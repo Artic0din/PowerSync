@@ -52,6 +52,30 @@
           flex-wrap: wrap;
           gap: 0.5em;
         }
+
+        /* Settings page: Stack sidebar on top of content */
+        div[style*="grid-template-columns: 250px 1fr"] {
+          grid-template-columns: 1fr !important;
+          gap: 1rem !important;
+        }
+
+        /* Settings sidebar: Make horizontal scrolling menu */
+        aside nav ul {
+          display: flex !important;
+          flex-wrap: wrap;
+          gap: 0.5rem;
+        }
+
+        aside nav ul li {
+          flex: 1 1 auto;
+          margin-bottom: 0 !important;
+          min-width: 140px;
+        }
+
+        aside nav ul li a {
+          text-align: center;
+          font-size: 0.9em;
+        }
       }
 
       /* Mobile breakpoint (screens smaller than 480px) */
@@ -175,6 +199,16 @@
         header div[style*="float"] button {
           flex: 1 1 auto;
           min-width: 120px;
+        }
+
+        /* Settings sidebar on mobile: Make more compact */
+        aside nav ul li {
+          min-width: 100px !important;
+        }
+
+        aside nav ul li a {
+          padding: 0.6rem 0.75rem !important;
+          font-size: 0.85em !important;
         }
       }
 
