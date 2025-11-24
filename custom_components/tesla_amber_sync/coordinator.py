@@ -19,6 +19,9 @@ from .const import (
     UPDATE_INTERVAL_ENERGY,
     AMBER_API_BASE_URL,
     TESLEMETRY_API_BASE_URL,
+    FLEET_API_BASE_URL,
+    TESLA_PROVIDER_TESLEMETRY,
+    TESLA_PROVIDER_FLEET_API,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -184,19 +187,29 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 
 
 class TeslaEnergyCoordinator(DataUpdateCoordinator):
-    """Coordinator to fetch Tesla energy data from Teslemetry API."""
+    """Coordinator to fetch Tesla energy data from Tesla API (Teslemetry or Fleet API)."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         site_id: str,
         api_token: str,
+        api_provider: str = TESLA_PROVIDER_TESLEMETRY,
     ) -> None:
         """Initialize the coordinator."""
         self.site_id = site_id
         self.api_token = api_token
+        self.api_provider = api_provider
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
+
+        # Determine API base URL based on provider
+        if api_provider == TESLA_PROVIDER_FLEET_API:
+            self.api_base_url = FLEET_API_BASE_URL
+            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id}")
+        else:
+            self.api_base_url = TESLEMETRY_API_BASE_URL
+            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Teslemetry for site {site_id}")
 
         super().__init__(
             hass,
@@ -206,25 +219,25 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from Teslemetry API."""
+        """Fetch data from Tesla API (Teslemetry or Fleet API)."""
         headers = {
             "Authorization": f"Bearer {self.api_token}",
             "Content-Type": "application/json",
         }
 
         try:
-            # Get live status from Teslemetry API with retry logic
-            # Teslemetry can be slow, so we use more retries and longer timeout
+            # Get live status from Tesla API with retry logic
+            # Note: Both Teslemetry and Fleet API can be slow, so we use retries
             data = await _fetch_with_retry(
                 self.session,
-                f"{TESLEMETRY_API_BASE_URL}/api/1/energy_sites/{self.site_id}/live_status",
+                f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/live_status",
                 headers,
-                max_retries=3,  # More retries for Teslemetry (can be unreliable)
-                timeout_seconds=60,  # Longer timeout (was 30s)
+                max_retries=3,  # More retries for reliability
+                timeout_seconds=60,  # Longer timeout
             )
 
             live_status = data.get("response", {})
-            _LOGGER.debug("Teslemetry live_status response: %s", live_status)
+            _LOGGER.debug("Tesla API live_status response: %s", live_status)
 
             # Map Teslemetry API response to our data structure
             energy_data = {
@@ -245,7 +258,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
     async def async_get_site_info(self) -> dict[str, Any] | None:
         """
-        Fetch site_info from Teslemetry API.
+        Fetch site_info from Tesla API (Teslemetry or Fleet API).
 
         Includes installation_time_zone which is critical for correct TOU schedule alignment.
         Results are cached since site info (especially timezone) doesn't change.
@@ -268,7 +281,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             data = await _fetch_with_retry(
                 self.session,
-                f"{TESLEMETRY_API_BASE_URL}/api/1/energy_sites/{self.site_id}/site_info",
+                f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/site_info",
                 headers,
                 max_retries=3,
                 timeout_seconds=60,
