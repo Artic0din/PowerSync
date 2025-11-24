@@ -22,6 +22,8 @@ class User(UserMixin, db.Model):
     tesla_api_provider = db.Column(db.String(20), default='teslemetry')  # 'teslemetry' or 'fleet_api'
 
     # Fleet API Credentials (for direct Tesla Fleet API)
+    fleet_api_client_id_encrypted = db.Column(db.LargeBinary)
+    fleet_api_client_secret_encrypted = db.Column(db.LargeBinary)
     fleet_api_access_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_token_expires_at = db.Column(db.DateTime)

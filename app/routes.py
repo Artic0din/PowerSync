@@ -210,6 +210,21 @@ def settings():
             logger.info("Clearing Teslemetry API key")
             current_user.teslemetry_api_key_encrypted = None
 
+        # Handle Fleet API OAuth credentials (encrypt if provided, clear if empty)
+        if form.fleet_api_client_id.data:
+            logger.info("Encrypting and saving Fleet API Client ID")
+            current_user.fleet_api_client_id_encrypted = encrypt_token(form.fleet_api_client_id.data)
+        else:
+            logger.info("Clearing Fleet API Client ID")
+            current_user.fleet_api_client_id_encrypted = None
+
+        if form.fleet_api_client_secret.data:
+            logger.info("Encrypting and saving Fleet API Client Secret")
+            current_user.fleet_api_client_secret_encrypted = encrypt_token(form.fleet_api_client_secret.data)
+        else:
+            logger.info("Clearing Fleet API Client Secret")
+            current_user.fleet_api_client_secret_encrypted = None
+
         # AEMO Spike Detection settings
         current_user.aemo_spike_detection_enabled = form.aemo_spike_detection_enabled.data
         if form.aemo_region.data:
@@ -252,6 +267,21 @@ def settings():
     except Exception as e:
         logger.error(f"Error decrypting teslemetry api key: {e}")
         form.teslemetry_api_key.data = None
+
+    # Pre-populate Fleet API OAuth credentials
+    try:
+        form.fleet_api_client_id.data = decrypt_token(current_user.fleet_api_client_id_encrypted)
+        logger.debug(f"Fleet API Client ID decrypted: {'Yes' if form.fleet_api_client_id.data else 'No'}")
+    except Exception as e:
+        logger.error(f"Error decrypting Fleet API client ID: {e}")
+        form.fleet_api_client_id.data = None
+
+    try:
+        form.fleet_api_client_secret.data = decrypt_token(current_user.fleet_api_client_secret_encrypted)
+        logger.debug(f"Fleet API Client Secret decrypted: {'Yes' if form.fleet_api_client_secret.data else 'No'}")
+    except Exception as e:
+        logger.error(f"Error decrypting Fleet API client secret: {e}")
+        form.fleet_api_client_secret.data = None
 
     # Pre-populate AEMO settings
     form.aemo_spike_detection_enabled.data = current_user.aemo_spike_detection_enabled

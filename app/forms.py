@@ -35,6 +35,10 @@ class SettingsForm(FlaskForm):
 
     teslemetry_api_key = StringField('Teslemetry API Key (get from teslemetry.com)')
 
+    # Fleet API OAuth Credentials
+    fleet_api_client_id = StringField('Fleet API Client ID (from developer.tesla.com)')
+    fleet_api_client_secret = StringField('Fleet API Client Secret (from developer.tesla.com)')
+
     # AEMO Spike Detection
     aemo_spike_detection_enabled = BooleanField('Enable AEMO Spike Detection')
     aemo_region = SelectField('AEMO Region', choices=[
