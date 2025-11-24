@@ -685,8 +685,8 @@ def price_history():
     now_utc = datetime.now(timezone.utc)
     twenty_four_hours_ago = now_utc - timedelta(hours=24)
 
-    # Get last 24 hours of price data (only actual prices, not forecasts)
-    records = PriceRecord.query.filter(
+    # Get last 24 hours of import price data (general channel, only actual prices, not forecasts)
+    import_records = PriceRecord.query.filter(
         PriceRecord.user_id == current_user.id,
         PriceRecord.channel_type == 'general',
         PriceRecord.forecast == False,
@@ -695,8 +695,18 @@ def price_history():
         PriceRecord.timestamp.asc()
     ).all()
 
-    data = []
-    for record in records:
+    # Get last 24 hours of export price data (feedIn channel, only actual prices, not forecasts)
+    export_records = PriceRecord.query.filter(
+        PriceRecord.user_id == current_user.id,
+        PriceRecord.channel_type == 'feedIn',
+        PriceRecord.forecast == False,
+        PriceRecord.timestamp >= twenty_four_hours_ago
+    ).order_by(
+        PriceRecord.timestamp.asc()
+    ).all()
+
+    import_data = []
+    for record in import_records:
         # Convert UTC timestamp to user's timezone
         if record.timestamp.tzinfo is None:
             # Assume UTC if no timezone info
@@ -706,15 +716,36 @@ def price_history():
 
         local_time = utc_time.astimezone(user_tz)
 
-        data.append({
+        import_data.append({
             'timestamp': local_time.isoformat(),
             'per_kwh': record.per_kwh,
             'spike_status': record.spike_status,
             'forecast': record.forecast
         })
 
-    logger.info(f"Returning {len(data)} price history records")
-    return jsonify(data)
+    export_data = []
+    for record in export_records:
+        # Convert UTC timestamp to user's timezone
+        if record.timestamp.tzinfo is None:
+            # Assume UTC if no timezone info
+            utc_time = record.timestamp.replace(tzinfo=timezone.utc)
+        else:
+            utc_time = record.timestamp
+
+        local_time = utc_time.astimezone(user_tz)
+
+        export_data.append({
+            'timestamp': local_time.isoformat(),
+            'per_kwh': record.per_kwh,
+            'spike_status': record.spike_status,
+            'forecast': record.forecast
+        })
+
+    logger.info(f"Returning {len(import_data)} import and {len(export_data)} export price history records")
+    return jsonify({
+        'import': import_data,
+        'export': export_data
+    })
 
 
 @bp.route('/api/energy-history')

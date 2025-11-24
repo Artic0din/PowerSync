@@ -701,7 +701,7 @@
                 }
                 const history = await response.json();
 
-                if (history.length === 0) {
+                if ((history.import && history.import.length === 0) && (history.export && history.export.length === 0)) {
                     return;
                 }
 
@@ -712,34 +712,71 @@
                     priceChart.destroy();
                 }
 
-                const labels = history.map(record => {
+                // Process import prices (buy prices)
+                const importLabels = (history.import || []).map(record => {
                     // Strip timezone to prevent browser timezone conversion
                     const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
                     const date = new Date(timestampStr);
                     return date.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
                 });
 
-                const data = history.map(record => record.per_kwh);
+                const importData = (history.import || []).map(record => record.per_kwh);
+
+                // Process export prices (sell/feed-in prices)
+                const exportLabels = (history.export || []).map(record => {
+                    // Strip timezone to prevent browser timezone conversion
+                    const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
+                    const date = new Date(timestampStr);
+                    return date.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+                });
+
+                const exportData = (history.export || []).map(record => record.per_kwh);
+
+                // Use import labels as primary (they should be the same or very similar)
+                const labels = importLabels.length > 0 ? importLabels : exportLabels;
+
+                // Build datasets array
+                const datasets = [];
+
+                // Add import dataset if we have data
+                if (importData.length > 0) {
+                    datasets.push({
+                        label: 'Import Price (¢/kWh)',
+                        data: importData,
+                        borderColor: 'rgb(75, 192, 192)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                        tension: 0.1,
+                        fill: false,
+                        borderWidth: 2
+                    });
+                }
+
+                // Add export dataset if we have data
+                if (exportData.length > 0) {
+                    datasets.push({
+                        label: 'Export Price (¢/kWh)',
+                        data: exportData,
+                        borderColor: 'rgb(255, 193, 7)', // Yellow
+                        backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                        tension: 0.1,
+                        fill: false,
+                        borderWidth: 2
+                    });
+                }
 
                 priceChart = new Chart(ctx, {
                     type: 'line',
                     data: {
                         labels: labels,
-                        datasets: [{
-                            label: 'Price (¢/kWh)',
-                            data: data,
-                            borderColor: 'rgb(75, 192, 192)',
-                            backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                            tension: 0.1,
-                            fill: true
-                        }]
+                        datasets: datasets
                     },
                     options: {
                         responsive: true,
                         maintainAspectRatio: true,
                         plugins: {
                             legend: {
-                                display: false
+                                display: true,
+                                position: 'top'
                             }
                         },
                         scales: {
