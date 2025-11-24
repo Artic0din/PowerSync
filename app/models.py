@@ -18,6 +18,14 @@ class User(UserMixin, db.Model):
     tesla_energy_site_id = db.Column(db.String(50))
     teslemetry_api_key_encrypted = db.Column(db.LargeBinary)
 
+    # Tesla API Provider Selection
+    tesla_api_provider = db.Column(db.String(20), default='teslemetry')  # 'teslemetry' or 'fleet_api'
+
+    # Fleet API Credentials (for direct Tesla Fleet API)
+    fleet_api_access_token_encrypted = db.Column(db.LargeBinary)
+    fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
+    fleet_api_token_expires_at = db.Column(db.DateTime)
+
     # Status Tracking
     last_update_status = db.Column(db.String(255))
     last_update_time = db.Column(db.DateTime)

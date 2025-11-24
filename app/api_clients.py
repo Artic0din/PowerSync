@@ -6,8 +6,53 @@ from datetime import datetime, timedelta
 from app.utils import decrypt_token
 import time
 import os
+from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
+
+
+class TeslaAPIClientBase(ABC):
+    """Abstract base class for Tesla API clients (Fleet API, Teslemetry, etc.)"""
+
+    @abstractmethod
+    def test_connection(self):
+        """Test the API connection"""
+        pass
+
+    @abstractmethod
+    def get_energy_sites(self):
+        """Get all energy sites (Powerwalls, Solar)"""
+        pass
+
+    @abstractmethod
+    def get_site_status(self, site_id):
+        """Get status of a specific energy site"""
+        pass
+
+    @abstractmethod
+    def get_site_info(self, site_id):
+        """Get detailed information about a site"""
+        pass
+
+    @abstractmethod
+    def set_operation_mode(self, site_id, mode):
+        """Set Powerwall operation mode (self_consumption, autonomous, backup)"""
+        pass
+
+    @abstractmethod
+    def set_backup_reserve(self, site_id, backup_reserve_percent):
+        """Set backup reserve percentage"""
+        pass
+
+    @abstractmethod
+    def set_time_based_control_settings(self, site_id, tou_settings):
+        """Set TOU (Time of Use) tariff settings"""
+        pass
+
+    @abstractmethod
+    def set_grid_export_rule(self, site_id, export_rule):
+        """Set grid export rule (never, pv_only, battery_ok)"""
+        pass
 
 
 class AmberAPIClient:
@@ -254,7 +299,309 @@ class AmberAPIClient:
             return False, {"error": str(e)}, 0
 
 
-class TeslemetryAPIClient:
+class FleetAPIClient(TeslaAPIClientBase):
+    """Client for Tesla Fleet API (direct connection)"""
+
+    BASE_URL = "https://fleet-api.prd.na.vn.cloud.tesla.com"
+    AUTH_URL = "https://auth.tesla.com/oauth2/v3"
+    TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
+
+    def __init__(self, access_token, refresh_token=None, client_id=None, client_secret=None):
+        """
+        Initialize Fleet API client
+
+        Args:
+            access_token: OAuth access token
+            refresh_token: OAuth refresh token (for automatic token refresh)
+            client_id: Tesla app client ID (required for token refresh)
+            client_secret: Tesla app client secret (required for token refresh)
+        """
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.base_url = self.BASE_URL
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        logger.info("FleetAPIClient initialized (direct Tesla Fleet API)")
+
+    def refresh_access_token(self):
+        """
+        Refresh the OAuth access token using refresh token
+
+        Returns:
+            dict: New token data with access_token and refresh_token
+        """
+        if not self.refresh_token:
+            raise ValueError("No refresh token available for token refresh")
+
+        if not self.client_id:
+            raise ValueError("Client ID required for token refresh")
+
+        try:
+            logger.info("Refreshing Fleet API access token")
+            response = requests.post(
+                self.TOKEN_URL,
+                json={
+                    "grant_type": "refresh_token",
+                    "client_id": self.client_id,
+                    "refresh_token": self.refresh_token
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Update tokens
+            self.access_token = data["access_token"]
+            self.refresh_token = data.get("refresh_token", self.refresh_token)  # New refresh token if provided
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
+
+            logger.info("Successfully refreshed Fleet API access token")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error refreshing access token: {e}")
+            raise
+
+    def test_connection(self):
+        """Test the API connection"""
+        try:
+            logger.info("Testing Fleet API connection")
+            response = requests.get(
+                f"{self.base_url}/api/1/products",
+                headers=self.headers,
+                timeout=10
+            )
+
+            # Try to refresh token if unauthorized
+            if response.status_code == 401 and self.refresh_token:
+                logger.info("Access token expired, refreshing...")
+                self.refresh_access_token()
+                response = requests.get(
+                    f"{self.base_url}/api/1/products",
+                    headers=self.headers,
+                    timeout=10
+                )
+
+            response.raise_for_status()
+            logger.info(f"Fleet API connection successful - Status: {response.status_code}")
+            return True, "Connected"
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Fleet API connection failed: {e}")
+            return False, str(e)
+
+    def get_energy_sites(self):
+        """Get all energy sites (Powerwalls, Solar)"""
+        try:
+            logger.info("Fetching Tesla energy sites via Fleet API")
+            response = requests.get(
+                f"{self.base_url}/api/1/products",
+                headers=self.headers,
+                timeout=10
+            )
+
+            # Auto-refresh on 401
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.get(
+                    f"{self.base_url}/api/1/products",
+                    headers=self.headers,
+                    timeout=10
+                )
+
+            response.raise_for_status()
+            data = response.json()
+
+            # Filter for energy sites only
+            energy_sites = [p for p in data.get('response', []) if 'energy_site_id' in p]
+            logger.info(f"Found {len(energy_sites)} Tesla energy sites via Fleet API")
+            return energy_sites
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching energy sites via Fleet API: {e}")
+            return []
+
+    def get_site_status(self, site_id):
+        """Get status of a specific energy site"""
+        try:
+            logger.info(f"Fetching site status for {site_id} via Fleet API")
+            response = requests.get(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/live_status",
+                headers=self.headers,
+                timeout=10
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.get(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/live_status",
+                    headers=self.headers,
+                    timeout=10
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully fetched site status via Fleet API")
+            return data.get('response', {})
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching site status via Fleet API: {e}")
+            return None
+
+    def get_site_info(self, site_id):
+        """Get detailed information about a site"""
+        try:
+            logger.info(f"Fetching site info for {site_id} via Fleet API")
+            response = requests.get(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/site_info",
+                headers=self.headers,
+                timeout=10
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.get(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/site_info",
+                    headers=self.headers,
+                    timeout=10
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully fetched site info via Fleet API")
+            return data.get('response', {})
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching site info via Fleet API: {e}")
+            return None
+
+    def set_operation_mode(self, site_id, mode):
+        """Set Powerwall operation mode"""
+        try:
+            valid_modes = ['self_consumption', 'autonomous', 'backup']
+            if mode not in valid_modes:
+                logger.error(f"Invalid operation mode: {mode}")
+                return None
+
+            logger.info(f"Setting operation mode to '{mode}' for site {site_id} via Fleet API")
+            response = requests.post(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/operation",
+                headers=self.headers,
+                json={"default_real_mode": mode},
+                timeout=30
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/operation",
+                    headers=self.headers,
+                    json={"default_real_mode": mode},
+                    timeout=30
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully set operation mode to '{mode}' via Fleet API")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error setting operation mode via Fleet API: {e}")
+            return None
+
+    def set_backup_reserve(self, site_id, backup_reserve_percent):
+        """Set backup reserve percentage"""
+        try:
+            if not 0 <= backup_reserve_percent <= 100:
+                logger.error(f"Invalid backup reserve: {backup_reserve_percent}")
+                return None
+
+            logger.info(f"Setting backup reserve to {backup_reserve_percent}% via Fleet API")
+            response = requests.post(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/backup",
+                headers=self.headers,
+                json={"backup_reserve_percent": backup_reserve_percent},
+                timeout=30
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/backup",
+                    headers=self.headers,
+                    json={"backup_reserve_percent": backup_reserve_percent},
+                    timeout=30
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully set backup reserve to {backup_reserve_percent}% via Fleet API")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error setting backup reserve via Fleet API: {e}")
+            return None
+
+    def set_time_based_control_settings(self, site_id, tou_settings):
+        """Set TOU (Time of Use) tariff settings"""
+        try:
+            logger.info(f"Setting TOU schedule for site {site_id} via Fleet API")
+            response = requests.post(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+                headers=self.headers,
+                json=tou_settings,
+                timeout=30
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+                    headers=self.headers,
+                    json=tou_settings,
+                    timeout=30
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully set TOU schedule via Fleet API")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error setting TOU schedule via Fleet API: {e}")
+            return None
+
+    def set_grid_export_rule(self, site_id, export_rule):
+        """Set grid export rule (never, pv_only, battery_ok)"""
+        try:
+            valid_rules = ['never', 'pv_only', 'battery_ok']
+            if export_rule not in valid_rules:
+                logger.error(f"Invalid export rule: {export_rule}")
+                return None
+
+            logger.info(f"Setting grid export rule to '{export_rule}' via Fleet API")
+            response = requests.post(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/grid_import_export",
+                headers=self.headers,
+                json={"customer_preferred_export_rule": export_rule},
+                timeout=10
+            )
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/grid_import_export",
+                    headers=self.headers,
+                    json={"customer_preferred_export_rule": export_rule},
+                    timeout=10
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Successfully set grid export rule to '{export_rule}' via Fleet API")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error setting grid export rule via Fleet API: {e}")
+            return None
+
+
+class TeslemetryAPIClient(TeslaAPIClientBase):
     """Client for Teslemetry API (Tesla API proxy service)"""
 
     BASE_URL = "https://api.teslemetry.com"
@@ -904,16 +1251,50 @@ class AEMOAPIClient:
 
 
 def get_tesla_client(user):
-    """Get a Tesla API client for the user (Teslemetry only)"""
+    """
+    Get a Tesla API client for the user
 
+    Returns either FleetAPIClient or TeslemetryAPIClient based on user configuration.
+    Priority: Fleet API > Teslemetry (if both are configured)
+
+    Args:
+        user: User model instance
+
+    Returns:
+        TeslaAPIClientBase instance (FleetAPIClient or TeslemetryAPIClient) or None
+    """
+
+    # Check for Fleet API configuration first
+    if user.tesla_api_provider == 'fleet_api' and user.fleet_api_access_token_encrypted:
+        try:
+            logger.info(f"Using FleetAPIClient (direct) for user {user.email}")
+            access_token = decrypt_token(user.fleet_api_access_token_encrypted)
+            refresh_token = decrypt_token(user.fleet_api_refresh_token_encrypted) if user.fleet_api_refresh_token_encrypted else None
+
+            # Get client ID and secret from environment
+            client_id = os.getenv('TESLA_CLIENT_ID')
+            client_secret = os.getenv('TESLA_CLIENT_SECRET')
+
+            return FleetAPIClient(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                client_id=client_id,
+                client_secret=client_secret
+            )
+        except Exception as e:
+            logger.error(f"Error creating Fleet API client: {e}")
+            # Fall back to Teslemetry if Fleet API fails
+            logger.info("Falling back to Teslemetry")
+
+    # Fall back to Teslemetry (default)
     if user.teslemetry_api_key_encrypted:
         try:
-            logger.info("Using TeslemetryAPIClient")
+            logger.info(f"Using TeslemetryAPIClient (proxy) for user {user.email}")
             api_key = decrypt_token(user.teslemetry_api_key_encrypted)
             return TeslemetryAPIClient(api_key)
         except Exception as e:
             logger.error(f"Error creating Teslemetry client: {e}")
             return None
 
-    logger.warning(f"No Teslemetry API key configured for user {user.email}")
+    logger.warning(f"No Tesla API configured for user {user.email}")
     return None
