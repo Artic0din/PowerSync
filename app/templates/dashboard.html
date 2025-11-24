@@ -71,6 +71,7 @@
         </header>
         <div style="display: flex; justify-content: center; gap: 2em; margin-bottom: 1.5em;">
             <div id="import-selector" onclick="selectPriceChannel('general')" style="text-align: center; cursor: pointer; transition: transform 0.2s;">
+                <div id="max-import-price" style="font-size: 0.8em; opacity: 0.7; margin-bottom: 0.3em;">Max today: --¢/kWh</div>
                 <div id="import-circle" style="background: rgba(253, 224, 71, 0.95); color: #1e3a8a; border-radius: 50%; width: 180px; height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.2); padding: 0 0.5em;">
                     <div id="current-general-price" style="font-size: 3.5em; font-weight: bold; line-height: 1;">--¢</div>
                     <div style="font-size: 0.9em; margin-top: 0.2em;">/kWh</div>
@@ -79,6 +80,7 @@
                 <div style="margin-top: 0.5em; font-size: 0.85em; opacity: 0.9;">IMPORT ✓</div>
             </div>
             <div id="export-selector" onclick="selectPriceChannel('feedIn')" style="text-align: center; cursor: pointer; transition: transform 0.2s;">
+                <div id="max-export-price" style="font-size: 0.8em; opacity: 0.7; margin-bottom: 0.3em;">Max today: --¢/kWh</div>
                 <div style="background: #fbbf24; color: #1e3a8a; border-radius: 50%; width: 180px; height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.2);">
                     <div id="current-feedin-price" style="font-size: 3.5em; font-weight: bold; line-height: 1;">--¢</div>
                     <div style="font-size: 0.9em; margin-top: 0.2em;">/kWh</div>
@@ -754,6 +756,25 @@
                 // Build datasets array
                 const datasets = [];
 
+                // Calculate and display max prices
+                let maxImportPrice = 0;
+                let maxExportPrice = 0;
+
+                if (importData.length > 0) {
+                    maxImportPrice = Math.max(...importData.map(d => d.y));
+                }
+                if (exportData.length > 0) {
+                    maxExportPrice = Math.max(...exportData.map(d => d.y));
+                }
+
+                // Update max price displays
+                if (maxImportPrice > 0) {
+                    document.getElementById('max-import-price').textContent = `Max today: ${maxImportPrice.toFixed(1)}¢/kWh`;
+                }
+                if (maxExportPrice > 0) {
+                    document.getElementById('max-export-price').textContent = `Max today: ${maxExportPrice.toFixed(1)}¢/kWh`;
+                }
+
                 // Add import dataset if we have data
                 if (importData.length > 0) {
                     datasets.push({
@@ -761,7 +782,7 @@
                         data: importData,
                         borderColor: 'rgb(75, 192, 192)',
                         backgroundColor: 'rgba(75, 192, 192, 0.1)',
-                        tension: 0.1,
+                        tension: 0.4,
                         fill: false,
                         borderWidth: 2
                     });
@@ -774,7 +795,7 @@
                         data: exportData,
                         borderColor: 'rgb(255, 193, 7)', // Yellow
                         backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                        tension: 0.1,
+                        tension: 0.4,
                         fill: false,
                         borderWidth: 2
                     });
