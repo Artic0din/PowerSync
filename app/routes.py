@@ -11,8 +11,10 @@ import os
 import requests
 import time
 import logging
+import secrets
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
 
 
 # Set up logging
@@ -2198,3 +2200,142 @@ def api_debug_site_info():
     except Exception as e:
         logger.error(f"Error fetching site info: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================
+# TESLA FLEET API OAUTH ROUTES
+# ============================================
+
+@bp.route('/fleet-api/connect')
+@login_required
+def fleet_api_oauth_start():
+    """Start Tesla Fleet API OAuth flow"""
+    logger.info(f"Fleet API OAuth flow initiated by user: {current_user.email}")
+
+    # Get OAuth configuration from environment
+    client_id = os.getenv('TESLA_CLIENT_ID')
+    redirect_uri = os.getenv('TESLA_REDIRECT_URI')
+
+    if not client_id or not redirect_uri:
+        logger.error("Fleet API OAuth not configured - missing TESLA_CLIENT_ID or TESLA_REDIRECT_URI")
+        flash('Tesla Fleet API is not configured. Please add TESLA_CLIENT_ID and TESLA_REDIRECT_URI to your .env file.')
+        return redirect(url_for('main.settings'))
+
+    # Generate random state parameter for CSRF protection
+    state = secrets.token_urlsafe(32)
+    session['oauth_state'] = state
+    logger.debug(f"Generated OAuth state: {state[:10]}...")
+
+    # Build authorization URL
+    params = {
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'scope': 'openid offline_access energy_device_data energy_cmds',
+        'state': state
+    }
+
+    auth_url = f"https://auth.tesla.com/oauth2/v3/authorize?{urlencode(params)}"
+    logger.info(f"Redirecting to Tesla OAuth: {auth_url[:100]}...")
+
+    return redirect(auth_url)
+
+
+@bp.route('/fleet-api/callback')
+@login_required
+def fleet_api_oauth_callback():
+    """Handle Tesla Fleet API OAuth callback"""
+    logger.info(f"Fleet API OAuth callback received for user: {current_user.email}")
+
+    # Get authorization code and state from query parameters
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    error_description = request.args.get('error_description')
+
+    # Check for OAuth errors
+    if error:
+        logger.error(f"OAuth error: {error} - {error_description}")
+        flash(f'OAuth authorization failed: {error_description or error}')
+        return redirect(url_for('main.settings'))
+
+    # Validate state parameter (CSRF protection)
+    expected_state = session.get('oauth_state')
+    if not state or state != expected_state:
+        logger.error(f"OAuth state mismatch: expected {expected_state}, got {state}")
+        flash('OAuth security validation failed. Please try again.')
+        return redirect(url_for('main.settings'))
+
+    # Clear state from session
+    session.pop('oauth_state', None)
+
+    if not code:
+        logger.error("No authorization code received")
+        flash('No authorization code received from Tesla.')
+        return redirect(url_for('main.settings'))
+
+    # Exchange authorization code for access token
+    try:
+        client_id = os.getenv('TESLA_CLIENT_ID')
+        client_secret = os.getenv('TESLA_CLIENT_SECRET')
+        redirect_uri = os.getenv('TESLA_REDIRECT_URI')
+
+        if not client_id or not client_secret or not redirect_uri:
+            logger.error("Fleet API OAuth not configured - missing credentials")
+            flash('Tesla Fleet API is not configured properly.')
+            return redirect(url_for('main.settings'))
+
+        # Make token request
+        token_url = "https://auth.tesla.com/oauth2/v3/token"
+        token_data = {
+            'grant_type': 'authorization_code',
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'code': code,
+            'redirect_uri': redirect_uri
+        }
+
+        logger.info("Exchanging authorization code for access token")
+        response = requests.post(token_url, data=token_data)
+
+        if response.status_code != 200:
+            logger.error(f"Token exchange failed: {response.status_code} - {response.text}")
+            flash(f'Failed to exchange authorization code: {response.text}')
+            return redirect(url_for('main.settings'))
+
+        token_response = response.json()
+        access_token = token_response.get('access_token')
+        refresh_token = token_response.get('refresh_token')
+        expires_in = token_response.get('expires_in', 28800)  # Default 8 hours
+
+        if not access_token:
+            logger.error("No access token in response")
+            flash('Failed to obtain access token from Tesla.')
+            return redirect(url_for('main.settings'))
+
+        logger.info("Successfully obtained access and refresh tokens")
+
+        # Calculate token expiry time
+        from datetime import timedelta
+        expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+        # Encrypt and save tokens to database
+        current_user.fleet_api_access_token_encrypted = encrypt_token(access_token)
+        if refresh_token:
+            current_user.fleet_api_refresh_token_encrypted = encrypt_token(refresh_token)
+        current_user.fleet_api_token_expires_at = expires_at
+        current_user.tesla_api_provider = 'fleet_api'  # Set provider to Fleet API
+
+        db.session.commit()
+
+        logger.info(f"Successfully saved Fleet API tokens for user {current_user.email}")
+        flash('✓ Successfully connected to Tesla Fleet API! Your account is now using direct Tesla API access.')
+
+    except Exception as e:
+        logger.error(f"Error during OAuth token exchange: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        flash(f'Error connecting to Tesla Fleet API: {str(e)}')
+        db.session.rollback()
+
+    return redirect(url_for('main.settings'))
