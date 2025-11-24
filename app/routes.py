@@ -681,26 +681,53 @@ def price_history():
     # Get user's timezone
     user_tz = ZoneInfo(get_powerwall_timezone(current_user))
 
-    # Calculate 24 hours ago
-    now_utc = datetime.now(timezone.utc)
-    twenty_four_hours_ago = now_utc - timedelta(hours=24)
+    # Get day parameter (default to 'today')
+    day = request.args.get('day', 'today')
 
-    # Get last 24 hours of import price data (general channel, only actual prices, not forecasts)
+    # Calculate date range based on day parameter
+    now_local = datetime.now(user_tz)
+
+    if day == 'today':
+        target_date = now_local
+    elif day == 'yesterday':
+        target_date = now_local - timedelta(days=1)
+    else:
+        # Try to parse as integer (days ago)
+        try:
+            days_ago = int(day)
+            target_date = now_local - timedelta(days=days_ago)
+        except ValueError:
+            # Default to today if invalid
+            target_date = now_local
+
+    # Get start and end of target day in user's timezone
+    start_of_day_local = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day_local = target_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    # Convert to UTC for database query
+    start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
+    end_of_day_utc = end_of_day_local.astimezone(timezone.utc)
+
+    logger.info(f"Fetching price history for {day}: {start_of_day_local.date()} (UTC range: {start_of_day_utc} to {end_of_day_utc})")
+
+    # Get import price data for target day (general channel, only actual prices, not forecasts)
     import_records = PriceRecord.query.filter(
         PriceRecord.user_id == current_user.id,
         PriceRecord.channel_type == 'general',
         PriceRecord.forecast == False,
-        PriceRecord.timestamp >= twenty_four_hours_ago
+        PriceRecord.timestamp >= start_of_day_utc,
+        PriceRecord.timestamp <= end_of_day_utc
     ).order_by(
         PriceRecord.timestamp.asc()
     ).all()
 
-    # Get last 24 hours of export price data (feedIn channel, only actual prices, not forecasts)
+    # Get export price data for target day (feedIn channel, only actual prices, not forecasts)
     export_records = PriceRecord.query.filter(
         PriceRecord.user_id == current_user.id,
         PriceRecord.channel_type == 'feedIn',
         PriceRecord.forecast == False,
-        PriceRecord.timestamp >= twenty_four_hours_ago
+        PriceRecord.timestamp >= start_of_day_utc,
+        PriceRecord.timestamp <= end_of_day_utc
     ).order_by(
         PriceRecord.timestamp.asc()
     ).all()
@@ -741,11 +768,22 @@ def price_history():
             'forecast': record.forecast
         })
 
-    logger.info(f"Returning {len(import_data)} import and {len(export_data)} export price history records")
-    return jsonify({
+    logger.info(f"Returning {len(import_data)} import and {len(export_data)} export price history records for {day}")
+
+    # Include metadata for chart configuration (midnight-to-midnight display)
+    response_data = {
         'import': import_data,
-        'export': export_data
-    })
+        'export': export_data,
+        'metadata': {
+            'start_of_day': start_of_day_local.isoformat(),
+            'end_of_day': end_of_day_local.isoformat(),
+            'day': day,
+            'date': target_date.strftime('%Y-%m-%d'),
+            'timezone': str(user_tz)
+        }
+    }
+
+    return jsonify(response_data)
 
 
 @bp.route('/api/energy-history')

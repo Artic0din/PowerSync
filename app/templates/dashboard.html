@@ -134,7 +134,20 @@
 
     <!-- Price History Chart (Amber Only) -->
     <article id="price-history-section">
-        <header><strong>Price History (Last 24 Hours)</strong></header>
+        <header>
+            <strong>Price History</strong>
+            <div style="float: right;">
+                <select id="price-day-selector" style="font-size: 0.9em;">
+                    <option value="today" selected>Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="2">2 Days Ago</option>
+                    <option value="3">3 Days Ago</option>
+                    <option value="4">4 Days Ago</option>
+                    <option value="5">5 Days Ago</option>
+                    <option value="6">6 Days Ago</option>
+                </select>
+            </div>
+        </header>
         <canvas id="priceChart" style="max-height: 300px;"></canvas>
     </article>
     {% endif %}
@@ -695,7 +708,8 @@
         let priceChart = null;
         async function fetchPriceHistory() {
             try {
-                const response = await fetch('/api/price-history');
+                const day = document.getElementById('price-day-selector').value;
+                const response = await fetch(`/api/price-history?day=${day}`);
                 if (!response.ok) {
                     throw new Error('Failed to fetch price history');
                 }
@@ -712,28 +726,30 @@
                     priceChart.destroy();
                 }
 
-                // Process import prices (buy prices)
-                const importLabels = (history.import || []).map(record => {
+                // Get metadata for midnight-to-midnight display
+                const metadata = history.metadata || null;
+
+                // Process import prices (buy prices) - use timestamp objects for time-based x-axis
+                const importData = (history.import || []).map(record => {
                     // Strip timezone to prevent browser timezone conversion
                     const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
                     const date = new Date(timestampStr);
-                    return date.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+                    return {
+                        x: date.getTime(),
+                        y: record.per_kwh
+                    };
                 });
-
-                const importData = (history.import || []).map(record => record.per_kwh);
 
                 // Process export prices (sell/feed-in prices)
-                const exportLabels = (history.export || []).map(record => {
+                const exportData = (history.export || []).map(record => {
                     // Strip timezone to prevent browser timezone conversion
                     const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
                     const date = new Date(timestampStr);
-                    return date.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+                    return {
+                        x: date.getTime(),
+                        y: record.per_kwh
+                    };
                 });
-
-                const exportData = (history.export || []).map(record => record.per_kwh);
-
-                // Use import labels as primary (they should be the same or very similar)
-                const labels = importLabels.length > 0 ? importLabels : exportLabels;
 
                 // Build datasets array
                 const datasets = [];
@@ -764,10 +780,62 @@
                     });
                 }
 
+                // Configure x-axis for midnight-to-midnight display
+                let xAxisConfig = {
+                    title: {
+                        display: true,
+                        text: 'Time'
+                    }
+                };
+
+                // If we have metadata, use fixed min/max for midnight-to-midnight display
+                if (metadata) {
+                    const startStr = metadata.start_of_day.replace(/[+-]\d{2}:\d{2}|Z$/, '');
+                    const endStr = metadata.end_of_day.replace(/[+-]\d{2}:\d{2}|Z$/, '');
+                    const startOfDay = new Date(startStr);
+                    const endOfDay = new Date(endStr);
+
+                    xAxisConfig = {
+                        type: 'time',
+                        min: startOfDay.getTime(),
+                        max: endOfDay.getTime(),
+                        time: {
+                            unit: 'hour',
+                            displayFormats: {
+                                hour: 'h a'
+                            },
+                            tooltipFormat: 'h:mm a'
+                        },
+                        ticks: {
+                            autoSkip: false,
+                            maxRotation: 0,
+                            minRotation: 0,
+                            callback: function(value, index, ticks) {
+                                const date = new Date(value);
+                                const hour = date.getHours();
+                                // Show labels for 0, 6, 12, 18 hours only
+                                if (hour === 0) {
+                                    return '12 AM';
+                                } else if (hour === 6) {
+                                    return '6 AM';
+                                } else if (hour === 12) {
+                                    return '12 PM';
+                                } else if (hour === 18) {
+                                    return '6 PM';
+                                }
+                                return '';
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Time'
+                        }
+                    };
+                }
+
                 priceChart = new Chart(ctx, {
                     type: 'line',
                     data: {
-                        labels: labels,
                         datasets: datasets
                     },
                     options: {
@@ -787,12 +855,7 @@
                                     text: 'Price (¢/kWh)'
                                 }
                             },
-                            x: {
-                                title: {
-                                    display: true,
-                                    text: 'Time'
-                                }
-                            }
+                            x: xAxisConfig
                         }
                     }
                 });
@@ -1149,6 +1212,8 @@
         document.getElementById('timeframe-selector').addEventListener('change', fetchEnergyUsageHistory);
         // Refresh energy charts every 30 seconds
         setInterval(fetchEnergyUsageHistory, 30 * 1000);
+        // Add event listener for price history day selector
+        document.getElementById('price-day-selector').addEventListener('change', fetchPriceHistory);
 
         // Energy Usage Charts
         let solarChart = null;
