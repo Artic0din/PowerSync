@@ -271,9 +271,13 @@ Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose which
 
 **Setup - Docker/Flask:**
 1. Register an OAuth application at https://developer.tesla.com
-2. Configure OAuth credentials via environment variables (see `.env.example`)
-3. Tesla Fleet API is not configurable via the Flask web GUI
-4. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed setup instructions
+2. Get your Client ID and Client Secret from the Tesla Developer Portal
+3. Configure via the Settings page in the Flask web GUI:
+   - Select "Tesla Fleet API (Direct, Free)" as your Tesla API Provider
+   - Enter your Client ID and Client Secret
+   - Save settings - credentials are encrypted and stored securely
+4. Alternative: Configure via environment variables (see `.env.example`)
+5. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed OAuth app registration
 
 **Best for:** Users who want to avoid recurring costs and are comfortable with OAuth setup.
 
@@ -612,54 +616,89 @@ docker restart tesla-sync
 
 ## Tesla API Authentication
 
-This application uses **Teslemetry** for Tesla API access.
+This application supports two methods for Tesla API access:
 
-### Teslemetry Setup
+### Option 1: Teslemetry (Recommended - Easier Setup)
 
 Teslemetry is a third-party proxy service for Tesla API.
 
 **Pros:**
-- ✅ Simple setup
+- ✅ Simple setup (2 minutes)
 - ✅ Works with localhost
-- ✅ Free for personal use
+- ✅ Configurable via web GUI
 - ✅ Reliable and well-maintained
+- ✅ ~$3/month (reasonable for convenience)
 
 **Setup:**
 1. Sign up at https://teslemetry.com
 2. Connect your Tesla account
 3. Copy your API key
-4. Paste into dashboard settings
+4. Paste into Settings page in dashboard
+
+### Option 2: Tesla Fleet API (Free - More Complex)
+
+Direct OAuth access to Tesla's Fleet API.
+
+**Pros:**
+- ✅ Completely free
+- ✅ Direct API access
+- ✅ Configurable via web GUI
+
+**Cons:**
+- ⚠️ Requires OAuth app registration
+- ⚠️ More setup steps
+
+**Setup:**
+1. Register OAuth app at https://developer.tesla.com
+2. Get Client ID and Client Secret
+3. Configure via Settings page in dashboard
+4. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
 
 ## Configuration
 
 ### Required Credentials
 
 1. **Amber Electric API Token**
-   - Get from: Amber developer settings
+   - Get from: https://app.amber.com.au/developers
    - Used for: Fetching real-time electricity prices
+   - Configure: Via Settings page in dashboard
 
-2. **Teslemetry API Key**
-   - Get from: https://teslemetry.com
-   - Used for: Tesla Powerwall communication
+2. **Tesla API Access** (choose one):
+   - **Option A - Teslemetry API Key** (Recommended)
+     - Get from: https://teslemetry.com
+     - Used for: Tesla Powerwall communication
+     - Configure: Via Settings page in dashboard
+
+   - **Option B - Tesla Fleet API OAuth** (Free)
+     - Get from: https://developer.tesla.com (register OAuth app)
+     - Used for: Direct Tesla Fleet API access
+     - Configure: Via Settings page in dashboard
 
 3. **Tesla Energy Site ID**
    - Your Powerwall/Solar site ID
-   - Find in Teslemetry dashboard
+   - Find in: Teslemetry dashboard or Tesla app
+   - Configure: Via Settings page in dashboard
 
 ### Dashboard Setup
 
-After logging in:
+After logging in, go to the Settings page:
 
 1. **Configure Amber Electric**
    - Enter your Amber API token
    - Save settings
 
-2. **Connect Teslemetry**
-   - Enter your Teslemetry API key in settings form
-   - Save settings
+2. **Choose Tesla API Method**
+   - Select either "Teslemetry" or "Tesla Fleet API" from dropdown
+
+   **If using Teslemetry:**
+   - Enter your Teslemetry API key
+
+   **If using Tesla Fleet API:**
+   - Enter your Fleet API Client ID
+   - Enter your Fleet API Client Secret
 
 3. **Set Energy Site ID**
-   - Enter your Tesla energy site ID from Teslemetry dashboard
+   - Enter your Tesla energy site ID
    - Save settings
 
 5. **Configure Timezone** (Optional)
