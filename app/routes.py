@@ -195,6 +195,11 @@ def settings():
             logger.info(f"Saving Tesla Site ID: {form.tesla_site_id.data}")
             current_user.tesla_energy_site_id = form.tesla_site_id.data
 
+        # Handle Tesla API Provider selection
+        if form.tesla_api_provider.data:
+            logger.info(f"Saving Tesla API provider: {form.tesla_api_provider.data}")
+            current_user.tesla_api_provider = form.tesla_api_provider.data
+
         # Handle Teslemetry API key (encrypt if provided, clear if empty)
         if form.teslemetry_api_key.data:
             logger.info("Encrypting and saving Teslemetry API key")
@@ -234,6 +239,10 @@ def settings():
 
     form.tesla_site_id.data = current_user.tesla_energy_site_id
     logger.debug(f"Tesla Site ID: {form.tesla_site_id.data}")
+
+    # Pre-populate Tesla API provider selection
+    form.tesla_api_provider.data = current_user.tesla_api_provider or 'teslemetry'
+    logger.debug(f"Tesla API Provider: {form.tesla_api_provider.data}")
 
     try:
         form.teslemetry_api_key.data = decrypt_token(current_user.teslemetry_api_key_encrypted)

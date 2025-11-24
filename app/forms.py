@@ -25,6 +25,14 @@ class RegistrationForm(FlaskForm):
 class SettingsForm(FlaskForm):
     amber_token = StringField('Amber Electric API Token')
     tesla_site_id = StringField('Tesla Energy Site ID')
+
+    # Tesla API Provider Selection
+    tesla_api_provider = SelectField('Tesla API Provider', choices=[
+        ('teslemetry', 'Teslemetry (Easier Setup, ~$3/month)'),
+        ('fleet_api', 'Tesla Fleet API (Direct, Free)')
+    ], default='teslemetry',
+    description='Choose between Teslemetry proxy service (easier) or direct Tesla Fleet API (free but complex setup)')
+
     teslemetry_api_key = StringField('Teslemetry API Key (get from teslemetry.com)')
 
     # AEMO Spike Detection
