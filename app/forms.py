@@ -98,14 +98,14 @@ class DemandChargeForm(FlaskForm):
         validators=[Optional(), NumberRange(min=0)],
         places=4,
         default=0,
-        description='Fixed daily charge from your electricity bill (e.g., 1.1770 for $1.18/day). Note: Amber pricing already includes network fees.'
+        description='Fixed daily charge from your electricity bill (e.g., 1.1770 for $1.18/day). Amber users: This should include your daily network access and metering charges.'
     )
     monthly_supply_charge = DecimalField(
         'Monthly Supply Charge ($)',
         validators=[Optional(), NumberRange(min=0)],
         places=2,
         default=0,
-        description='Monthly account fee if applicable (rare)'
+        description='Monthly account fee (e.g., $25 for Amber subscription, or other monthly charges from your provider)'
     )
 
     submit = SubmitField('Save Demand Charges')
