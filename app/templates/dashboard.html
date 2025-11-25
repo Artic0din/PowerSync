@@ -272,6 +272,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-crosshair@2.0.0/dist/chartjs-plugin-crosshair.min.js"></script>
 
     <script>
         // Track selected price channel (general = import, feedIn = export)
@@ -725,20 +726,8 @@
                 // Get metadata for midnight-to-midnight display
                 const metadata = history.metadata || null;
 
-                // Helper function to downsample data for easier interaction
-                function downsampleData(data, sampleRate = 6) {
-                    // Take every Nth point to reduce density, always keep first and last
-                    if (data.length <= sampleRate * 2) return data; // Don't downsample if too few points
-                    const sampled = data.filter((_, index) => index % sampleRate === 0);
-                    // Always include the last point if not already included
-                    if ((data.length - 1) % sampleRate !== 0) {
-                        sampled.push(data[data.length - 1]);
-                    }
-                    return sampled;
-                }
-
                 // Process import prices (buy prices) - use timestamp objects for time-based x-axis
-                let importData = (history.import || []).map(record => {
+                const importData = (history.import || []).map(record => {
                     // Strip timezone to prevent browser timezone conversion
                     const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
                     const date = new Date(timestampStr);
@@ -749,7 +738,7 @@
                 });
 
                 // Process export prices (sell/feed-in prices)
-                let exportData = (history.export || []).map(record => {
+                const exportData = (history.export || []).map(record => {
                     // Strip timezone to prevent browser timezone conversion
                     const timestampStr = record.timestamp.replace(/[+-]\d{2}:\d{2}|Z$/, '');
                     const date = new Date(timestampStr);
@@ -758,10 +747,6 @@
                         y: record.per_kwh
                     };
                 });
-
-                // Downsample for easier hovering (show every 6th point = roughly 30-min intervals)
-                importData = downsampleData(importData, 6);
-                exportData = downsampleData(exportData, 6);
 
                 // Build datasets array
                 const datasets = [];
@@ -794,10 +779,7 @@
                         backgroundColor: 'rgba(75, 192, 192, 0.1)',
                         tension: 0.4,
                         fill: false,
-                        borderWidth: 2,
-                        pointRadius: 4,
-                        pointHitRadius: 20,
-                        pointHoverRadius: 6
+                        borderWidth: 2
                     });
                 }
 
@@ -810,10 +792,7 @@
                         backgroundColor: 'rgba(255, 193, 7, 0.1)',
                         tension: 0.4,
                         fill: false,
-                        borderWidth: 2,
-                        pointRadius: 4,
-                        pointHitRadius: 20,
-                        pointHoverRadius: 6
+                        borderWidth: 2
                     });
                 }
 
@@ -879,18 +858,31 @@
                         responsive: true,
                         maintainAspectRatio: true,
                         interaction: {
-                            mode: 'nearest',
+                            mode: 'index',
                             intersect: false,
                             axis: 'x'
                         },
                         plugins: {
+                            crosshair: {
+                                line: {
+                                    color: 'rgba(255, 99, 132, 0.7)',
+                                    width: 1,
+                                    dashPattern: [5, 5]
+                                },
+                                sync: {
+                                    enabled: false
+                                },
+                                zoom: {
+                                    enabled: false
+                                }
+                            },
                             legend: {
                                 display: true,
                                 position: 'top'
                             },
                             tooltip: {
                                 enabled: true,
-                                mode: 'nearest',
+                                mode: 'interpolate',
                                 intersect: false
                             }
                         },
@@ -1105,11 +1097,25 @@
                         intersect: false
                     },
                     plugins: {
+                        crosshair: {
+                            line: {
+                                color: 'rgba(76, 175, 80, 0.7)',
+                                width: 1,
+                                dashPattern: [5, 5]
+                            },
+                            sync: {
+                                enabled: false
+                            },
+                            zoom: {
+                                enabled: false
+                            }
+                        },
                         legend: {
                             display: true,
                             position: 'top'
                         },
                         tooltip: {
+                            mode: 'interpolate',
                             callbacks: {
                                 label: function(context) {
                                     return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + '¢/kWh';
