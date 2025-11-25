@@ -882,8 +882,14 @@
                             },
                             tooltip: {
                                 enabled: true,
-                                mode: 'interpolate',
-                                intersect: false
+                                mode: 'index',
+                                intersect: false,
+                                filter: function(tooltipItem, index, tooltipItems) {
+                                    // Remove duplicate entries with same label
+                                    const label = tooltipItem.dataset.label;
+                                    const firstIndex = tooltipItems.findIndex(item => item.dataset.label === label);
+                                    return tooltipItems.indexOf(tooltipItem) === firstIndex;
+                                }
                             }
                         },
                         scales: {
@@ -1115,7 +1121,14 @@
                             position: 'top'
                         },
                         tooltip: {
-                            mode: 'interpolate',
+                            mode: 'index',
+                            intersect: false,
+                            filter: function(tooltipItem, index, tooltipItems) {
+                                // Remove duplicate entries with same label
+                                const label = tooltipItem.dataset.label;
+                                const firstIndex = tooltipItems.findIndex(item => item.dataset.label === label);
+                                return tooltipItems.indexOf(tooltipItem) === firstIndex;
+                            },
                             callbacks: {
                                 label: function(context) {
                                     return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + '¢/kWh';
