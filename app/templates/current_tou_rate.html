@@ -62,7 +62,15 @@
 
                                 {% if current_tariff.get('seasons') %}
                                 <dt class="col-sm-4">Seasons:</dt>
-                                <dd class="col-sm-8">{{ current_tariff.seasons|length }}</dd>
+                                <dd class="col-sm-8">
+                                    {%- set active_seasons = [] -%}
+                                    {%- for season_name, season_data in current_tariff.seasons.items() -%}
+                                        {%- if season_data and season_data.get('tou_periods') -%}
+                                            {%- set _ = active_seasons.append(season_name) -%}
+                                        {%- endif -%}
+                                    {%- endfor -%}
+                                    {{ active_seasons|length }}
+                                </dd>
                                 {% endif %}
 
                                 {% if current_tariff.get('energy_charges') %}
