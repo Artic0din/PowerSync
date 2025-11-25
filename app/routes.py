@@ -7,6 +7,14 @@ from app.forms import LoginForm, RegistrationForm, SettingsForm, DemandChargeFor
 from app.utils import encrypt_token, decrypt_token
 from app.api_clients import get_amber_client, get_tesla_client
 from app.scheduler import TOUScheduler
+from app.route_helpers import (
+    require_tesla_client,
+    require_amber_client,
+    require_tesla_site_id,
+    db_transaction,
+    start_background_task,
+    restore_tariff_background
+)
 import os
 import requests
 import time
@@ -431,14 +439,10 @@ def api_status():
 
 @bp.route('/api/amber/current-price')
 @login_required
-def amber_current_price():
+@require_amber_client
+def amber_current_price(amber_client):
     """Get current Amber electricity price using WebSocket (real-time) with REST API fallback"""
     logger.info(f"Current price requested by user: {current_user.email}")
-
-    amber_client = get_amber_client(current_user)
-    if not amber_client:
-        logger.warning("Amber client not available")
-        return jsonify({'error': 'Amber API not configured'}), 400
 
     # Get WebSocket client from Flask app config
     from flask import current_app
@@ -643,18 +647,11 @@ def amber_debug_forecast():
 
 @bp.route('/api/tesla/status')
 @login_required
-def tesla_status():
+@require_tesla_client
+@require_tesla_site_id
+def tesla_status(tesla_client):
     """Get Tesla Powerwall status including firmware version"""
     logger.info(f"Tesla status requested by user: {current_user.email}")
-
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        logger.warning("Tesla client not available")
-        return jsonify({'error': 'Tesla API not configured'}), 400
-
-    if not current_user.tesla_energy_site_id:
-        logger.warning("No Tesla site ID configured")
-        return jsonify({'error': 'No Tesla site ID configured'}), 400
 
     # Get live status
     site_status = tesla_client.get_site_status(current_user.tesla_energy_site_id)
@@ -889,23 +886,15 @@ def energy_history():
 
 @bp.route('/api/energy-calendar-history')
 @login_required
-def energy_calendar_history():
+@require_tesla_client
+@require_tesla_site_id
+def energy_calendar_history(tesla_client):
     """Get historical energy summaries from Tesla calendar history API"""
     logger.info(f"Energy calendar history requested by user: {current_user.email}")
 
     # Get parameters
     period = request.args.get('period', 'month')  # day, week, month, year, lifetime
     end_date_str = request.args.get('end_date')  # Optional: datetime with timezone
-
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        logger.warning("Tesla client not available for calendar history")
-        return jsonify({'error': 'Tesla API not configured'}), 400
-
-    if not current_user.tesla_energy_site_id:
-        logger.warning("No Tesla site ID configured for calendar history")
-        return jsonify({'error': 'No Tesla site ID configured'}), 400
 
     # Convert end_date to proper format if provided
     # Otherwise, get_calendar_history will use current time
@@ -1094,25 +1083,12 @@ def tou_schedule():
 
 @bp.route('/api/sync-tesla-schedule', methods=['POST'])
 @login_required
-def sync_tesla_schedule():
+@require_amber_client
+@require_tesla_client
+@require_tesla_site_id
+def sync_tesla_schedule(amber_client, tesla_client):
     """Apply the TOU schedule to Tesla Powerwall"""
     logger.info(f"Tesla schedule sync requested by user: {current_user.email}")
-
-    # Get both clients
-    amber_client = get_amber_client(current_user)
-    tesla_client = get_tesla_client(current_user)
-
-    if not amber_client:
-        logger.warning("Amber client not available for schedule sync")
-        return jsonify({'error': 'Amber API not configured'}), 400
-
-    if not tesla_client:
-        logger.warning("Tesla client not available for schedule sync")
-        return jsonify({'error': 'Tesla/Teslemetry API not configured'}), 400
-
-    if not current_user.tesla_energy_site_id:
-        logger.warning("No Tesla site ID configured")
-        return jsonify({'error': 'Tesla Site ID not configured'}), 400
 
     site_id = current_user.tesla_energy_site_id
 
@@ -1515,16 +1491,10 @@ def test_tariff_comparison():
 
 @bp.route('/api/test/find-tesla-sites')
 @login_required
-def test_find_tesla_sites():
+@require_tesla_client
+def test_find_tesla_sites(tesla_client):
     """Helper to find Tesla energy site IDs"""
     try:
-        tesla_client = get_tesla_client(current_user)
-        if not tesla_client:
-            return jsonify({
-                'error': 'Tesla API client not configured',
-                'help': 'Please go to Settings and enter your Teslemetry API key first'
-            }), 400
-
         # Get all energy sites
         sites = tesla_client.get_energy_sites()
 
@@ -1690,7 +1660,9 @@ def download_logs():
 
 @bp.route('/test-aemo-spike', methods=['POST'])
 @login_required
-def test_aemo_spike():
+@require_tesla_client
+@require_tesla_site_id
+def test_aemo_spike(tesla_client):
     """Test/simulate AEMO price spike mode"""
     from app.tasks import create_spike_tariff
     from app.models import SavedTOUProfile
@@ -1706,12 +1678,6 @@ def test_aemo_spike():
 
         if not current_user.aemo_region:
             flash('AEMO region not configured. Please set it in settings first.')
-            return redirect(url_for('main.settings'))
-
-        # Get Tesla client
-        tesla_client = get_tesla_client(current_user)
-        if not tesla_client:
-            flash('Tesla API not configured. Please configure Teslemetry in settings first.')
             return redirect(url_for('main.settings'))
 
         # Use the user's configured spike threshold for simulation
@@ -1966,20 +1932,13 @@ def test_aemo_restore():
 
 @bp.route('/current_tou_rate')
 @login_required
-def current_tou_rate():
+@require_tesla_client
+@require_tesla_site_id
+def current_tou_rate(tesla_client):
     """View current TOU rate from Tesla and manage saved profiles"""
     logger.info(f"User {current_user.email} accessing Current TOU Rate page")
 
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        flash('Please configure your Tesla API credentials first.')
-        return redirect(url_for('main.dashboard'))
-
     site_id = current_user.tesla_energy_site_id
-    if not site_id:
-        flash('Please configure your Tesla energy site ID first.')
-        return redirect(url_for('main.dashboard'))
 
     # Fetch current tariff from Tesla
     current_tariff = None
@@ -2006,7 +1965,9 @@ def current_tou_rate():
 
 @bp.route('/current_tou_rate/save', methods=['POST'])
 @login_required
-def save_current_tou_rate():
+@require_tesla_client
+@require_tesla_site_id
+def save_current_tou_rate(tesla_client):
     """Save the current TOU rate from Tesla to database"""
     import json
 
@@ -2020,16 +1981,7 @@ def save_current_tou_rate():
         flash('Please provide a name for this profile.')
         return redirect(url_for('main.current_tou_rate'))
 
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        flash('Please configure your Tesla API credentials first.')
-        return redirect(url_for('main.current_tou_rate'))
-
     site_id = current_user.tesla_energy_site_id
-    if not site_id:
-        flash('Please configure your Tesla energy site ID first.')
-        return redirect(url_for('main.current_tou_rate'))
 
     # Fetch current tariff from Tesla
     try:
@@ -2142,7 +2094,9 @@ def _restore_tou_rate_background(app, user_id, profile_id, site_id, tariff_data,
 
 @bp.route('/current_tou_rate/restore/<int:profile_id>', methods=['POST'])
 @login_required
-def restore_tou_rate(profile_id):
+@require_tesla_client
+@require_tesla_site_id
+def restore_tou_rate(profile_id, tesla_client):
     """Restore a saved TOU rate profile to Tesla (async)"""
     import json
     import threading
@@ -2155,16 +2109,7 @@ def restore_tou_rate(profile_id):
         flash('Profile not found.')
         return redirect(url_for('main.current_tou_rate'))
 
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        flash('Please configure your Tesla API credentials first.')
-        return redirect(url_for('main.current_tou_rate'))
-
     site_id = current_user.tesla_energy_site_id
-    if not site_id:
-        flash('Please configure your Tesla energy site ID first.')
-        return redirect(url_for('main.current_tou_rate'))
 
     try:
         # Parse the saved tariff JSON
@@ -2252,16 +2197,11 @@ def set_default_tou_profile(profile_id):
 
 @bp.route('/api/current_tou_rate/raw')
 @login_required
-def api_current_tou_rate_raw():
+@require_tesla_client
+@require_tesla_site_id
+def api_current_tou_rate_raw(tesla_client):
     """API endpoint to get the raw current TOU tariff JSON"""
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        return jsonify({'error': 'Tesla API not configured'}), 400
-
     site_id = current_user.tesla_energy_site_id
-    if not site_id:
-        return jsonify({'error': 'Tesla site ID not configured'}), 400
 
     try:
         current_tariff = tesla_client.get_current_tariff(site_id)
@@ -2276,16 +2216,11 @@ def api_current_tou_rate_raw():
 
 @bp.route('/api/debug/site_info')
 @login_required
-def api_debug_site_info():
+@require_tesla_client
+@require_tesla_site_id
+def api_debug_site_info(tesla_client):
     """Debug endpoint to see full site_info response from Tesla"""
-    # Get Tesla client
-    tesla_client = get_tesla_client(current_user)
-    if not tesla_client:
-        return jsonify({'error': 'Tesla API not configured'}), 400
-
     site_id = current_user.tesla_energy_site_id
-    if not site_id:
-        return jsonify({'error': 'Tesla site ID not configured'}), 400
 
     try:
         site_info = tesla_client.get_site_info(site_id)
