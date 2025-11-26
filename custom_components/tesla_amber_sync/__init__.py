@@ -214,12 +214,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Initialize WebSocket client for real-time Amber prices
     ws_client = None
+
+    # Create a placeholder for the sync callback that will be set up later
+    # after coordinators are initialized
+    websocket_sync_callback = None
+
     try:
         from .websocket_client import AmberWebSocketClient
 
         ws_client = AmberWebSocketClient(
             api_token=entry.data[CONF_AMBER_API_TOKEN],
             site_id=entry.data.get("amber_site_id"),
+            sync_callback=None,  # Will be set up after coordinators are initialized
         )
         await ws_client.start()
         _LOGGER.info("🔌 Amber WebSocket client initialized and started")
@@ -465,6 +471,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU, handle_sync_tou)
     hass.services.async_register(DOMAIN, SERVICE_SYNC_NOW, handle_sync_now)
+
+    # Wire up WebSocket sync callback now that handlers are defined
+    if ws_client:
+        async def websocket_sync_callback():
+            """Callback to trigger Tesla sync when WebSocket receives price update."""
+            # Honor auto-sync setting
+            auto_sync_enabled = entry.options.get(
+                CONF_AUTO_SYNC_ENABLED,
+                entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
+            )
+
+            if auto_sync_enabled:
+                _LOGGER.debug("WebSocket triggered TOU sync (auto-sync enabled)")
+                await handle_sync_tou(None)
+            else:
+                _LOGGER.debug("WebSocket sync skipped (auto-sync disabled)")
+
+        # Assign callback to WebSocket client
+        ws_client._sync_callback = websocket_sync_callback
+        _LOGGER.info("🔗 WebSocket sync callback configured")
 
     # Set up automatic TOU sync every 5 minutes if auto-sync is enabled
     async def auto_sync_tou(now):
