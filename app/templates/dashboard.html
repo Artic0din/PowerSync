@@ -761,16 +761,9 @@
                 // Build datasets array
                 const datasets = [];
 
-                // Calculate and display max prices
-                let maxImportPrice = 0;
-                let maxExportPrice = 0;
-
-                if (importData.length > 0) {
-                    maxImportPrice = Math.max(...importData.map(d => d.y));
-                }
-                if (exportData.length > 0) {
-                    maxExportPrice = Math.max(...exportData.map(d => d.y));
-                }
+                // Get max prices from metadata (calculated from ALL day's data, not just chart data)
+                const maxImportPrice = metadata?.max_import_price || 0;
+                const maxExportPrice = metadata?.max_export_price || 0;
 
                 // Update max price displays
                 if (maxImportPrice > 0) {

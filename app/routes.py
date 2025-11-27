@@ -773,7 +773,12 @@ def price_history():
             'forecast': record.forecast
         })
 
+    # Calculate max prices from all records for the day
+    max_import_price = max([record.per_kwh for record in import_records], default=0)
+    max_export_price = max([record.per_kwh for record in export_records], default=0)
+
     logger.info(f"Returning {len(import_data)} import and {len(export_data)} export price history records for {day}")
+    logger.info(f"Max prices for {day}: Import={max_import_price}¢/kWh, Export={max_export_price}¢/kWh")
 
     # Include metadata for chart configuration (midnight-to-midnight display)
     response_data = {
@@ -784,7 +789,9 @@ def price_history():
             'end_of_day': end_of_day_local.isoformat(),
             'day': day,
             'date': target_date.strftime('%Y-%m-%d'),
-            'timezone': str(user_tz)
+            'timezone': str(user_tz),
+            'max_import_price': max_import_price,
+            'max_export_price': max_export_price
         }
     }
 
