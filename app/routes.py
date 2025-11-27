@@ -1,7 +1,7 @@
 # app/routes.py
 from flask import render_template, flash, redirect, url_for, request, Blueprint, jsonify, session
 from flask_login import login_user, logout_user, current_user, login_required
-from app import db
+from app import db, cache
 from app.models import User, PriceRecord, SavedTOUProfile
 from app.forms import LoginForm, RegistrationForm, SettingsForm, DemandChargeForm, AmberSettingsForm
 from app.utils import encrypt_token, decrypt_token
@@ -146,6 +146,7 @@ def dashboard():
 
 @bp.route('/api/aemo-price')
 @login_required
+@cache.cached(timeout=60, key_prefix=lambda: f'aemo_price_{current_user.id}')
 def api_aemo_price():
     """Get current AEMO wholesale price and spike status"""
     from app.api_clients import AEMOAPIClient
@@ -408,6 +409,7 @@ def logs():
 # API Status and Data Routes
 @bp.route('/api/status')
 @login_required
+@cache.cached(timeout=180, key_prefix=lambda: f'api_status_{current_user.id}')
 def api_status():
     """Get connection status for both Amber and Tesla APIs"""
     logger.info(f"API status check requested by user: {current_user.email}")
@@ -650,6 +652,7 @@ def amber_debug_forecast():
 @login_required
 @require_tesla_client
 @require_tesla_site_id
+@cache.cached(timeout=60, key_prefix=lambda: f'tesla_status_{current_user.id}')
 def tesla_status(tesla_client):
     """Get Tesla Powerwall status including firmware version"""
     logger.info(f"Tesla status requested by user: {current_user.email}")
@@ -942,6 +945,7 @@ def energy_calendar_history(tesla_client):
 
 @bp.route('/api/tou-schedule')
 @login_required
+@cache.cached(timeout=300, key_prefix=lambda: f'tou_schedule_{current_user.id}')
 def tou_schedule():
     """Get the rolling 24-hour tariff schedule that will be sent to Tesla"""
     logger.info(f"TOU tariff schedule requested by user: {current_user.email}")

@@ -4,6 +4,7 @@ from config import Config
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_login import LoginManager
+from flask_caching import Cache
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import logging
@@ -28,6 +29,7 @@ db = SQLAlchemy()
 migrate = Migrate()
 login = LoginManager()
 login.login_view = 'main.login' # Redirect to login page if user is not authenticated
+cache = Cache()
 
 def create_app(config_class=Config):
     logger.info("Creating Flask application")
@@ -38,6 +40,12 @@ def create_app(config_class=Config):
     db.init_app(app)
     migrate.init_app(app, db)
     login.init_app(app)
+
+    # Initialize Flask-Caching for API response caching
+    app.config['CACHE_TYPE'] = 'SimpleCache'  # In-memory cache
+    app.config['CACHE_DEFAULT_TIMEOUT'] = 300  # Default 5 minutes
+    cache.init_app(app)
+    logger.info("Flask-Caching initialized with SimpleCache backend")
 
     from app.routes import bp as main_bp
     app.register_blueprint(main_bp)
