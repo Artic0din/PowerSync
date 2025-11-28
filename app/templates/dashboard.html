@@ -760,14 +760,6 @@
                 const maxImportPrice = metadata?.max_import_price || 0;
                 const maxExportPrice = metadata?.max_export_price || 0;
 
-                // Update max price displays
-                if (maxImportPrice > 0) {
-                    document.getElementById('max-import-price').textContent = `Max today: ${maxImportPrice.toFixed(1)}¢/kWh`;
-                }
-                if (maxExportPrice > 0) {
-                    document.getElementById('max-export-price').textContent = `Max today: ${maxExportPrice.toFixed(1)}¢/kWh`;
-                }
-
                 // Add import dataset if we have data
                 if (importData.length > 0) {
                     datasets.push({
