@@ -397,15 +397,28 @@ def save_price_history():
                 error_count += 1
                 continue
 
-            # Get current prices from WebSocket (real-time) with REST API fallback
-            from flask import current_app
-            try:
-                ws_client = current_app.config.get('AMBER_WEBSOCKET_CLIENT')
-            except RuntimeError:
-                # current_app not available outside request context
-                ws_client = None
+            # Get current prices from WebSocket (primary) or REST API (fallback)
+            # Wait up to 60 seconds for WebSocket data (same logic as TOU sync)
+            coordinator = get_sync_coordinator()
+            websocket_data = coordinator.wait_for_websocket_data(timeout=60)
 
-            prices = amber_client.get_live_prices(ws_client=ws_client)
+            prices = None
+            if websocket_data:
+                # WebSocket data received within 60s - convert to list format for price history
+                prices = []
+                if websocket_data.get('general'):
+                    prices.append(websocket_data['general'])
+                if websocket_data.get('feedIn'):
+                    prices.append(websocket_data['feedIn'])
+
+                general_price = websocket_data.get('general', {}).get('perKwh') if websocket_data.get('general') else None
+                feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data.get('feedIn') else None
+                logger.info(f"✅ Using WebSocket price for history: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
+            else:
+                # WebSocket timeout - fallback to REST API
+                logger.warning(f"⏰ WebSocket timeout - using REST API fallback for price history")
+                prices = amber_client.get_current_prices()
+
             if not prices:
                 logger.warning(f"No current prices available for user {user.email}")
                 error_count += 1
