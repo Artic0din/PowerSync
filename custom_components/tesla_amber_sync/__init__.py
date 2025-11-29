@@ -109,6 +109,24 @@ class SyncCoordinator:
                 self._websocket_data = None
             return None
 
+    async def already_synced_this_period(self):
+        """
+        Check if we already synced for the current 5-minute period (read-only).
+        Used by cron fallback to determine if WebSocket already handled this period.
+
+        Returns:
+            bool: True if already synced this period, False if not synced yet
+        """
+        from homeassistant.util import dt as dt_util
+
+        now = dt_util.utcnow()
+        # Calculate current 5-minute period
+        current_period = now.replace(second=0, microsecond=0)
+        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+        async with self._lock:
+            return self._current_period == current_period
+
     async def should_sync_this_period(self):
         """
         Check if we should sync for the current 5-minute period.
@@ -443,24 +461,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
+    async def handle_sync_tou_with_websocket_data(websocket_data) -> None:
+        """
+        EVENT-DRIVEN: Handle sync with pre-fetched WebSocket data (called by WebSocket callback).
+        This is the fast path - data already arrived, no waiting.
+        """
+        await _handle_sync_tou_internal(websocket_data)
+
     async def handle_sync_tou(call: ServiceCall) -> None:
         """
-        Handle the sync TOU schedule service call.
+        CRON FALLBACK: Handle sync only if WebSocket hasn't delivered yet.
 
-        Uses wait-with-timeout pattern:
-        1. Check if we should sync this period (prevents duplicates within same 5-min window)
-        2. Wait up to 60s for WebSocket price update
-        3. If WebSocket arrives -> Use WebSocket data
-        4. If timeout -> Fallback to REST API
-
-        Only ONE sync per 5-minute period.
+        This is the safety net if WebSocket fails. Checks if already synced first,
+        then waits up to 60s for WebSocket, falls back to REST API if timeout.
         """
+        # FALLBACK CHECK: Has WebSocket already synced this period?
+        if await coordinator.already_synced_this_period():
+            _LOGGER.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
+            return
+
         # Check if we should sync this period (prevents duplicates within same 5-min window)
         if not await coordinator.should_sync_this_period():
             return
 
         # Wait for WebSocket or timeout (60s)
+        _LOGGER.info("⏰ Cron fallback: waiting 60s for WebSocket...")
         websocket_data = await coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+
+        await _handle_sync_tou_internal(websocket_data)
+
+    async def _handle_sync_tou_internal(websocket_data) -> None:
+        """Internal sync logic shared by both event-driven and cron-fallback paths."""
 
         _LOGGER.info("=== Starting TOU sync ===")
 
@@ -601,12 +632,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Wire up WebSocket sync callback now that handlers are defined
     if ws_client:
         def websocket_sync_callback(prices_data):
-            """Callback to notify sync coordinator when WebSocket receives price update."""
+            """
+            EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
+            This is the primary trigger - cron jobs are just fallback.
+            """
+            # Notify coordinator (for period deduplication)
             coordinator.notify_websocket_update(prices_data)
+
+            # Check if we should sync this period (prevents duplicates)
+            async def trigger_sync():
+                if not await coordinator.should_sync_this_period():
+                    _LOGGER.info("⏭️  WebSocket price received but already synced this period, skipping")
+                    return
+
+                # TRIGGER SYNC IMMEDIATELY with WebSocket data (event-driven!)
+                _LOGGER.info("🚀 WebSocket price received - triggering immediate sync (event-driven)")
+
+                try:
+                    # Sync TOU to Tesla with WebSocket price
+                    await handle_sync_tou_with_websocket_data(prices_data)
+                    _LOGGER.info("✅ Event-driven sync completed successfully")
+                except Exception as e:
+                    _LOGGER.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
+
+            # Schedule the async sync
+            hass.async_create_task(trigger_sync())
 
         # Assign callback to WebSocket client
         ws_client._sync_callback = websocket_sync_callback
-        _LOGGER.info("🔗 WebSocket sync callback configured to notify coordinator")
+        _LOGGER.info("🔗 WebSocket sync callback configured to trigger immediate sync")
 
     # Set up automatic TOU sync every 5 minutes if auto-sync is enabled
     async def auto_sync_tou(now):
