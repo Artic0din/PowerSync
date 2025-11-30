@@ -60,14 +60,15 @@ class AmberAPIClient:
 
     BASE_URL = "https://api.amber.com.au/v1"
 
-    def __init__(self, api_token):
+    def __init__(self, api_token, site_id=None):
         self.api_token = api_token
+        self.site_id = site_id  # User's selected site ID
         self.base_url = self.BASE_URL
         self.headers = {
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json"
         }
-        logger.info("AmberAPIClient initialized")
+        logger.info(f"AmberAPIClient initialized (site_id: {site_id or 'not set'})")
 
     def test_connection(self):
         """Test the API connection"""
@@ -88,11 +89,14 @@ class AmberAPIClient:
     def get_current_prices(self, site_id=None):
         """Get current electricity prices via REST API"""
         try:
-            # If no site_id provided, get the first site
+            # Use provided site_id, or client's stored site_id, or fallback to first site
+            if not site_id:
+                site_id = self.site_id
             if not site_id:
                 sites = self.get_sites()
                 if sites:
                     site_id = sites[0]['id']
+                    logger.warning(f"No site_id configured, falling back to first site: {site_id}")
                 else:
                     logger.error("No Amber sites found")
                     return None
@@ -183,18 +187,21 @@ class AmberAPIClient:
         Get price forecast for a site
 
         Args:
-            site_id: Site ID (defaults to first site)
+            site_id: Site ID (uses client's stored site_id if not provided)
             start_date: Start date (defaults to now)
             end_date: End date (defaults to start + next_hours)
             next_hours: Hours to fetch if end_date not specified
             resolution: Interval resolution in minutes (5 or 30, defaults to billing interval)
         """
         try:
-            # If no site_id provided, get the first site
+            # Use provided site_id, or client's stored site_id, or fallback to first site
+            if not site_id:
+                site_id = self.site_id
             if not site_id:
                 sites = self.get_sites()
                 if sites:
                     site_id = sites[0]['id']
+                    logger.warning(f"No site_id configured, falling back to first site: {site_id}")
                 else:
                     logger.error("No Amber sites found")
                     return None
@@ -235,16 +242,19 @@ class AmberAPIClient:
         Get historical usage data for a site
 
         Args:
-            site_id: Site ID (defaults to first site)
+            site_id: Site ID (uses client's stored site_id if not provided)
             start_date: Start date (defaults to 7 days ago)
             end_date: End date (defaults to now)
         """
         try:
-            # If no site_id provided, get the first site
+            # Use provided site_id, or client's stored site_id, or fallback to first site
+            if not site_id:
+                site_id = self.site_id
             if not site_id:
                 sites = self.get_sites()
                 if sites:
                     site_id = sites[0]['id']
+                    logger.warning(f"No site_id configured, falling back to first site: {site_id}")
                 else:
                     logger.error("No Amber sites found")
                     return None
@@ -1147,14 +1157,16 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
 
 
 def get_amber_client(user):
-    """Get an Amber API client for the user"""
+    """Get an Amber API client for the user with their selected site ID"""
     if not user.amber_api_token_encrypted:
         logger.warning(f"No Amber token for user {user.email}")
         return None
 
     try:
         api_token = decrypt_token(user.amber_api_token_encrypted)
-        return AmberAPIClient(api_token)
+        # Pass user's selected Amber site ID to the client
+        site_id = getattr(user, 'amber_site_id', None)
+        return AmberAPIClient(api_token, site_id=site_id)
     except Exception as e:
         logger.error(f"Error creating Amber client: {e}")
         return None
