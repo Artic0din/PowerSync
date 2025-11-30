@@ -380,8 +380,22 @@ def amber_settings():
             if amber_client:
                 amber_sites = amber_client.get_sites()
                 if amber_sites:
+                    # Sort sites: active first, then pending, then closed
+                    status_order = {'active': 0, 'pending': 1, 'closed': 2}
+                    amber_sites.sort(key=lambda s: status_order.get(s.get('status', 'unknown'), 3))
+
                     # Create dropdown choices using NMI (user-friendly) as label, site ID as value
-                    site_choices = [(site['id'], site.get('nmi', site['id'])) for site in amber_sites]
+                    # Append status label for closed/pending sites to help users identify the right one
+                    def format_site_label(site):
+                        label = site.get('nmi', site['id'])
+                        status = site.get('status', 'unknown')
+                        if status == 'closed':
+                            return f"{label} (Closed)"
+                        elif status == 'pending':
+                            return f"{label} (Pending)"
+                        return label  # Active sites don't need a label
+
+                    site_choices = [(site['id'], format_site_label(site)) for site in amber_sites]
                     logger.info(f"Found {len(amber_sites)} Amber sites for dropdown")
                 else:
                     logger.warning("No Amber sites found for this API token")
