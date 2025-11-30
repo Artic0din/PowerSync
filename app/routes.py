@@ -424,17 +424,22 @@ def amber_settings():
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
 
-            # Reinitialize WebSocket client with new site_id (if this worker has the lock)
+            # Reinitialize WebSocket client with new site_id
+            # In single-worker Docker deployments, always try to reinit (no lock check needed)
             if current_user.amber_site_id and current_user.amber_api_token_encrypted:
-                if current_app.config.get('WEBSOCKET_LOCK_ACQUIRED'):
-                    init_fn = current_app.config.get('WEBSOCKET_INIT_FUNCTION')
-                    if init_fn:
+                init_fn = current_app.config.get('WEBSOCKET_INIT_FUNCTION')
+                logger.info(f"WebSocket reinit check: init_fn={init_fn is not None}, site_id={current_user.amber_site_id}")
+
+                if init_fn:
+                    try:
                         from app.utils import decrypt_token
                         decrypted_token = decrypt_token(current_user.amber_api_token_encrypted)
                         init_fn(decrypted_token, current_user.amber_site_id)
-                        logger.info(f"🔄 WebSocket client reinitialized with new site: {current_user.amber_site_id}")
+                        logger.info(f"✅ WebSocket client reinitialized with site: {current_user.amber_site_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to reinitialize WebSocket: {e}", exc_info=True)
                 else:
-                    logger.info("WebSocket lock held by another worker - site change will take effect on restart")
+                    logger.warning("WebSocket init function not available - restart Flask to enable WebSocket")
 
             flash('Amber settings have been saved.')
         except Exception as e:
