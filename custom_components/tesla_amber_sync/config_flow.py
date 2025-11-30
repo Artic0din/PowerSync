@@ -38,6 +38,10 @@ from .const import (
     AMBER_API_BASE_URL,
     TESLEMETRY_API_BASE_URL,
     FLEET_API_BASE_URL,
+    CONF_AEMO_SPIKE_ENABLED,
+    CONF_AEMO_REGION,
+    CONF_AEMO_SPIKE_THRESHOLD,
+    AEMO_REGIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -183,16 +187,49 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._tesla_fleet_available: bool = False
         self._tesla_fleet_token: str | None = None
         self._selected_provider: str | None = None
+        self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
+        self._aemo_data: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
+        """Handle the initial step - choose mode."""
         # Check if already configured
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
-        return await self.async_step_amber()
+        return await self.async_step_mode_selection()
+
+    async def async_step_mode_selection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle mode selection - Amber TOU sync or AEMO spike only."""
+        if user_input is not None:
+            mode = user_input.get("mode", "amber")
+
+            if mode == "aemo_only":
+                # AEMO-only mode: skip Amber, go to AEMO config then Tesla
+                self._aemo_only_mode = True
+                self._amber_data = {}  # No Amber API token needed
+                return await self.async_step_aemo_config()
+            else:
+                # Amber mode: standard flow with optional AEMO
+                self._aemo_only_mode = False
+                return await self.async_step_amber()
+
+        return self.async_show_form(
+            step_id="mode_selection",
+            data_schema=vol.Schema({
+                vol.Required("mode", default="amber"): vol.In({
+                    "amber": "Amber TOU Sync (Real-time prices + optional spike detection)",
+                    "aemo_only": "AEMO Spike Detection Only (No Amber subscription needed)",
+                }),
+            }),
+            description_placeholders={
+                "amber_desc": "Full price sync with Amber Electric",
+                "aemo_desc": "Spike detection using AEMO wholesale prices",
+            },
+        )
 
     async def async_step_amber(
         self, user_input: dict[str, Any] | None = None
@@ -209,7 +246,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if validation_result["success"]:
                 self._amber_data = user_input
                 self._amber_sites = validation_result.get("sites", [])
-                return await self.async_step_tesla_provider()
+                # Go to AEMO config (optional for Amber mode)
+                return await self.async_step_aemo_config()
             else:
                 errors["base"] = validation_result.get("error", "unknown")
 
@@ -342,6 +380,73 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_aemo_config(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle AEMO spike detection configuration."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Validate AEMO region is selected if enabled
+            aemo_enabled = user_input.get(CONF_AEMO_SPIKE_ENABLED, False)
+
+            if aemo_enabled:
+                region = user_input.get(CONF_AEMO_REGION)
+                if not region:
+                    errors["base"] = "aemo_region_required"
+                else:
+                    # Store AEMO config
+                    self._aemo_data = {
+                        CONF_AEMO_SPIKE_ENABLED: True,
+                        CONF_AEMO_REGION: region,
+                        CONF_AEMO_SPIKE_THRESHOLD: user_input.get(
+                            CONF_AEMO_SPIKE_THRESHOLD, 300.0
+                        ),
+                    }
+
+                    if self._aemo_only_mode:
+                        # AEMO-only mode: go to Tesla provider selection
+                        return await self.async_step_tesla_provider()
+                    else:
+                        # Amber mode with AEMO: continue to Tesla provider selection
+                        return await self.async_step_tesla_provider()
+            else:
+                # AEMO disabled
+                self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
+
+                if self._aemo_only_mode:
+                    # Can't be in AEMO-only mode without AEMO enabled
+                    errors["base"] = "aemo_required_in_aemo_mode"
+                else:
+                    # Amber mode without AEMO: continue to Tesla provider
+                    return await self.async_step_tesla_provider()
+
+        # Build region choices
+        region_choices = {"": "Select Region..."}
+        region_choices.update(AEMO_REGIONS)
+
+        # Default to enabled if in AEMO-only mode
+        default_enabled = self._aemo_only_mode
+
+        data_schema = vol.Schema(
+            {
+                vol.Optional(CONF_AEMO_SPIKE_ENABLED, default=default_enabled): bool,
+                vol.Optional(CONF_AEMO_REGION, default=""): vol.In(region_choices),
+                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=300.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=20000.0)
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="aemo_config",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={
+                "threshold_hint": "300 = $300/MWh (typical spike level)",
+            },
+        )
+
     async def async_step_site_selection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -349,29 +454,31 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # If only one Amber site, use it automatically
-            amber_site_id = user_input.get(CONF_AMBER_SITE_ID)
-            if not amber_site_id and len(self._amber_sites) == 1:
-                amber_site_id = self._amber_sites[0]["id"]
-                _LOGGER.info(f"Auto-selected single Amber site: {amber_site_id}")
+            # Handle Amber site selection (only for Amber mode)
+            amber_site_id = None
+            if not self._aemo_only_mode:
+                amber_site_id = user_input.get(CONF_AMBER_SITE_ID)
+                if not amber_site_id and len(self._amber_sites) == 1:
+                    amber_site_id = self._amber_sites[0]["id"]
+                    _LOGGER.info(f"Auto-selected single Amber site: {amber_site_id}")
 
             # Store site selection data
             self._site_data = {
-                CONF_AMBER_SITE_ID: amber_site_id,
                 CONF_TESLA_ENERGY_SITE_ID: user_input[CONF_TESLA_ENERGY_SITE_ID],
-                CONF_AUTO_SYNC_ENABLED: user_input.get(CONF_AUTO_SYNC_ENABLED, True),
-                CONF_AMBER_FORECAST_TYPE: user_input.get(CONF_AMBER_FORECAST_TYPE, "predicted"),
                 CONF_SOLAR_CURTAILMENT_ENABLED: user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False),
             }
 
+            # Amber-specific options only in Amber mode
+            if not self._aemo_only_mode:
+                self._site_data[CONF_AMBER_SITE_ID] = amber_site_id
+                self._site_data[CONF_AUTO_SYNC_ENABLED] = user_input.get(CONF_AUTO_SYNC_ENABLED, True)
+                self._site_data[CONF_AMBER_FORECAST_TYPE] = user_input.get(CONF_AMBER_FORECAST_TYPE, "predicted")
+            else:
+                # AEMO-only mode doesn't use Amber sync
+                self._site_data[CONF_AUTO_SYNC_ENABLED] = False
+
             # Go to optional demand charge configuration
             return await self.async_step_demand_charges()
-
-        # Build selection options
-        amber_site_options = {
-            site["id"]: site.get("nmi", site["id"])
-            for site in self._amber_sites
-        }
 
         data_schema_dict: dict[vol.Marker, Any] = {}
 
@@ -389,18 +496,27 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.error("No Tesla energy sites found in Teslemetry account")
             return self.async_abort(reason="no_energy_sites")
 
-        # Only add Amber site selection if multiple sites
-        if len(self._amber_sites) > 1:
-            data_schema_dict[vol.Required(CONF_AMBER_SITE_ID)] = vol.In(
-                amber_site_options
-            )
+        # Only add Amber-specific options in Amber mode
+        if not self._aemo_only_mode:
+            # Build Amber site options
+            amber_site_options = {
+                site["id"]: site.get("nmi", site["id"])
+                for site in self._amber_sites
+            }
 
-        data_schema_dict[vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True)] = bool
-        data_schema_dict[vol.Optional(CONF_AMBER_FORECAST_TYPE, default="predicted")] = vol.In({
-            "predicted": "Predicted (Default)",
-            "low": "Low (Conservative)",
-            "high": "High (Optimistic)"
-        })
+            # Only add Amber site selection if multiple sites
+            if len(self._amber_sites) > 1:
+                data_schema_dict[vol.Required(CONF_AMBER_SITE_ID)] = vol.In(
+                    amber_site_options
+                )
+
+            data_schema_dict[vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True)] = bool
+            data_schema_dict[vol.Optional(CONF_AMBER_FORECAST_TYPE, default="predicted")] = vol.In({
+                "predicted": "Predicted (Default)",
+                "low": "Low (Conservative)",
+                "high": "High (Optimistic)"
+            })
+
         data_schema_dict[vol.Optional(CONF_SOLAR_CURTAILMENT_ENABLED, default=False)] = bool
 
         data_schema = vol.Schema(data_schema_dict)
@@ -421,6 +537,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **self._amber_data,
                 **self._teslemetry_data,
                 **self._site_data,
+                **self._aemo_data,  # Include AEMO configuration
             }
 
             # Add demand charge configuration if enabled
@@ -441,7 +558,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
             data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
 
-            return self.async_create_entry(title="Tesla Sync", data=data)
+            # Set appropriate title based on mode
+            title = "Tesla AEMO Spike" if self._aemo_only_mode else "Tesla Sync"
+            return self.async_create_entry(title=title, data=data)
 
         # Build the form schema
         data_schema = vol.Schema(
@@ -544,6 +663,24 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
         )
 
+        # AEMO Spike Detection settings
+        current_aemo_enabled = self.config_entry.options.get(
+            CONF_AEMO_SPIKE_ENABLED,
+            self.config_entry.data.get(CONF_AEMO_SPIKE_ENABLED, False)
+        )
+        current_aemo_region = self.config_entry.options.get(
+            CONF_AEMO_REGION,
+            self.config_entry.data.get(CONF_AEMO_REGION, "")
+        )
+        current_aemo_threshold = self.config_entry.options.get(
+            CONF_AEMO_SPIKE_THRESHOLD,
+            self.config_entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 300.0)
+        )
+
+        # Build region choices for AEMO
+        region_choices = {"": "Select Region..."}
+        region_choices.update(AEMO_REGIONS)
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -600,6 +737,19 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_MONTHLY_SUPPLY_CHARGE,
                         default=current_monthly_supply_charge,
                     ): vol.Coerce(float),
+                    # AEMO Spike Detection Options
+                    vol.Optional(
+                        CONF_AEMO_SPIKE_ENABLED,
+                        default=current_aemo_enabled,
+                    ): bool,
+                    vol.Optional(
+                        CONF_AEMO_REGION,
+                        default=current_aemo_region,
+                    ): vol.In(region_choices),
+                    vol.Optional(
+                        CONF_AEMO_SPIKE_THRESHOLD,
+                        default=current_aemo_threshold,
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
                 }
             ),
         )

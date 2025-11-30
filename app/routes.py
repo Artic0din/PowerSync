@@ -482,6 +482,38 @@ def api_status():
     return jsonify(status)
 
 
+@bp.route('/api/websocket/status')
+@login_required
+def websocket_status():
+    """Get WebSocket connection health status"""
+    from flask import current_app
+
+    ws_client = current_app.config.get('AMBER_WEBSOCKET_CLIENT')
+
+    if not ws_client:
+        return jsonify({
+            'available': False,
+            'status': 'not_initialized',
+            'message': 'WebSocket client not initialized (no Amber credentials or site configured)'
+        })
+
+    # Get health status from WebSocket client
+    health = ws_client.get_health_status()
+
+    return jsonify({
+        'available': True,
+        'status': health.get('status', 'unknown'),
+        'connected': health.get('connected', False),
+        'last_update': health.get('last_update'),
+        'age_seconds': round(health.get('age_seconds', 0), 1) if health.get('age_seconds') else None,
+        'message_count': health.get('message_count', 0),
+        'error_count': health.get('error_count', 0),
+        'last_error': health.get('last_error'),
+        'has_cached_data': health.get('has_cached_data', False),
+        'message': f"Status: {health.get('status', 'unknown')}, Messages: {health.get('message_count', 0)}"
+    })
+
+
 @bp.route('/api/amber/current-price')
 @login_required
 @require_amber_client

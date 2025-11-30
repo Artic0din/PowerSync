@@ -39,12 +39,29 @@ CONF_DEMAND_CHARGE_APPLY_TO = "demand_charge_apply_to"
 CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
 CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
 
+# AEMO Spike Detection configuration
+CONF_AEMO_SPIKE_ENABLED = "aemo_spike_enabled"
+CONF_AEMO_REGION = "aemo_region"
+CONF_AEMO_SPIKE_THRESHOLD = "aemo_spike_threshold"
+
+# AEMO region options (NEM regions)
+AEMO_REGIONS = {
+    "NSW1": "NSW - New South Wales",
+    "QLD1": "QLD - Queensland",
+    "VIC1": "VIC - Victoria",
+    "SA1": "SA - South Australia",
+    "TAS1": "TAS - Tasmania",
+}
+
 # Data coordinator update intervals
 UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(minutes=1)  # Tesla energy data every minute
 
 # Amber API
 AMBER_API_BASE_URL = "https://api.amber.com.au/v1"
+
+# AEMO API
+AEMO_API_BASE_URL = "https://visualisations.aemo.com.au/aemo/apps/api/report/ELEC_NEM_SUMMARY"
 
 # Teslemetry API
 TESLEMETRY_API_BASE_URL = "https://api.teslemetry.com"
@@ -87,9 +104,16 @@ SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
 # Switch types
 SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 
+# AEMO Spike sensors
+SENSOR_TYPE_AEMO_PRICE = "aemo_price"
+SENSOR_TYPE_AEMO_SPIKE_STATUS = "aemo_spike_status"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"
 ATTR_PRICE_SPIKE = "price_spike"
 ATTR_WHOLESALE_PRICE = "wholesale_price"
 ATTR_NETWORK_PRICE = "network_price"
+ATTR_AEMO_REGION = "aemo_region"
+ATTR_AEMO_THRESHOLD = "aemo_threshold"
+ATTR_SPIKE_START_TIME = "spike_start_time"

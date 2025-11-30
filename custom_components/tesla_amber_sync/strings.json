@@ -5,11 +5,27 @@
         "title": "Tesla Sync Setup",
         "description": "Configure Tesla Sync to automatically sync Amber Electric pricing to your Tesla Powerwall."
       },
+      "mode_selection": {
+        "title": "Choose Setup Mode",
+        "description": "Select how you want to use Tesla Sync:\n\n**Amber TOU Sync**: Full real-time price sync with Amber Electric (requires Amber subscription).\n\n**AEMO Spike Only**: Detect wholesale price spikes without an Amber subscription. Uses AEMO NEM data.",
+        "data": {
+          "mode": "Setup Mode"
+        }
+      },
       "amber": {
         "title": "Amber Electric Configuration",
         "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
         "data": {
           "amber_api_token": "Amber API Token"
+        }
+      },
+      "aemo_config": {
+        "title": "AEMO Spike Detection",
+        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, the Powerwall will be configured to export energy to the grid.\n\n{threshold_hint}",
+        "data": {
+          "aemo_spike_enabled": "Enable AEMO Spike Detection",
+          "aemo_region": "NEM Region",
+          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
         }
       },
       "tesla_provider": {
@@ -52,6 +68,8 @@
       "no_sites": "No Amber Electric sites found for this account.",
       "no_energy_sites": "No Tesla energy sites found in your account.",
       "no_token_provided": "Please provide a Teslemetry API token.",
+      "aemo_region_required": "Please select an AEMO NEM region when spike detection is enabled.",
+      "aemo_required_in_aemo_mode": "AEMO spike detection must be enabled in AEMO-only mode.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -63,14 +81,23 @@
     "step": {
       "init": {
         "title": "Tesla Sync Options",
-        "description": "Configure automatic syncing and demand charge tracking.",
+        "description": "Configure automatic syncing, demand charge tracking, and AEMO spike detection.",
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
+          "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)"
+          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
+          "demand_charge_days": "Demand Charge Days",
+          "demand_charge_billing_day": "Billing Cycle Reset Day",
+          "demand_charge_apply_to": "Apply Demand Charge To",
+          "daily_supply_charge": "Daily Supply Charge ($)",
+          "monthly_supply_charge": "Monthly Supply Charge ($)",
+          "aemo_spike_enabled": "Enable AEMO Spike Detection",
+          "aemo_region": "AEMO NEM Region",
+          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
         }
       }
     }
@@ -109,6 +136,12 @@
       },
       "days_until_demand_reset": {
         "name": "Days Until Demand Reset"
+      },
+      "aemo_price": {
+        "name": "AEMO Wholesale Price"
+      },
+      "aemo_spike_status": {
+        "name": "AEMO Spike Status"
       }
     },
     "switch": {

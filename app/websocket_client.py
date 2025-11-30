@@ -192,7 +192,7 @@ class AmberWebSocketClient:
             data = json.loads(message)
 
             # Log message for debugging
-            logger.debug(f"WebSocket message received: {data}")
+            logger.info(f"📨 WebSocket message received: {data}")
             self._message_count += 1
 
             # Expected format from Amber WebSocket:

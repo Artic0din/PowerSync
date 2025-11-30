@@ -43,15 +43,21 @@ from .const import (
     SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,
     SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
     SENSOR_TYPE_TOTAL_MONTHLY_COST,
+    SENSOR_TYPE_AEMO_PRICE,
+    SENSOR_TYPE_AEMO_SPIKE_STATUS,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
     CONF_DEMAND_CHARGE_START_TIME,
     CONF_DEMAND_CHARGE_END_TIME,
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
+    CONF_AEMO_SPIKE_ENABLED,
     ATTR_PRICE_SPIKE,
     ATTR_WHOLESALE_PRICE,
     ATTR_NETWORK_PRICE,
+    ATTR_AEMO_REGION,
+    ATTR_AEMO_THRESHOLD,
+    ATTR_SPIKE_START_TIME,
 )
 from .coordinator import AmberPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator
 
@@ -192,6 +198,36 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaAmberSensorEntityDescription, ...] = (
 )
 
 
+# AEMO Spike Detection Sensors
+AEMO_SENSORS: tuple[TeslaAmberSensorEntityDescription, ...] = (
+    TeslaAmberSensorEntityDescription(
+        key=SENSOR_TYPE_AEMO_PRICE,
+        name="AEMO Wholesale Price",
+        native_unit_of_measurement="$/MWh",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=2,
+        value_fn=lambda data: data.get("last_price") if data else None,
+        attr_fn=lambda data: {
+            ATTR_AEMO_REGION: data.get("region") if data else None,
+            ATTR_AEMO_THRESHOLD: data.get("threshold") if data else None,
+            "last_check": data.get("last_check") if data else None,
+        },
+    ),
+    TeslaAmberSensorEntityDescription(
+        key=SENSOR_TYPE_AEMO_SPIKE_STATUS,
+        name="AEMO Spike Status",
+        icon="mdi:alert-decagram",
+        value_fn=lambda data: "Spike Active" if data and data.get("in_spike_mode") else "Normal",
+        attr_fn=lambda data: {
+            ATTR_AEMO_REGION: data.get("region") if data else None,
+            ATTR_AEMO_THRESHOLD: data.get("threshold") if data else None,
+            ATTR_SPIKE_START_TIME: data.get("spike_start_time") if data else None,
+            "last_price": data.get("last_price") if data else None,
+        },
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -199,21 +235,23 @@ async def async_setup_entry(
 ) -> None:
     """Set up Tesla Sync sensor entities."""
     domain_data = hass.data[DOMAIN][entry.entry_id]
-    amber_coordinator: AmberPriceCoordinator = domain_data["amber_coordinator"]
+    amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
     tesla_coordinator: TeslaEnergyCoordinator = domain_data["tesla_coordinator"]
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
+    aemo_spike_manager = domain_data.get("aemo_spike_manager")
 
     entities: list[SensorEntity] = []
 
-    # Add price sensors
-    for description in PRICE_SENSORS:
-        entities.append(
-            AmberPriceSensor(
-                coordinator=amber_coordinator,
-                description=description,
-                entry=entry,
+    # Add price sensors (only if Amber mode - requires amber_coordinator)
+    if amber_coordinator:
+        for description in PRICE_SENSORS:
+            entities.append(
+                AmberPriceSensor(
+                    coordinator=amber_coordinator,
+                    description=description,
+                    entry=entry,
+                )
             )
-        )
 
     # Add energy sensors
     for description in ENERGY_SENSORS:
@@ -232,6 +270,18 @@ async def async_setup_entry(
             entities.append(
                 DemandChargeSensor(
                     coordinator=demand_charge_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+
+    # Add AEMO spike sensors if spike manager exists
+    if aemo_spike_manager:
+        _LOGGER.info("AEMO spike detection enabled - adding sensors")
+        for description in AEMO_SENSORS:
+            entities.append(
+                AEMOSpikeSensor(
+                    spike_manager=aemo_spike_manager,
                     description=description,
                     entry=entry,
                 )
@@ -347,3 +397,35 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
             attributes["rate"] = rate
 
         return attributes
+
+
+class AEMOSpikeSensor(SensorEntity):
+    """Sensor for AEMO spike detection status."""
+
+    entity_description: TeslaAmberSensorEntityDescription
+
+    def __init__(
+        self,
+        spike_manager,  # AEMOSpikeManager from __init__.py
+        description: TeslaAmberSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        self._spike_manager = spike_manager
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self._spike_manager.get_status())
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self._spike_manager.get_status())
+        return {}

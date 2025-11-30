@@ -40,6 +40,9 @@ from .const import (
     SERVICE_SYNC_NOW,
     TESLEMETRY_API_BASE_URL,
     FLEET_API_BASE_URL,
+    CONF_AEMO_SPIKE_ENABLED,
+    CONF_AEMO_REGION,
+    CONF_AEMO_SPIKE_THRESHOLD,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -150,6 +153,346 @@ class SyncCoordinator:
             self._current_period = current_period
             _LOGGER.info(f"🆕 New sync period: {current_period}")
             return True
+
+
+class AEMOSpikeManager:
+    """
+    Manages AEMO price spike detection and Tesla tariff modifications.
+
+    When a price spike is detected:
+    1. Save the current Tesla tariff
+    2. Switch to autonomous mode
+    3. Upload a spike tariff optimized for export
+    4. Wait for price to normalize
+    5. Restore the saved tariff and operation mode
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        region: str,
+        threshold: float,
+        site_id: str,
+        api_token: str,
+        api_provider: str = TESLA_PROVIDER_TESLEMETRY,
+    ):
+        """Initialize the AEMO spike manager."""
+        self.hass = hass
+        self.entry = entry
+        self.region = region
+        self.threshold = threshold
+        self.site_id = site_id
+        self.api_token = api_token
+        self.api_provider = api_provider
+
+        # State tracking
+        self._in_spike_mode = False
+        self._spike_start_time: datetime | None = None
+        self._saved_tariff: dict | None = None
+        self._saved_operation_mode: str | None = None
+        self._last_price: float | None = None
+        self._last_check: datetime | None = None
+
+        # Create AEMO client
+        from .aemo_client import AEMOAPIClient
+        session = async_get_clientsession(hass)
+        self._aemo_client = AEMOAPIClient(session)
+
+        _LOGGER.info(
+            "AEMO Spike Manager initialized: region=%s, threshold=$%.0f/MWh",
+            region,
+            threshold,
+        )
+
+    @property
+    def in_spike_mode(self) -> bool:
+        """Return whether currently in spike mode."""
+        return self._in_spike_mode
+
+    @property
+    def last_price(self) -> float | None:
+        """Return the last observed AEMO price."""
+        return self._last_price
+
+    @property
+    def spike_start_time(self) -> datetime | None:
+        """Return when the current spike started."""
+        return self._spike_start_time
+
+    async def check_and_handle_spike(self) -> None:
+        """Check AEMO prices and handle spike mode transitions."""
+        from homeassistant.util import dt as dt_util
+
+        self._last_check = dt_util.utcnow()
+
+        # Check for spike
+        is_spike, current_price, price_data = await self._aemo_client.check_price_spike(
+            self.region, self.threshold
+        )
+
+        if current_price is not None:
+            self._last_price = current_price
+
+        if current_price is None:
+            _LOGGER.warning("Could not fetch AEMO price - skipping spike check")
+            return
+
+        # SPIKE DETECTED - Enter spike mode
+        if is_spike and not self._in_spike_mode:
+            await self._enter_spike_mode(current_price)
+
+        # NO SPIKE - Exit spike mode if currently in it
+        elif not is_spike and self._in_spike_mode:
+            await self._exit_spike_mode(current_price)
+
+        # Still in spike mode - maybe update tariff if price changed significantly
+        elif is_spike and self._in_spike_mode:
+            _LOGGER.debug(
+                "Still in spike mode: $%.2f/MWh (threshold: $%.0f/MWh)",
+                current_price,
+                self.threshold,
+            )
+
+    async def _enter_spike_mode(self, current_price: float) -> None:
+        """Enter spike mode: save tariff, switch to autonomous, upload spike tariff."""
+        from homeassistant.util import dt as dt_util
+
+        _LOGGER.warning(
+            "SPIKE DETECTED: $%.2f/MWh >= $%.0f/MWh threshold - entering spike mode",
+            current_price,
+            self.threshold,
+        )
+
+        try:
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if self.api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Step 1: Save current tariff
+            _LOGGER.info("Saving current tariff before spike mode...")
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self._saved_tariff = data.get("response", {}).get("tariff_content_v2")
+                    _LOGGER.info("Saved current tariff for restoration after spike")
+                else:
+                    _LOGGER.warning("Could not save current tariff: %s", response.status)
+
+            # Step 2: Get and save current operation mode
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self._saved_operation_mode = data.get("response", {}).get("default_real_mode")
+                    _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+
+            # Step 3: Switch to autonomous mode for best export behavior
+            if self._saved_operation_mode != "autonomous":
+                _LOGGER.info("Switching to autonomous mode for optimal export...")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "autonomous"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Switched to autonomous mode")
+                    else:
+                        _LOGGER.warning("Could not switch operation mode: %s", response.status)
+
+            # Step 4: Create and upload spike tariff
+            spike_tariff = self._create_spike_tariff(current_price)
+            success = await send_tariff_to_tesla(
+                self.hass,
+                self.site_id,
+                spike_tariff,
+                self.api_token,
+            )
+
+            if success:
+                self._in_spike_mode = True
+                self._spike_start_time = dt_util.utcnow()
+                _LOGGER.warning(
+                    "SPIKE MODE ACTIVE: Tariff uploaded to maximize export at $%.2f/MWh",
+                    current_price,
+                )
+            else:
+                _LOGGER.error("Failed to upload spike tariff")
+
+        except Exception as e:
+            _LOGGER.error("Error entering spike mode: %s", e, exc_info=True)
+
+    async def _exit_spike_mode(self, current_price: float) -> None:
+        """Exit spike mode: restore saved tariff and operation mode."""
+        _LOGGER.info(
+            "Price normalized: $%.2f/MWh < $%.0f/MWh threshold - exiting spike mode",
+            current_price,
+            self.threshold,
+        )
+
+        try:
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if self.api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Step 1: Switch to self_consumption mode first (helps tariff apply)
+            _LOGGER.info("Switching to self_consumption mode before tariff restore...")
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": "self_consumption"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("Switched to self_consumption mode")
+
+            # Step 2: Restore saved tariff
+            if self._saved_tariff:
+                _LOGGER.info("Restoring saved tariff...")
+                success = await send_tariff_to_tesla(
+                    self.hass,
+                    self.site_id,
+                    self._saved_tariff,
+                    self.api_token,
+                )
+                if success:
+                    _LOGGER.info("Restored saved tariff successfully")
+                else:
+                    _LOGGER.error("Failed to restore saved tariff")
+            else:
+                _LOGGER.warning("No saved tariff to restore")
+
+            # Step 3: Wait for Tesla to process the tariff
+            await asyncio.sleep(5)
+
+            # Step 4: Restore original operation mode
+            restore_mode = self._saved_operation_mode or "autonomous"
+            _LOGGER.info("Restoring operation mode to: %s", restore_mode)
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": restore_mode},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("Restored operation mode to %s", restore_mode)
+
+            # Clear spike state
+            self._in_spike_mode = False
+            self._spike_start_time = None
+            _LOGGER.info("SPIKE MODE ENDED: Normal operation restored")
+
+        except Exception as e:
+            _LOGGER.error("Error exiting spike mode: %s", e, exc_info=True)
+
+    def _create_spike_tariff(self, current_aemo_price_mwh: float) -> dict:
+        """
+        Create a Tesla tariff optimized for exporting during price spikes.
+
+        Uses very high sell rates to encourage Powerwall to export all energy.
+        """
+        from homeassistant.util import dt as dt_util
+
+        # Convert $/MWh to $/kWh (divide by 1000) and apply 3x markup
+        # This creates a HUGE sell incentive that Powerwall will respond to
+        sell_rate_spike = (current_aemo_price_mwh / 1000.0) * 3.0
+
+        # Normal rates for buy (make it unattractive to import)
+        buy_rate = 0.50  # 50c/kWh - expensive to discourage import
+        sell_rate_normal = 0.08  # 8c/kWh normal feed-in
+
+        # Get current 30-minute period
+        now = dt_util.now()
+        current_period_index = (now.hour * 2) + (1 if now.minute >= 30 else 0)
+
+        # Create rate periods - spike for next 2 hours (4 periods)
+        buy_rates = []
+        sell_rates = []
+        spike_window_periods = 4
+
+        for i in range(48):
+            buy_rates.append(buy_rate)
+
+            # Apply spike sell rate for current period + next few periods
+            periods_from_now = (i - current_period_index) % 48
+            if periods_from_now < spike_window_periods:
+                sell_rates.append(sell_rate_spike)
+            else:
+                sell_rates.append(sell_rate_normal)
+
+        tariff = {
+            "code": "AEMO-SPIKE",
+            "utility": "AEMO Spike Response",
+            "name": f"Spike Tariff (${current_aemo_price_mwh:.0f}/MWh)",
+            "daily_charges": [{"name": "Grid Connection", "amount": 1.0}],
+            "demand_charges": {
+                "ALL": {"ALL": 0}
+            },
+            "energy_charges": {
+                "ALL": {
+                    "ALL": 0
+                }
+            },
+            "seasons": {
+                "Summer": {
+                    "fromMonth": 1,
+                    "fromDay": 1,
+                    "toMonth": 12,
+                    "toDay": 31,
+                    "tou_periods": {
+                        "SPIKE": {
+                            "periods": [{"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "fromMinute": 0, "toHour": 0, "toMinute": 0}],
+                            "buy": buy_rate,
+                            "sell": sell_rate_spike,
+                        }
+                    }
+                }
+            },
+            "sell_tariff": {
+                "name": "Spike Export",
+                "utility": "AEMO",
+                "daily_charges": [],
+                "demand_charges": {},
+                "energy_charges": {
+                    "ALL": {"ALL": sell_rate_spike}
+                }
+            }
+        }
+
+        _LOGGER.info(
+            "Created spike tariff: buy=$%.2f/kWh, sell=$%.2f/kWh (AEMO price: $%.0f/MWh)",
+            buy_rate,
+            sell_rate_spike,
+            current_aemo_price_mwh,
+        )
+
+        return tariff
+
+    def get_status(self) -> dict:
+        """Get current spike manager status."""
+        return {
+            "enabled": True,
+            "region": self.region,
+            "threshold": self.threshold,
+            "in_spike_mode": self._in_spike_mode,
+            "last_price": self._last_price,
+            "spike_start_time": self._spike_start_time.isoformat() if self._spike_start_time else None,
+            "last_check": self._last_check.isoformat() if self._last_check else None,
+        }
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
@@ -314,39 +657,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla Sync from a config entry."""
     _LOGGER.info("Setting up Tesla Sync integration")
 
+    # Check if this is AEMO-only mode (no Amber API token)
+    has_amber = bool(entry.data.get(CONF_AMBER_API_TOKEN))
+    aemo_enabled = entry.options.get(
+        CONF_AEMO_SPIKE_ENABLED,
+        entry.data.get(CONF_AEMO_SPIKE_ENABLED, False)
+    )
+
+    if has_amber:
+        _LOGGER.info("Running in Amber TOU Sync mode")
+    elif aemo_enabled:
+        _LOGGER.info("Running in AEMO Spike Detection only mode (no Amber)")
+    else:
+        _LOGGER.error("No Amber API token and AEMO spike detection not enabled")
+        raise ConfigEntryNotReady("No pricing source configured")
+
     # Initialize sync coordinator for wait-with-timeout pattern
     coordinator = SyncCoordinator()
     _LOGGER.info("🎯 Sync coordinator initialized")
 
-    # Initialize WebSocket client for real-time Amber prices
+    # Initialize WebSocket client for real-time Amber prices (only if Amber mode)
     ws_client = None
+    amber_coordinator = None
 
-    # Create a placeholder for the sync callback that will be set up later
-    # after coordinators are initialized
-    websocket_sync_callback = None
+    if has_amber:
+        # Create a placeholder for the sync callback that will be set up later
+        # after coordinators are initialized
+        websocket_sync_callback = None
 
-    try:
-        from .websocket_client import AmberWebSocketClient
+        try:
+            from .websocket_client import AmberWebSocketClient
 
-        ws_client = AmberWebSocketClient(
-            api_token=entry.data[CONF_AMBER_API_TOKEN],
-            site_id=entry.data.get("amber_site_id"),
-            sync_callback=None,  # Will be set up after coordinators are initialized
+            ws_client = AmberWebSocketClient(
+                api_token=entry.data[CONF_AMBER_API_TOKEN],
+                site_id=entry.data.get("amber_site_id"),
+                sync_callback=None,  # Will be set up after coordinators are initialized
+            )
+            await ws_client.start()
+            _LOGGER.info("🔌 Amber WebSocket client initialized and started")
+        except Exception as e:
+            _LOGGER.error(f"Failed to initialize WebSocket client: {e}", exc_info=True)
+            _LOGGER.warning("WebSocket client not available - will use REST API fallback")
+            ws_client = None
+
+        # Initialize coordinators for data fetching
+        amber_coordinator = AmberPriceCoordinator(
+            hass,
+            entry.data[CONF_AMBER_API_TOKEN],
+            entry.data.get("amber_site_id"),
+            ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
-        await ws_client.start()
-        _LOGGER.info("🔌 Amber WebSocket client initialized and started")
-    except Exception as e:
-        _LOGGER.error(f"Failed to initialize WebSocket client: {e}", exc_info=True)
-        _LOGGER.warning("WebSocket client not available - will use REST API fallback")
-        ws_client = None
-
-    # Initialize coordinators for data fetching
-    amber_coordinator = AmberPriceCoordinator(
-        hass,
-        entry.data[CONF_AMBER_API_TOKEN],
-        entry.data.get("amber_site_id"),
-        ws_client=ws_client,  # Pass WebSocket client to coordinator
-    )
 
     # Check if Tesla Fleet integration is configured and available
     tesla_api_token = None
@@ -392,7 +752,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Fetch initial data
-    await amber_coordinator.async_config_entry_first_refresh()
+    if amber_coordinator:
+        await amber_coordinator.async_config_entry_first_refresh()
     await tesla_coordinator.async_config_entry_first_refresh()
 
     # Initialize demand charge coordinator if enabled
@@ -446,15 +807,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await demand_charge_coordinator.async_config_entry_first_refresh()
         _LOGGER.info("Demand charge coordinator initialized")
 
+    # Initialize AEMO Spike Manager if enabled
+    aemo_spike_manager = None
+    if aemo_enabled:
+        aemo_region = entry.options.get(
+            CONF_AEMO_REGION,
+            entry.data.get(CONF_AEMO_REGION)
+        )
+        aemo_threshold = entry.options.get(
+            CONF_AEMO_SPIKE_THRESHOLD,
+            entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 300.0)
+        )
+
+        if aemo_region:
+            aemo_spike_manager = AEMOSpikeManager(
+                hass=hass,
+                entry=entry,
+                region=aemo_region,
+                threshold=aemo_threshold,
+                site_id=entry.data[CONF_TESLA_ENERGY_SITE_ID],
+                api_token=tesla_api_token,
+                api_provider=tesla_api_provider,
+            )
+            _LOGGER.info(
+                "AEMO Spike Manager initialized: region=%s, threshold=$%.0f/MWh",
+                aemo_region,
+                aemo_threshold,
+            )
+        else:
+            _LOGGER.warning("AEMO spike detection enabled but no region configured")
+
     # Store coordinators and WebSocket client in hass.data
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         "amber_coordinator": amber_coordinator,
         "tesla_coordinator": tesla_coordinator,
         "demand_charge_coordinator": demand_charge_coordinator,
+        "aemo_spike_manager": aemo_spike_manager,
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function
+        "aemo_spike_cancel": None,  # Will store the AEMO spike check cancel function
     }
 
     # Set up platforms
@@ -475,6 +868,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Runs at :01 (60s into each 5-min period) so Amber REST API prices are fresh.
         No wait needed - just fetch directly from REST API.
         """
+        # Skip if no Amber coordinator (AEMO-only mode)
+        if not amber_coordinator:
+            _LOGGER.debug("TOU sync skipped - no Amber coordinator (AEMO-only mode)")
+            return
+
         # FALLBACK CHECK: Has WebSocket already synced this period?
         if await coordinator.already_synced_this_period():
             _LOGGER.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
@@ -617,7 +1015,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_sync_now(call: ServiceCall) -> None:
         """Handle the sync now service call."""
         _LOGGER.info("Immediate data refresh requested")
-        await amber_coordinator.async_request_refresh()
+        if amber_coordinator:
+            await amber_coordinator.async_request_refresh()
         await tesla_coordinator.async_request_refresh()
 
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
@@ -638,6 +1037,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if not curtailment_enabled:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        # Skip if no Amber coordinator (AEMO-only mode) - curtailment requires Amber prices
+        if not amber_coordinator:
+            _LOGGER.debug("Solar curtailment skipped - no Amber coordinator (AEMO-only mode)")
             return
 
         _LOGGER.info("=== Starting solar curtailment check ===")
@@ -858,15 +1262,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             _LOGGER.debug("Auto-sync disabled, skipping TOU sync")
 
-    # Perform initial TOU sync if auto-sync is enabled
+    # Perform initial TOU sync if auto-sync is enabled (only in Amber mode)
     auto_sync_enabled = entry.options.get(
         CONF_AUTO_SYNC_ENABLED,
         entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
     )
 
-    if auto_sync_enabled:
+    if auto_sync_enabled and amber_coordinator:
         _LOGGER.info("Performing initial TOU sync")
         await handle_sync_tou(None)
+    elif not amber_coordinator:
+        _LOGGER.info("Skipping initial TOU sync - AEMO-only mode")
 
     # Start the automatic sync timer (every 5 minutes, 60s after Amber price updates)
     # Triggers at :01:00, :06:00, :11:00, :16:00, :21:00, :26:00, :31:00, :36:00, :41:00, :46:00, :51:00, :56:00
@@ -898,6 +1304,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["curtailment_cancel"] = curtailment_cancel_timer
     _LOGGER.info("Solar curtailment check scheduled every 5 minutes at :35 seconds (aligned with WebSocket prices)")
 
+    # Set up automatic AEMO spike check every minute if enabled
+    if aemo_spike_manager:
+        async def auto_aemo_spike_check(now):
+            """Automatically check AEMO prices for spikes."""
+            await aemo_spike_manager.check_and_handle_spike()
+
+        # Check every minute at :35 seconds
+        aemo_spike_cancel_timer = async_track_utc_time_change(
+            hass,
+            auto_aemo_spike_check,
+            second=35,  # Every minute at :35 seconds
+        )
+
+        # Store the AEMO spike cancel function
+        hass.data[DOMAIN][entry.entry_id]["aemo_spike_cancel"] = aemo_spike_cancel_timer
+        _LOGGER.info(
+            "AEMO spike check scheduled every minute (region=%s, threshold=$%.0f/MWh)",
+            aemo_spike_manager.region,
+            aemo_spike_manager.threshold,
+        )
+
+        # Perform initial AEMO spike check
+        _LOGGER.info("Performing initial AEMO spike check")
+        await aemo_spike_manager.check_and_handle_spike()
+
     _LOGGER.info("Tesla Sync integration setup complete")
     return True
 
@@ -916,6 +1347,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if curtailment_cancel := entry_data.get("curtailment_cancel"):
         curtailment_cancel()
         _LOGGER.debug("Cancelled curtailment timer")
+
+    # Cancel the AEMO spike timer if it exists
+    if aemo_spike_cancel := entry_data.get("aemo_spike_cancel"):
+        aemo_spike_cancel()
+        _LOGGER.debug("Cancelled AEMO spike timer")
 
     # Stop WebSocket client if it exists
     if ws_client := entry_data.get("ws_client"):

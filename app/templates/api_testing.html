@@ -33,10 +33,16 @@
 <!-- API Connection Status -->
 <article id="connection-status">
     <header><strong>Connection Status</strong></header>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem;">
         <div id="amber-status" style="padding: 1rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
-            <h4 style="margin: 0 0 0.5em 0;">⚡ Amber Electric</h4>
+            <h4 style="margin: 0 0 0.5em 0;">⚡ Amber REST API</h4>
             <div id="amber-status-content">
+                <p style="margin: 0;">Checking connection...</p>
+            </div>
+        </div>
+        <div id="websocket-status" style="padding: 1rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
+            <h4 style="margin: 0 0 0.5em 0;">🔌 Amber WebSocket</h4>
+            <div id="websocket-status-content">
                 <p style="margin: 0;">Checking connection...</p>
             </div>
         </div>
@@ -47,7 +53,7 @@
             </div>
         </div>
     </div>
-    <button onclick="refreshStatus()" style="margin-top: 1rem; width: auto;" class="outline">Refresh Status</button>
+    <button onclick="refreshStatus()" style="margin-top: 1rem; width: auto;" class="outline">Refresh All Status</button>
 </article>
 
 <!-- Quick Actions -->
@@ -127,49 +133,33 @@
             </details>
         </article>
 
+        <article>
+            <h4>Price Forecast</h4>
+            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem;">
+                <select id="forecast-hours" style="width: auto;">
+                    <option value="24">24 hours</option>
+                    <option value="48">48 hours</option>
+                    <option value="12">12 hours</option>
+                </select>
+                <select id="forecast-resolution" style="width: auto;">
+                    <option value="30">30-min resolution</option>
+                    <option value="5">5-min resolution</option>
+                </select>
+                <button onclick="testForecast()" class="contrast" style="margin: 0;">GET Forecast</button>
+            </div>
+            <details id="response-price-forecast">
+                <summary>Response</summary>
+                <pre><code id="output-price-forecast">Select options and click GET Forecast</code></pre>
+            </details>
+        </article>
+
         <article style="border: 2px solid var(--primary); background-color: var(--card-background-color);">
-            <h4>⭐ Advanced Price Schema (30-min forecast with ML predictions)</h4>
-            <p style="font-size: 0.85em;"><strong>This endpoint shows the <code>advancedPrice.predicted</code> field used in TOU tariff conversion.</strong></p>
-            <button onclick="testAdvancedPriceSchema()" class="contrast">GET Price Forecast with Advanced Schema</button>
+            <h4>Advanced Price Schema (ML predictions)</h4>
+            <p style="font-size: 0.85em;">Shows <code>advancedPrice.predicted</code> field used in TOU tariff conversion.</p>
+            <button onclick="testAdvancedPriceSchema()" class="contrast">GET Advanced Price Schema</button>
             <details id="response-advanced-price">
                 <summary>Response (with Advanced Price breakdown)</summary>
                 <pre><code id="output-advanced-price">Click the button to see the advanced price structure</code></pre>
-            </details>
-        </article>
-
-        <article>
-            <h4>Price Forecast (24 hours)</h4>
-            <button onclick="testEndpoint('price-forecast', {next_hours: 24})" class="contrast">GET /v1/sites/{site_id}/prices</button>
-            <details id="response-price-forecast">
-                <summary>Response</summary>
-                <pre><code id="output-price-forecast">Click the button to test this endpoint</code></pre>
-            </details>
-        </article>
-
-        <article>
-            <h4>Price Forecast (48 hours)</h4>
-            <button onclick="testEndpoint('price-forecast-48h', {next_hours: 48})" class="contrast">GET /v1/sites/{site_id}/prices?next_hours=48</button>
-            <details id="response-price-forecast-48h">
-                <summary>Response</summary>
-                <pre><code id="output-price-forecast-48h">Click the button to test this endpoint</code></pre>
-            </details>
-        </article>
-
-        <article>
-            <h4>Price Forecast (5-minute resolution)</h4>
-            <button onclick="testEndpoint('price-forecast-5min', {next_hours: 24, resolution: 5})" class="contrast">GET /v1/sites/{site_id}/prices?resolution=5</button>
-            <details id="response-price-forecast-5min">
-                <summary>Response</summary>
-                <pre><code id="output-price-forecast-5min">Click the button to test this endpoint</code></pre>
-            </details>
-        </article>
-
-        <article>
-            <h4>Price Forecast (30-minute resolution)</h4>
-            <button onclick="testEndpoint('price-forecast-30min', {next_hours: 48, resolution: 30})" class="contrast">GET /v1/sites/{site_id}/prices?resolution=30</button>
-            <details id="response-price-forecast-30min">
-                <summary>Response</summary>
-                <pre><code id="output-price-forecast-30min">Click the button to test this endpoint</code></pre>
             </details>
         </article>
 
@@ -184,47 +174,48 @@
     </div>
 </details>
 
-<!-- Tariff Implementation Comparison -->
-<article style="border: 2px solid var(--del-color); background-color: var(--card-background-color);">
-    <h3>🔍 Tariff Implementation Comparison (Debug Price Differences)</h3>
-    <p><strong>Debug and analyze your tariff implementation.</strong></p>
-    <p>This shows:</p>
-    <ul>
-        <li>Your current implementation (with 30-min advance shift)</li>
-        <li>Hypothetical "no-shift" version (direct price mapping)</li>
-        <li>Raw API data structure (check if predicted is number or object)</li>
-    </ul>
-    <button onclick="testTariffComparison()" style="background-color: var(--del-color);">Compare Implementations</button>
-    <details id="response-tariff-comparison">
-        <summary>Comparison Results</summary>
-        <pre><code id="output-tariff-comparison">Click the button to see the comparison</code></pre>
-    </details>
-</article>
+<!-- Developer Tools (collapsed by default) -->
+<details>
+    <summary><strong>🔧 Developer Tools</strong></summary>
+    <div style="margin-top: 1rem;">
 
-<!-- Custom Raw API Call -->
-<article>
-    <h3>Custom Raw API Call</h3>
-    <form id="raw-api-form" onsubmit="testRawEndpoint(event)">
-        <label for="raw-endpoint">
-            Endpoint Path
-            <input type="text" id="raw-endpoint" name="endpoint" placeholder="/sites" value="/sites">
-        </label>
-        <label for="raw-method">
-            HTTP Method
-            <select id="raw-method" name="method">
-                <option value="GET" selected>GET</option>
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="DELETE">DELETE</option>
-            </select>
-        </label>
-        <button type="submit" class="contrast">Execute Custom Call</button>
-    </form>
-    <details id="response-raw">
-        <summary>Response</summary>
-        <pre><code id="output-raw">Submit the form to test a custom endpoint</code></pre>
-    </details>
-</article>
+        <!-- Custom Raw API Call -->
+        <article>
+            <h4>Custom Raw API Call</h4>
+            <form id="raw-api-form" onsubmit="testRawEndpoint(event)">
+                <div style="display: flex; gap: 0.5rem; align-items: end; flex-wrap: wrap;">
+                    <label style="flex: 1; min-width: 200px;">
+                        Endpoint Path
+                        <input type="text" id="raw-endpoint" name="endpoint" placeholder="/sites" value="/sites" style="margin: 0;">
+                    </label>
+                    <label style="width: auto;">
+                        Method
+                        <select id="raw-method" name="method" style="margin: 0;">
+                            <option value="GET" selected>GET</option>
+                            <option value="POST">POST</option>
+                        </select>
+                    </label>
+                    <button type="submit" class="contrast" style="margin: 0;">Execute</button>
+                </div>
+            </form>
+            <details id="response-raw">
+                <summary>Response</summary>
+                <pre><code id="output-raw">Submit the form to test a custom endpoint</code></pre>
+            </details>
+        </article>
+
+        <!-- WebSocket Debug Info -->
+        <article>
+            <h4>WebSocket Health Check</h4>
+            <button onclick="testWebSocketHealth()" class="contrast">Get Detailed WebSocket Status</button>
+            <details id="response-websocket-health">
+                <summary>WebSocket Details</summary>
+                <pre><code id="output-websocket-health">Click the button to check WebSocket health</code></pre>
+            </details>
+        </article>
+
+    </div>
+</details>
 
 <script>
 // Load initial data on page load
@@ -236,10 +227,15 @@ window.addEventListener('DOMContentLoaded', async () => {
 // Refresh connection status
 async function refreshStatus() {
     try {
-        const response = await fetch('/api/status');
-        const data = await response.json();
+        // Fetch both API status and WebSocket status in parallel
+        const [apiResponse, wsResponse] = await Promise.all([
+            fetch('/api/status'),
+            fetch('/api/websocket/status')
+        ]);
+        const data = await apiResponse.json();
+        const wsData = await wsResponse.json();
 
-        // Update Amber status
+        // Update Amber REST API status
         const amberDiv = document.getElementById('amber-status');
         const amberContent = document.getElementById('amber-status-content');
         if (data.amber && data.amber.connected) {
@@ -253,6 +249,37 @@ async function refreshStatus() {
             amberContent.innerHTML = `
                 <p style="margin: 0; color: var(--del-color); font-weight: bold;">✗ Not Connected</p>
                 <p style="margin: 0.5em 0 0 0; font-size: 0.85em;">${data.amber.message || 'Not configured'}</p>
+            `;
+        }
+
+        // Update WebSocket status
+        const wsDiv = document.getElementById('websocket-status');
+        const wsContent = document.getElementById('websocket-status-content');
+        if (wsData.connected) {
+            wsDiv.style.background = 'rgba(0, 255, 0, 0.1)';
+            let wsDetails = `<p style="margin: 0; color: var(--ins-color); font-weight: bold;">✓ Connected</p>`;
+            wsDetails += `<p style="margin: 0.5em 0 0 0; font-size: 0.85em;">Messages: ${wsData.message_count}`;
+            if (wsData.age_seconds !== null) {
+                wsDetails += ` | Last: ${wsData.age_seconds}s ago`;
+            }
+            wsDetails += `</p>`;
+            if (wsData.has_cached_data) {
+                wsDetails += `<p style="margin: 0.3em 0 0 0; font-size: 0.8em; color: var(--ins-color);">Has cached price data</p>`;
+            }
+            wsContent.innerHTML = wsDetails;
+        } else if (wsData.available) {
+            wsDiv.style.background = 'rgba(255, 165, 0, 0.1)';
+            let statusText = wsData.status === 'reconnecting' ? 'Reconnecting...' : 'Disconnected';
+            wsContent.innerHTML = `
+                <p style="margin: 0; color: orange; font-weight: bold;">⚠ ${statusText}</p>
+                <p style="margin: 0.5em 0 0 0; font-size: 0.85em;">Messages: ${wsData.message_count} | Errors: ${wsData.error_count}</p>
+                ${wsData.last_error ? `<p style="margin: 0.3em 0 0 0; font-size: 0.8em; color: var(--del-color);">Last error: ${wsData.last_error.substring(0, 50)}...</p>` : ''}
+            `;
+        } else {
+            wsDiv.style.background = 'rgba(150, 150, 150, 0.1)';
+            wsContent.innerHTML = `
+                <p style="margin: 0; color: var(--muted-color); font-weight: bold;">○ Not Initialized</p>
+                <p style="margin: 0.5em 0 0 0; font-size: 0.85em;">${wsData.message || 'Configure Amber credentials'}</p>
             `;
         }
 
@@ -509,6 +536,36 @@ async function testEndpoint(name, params = {}) {
     }
 }
 
+// Consolidated Forecast test
+async function testForecast() {
+    const hours = document.getElementById('forecast-hours').value;
+    const resolution = document.getElementById('forecast-resolution').value;
+
+    const outputElement = document.getElementById('output-price-forecast');
+    const detailsElement = document.getElementById('response-price-forecast');
+
+    outputElement.textContent = 'Loading...';
+    detailsElement.open = true;
+
+    try {
+        const url = `/api/test/amber/price-forecast?next_hours=${hours}&resolution=${resolution}`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        let output = `Endpoint: ${data.endpoint || 'N/A'}\n`;
+        output += `Parameters: next_hours=${hours}, resolution=${resolution}\n`;
+        if (data.count !== undefined) {
+            output += `Count: ${data.count} records\n`;
+        }
+        output += `Status: ${response.status}\n\n`;
+        output += `Response:\n${JSON.stringify(data.data, null, 2)}`;
+
+        outputElement.textContent = output;
+    } catch (error) {
+        outputElement.textContent = `Error: ${error.message}`;
+    }
+}
+
 async function testAdvancedPriceSchema() {
     const outputElement = document.getElementById('output-advanced-price');
     const detailsElement = document.getElementById('response-advanced-price');
@@ -565,99 +622,45 @@ async function testAdvancedPriceSchema() {
     }
 }
 
-async function findTeslaSites() {
-    const outputElement = document.getElementById('output-find-sites');
-    const detailsElement = document.getElementById('response-find-sites');
+// WebSocket Health Check
+async function testWebSocketHealth() {
+    const outputElement = document.getElementById('output-websocket-health');
+    const detailsElement = document.getElementById('response-websocket-health');
 
-    // Show loading state
-    outputElement.textContent = 'Loading... (Connecting to Tesla via Teslemetry)';
-    detailsElement.open = true;
-
-    try {
-        const response = await fetch('/api/test/find-tesla-sites');
-        const data = await response.json();
-
-        if (!data.success) {
-            let output = `Error: ${data.error}\n\n`;
-            if (data.help) {
-                output += `Help: ${data.help}\n`;
-            }
-            outputElement.textContent = output;
-            return;
-        }
-
-        // Format the output
-        let output = `=== TESLA SITES FOUND ===\n\n`;
-        output += `${data.instructions}\n\n`;
-
-        for (const site of data.sites) {
-            output += `Site Name: ${site.site_name}\n`;
-            output += `Site ID: ${site.site_id} ← COPY THIS!\n`;
-            output += `Type: ${site.resource_type}\n`;
-            output += `\n`;
-        }
-
-        output += `\nNEXT STEPS:\n`;
-        output += `1. Copy the Site ID above\n`;
-        output += `2. Go to Settings (navigation menu)\n`;
-        output += `3. Paste it into "Tesla Site ID" field\n`;
-        output += `4. Click Save\n`;
-        output += `5. Come back here and click "Compare Live Schedules"\n`;
-
-        outputElement.textContent = output;
-    } catch (error) {
-        outputElement.textContent = `Error: ${error.message}`;
-    }
-}
-
-async function testTariffComparison() {
-    const outputElement = document.getElementById('output-tariff-comparison');
-    const detailsElement = document.getElementById('response-tariff-comparison');
-
-    // Show loading state
     outputElement.textContent = 'Loading...';
     detailsElement.open = true;
 
     try {
-        const response = await fetch('/api/test/tariff-comparison');
+        const response = await fetch('/api/websocket/status');
         const data = await response.json();
 
-        if (!data.success) {
-            outputElement.textContent = `Error: ${data.error}`;
-            return;
+        let output = `=== WEBSOCKET HEALTH STATUS ===\n\n`;
+        output += `Available: ${data.available ? 'Yes' : 'No'}\n`;
+        output += `Connection Status: ${data.status}\n`;
+        output += `Connected: ${data.connected ? 'Yes' : 'No'}\n\n`;
+
+        if (data.available) {
+            output += `--- STATISTICS ---\n`;
+            output += `Messages Received: ${data.message_count}\n`;
+            output += `Errors: ${data.error_count}\n`;
+            output += `Has Cached Data: ${data.has_cached_data ? 'Yes' : 'No'}\n`;
+
+            if (data.last_update) {
+                output += `\n--- LAST UPDATE ---\n`;
+                output += `Timestamp: ${data.last_update}\n`;
+                output += `Age: ${data.age_seconds}s ago\n`;
+            }
+
+            if (data.last_error) {
+                output += `\n--- LAST ERROR ---\n`;
+                output += `${data.last_error}\n`;
+            }
+        } else {
+            output += `Message: ${data.message}\n`;
         }
 
-        // Format the comparison output
-        let output = `=== TARIFF IMPLEMENTATION COMPARISON ===\n\n`;
-        output += `Current Time: ${data.current_time}\n\n`;
-
-        output += `--- IMPLEMENTATION NOTES ---\n`;
-        output += `Actual: ${data.implementation_notes.actual}\n`;
-        output += `No-Shift: ${data.implementation_notes.no_shift}\n`;
-        output += `Difference: ${data.implementation_notes.difference}\n\n`;
-
-        output += `--- PRICE COMPARISON (First 5 Periods) ---\n\n`;
-
-        output += `YOUR IMPLEMENTATION (with 30-min shift):\n`;
-        for (const [period, price] of Object.entries(data.comparison.actual_tariff_first_5_periods)) {
-            output += `${period}: $${price.toFixed(4)}\n`;
-        }
-
-        output += `\nNO-SHIFT VERSION (direct mapping):\n`;
-        for (const [period, price] of Object.entries(data.comparison.no_shift_first_5_periods)) {
-            output += `${period}: $${price.toFixed(4)}\n`;
-        }
-
-        output += `\n\n--- RAW API DATA SAMPLES ---\n`;
-        output += `(Check advancedPrice structure)\n\n`;
-        output += JSON.stringify(data.raw_forecast_samples, null, 2);
-
-        output += `\n\n--- KEY QUESTION ---\n`;
-        output += `Is 'predicted' a simple number or an object with 'perKwh' field?\n`;
-        output += `Check the raw_forecast_samples above.\n\n`;
-
-        output += `If you see differences between YOUR and NO-SHIFT versions,\n`;
-        output += `that's the 30-minute advance shift in action!\n`;
+        output += `\n\n--- RAW RESPONSE ---\n`;
+        output += JSON.stringify(data, null, 2);
 
         outputElement.textContent = output;
     } catch (error) {
