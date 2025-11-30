@@ -68,16 +68,16 @@ class SensitiveDataFilter(logging.Filter):
             flags=re.IGNORECASE
         )
 
-        # Handle site IDs (UUIDs and alphanumeric IDs)
+        # Handle site IDs (alphanumeric, like Amber 01KAR0YMB7JQDVZ10SN1SGA0CV)
         text = re.sub(
-            r'(site[_\s]?[iI][dD][\s:=]+)([a-fA-F0-9-]{20,})',
+            r'(site[_\s]?[iI][dD]["\']?[\s:=]+["\']?)([a-zA-Z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text
         )
 
         # Handle "for site {id}" pattern
         text = re.sub(
-            r'(for site\s+)([a-fA-F0-9-]{20,})',
+            r'(for site\s+)([a-zA-Z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
@@ -90,50 +90,114 @@ class SensitiveDataFilter(logging.Filter):
             text
         )
 
-        # Handle Tesla energy site IDs (numeric, typically 15-20 digits)
+        # Handle Tesla energy site IDs (numeric, 13-20 digits) - in URLs and JSON
         text = re.sub(
-            r'(energy_site[s]?[/\s:=]+)(\d{10,})',
+            r'(energy_site[s]?[/\s:=]+["\']?)(\d{13,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
         )
 
-        # Handle VIN numbers (17 alphanumeric characters)
+        # Handle standalone long numeric IDs (Tesla energy site IDs in various contexts)
         text = re.sub(
-            r'(vin[\s:=]+)([A-HJ-NPR-Z0-9]{17})',
+            r'(\bsite\s+)(\d{13,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
         )
 
-        # Handle DIN numbers
+        # Handle VIN numbers in JSON format ('vin': 'XXX' or "vin": "XXX")
         text = re.sub(
-            r'(din[\s:=]+)([A-Za-z0-9-]{10,})',
+            r'(["\']vin["\']:\s*["\'])([A-HJ-NPR-Z0-9]{17})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle VIN numbers plain format
+        text = re.sub(
+            r'(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
         )
 
-        # Handle serial numbers
+        # Handle DIN numbers in JSON format
         text = re.sub(
-            r'(serial[\s_]?(?:number)?[\s:=]+)([A-Za-z0-9-]{8,})',
+            r'(["\']din["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle DIN numbers plain format
+        text = re.sub(
+            r'(\bdin[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
         )
 
-        # Handle gateway IDs
+        # Handle serial numbers in JSON format
         text = re.sub(
-            r'(gateway[\s_]?(?:id)?[\s:=]+)([A-Za-z0-9-]{8,})',
+            r'(["\']serial_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle serial numbers plain format
+        text = re.sub(
+            r'(serial[\s_]?(?:number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
         )
 
-        # Handle warp site numbers
+        # Handle gateway IDs in JSON format
         text = re.sub(
-            r'(warp[\s_]?(?:site)?[\s:=]+)([A-Za-z0-9-]{8,})',
+            r'(["\']gateway_id["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle gateway IDs plain format
+        text = re.sub(
+            r'(gateway[\s_]?(?:id)?[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle warp site numbers in JSON format
+        text = re.sub(
+            r'(["\']warp_site_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle warp site numbers plain format
+        text = re.sub(
+            r'(warp[\s_]?(?:site)?(?:[\s_]?number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle asset_site_id (UUIDs)
+        text = re.sub(
+            r'(["\']asset_site_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle device_id (UUIDs)
+        text = re.sub(
+            r'(["\']device_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
             flags=re.IGNORECASE
         )
