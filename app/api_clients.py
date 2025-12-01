@@ -830,12 +830,13 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
                 end_dt = now.replace(hour=23, minute=59, second=59)
                 end_date = end_dt.isoformat()
 
-            logger.info(f"Fetching calendar history for site {site_id} via Teslemetry: kind={kind}, period={period}, end_date={end_date}")
+            logger.info(f"Fetching calendar history for site {site_id} via Teslemetry: kind={kind}, period={period}, end_date={end_date}, timezone={timezone}")
 
             params = {
                 'kind': kind,
                 'period': period,
-                'end_date': end_date
+                'end_date': end_date,
+                'time_zone': timezone
             }
 
             response = requests.get(
@@ -846,8 +847,10 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
             )
             response.raise_for_status()
             data = response.json()
-            logger.info(f"Successfully fetched calendar history via Teslemetry")
-            return data.get('response', {})
+            result = data.get('response', {})
+            time_series = result.get('time_series', [])
+            logger.info(f"Successfully fetched calendar history via Teslemetry: {len(time_series)} records returned for period='{period}'")
+            return result
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching calendar history via Teslemetry: {e}")
             return None
