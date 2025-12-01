@@ -550,8 +550,9 @@
             }
 
             if (feedinPrice) {
-                // Show negative sign for feed-in prices (negative = you get paid)
-                const feedinValue = feedinPrice.perKwh;
+                // Amber returns feed-in as: negative = you get paid, positive = you pay
+                // Negate for display so positive = earnings (what user expects)
+                const feedinValue = -feedinPrice.perKwh;
                 document.getElementById('current-feedin-price').textContent = `${feedinValue.toFixed(0)}¢`;
             }
 
@@ -697,8 +698,9 @@
                     const borderStyle = isCurrent ? `3px solid ${borderColor}` : '1px solid rgba(255,255,255,0.15)';
                     const bgStyle = isCurrent ? (selectedChannel === 'general' ? 'rgba(249, 115, 22, 0.1)' : 'rgba(251, 191, 36, 0.1)') : 'rgba(255,255,255,0.03)';
 
-                    // For feed-in, show actual price (with negative sign); for import, show absolute value
-                    const displayPrice = selectedChannel === 'general' ? absPrice : getDisplayPrice(displayInterval);
+                    // For feed-in, negate to show earnings (Amber: negative=paid, positive=pay)
+                    // For import, show absolute value
+                    const displayPrice = selectedChannel === 'general' ? absPrice : -getDisplayPrice(displayInterval);
 
                     html += `
                         <div style="border: ${borderStyle}; border-radius: 12px; padding: 0.7em; min-width: 70px; background: ${bgStyle}; text-align: center;">
