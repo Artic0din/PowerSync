@@ -571,6 +571,8 @@
         // Uses live WebSocket price for current tile, forecast prices for future tiles
         async function generate5MinForecast(liveGeneralPrice, liveFeedinPrice) {
             const forecastDiv = document.getElementById('five-min-forecast');
+            // Skip if the element doesn't exist (replaced by 30-min forecast)
+            if (!forecastDiv) return;
 
             try {
                 // Fetch 5-minute interval data from API
@@ -822,16 +824,6 @@
                     let hour = interval.localHour;
                     let minute = interval.localMinute;
 
-                    // Debug: log first interval to see what data we're getting
-                    if (idx === 0) {
-                        console.log('First interval data:', {
-                            localHour: interval.localHour,
-                            localMinute: interval.localMinute,
-                            localTime: interval.localTime,
-                            nemTime: interval.nemTime
-                        });
-                    }
-
                     // Fallback: parse from localTime string if localHour/localMinute not set
                     if (hour === undefined || minute === undefined) {
                         if (interval.localTime) {
@@ -868,8 +860,6 @@
                     currentBlock.intervals.push(interval);
                 });
                 if (currentBlock) blocks.push(currentBlock);
-
-                console.log('30-min blocks:', blocks.map(b => `${b.hour}:${b.startMinute} (${b.intervals.length} intervals)`));
 
                 // The first block from the API is always the current block (it's forecast data)
                 // Mark it as current and set currentBlockIndex to 0
