@@ -102,9 +102,6 @@
                     <p style="color: rgba(255,255,255,0.7);">Loading forecast...</p>
                 </div>
             </div>
-            <!-- Expanded 5-min details shown below the row -->
-            <div id="thirty-min-expanded" style="display: none; margin-top: 0.75em; padding: 0.75em; background: rgba(255,255,255,0.08); border-radius: 12px; border: 2px solid rgba(255,255,255,0.2);">
-            </div>
         </div>
     </article>
     {% endif %}
@@ -738,15 +735,14 @@
             }
         }
 
-        // Amber-style 30-min forecast - horizontal scrollable row with expandable blocks
-        // Current block is centered, can scroll left for past and right for future
-        // Only one block can be expanded at a time, expansion shows below the row
+        // Amber-style 30-min forecast - horizontal scrollable row with inline expandable blocks
+        // Current block is always centered, past blocks are greyed out
+        // Only current and next block are expandable (API only has accurate 5-min data for these)
         let currentExpandedBlock = null;
         let thirtyMinBlocksData = []; // Store block data for expansion
 
         async function generate30MinForecast() {
             const forecastDiv = document.getElementById('thirty-min-forecast');
-            const expandedDiv = document.getElementById('thirty-min-expanded');
             const scrollContainer = document.getElementById('thirty-min-scroll-container');
             if (!forecastDiv) return;
 
@@ -769,6 +765,12 @@
                     return;
                 }
 
+                // Get current time
+                const now = new Date();
+                const currentHour = now.getHours();
+                const currentMinute = now.getMinutes();
+                const current30Min = Math.floor(currentMinute / 30) * 30;
+
                 // Helper to get price from interval
                 function getDisplayPrice(interval) {
                     if (interval.advancedPrice && interval.advancedPrice[forecastType] !== undefined) {
@@ -777,17 +779,15 @@
                     return interval.perKwh;
                 }
 
-                // Helper to determine spike status label and style
+                // Helper to determine spike status
                 function getSpikeInfo(intervals) {
                     let hasSpike = false;
                     let hasPotential = false;
-
                     intervals.forEach(interval => {
                         const status = interval.spikeStatus || 'none';
                         if (status === 'spike') hasSpike = true;
                         if (status === 'potential') hasPotential = true;
                     });
-
                     if (hasSpike) {
                         return { label: 'Spike', bgColor: 'rgba(220, 38, 38, 0.3)', borderColor: '#ef4444', dotColor: '#ef4444', icon: '⚠️' };
                     } else if (hasPotential) {
@@ -796,7 +796,7 @@
                     return null;
                 }
 
-                // Helper to get price color based on price and channel
+                // Helper to get price color
                 function getPriceColor(price, isGeneral) {
                     const absPrice = Math.abs(price);
                     if (isGeneral) {
@@ -828,32 +828,48 @@
                             hour: hour,
                             startMinute: block30Min,
                             intervals: [],
-                            isCurrent: blocks.length === 0,
+                            isCurrent: false,
                             blockIndex: blocks.length
                         };
-                        if (blocks.length === 0) currentBlockIndex = blocks.length;
                     }
                     currentBlock.intervals.push(interval);
                 });
                 if (currentBlock) blocks.push(currentBlock);
 
+                // Mark current block
+                blocks.forEach((block, idx) => {
+                    if (block.hour === currentHour && block.startMinute === current30Min) {
+                        block.isCurrent = true;
+                        currentBlockIndex = idx;
+                    }
+                });
+                // If no exact match, first block is current
+                if (!blocks.some(b => b.isCurrent) && blocks.length > 0) {
+                    blocks[0].isCurrent = true;
+                    currentBlockIndex = 0;
+                }
+
                 // Store for expansion
-                thirtyMinBlocksData = blocks.map(block => ({
+                thirtyMinBlocksData = blocks.map((block, idx) => ({
                     ...block,
                     forecastType,
-                    getDisplayPrice,
-                    getPriceColor
+                    isExpandable: idx === currentBlockIndex || idx === currentBlockIndex + 1, // Only current and next
+                    isPast: idx < currentBlockIndex
                 }));
 
-                // Generate HTML for 30-min blocks - compact tiles
+                // Generate HTML for 30-min blocks with inline expansion
                 let html = '';
 
                 blocks.forEach((block, blockIdx) => {
                     const blockId = `block-${blockIdx}`;
+                    const blockData = thirtyMinBlocksData[blockIdx];
+                    const isExpandable = blockData.isExpandable;
+                    const isPast = blockData.isPast;
+                    const isCurrent = block.isCurrent;
+                    const isExpanded = currentExpandedBlock === blockIdx;
 
                     // Format time label
                     const displayHour = block.hour % 12 || 12;
-                    const ampm = block.hour < 12 ? 'am' : 'pm';
                     const timeLabel = `${displayHour}:${String(block.startMinute).padStart(2, '0')}`;
 
                     // Calculate aggregate stats
@@ -864,32 +880,67 @@
                     // Check for spike status
                     const spikeInfo = getSpikeInfo(block.intervals);
 
-                    // Styling - current block has bold text, spike blocks have colored background
-                    const isCurrent = block.isCurrent;
-                    const isExpanded = currentExpandedBlock === blockIdx;
+                    // Styling
+                    const opacity = isPast ? '0.5' : '1';
                     const blockBg = spikeInfo ? spikeInfo.bgColor : (isExpanded ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)');
-                    const blockBorder = isExpanded ? '2px solid rgba(255,255,255,0.4)' : (spikeInfo ? `2px solid ${spikeInfo.borderColor}` : '1px solid rgba(255,255,255,0.1)');
+                    const blockBorder = isExpanded ? '2px solid rgba(255,255,255,0.5)' : (spikeInfo ? `2px solid ${spikeInfo.borderColor}` : '1px solid rgba(255,255,255,0.1)');
                     const dotColor = spikeInfo ? spikeInfo.dotColor : getPriceColor(avgPrice, selectedChannel === 'general');
                     const textWeight = isCurrent ? 'bold' : 'normal';
                     const textColor = isCurrent ? '#22c55e' : 'inherit';
+                    const cursor = isExpandable ? 'pointer' : 'default';
+
+                    // Generate inline 5-min expansion HTML
+                    let expansionHtml = '';
+                    if (isExpanded && isExpandable) {
+                        const segmentsHtml = block.intervals.map((interval, iIdx) => {
+                            const intPrice = selectedChannel === 'general' ? getDisplayPrice(interval) : -getDisplayPrice(interval);
+                            const intColor = getPriceColor(intPrice, selectedChannel === 'general');
+                            const intSpike = interval.spikeStatus || 'none';
+                            const intIsPast = interval.localHour < currentHour ||
+                                (interval.localHour === currentHour && interval.localMinute < currentMinute);
+                            const intOpacity = intIsPast ? '0.5' : '1';
+                            const intSpikeStyle = intSpike === 'spike' ? 'background: rgba(220, 38, 38, 0.3); border: 1px solid #ef4444;' :
+                                intSpike === 'potential' ? 'background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b;' :
+                                'background: rgba(255,255,255,0.08);';
+
+                            return `
+                                <div style="padding: 0.4em; border-radius: 6px; text-align: center; min-width: 38px; ${intSpikeStyle} opacity: ${intOpacity};">
+                                    <div style="font-size: 0.7em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
+                                    <div style="color: ${intColor}; font-size: 1.2em; line-height: 1;">●</div>
+                                    <div style="font-size: 0.8em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
+                                </div>
+                            `;
+                        }).join('');
+
+                        expansionHtml = `
+                            <div style="margin-top: 0.5em; padding-top: 0.5em; border-top: 1px solid rgba(255,255,255,0.2);">
+                                <div style="display: flex; justify-content: center; gap: 0.3em; flex-wrap: wrap;">
+                                    ${segmentsHtml}
+                                </div>
+                            </div>
+                        `;
+                    }
 
                     html += `
                         <div id="${blockId}" class="thirty-min-block ${isExpanded ? 'expanded' : ''}" data-block-idx="${blockIdx}" style="
                             background: ${blockBg};
                             border: ${blockBorder};
                             border-radius: 10px;
-                            padding: 0.6em 0.8em;
-                            min-width: 75px;
+                            padding: 0.5em 0.6em;
+                            min-width: ${isExpanded ? '280px' : '70px'};
                             text-align: center;
-                            cursor: pointer;
+                            cursor: ${cursor};
                             transition: all 0.2s;
                             flex-shrink: 0;
-                        " onclick="toggle30MinBlock(${blockIdx})">
-                            ${spikeInfo ? `<div style="font-size: 0.65em; color: ${spikeInfo.borderColor}; font-weight: bold;">${spikeInfo.icon} ${spikeInfo.label}</div>` : ''}
-                            <div style="font-size: 0.8em; font-weight: ${textWeight}; color: ${textColor};">${timeLabel}</div>
-                            <div style="color: ${dotColor}; font-size: 1.8em; line-height: 1; margin: 0.1em 0;">●</div>
-                            <div style="font-size: 1em; font-weight: ${textWeight};${selectedChannel !== 'general' && avgPrice < 0 ? ' color: #ef4444;' : ''}">${avgPrice.toFixed(0)}¢</div>
-                            <div style="font-size: 0.65em; opacity: 0.7;">${Math.round(avgRenewables)}%</div>
+                            opacity: ${opacity};
+                        " ${isExpandable ? `onclick="toggle30MinBlock(${blockIdx})"` : ''}>
+                            ${spikeInfo ? `<div style="font-size: 0.6em; color: ${spikeInfo.borderColor}; font-weight: bold;">${spikeInfo.icon} ${spikeInfo.label}</div>` : ''}
+                            <div style="font-size: 0.75em; font-weight: ${textWeight}; color: ${textColor};">${timeLabel}</div>
+                            <div style="color: ${dotColor}; font-size: 1.6em; line-height: 1; margin: 0.1em 0;">●</div>
+                            <div style="font-size: 0.9em; font-weight: ${textWeight};${selectedChannel !== 'general' && avgPrice < 0 ? ' color: #ef4444;' : ''}">${avgPrice.toFixed(0)}¢</div>
+                            <div style="font-size: 0.6em; opacity: 0.7;">${Math.round(avgRenewables)}%</div>
+                            ${isExpandable && !isExpanded ? '<div style="font-size: 0.5em; opacity: 0.5; margin-top: 0.2em;">▼</div>' : ''}
+                            ${expansionHtml}
                         </div>
                     `;
                 });
@@ -908,12 +959,10 @@
                     }
                 }, 50);
 
-                // Show expansion for current block by default
+                // Auto-expand current block on first load
                 if (currentExpandedBlock === null) {
-                    toggle30MinBlock(currentBlockIndex);
-                } else {
-                    // Refresh expansion display
-                    showBlockExpansion(currentExpandedBlock);
+                    currentExpandedBlock = currentBlockIndex;
+                    generate30MinForecast(); // Re-render with expansion
                 }
 
             } catch (error) {
@@ -922,118 +971,20 @@
             }
         }
 
-        // Toggle 30-min block expansion - only one at a time, shown below the row
+        // Toggle 30-min block expansion - inline, only one at a time
         function toggle30MinBlock(blockIdx) {
-            const expandedDiv = document.getElementById('thirty-min-expanded');
-            if (!expandedDiv) return;
+            // Only current and next block are expandable
+            if (!thirtyMinBlocksData[blockIdx] || !thirtyMinBlocksData[blockIdx].isExpandable) return;
 
             // If clicking the already expanded block, collapse it
             if (currentExpandedBlock === blockIdx) {
-                expandedDiv.style.display = 'none';
                 currentExpandedBlock = null;
-                // Remove expanded styling from all blocks
-                document.querySelectorAll('.thirty-min-block').forEach(el => {
-                    el.classList.remove('expanded');
-                    el.style.border = '1px solid rgba(255,255,255,0.1)';
-                    el.style.background = 'rgba(255,255,255,0.05)';
-                });
-                return;
+            } else {
+                currentExpandedBlock = blockIdx;
             }
 
-            // Expand the new block
-            currentExpandedBlock = blockIdx;
-            showBlockExpansion(blockIdx);
-
-            // Update block styling
-            document.querySelectorAll('.thirty-min-block').forEach((el, idx) => {
-                if (parseInt(el.dataset.blockIdx) === blockIdx) {
-                    el.classList.add('expanded');
-                    el.style.border = '2px solid rgba(255,255,255,0.4)';
-                    el.style.background = 'rgba(255,255,255,0.15)';
-                } else {
-                    el.classList.remove('expanded');
-                    el.style.border = '1px solid rgba(255,255,255,0.1)';
-                    el.style.background = 'rgba(255,255,255,0.05)';
-                }
-            });
-        }
-
-        // Show the 5-min expansion for a block
-        function showBlockExpansion(blockIdx) {
-            const expandedDiv = document.getElementById('thirty-min-expanded');
-            if (!expandedDiv || !thirtyMinBlocksData[blockIdx]) return;
-
-            const block = thirtyMinBlocksData[blockIdx];
-            const forecastType = block.forecastType;
-
-            function getDisplayPrice(interval) {
-                if (interval.advancedPrice && interval.advancedPrice[forecastType] !== undefined) {
-                    return interval.advancedPrice[forecastType];
-                }
-                return interval.perKwh;
-            }
-
-            function getPriceColor(price, isGeneral) {
-                const absPrice = Math.abs(price);
-                if (isGeneral) {
-                    if (absPrice < 20) return '#22c55e';
-                    if (absPrice < 30) return '#fbbf24';
-                    if (absPrice < 40) return '#f59e0b';
-                    if (absPrice < 50) return '#f97316';
-                    return '#ef4444';
-                } else {
-                    if (absPrice < 5) return '#fde047';
-                    if (absPrice >= 10) return '#f59e0b';
-                    return '#fbbf24';
-                }
-            }
-
-            // Get current time to determine which intervals are past
-            const now = new Date();
-            const currentHour = now.getHours();
-            const currentMinute = now.getMinutes();
-
-            // Generate 5-min segments in a horizontal row
-            let segmentsHtml = block.intervals.map((interval, iIdx) => {
-                const intPrice = selectedChannel === 'general' ? getDisplayPrice(interval) : -getDisplayPrice(interval);
-                const intColor = getPriceColor(intPrice, selectedChannel === 'general');
-                const intSpike = interval.spikeStatus || 'none';
-
-                // Check if this interval is in the past (greyed out)
-                const isPast = interval.localHour < currentHour ||
-                    (interval.localHour === currentHour && interval.localMinute < currentMinute);
-
-                const opacity = isPast ? '0.5' : '1';
-                const intSpikeStyle = intSpike === 'spike' ? 'background: rgba(220, 38, 38, 0.3); border: 1px solid #ef4444;' :
-                    intSpike === 'potential' ? 'background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b;' :
-                    'background: rgba(255,255,255,0.08);';
-
-                return `
-                    <div style="padding: 0.5em 0.7em; border-radius: 8px; text-align: center; min-width: 50px; ${intSpikeStyle} opacity: ${opacity};">
-                        <div style="font-size: 0.75em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
-                        <div style="color: ${intColor}; font-size: 1.5em; line-height: 1; margin: 0.2em 0;">●</div>
-                        <div style="font-size: 0.9em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
-                        <div style="font-size: 0.65em; opacity: 0.7;">${Math.round(interval.renewables || 0)}%</div>
-                    </div>
-                `;
-            }).join('');
-
-            // Time range header
-            const displayHour = block.hour % 12 || 12;
-            const ampm = block.hour < 12 ? 'AM' : 'PM';
-            const endMinute = (block.startMinute + 30) % 60;
-            const endHour = block.startMinute + 30 >= 60 ? (block.hour + 1) % 24 : block.hour;
-            const endDisplayHour = endHour % 12 || 12;
-            const endAmpm = endHour < 12 ? 'AM' : 'PM';
-            const timeRange = `${displayHour}:${String(block.startMinute).padStart(2, '0')} ${ampm} - ${endDisplayHour}:${String(endMinute).padStart(2, '0')} ${endAmpm}`;
-
-            expandedDiv.innerHTML = `
-                <div style="text-align: center; font-size: 0.85em; font-weight: bold; margin-bottom: 0.5em; opacity: 0.9;">${timeRange}</div>
-                <div style="display: flex; justify-content: center; gap: 0.5em; overflow-x: auto;">
-                    ${segmentsHtml}
-                </div>
-            `;
-            expandedDiv.style.display = 'block';
+            // Re-render to show/hide inline expansion
+            generate30MinForecast();
         }
 
         // Fetch current Amber prices
