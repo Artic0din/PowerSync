@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import re
-import ssl
 import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -340,21 +339,12 @@ class AmberWebSocketClient:
                     "authorization": f"Bearer {self.api_token}"
                 }
 
-                # Create SSL context in executor to avoid blocking event loop
-                # See: https://developers.home-assistant.io/docs/asyncio_blocking_operations/#set_default_verify_paths
-                def _create_ssl_context():
-                    return ssl.create_default_context()
-
-                loop = asyncio.get_running_loop()
-                ssl_context = await loop.run_in_executor(None, _create_ssl_context)
-
-                # Connect to WebSocket with pre-created SSL context
+                # Connect to WebSocket (no custom SSL context - match Flask behavior)
                 async with websockets.connect(
                     self.WS_URL,
                     additional_headers=headers,
                     ping_interval=30,  # Send ping every 30 seconds
                     ping_timeout=10,   # Wait 10 seconds for pong
-                    ssl=ssl_context,
                 ) as websocket:
                     self._websocket = websocket
                     self._connection_status = "connected"
