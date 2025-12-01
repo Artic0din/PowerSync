@@ -1282,7 +1282,12 @@ def solar_curtailment_with_websocket_data(prices_data):
         logger.warning("No feed-in price in WebSocket data, skipping curtailment check")
         return
 
-    logger.info(f"WebSocket feed-in price: {feedin_price}c/kWh")
+    # Amber returns feed-in prices as NEGATIVE when you're paid to export
+    # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+    # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+    # So we want to curtail when feedin_price > 0 (user would pay to export)
+    export_earnings = -feedin_price  # Convert to positive = earnings per kWh
+    logger.info(f"WebSocket feed-in price: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
 
     users = User.query.filter_by(solar_curtailment_enabled=True).all()
 
@@ -1319,9 +1324,10 @@ def solar_curtailment_with_websocket_data(prices_data):
             current_export_rule = current_settings.get('customer_preferred_export_rule')
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
-            # CURTAILMENT LOGIC: Export price is below 1c/kWh
-            if feedin_price < 1:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c) for {user.email}")
+            # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
+            # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
+            if export_earnings < 1:
+                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
                 if current_export_rule == 'never':
                     logger.info(f"Already curtailed - toggling to force re-apply for {user.email}")
