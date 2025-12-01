@@ -43,6 +43,7 @@ from .const import (
     CONF_AEMO_SPIKE_ENABLED,
     CONF_AEMO_REGION,
     CONF_AEMO_SPIKE_THRESHOLD,
+    AMBER_API_BASE_URL,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -264,6 +265,45 @@ _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+
+
+async def fetch_active_amber_site_id(hass: HomeAssistant, api_token: str) -> str | None:
+    """
+    Fetch the active Amber site ID from the API.
+
+    Returns the first active site ID, or None if no sites found.
+    This ensures we always use the current active site, not a stale/closed one.
+    """
+    try:
+        session = async_get_clientsession(hass)
+        headers = {"Authorization": f"Bearer {api_token}"}
+
+        async with session.get(
+            f"{AMBER_API_BASE_URL}/sites",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status == 200:
+                sites = await response.json()
+                if sites and len(sites) > 0:
+                    # Filter for active sites (status == "active")
+                    active_sites = [s for s in sites if s.get("status") == "active"]
+                    if active_sites:
+                        site_id = active_sites[0]["id"]
+                        _LOGGER.info(f"🔍 Fetched active Amber site ID from API: {site_id}")
+                        return site_id
+                    # If no active sites, fall back to first site
+                    site_id = sites[0]["id"]
+                    _LOGGER.warning(f"No active Amber sites found, using first available: {site_id}")
+                    return site_id
+                _LOGGER.error("No Amber sites found in API response")
+                return None
+            else:
+                _LOGGER.error(f"Failed to fetch Amber sites: HTTP {response.status}")
+                return None
+    except Exception as e:
+        _LOGGER.error(f"Error fetching Amber site ID: {e}")
+        return None
 
 
 class SyncCoordinator:
@@ -903,10 +943,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # after coordinators are initialized
         websocket_sync_callback = None
 
+        # Fetch the active Amber site ID from API (don't rely on stored/stale ID)
+        stored_site_id = entry.data.get("amber_site_id")
+        amber_site_id = await fetch_active_amber_site_id(hass, entry.data[CONF_AMBER_API_TOKEN])
+
+        if amber_site_id:
+            if stored_site_id and stored_site_id != amber_site_id:
+                _LOGGER.warning(
+                    f"⚠️ Stored Amber site ID ({stored_site_id}) differs from active site ({amber_site_id}). "
+                    f"Using active site ID."
+                )
+        else:
+            # Fall back to stored ID if API fetch fails
+            amber_site_id = stored_site_id
+            _LOGGER.warning(f"Could not fetch active Amber site, using stored ID: {amber_site_id}")
+
         try:
             from .websocket_client import AmberWebSocketClient
 
-            amber_site_id = entry.data.get("amber_site_id")
             _LOGGER.info(f"🔌 Initializing WebSocket client with site_id: {amber_site_id}")
 
             ws_client = AmberWebSocketClient(
@@ -925,7 +979,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         amber_coordinator = AmberPriceCoordinator(
             hass,
             entry.data[CONF_AMBER_API_TOKEN],
-            entry.data.get("amber_site_id"),
+            amber_site_id,  # Use the active site ID
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
 
