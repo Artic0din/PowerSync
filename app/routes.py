@@ -20,7 +20,7 @@ import requests
 import time
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
