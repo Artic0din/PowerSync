@@ -632,7 +632,73 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
+            # Check if solar curtailment is being disabled
+            was_curtailment_enabled = self.config_entry.options.get(
+                CONF_SOLAR_CURTAILMENT_ENABLED,
+                self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            )
+            new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+
+            if was_curtailment_enabled and not new_curtailment_enabled:
+                # Restore Tesla export rule to battery_ok when disabling curtailment
+                await self._restore_export_rule()
+
             return self.async_create_entry(title="", data=user_input)
+
+    async def _restore_export_rule(self) -> None:
+        """Restore Tesla export rule to battery_ok when curtailment is disabled."""
+        site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+        if not site_id:
+            _LOGGER.warning("Cannot restore export rule - no Tesla site ID configured")
+            return
+
+        # Determine API provider and get token
+        api_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
+
+        if api_provider == TESLA_PROVIDER_FLEET_API:
+            # Try to get Fleet API token from Tesla Fleet integration
+            tesla_fleet_entries = self.hass.config_entries.async_entries("tesla_fleet")
+            api_token = None
+            for tesla_entry in tesla_fleet_entries:
+                if tesla_entry.state == ConfigEntryState.LOADED:
+                    try:
+                        if CONF_TOKEN in tesla_entry.data:
+                            token_data = tesla_entry.data[CONF_TOKEN]
+                            if CONF_ACCESS_TOKEN in token_data:
+                                api_token = token_data[CONF_ACCESS_TOKEN]
+                                break
+                    except Exception:
+                        pass
+            if not api_token:
+                _LOGGER.error("Cannot restore export rule - Fleet API token not available")
+                return
+            base_url = FLEET_API_BASE_URL
+        else:
+            # Teslemetry
+            api_token = self.config_entry.data.get(CONF_TESLEMETRY_API_TOKEN)
+            if not api_token:
+                _LOGGER.error("Cannot restore export rule - Teslemetry API token not configured")
+                return
+            base_url = TESLEMETRY_API_BASE_URL
+
+        try:
+            session = async_get_clientsession(self.hass)
+            headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
+            url = f"{base_url}/api/1/energy_sites/{site_id}/grid_import_export"
+
+            async with session.post(
+                url,
+                headers=headers,
+                json={"customer_preferred_export_rule": "battery_ok"},
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("✅ Solar curtailment disabled - restored export rule to 'battery_ok'")
+                else:
+                    error_text = await response.text()
+                    _LOGGER.error(f"Failed to restore export rule: {response.status} - {error_text}")
+        except Exception as e:
+            _LOGGER.error(f"Error restoring export rule: {e}")
 
         # Get current values from options (fallback to data for backwards compatibility)
         current_auto_sync = self.config_entry.options.get(

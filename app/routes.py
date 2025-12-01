@@ -451,7 +451,23 @@ def amber_settings():
 
         # Update Amber-specific settings
         current_user.amber_forecast_type = form.amber_forecast_type.data
+
+        # Check if curtailment is being disabled (was enabled, now disabled)
+        was_curtailment_enabled = current_user.solar_curtailment_enabled
         current_user.solar_curtailment_enabled = form.solar_curtailment_enabled.data
+
+        if was_curtailment_enabled and not form.solar_curtailment_enabled.data:
+            # Restore Tesla export rule to battery_ok when disabling curtailment
+            from app.api_clients import get_tesla_client
+            tesla_client = get_tesla_client(current_user)
+            if tesla_client and current_user.tesla_energy_site_id:
+                result = tesla_client.set_grid_export_rule(current_user.tesla_energy_site_id, 'battery_ok')
+                if result:
+                    current_user.current_export_rule = 'battery_ok'
+                    current_user.current_export_rule_updated = datetime.utcnow()
+                    logger.info(f"✅ Solar curtailment disabled - restored export rule to 'battery_ok'")
+                else:
+                    logger.error(f"Failed to restore export rule when disabling curtailment")
 
         # Save selected site ID (auto-select if only 1 site)
         if len(amber_sites) == 1:
