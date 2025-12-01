@@ -548,6 +548,7 @@ class AmberWebSocketClient:
             ]
         """
         if not self._cached_prices or not self._last_update:
+            _LOGGER.debug(f"WebSocket cache empty: cached_prices={bool(self._cached_prices)}, last_update={self._last_update}, message_count={self._message_count}")
             return None
 
         # Check if data is stale
