@@ -1031,6 +1031,46 @@ def energy_calendar_history(tesla_client):
     # Extract time series data
     time_series = history.get('time_series', [])
 
+    # Tesla API seems to ignore the period parameter and returns all data
+    # Filter client-side based on requested period
+    if time_series and period in ['day', 'week', 'month', 'year']:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+        now = datetime.now(user_tz)
+
+        # Calculate cutoff date based on period
+        if period == 'day':
+            # Today only - filter to entries from today
+            cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'week':
+            # Last 7 days
+            cutoff = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'month':
+            # Last 30 days
+            cutoff = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == 'year':
+            # Last 365 days
+            cutoff = (now - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Filter time_series to entries after cutoff
+        filtered_series = []
+        for entry in time_series:
+            try:
+                # Parse timestamp (format: 2025-01-15T00:00:00+10:00)
+                ts_str = entry.get('timestamp', '')
+                if ts_str:
+                    entry_dt = datetime.fromisoformat(ts_str)
+                    if entry_dt >= cutoff:
+                        filtered_series.append(entry)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse timestamp: {entry.get('timestamp')}: {e}")
+                continue
+
+        logger.info(f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period '{period}'")
+        time_series = filtered_series
+
     # Format response
     data = {
         'period': period,
