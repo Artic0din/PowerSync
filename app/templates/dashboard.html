@@ -550,7 +550,9 @@
             }
 
             if (feedinPrice) {
-                document.getElementById('current-feedin-price').textContent = `${Math.abs(feedinPrice.perKwh).toFixed(0)}¢`;
+                // Show negative sign for feed-in prices (negative = you get paid)
+                const feedinValue = feedinPrice.perKwh;
+                document.getElementById('current-feedin-price').textContent = `${feedinValue.toFixed(0)}¢`;
             }
 
             // Fetch and display 5-minute forecast (separate API call)
@@ -695,11 +697,14 @@
                     const borderStyle = isCurrent ? `3px solid ${borderColor}` : '1px solid rgba(255,255,255,0.15)';
                     const bgStyle = isCurrent ? (selectedChannel === 'general' ? 'rgba(249, 115, 22, 0.1)' : 'rgba(251, 191, 36, 0.1)') : 'rgba(255,255,255,0.03)';
 
+                    // For feed-in, show actual price (with negative sign); for import, show absolute value
+                    const displayPrice = selectedChannel === 'general' ? absPrice : getDisplayPrice(displayInterval);
+
                     html += `
                         <div style="border: ${borderStyle}; border-radius: 12px; padding: 0.7em; min-width: 70px; background: ${bgStyle}; text-align: center;">
                             <div style="font-size: 0.75em; font-weight: ${isCurrent ? 'bold' : 'normal'}; margin-bottom: 0.4em; opacity: 0.9;">${timeLabel}</div>
                             <div style="color: ${circleColor}; font-size: 2.5em; line-height: 1;">●</div>
-                            <div style="font-size: 1em; font-weight: bold; margin-top: 0.3em;">${absPrice.toFixed(0)}¢</div>
+                            <div style="font-size: 1em; font-weight: bold; margin-top: 0.3em;">${displayPrice.toFixed(0)}¢</div>
                             <div style="font-size: 0.75em; opacity: 0.7; margin-top: 0.2em;">${Math.round(displayInterval.renewables || 0)}%</div>
                         </div>
                     `;
