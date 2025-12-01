@@ -818,8 +818,34 @@
                 let currentBlockIndex = 0;
 
                 sourceIntervals.forEach((interval, idx) => {
-                    const hour = interval.localHour;
-                    const minute = interval.localMinute;
+                    // Parse time from localTime if localHour/localMinute not available
+                    let hour = interval.localHour;
+                    let minute = interval.localMinute;
+
+                    if (hour === undefined || minute === undefined) {
+                        // Fallback: parse from localTime string (e.g., "2025-12-02T09:30:00")
+                        if (interval.localTime) {
+                            const timeParts = interval.localTime.split('T')[1];
+                            if (timeParts) {
+                                const [h, m] = timeParts.split(':');
+                                hour = parseInt(h, 10);
+                                minute = parseInt(m, 10);
+                            }
+                        }
+                        // Last resort: parse from nemTime
+                        if ((hour === undefined || isNaN(hour)) && interval.nemTime) {
+                            const nemDate = new Date(interval.nemTime);
+                            hour = nemDate.getHours();
+                            minute = nemDate.getMinutes();
+                        }
+                    }
+
+                    // Skip if we still can't determine time
+                    if (hour === undefined || minute === undefined || isNaN(hour) || isNaN(minute)) {
+                        console.warn('Could not determine time for interval:', interval);
+                        return;
+                    }
+
                     const block30Min = Math.floor(minute / 30) * 30;
 
                     if (currentBlock === null || hour !== currentBlock.hour || block30Min !== currentBlock.startMinute) {
@@ -832,9 +858,14 @@
                             blockIndex: blocks.length
                         };
                     }
+                    // Store parsed hour/minute on interval for later use
+                    interval.localHour = hour;
+                    interval.localMinute = minute;
                     currentBlock.intervals.push(interval);
                 });
                 if (currentBlock) blocks.push(currentBlock);
+
+                console.log('30-min blocks:', blocks.map(b => `${b.hour}:${b.startMinute} (${b.intervals.length} intervals)`));
 
                 // The first block from the API is always the current block (it's forecast data)
                 // Mark it as current and set currentBlockIndex to 0
@@ -900,7 +931,8 @@
                     } else {
                         // Show collapsed 30-min block
                         const displayHour = block.hour % 12 || 12;
-                        const timeLabel = `${displayHour}:${String(block.startMinute).padStart(2, '0')}`;
+                        const ampm = block.hour < 12 ? 'am' : 'pm';
+                        const timeLabel = `${displayHour}:${String(block.startMinute).padStart(2, '0')}${ampm}`;
 
                         const prices = block.intervals.map(i => selectedChannel === 'general' ? getDisplayPrice(i) : -getDisplayPrice(i));
                         const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
