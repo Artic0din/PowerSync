@@ -517,6 +517,7 @@ class AEMOSpikeManager:
                 self.site_id,
                 spike_tariff,
                 self.api_token,
+                self.api_provider,
             )
 
             if success:
@@ -567,6 +568,7 @@ class AEMOSpikeManager:
                     self.site_id,
                     self._saved_tariff,
                     self.api_token,
+                    self.api_provider,
                 )
                 if success:
                     _LOGGER.info("Restored saved tariff successfully")
@@ -722,16 +724,18 @@ async def send_tariff_to_tesla(
     site_id: str,
     tariff_data: dict[str, Any],
     api_token: str,
+    api_provider: str = TESLA_PROVIDER_TESLEMETRY,
     max_retries: int = 3,
     timeout_seconds: int = 60,
 ) -> bool:
-    """Send tariff data to Tesla via Teslemetry API with retry logic.
+    """Send tariff data to Tesla via Teslemetry or Fleet API with retry logic.
 
     Args:
         hass: HomeAssistant instance
         site_id: Tesla energy site ID
         tariff_data: Tariff data to send
-        api_token: Teslemetry API token
+        api_token: API token (Teslemetry or Fleet API)
+        api_provider: API provider (teslemetry or fleet_api)
         max_retries: Maximum number of retry attempts (default: 3)
         timeout_seconds: Request timeout in seconds (default: 60)
 
@@ -750,7 +754,10 @@ async def send_tariff_to_tesla(
         }
     }
 
-    url = f"{TESLEMETRY_API_BASE_URL}/api/1/energy_sites/{site_id}/time_of_use_settings"
+    # Use correct API base URL based on provider
+    api_base = TESLEMETRY_API_BASE_URL if api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+    url = f"{api_base}/api/1/energy_sites/{site_id}/time_of_use_settings"
+    _LOGGER.debug("Sending TOU schedule via %s API", api_provider)
     last_error = None
 
     for attempt in range(max_retries):
@@ -887,9 +894,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             from .websocket_client import AmberWebSocketClient
 
+            amber_site_id = entry.data.get("amber_site_id")
+            _LOGGER.info(f"🔌 Initializing WebSocket client with site_id: {amber_site_id}")
+
             ws_client = AmberWebSocketClient(
                 api_token=entry.data[CONF_AMBER_API_TOKEN],
-                site_id=entry.data.get("amber_site_id"),
+                site_id=amber_site_id,
                 sync_callback=None,  # Will be set up after coordinators are initialized
             )
             await ws_client.start()
@@ -1198,12 +1208,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Failed to convert Amber prices to Tesla tariff")
             return
 
-        # Send tariff to Tesla via Teslemetry API
+        # Send tariff to Tesla via Teslemetry or Fleet API
         success = await send_tariff_to_tesla(
             hass,
             entry.data[CONF_TESLA_ENERGY_SITE_ID],
             tariff,
-            entry.data[CONF_TESLEMETRY_API_TOKEN],
+            tesla_api_token,
+            tesla_api_provider,
         )
 
         if success:
@@ -1273,15 +1284,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Get current grid export settings from Tesla
             session = async_get_clientsession(hass)
+            api_base_url = TESLEMETRY_API_BASE_URL if tesla_api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
             headers = {
-                "Authorization": f"Bearer {entry.data[CONF_TESLEMETRY_API_TOKEN]}",
+                "Authorization": f"Bearer {tesla_api_token}",
                 "Content-Type": "application/json",
             }
-
-            # Determine API base URL
-            api_base_url = TESLEMETRY_API_BASE_URL
-            if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
-                api_base_url = FLEET_API_BASE_URL
 
             # Get current export rule from site_info (grid_import_export only supports POST)
             try:
@@ -1436,15 +1443,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Get current grid export settings from Tesla
             session = async_get_clientsession(hass)
+            api_base_url = TESLEMETRY_API_BASE_URL if tesla_api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
             headers = {
-                "Authorization": f"Bearer {entry.data[CONF_TESLEMETRY_API_TOKEN]}",
+                "Authorization": f"Bearer {tesla_api_token}",
                 "Content-Type": "application/json",
             }
-
-            # Determine API base URL
-            api_base_url = TESLEMETRY_API_BASE_URL
-            if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
-                api_base_url = FLEET_API_BASE_URL
 
             # Get current export rule from site_info (grid_import_export only supports POST)
             try:

@@ -259,7 +259,7 @@ class AmberWebSocketClient:
         self._last_sync_trigger: Optional[datetime] = None
         self._sync_cooldown_seconds = 60  # Minimum 60s between sync triggers
 
-        _LOGGER.info(f"AmberWebSocketClient initialized for site {site_id}")
+        _LOGGER.info(f"AmberWebSocketClient initialized for site {site_id} (token: {api_token[:8]}...)")
 
     async def start(self):
         """Start the WebSocket client as an asyncio task."""
@@ -336,8 +336,10 @@ class AmberWebSocketClient:
                             "siteId": self.site_id
                         }
                     }
-                    await websocket.send(json.dumps(subscribe_message))
-                    _LOGGER.info(f"📡 Subscribed to live prices for site {self.site_id}")
+                    subscribe_json = json.dumps(subscribe_message)
+                    _LOGGER.info(f"📡 Sending subscription: {subscribe_json}")
+                    await websocket.send(subscribe_json)
+                    _LOGGER.info(f"📡 Subscription sent for site {self.site_id}, waiting for response...")
 
                     # Listen for messages
                     async for message in websocket:
@@ -380,10 +382,13 @@ class AmberWebSocketClient:
             message: Raw message string from WebSocket
         """
         try:
+            # Log raw message first for debugging (truncated)
+            _LOGGER.info(f"📨 Raw WebSocket message: {message[:500]}...")
+
             data = json.loads(message)
 
-            # Log message for debugging
-            _LOGGER.debug(f"WebSocket message received: {data}")
+            # Log parsed message structure
+            _LOGGER.info(f"📨 Parsed message keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
             self._message_count += 1
 
             # Validate message structure
