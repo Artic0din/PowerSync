@@ -13,9 +13,9 @@
     </hgroup>
 
     <!-- API Connection Status -->
-    <article id="connection-status" style="max-width: 600px; padding: 0.75rem; margin: 0 auto 1rem auto;">
+    <article id="connection-status" style="max-width: 800px; padding: 0.75rem; margin: 0 auto 1rem auto;">
         <header style="margin-bottom: 0.5rem; text-align: center;"><strong>Connection Status</strong></header>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+        <div style="display: grid; grid-template-columns: {% if solar_curtailment_enabled %}1fr 1fr 1fr{% else %}1fr 1fr{% endif %}; gap: 0.75rem;">
             <div id="amber-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
                 <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">⚡ Amber Electric</h4>
                 <div id="amber-status-content">
@@ -28,6 +28,14 @@
                     <p style="margin: 0; font-size: 0.8em;">Checking connection...</p>
                 </div>
             </div>
+            {% if solar_curtailment_enabled %}
+            <div id="curtailment-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
+                <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">🌞 Solar Curtailment</h4>
+                <div id="curtailment-status-content">
+                    <p style="margin: 0; font-size: 0.8em;">Checking status...</p>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </article>
 
@@ -348,12 +356,71 @@
                     await fetchTeslaStatus();
                 }
 
+                // Fetch curtailment status if enabled
+                {% if solar_curtailment_enabled %}
+                await fetchCurtailmentStatus();
+                {% endif %}
+
                 // Always try to fetch AEMO price (independent of Amber/Tesla)
                 await fetchAEMOPrice();
             } catch (error) {
                 console.error('Error checking API status:', error);
             }
         }
+
+        // Fetch and display solar curtailment status
+        {% if solar_curtailment_enabled %}
+        async function fetchCurtailmentStatus() {
+            try {
+                const response = await fetch('/api/curtailment-status');
+                const data = await response.json();
+
+                const curtailmentDiv = document.getElementById('curtailment-status');
+                const curtailmentContent = document.getElementById('curtailment-status-content');
+
+                if (!curtailmentDiv || !curtailmentContent) return;
+
+                if (!data.enabled) {
+                    curtailmentDiv.style.display = 'none';
+                    return;
+                }
+
+                if (data.error) {
+                    curtailmentDiv.style.background = 'rgba(255, 165, 0, 0.1)';
+                    curtailmentContent.innerHTML = `
+                        <p style="margin: 0; color: orange; font-weight: bold;">⚠ ${data.error}</p>
+                    `;
+                    return;
+                }
+
+                if (data.is_curtailed) {
+                    // Curtailment is active (export blocked)
+                    curtailmentDiv.style.background = 'rgba(255, 0, 0, 0.15)';
+                    let priceInfo = '';
+                    if (data.export_earnings !== null) {
+                        priceInfo = `<br><span style="font-size: 0.75em; opacity: 0.8;">Earnings: ${data.export_earnings.toFixed(1)}¢/kWh</span>`;
+                    }
+                    curtailmentContent.innerHTML = `
+                        <p style="margin: 0; color: var(--del-color); font-weight: bold;">🚫 Export Blocked</p>
+                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">Rule: ${data.export_rule || 'never'}${priceInfo}</p>
+                    `;
+                } else {
+                    // Normal operation (exporting allowed)
+                    curtailmentDiv.style.background = 'rgba(0, 255, 0, 0.1)';
+                    let priceInfo = '';
+                    if (data.export_earnings !== null) {
+                        priceInfo = `<br><span style="font-size: 0.75em; opacity: 0.8;">Earnings: ${data.export_earnings.toFixed(1)}¢/kWh</span>`;
+                    }
+                    curtailmentContent.innerHTML = `
+                        <p style="margin: 0; color: var(--ins-color); font-weight: bold;">✓ Exporting</p>
+                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">Rule: ${data.export_rule || 'battery_ok'}${priceInfo}</p>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error fetching curtailment status:', error);
+            }
+        }
+        {% endif %}
 
         // Fetch and display AEMO wholesale price
         async function fetchAEMOPrice() {

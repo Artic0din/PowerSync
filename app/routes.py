@@ -141,7 +141,57 @@ def register():
 def dashboard():
     logger.info(f"Dashboard accessed by user: {current_user.email}")
     has_amber_token = current_user.amber_api_token_encrypted is not None
-    return render_template('dashboard.html', title='Dashboard', has_amber_token=has_amber_token)
+    return render_template('dashboard.html', title='Dashboard', has_amber_token=has_amber_token,
+                           solar_curtailment_enabled=current_user.solar_curtailment_enabled or False)
+
+
+@bp.route('/api/curtailment-status')
+@login_required
+def api_curtailment_status():
+    """Get current solar curtailment status"""
+    from app.api_clients import get_tesla_client, get_amber_client
+
+    # Check if curtailment is enabled
+    if not current_user.solar_curtailment_enabled:
+        return jsonify({'enabled': False})
+
+    # Get Tesla client
+    tesla_client = get_tesla_client(current_user)
+    if not tesla_client or not current_user.tesla_energy_site_id:
+        return jsonify({'enabled': True, 'error': 'Tesla not configured'})
+
+    # Get current export rule
+    settings = tesla_client.get_grid_import_export(current_user.tesla_energy_site_id)
+    if not settings:
+        return jsonify({'enabled': True, 'error': 'Failed to get grid settings'})
+
+    export_rule = settings.get('customer_preferred_export_rule')
+    is_curtailed = export_rule == 'never'
+
+    # Get current feed-in price if Amber is configured
+    feedin_price = None
+    export_earnings = None
+    if current_user.amber_api_token_encrypted and current_user.amber_site_id:
+        amber_client = get_amber_client(current_user)
+        if amber_client:
+            # Try WebSocket first, then REST API
+            ws_client = current_app.config.get('AMBER_WEBSOCKET_CLIENT')
+            prices = amber_client.get_live_prices(ws_client=ws_client)
+            if prices:
+                for price in prices:
+                    if price.get('channelType') == 'feedIn':
+                        feedin_price = price.get('perKwh')
+                        if feedin_price is not None:
+                            export_earnings = -feedin_price
+                        break
+
+    return jsonify({
+        'enabled': True,
+        'is_curtailed': is_curtailed,
+        'export_rule': export_rule,
+        'feedin_price': feedin_price,
+        'export_earnings': export_earnings
+    })
 
 
 @bp.route('/api/aemo-price')
