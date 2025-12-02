@@ -627,24 +627,6 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Tesla Sync."""
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage the options."""
-        if user_input is not None:
-            # Check if solar curtailment is being disabled
-            was_curtailment_enabled = self.config_entry.options.get(
-                CONF_SOLAR_CURTAILMENT_ENABLED,
-                self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
-            )
-            new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
-
-            if was_curtailment_enabled and not new_curtailment_enabled:
-                # Restore Tesla export rule to battery_ok when disabling curtailment
-                await self._restore_export_rule()
-
-            return self.async_create_entry(title="", data=user_input)
-
     async def _restore_export_rule(self) -> None:
         """Restore Tesla export rule to battery_ok when curtailment is disabled."""
         site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
@@ -699,6 +681,24 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     _LOGGER.error(f"Failed to restore export rule: {response.status} - {error_text}")
         except Exception as e:
             _LOGGER.error(f"Error restoring export rule: {e}")
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            # Check if solar curtailment is being disabled
+            was_curtailment_enabled = self.config_entry.options.get(
+                CONF_SOLAR_CURTAILMENT_ENABLED,
+                self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            )
+            new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+
+            if was_curtailment_enabled and not new_curtailment_enabled:
+                # Restore Tesla export rule to battery_ok when disabling curtailment
+                await self._restore_export_rule()
+
+            return self.async_create_entry(title="", data=user_input)
 
         # Get current values from options (fallback to data for backwards compatibility)
         current_auto_sync = self.config_entry.options.get(

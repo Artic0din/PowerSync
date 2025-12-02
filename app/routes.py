@@ -505,6 +505,11 @@ def amber_settings():
             db.session.rollback()
 
         return redirect(url_for('main.amber_settings'))
+    elif request.method == 'POST':
+        # Log validation errors if form didn't validate on POST
+        logger.warning(f"Form validation failed. Errors: {form.errors}")
+        logger.debug(f"Form data received: amber_site_id={form.amber_site_id.data}, forecast_type={form.amber_forecast_type.data}, curtailment={form.solar_curtailment_enabled.data}")
+        logger.debug(f"Available choices for amber_site_id: {site_choices}")
 
     # Pre-populate form with existing data
     logger.debug("Pre-populating Amber settings form data")

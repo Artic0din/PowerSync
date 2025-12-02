@@ -1636,6 +1636,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             """
             EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
             This is the primary trigger - cron jobs are just fallback.
+
+            NOTE: This callback is called from a background WebSocket thread,
+            so we must use call_soon_threadsafe to schedule work on the HA event loop.
             """
             # Notify coordinator (for period deduplication)
             coordinator.notify_websocket_update(prices_data)
@@ -1660,8 +1663,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception as e:
                     _LOGGER.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
 
-            # Schedule the async sync
-            hass.async_create_task(trigger_sync())
+            # Schedule the async sync using thread-safe method
+            # This callback runs in a background WebSocket thread, not the HA event loop
+            hass.loop.call_soon_threadsafe(
+                lambda: hass.async_create_task(trigger_sync())
+            )
 
         # Assign callback to WebSocket client
         ws_client._sync_callback = websocket_sync_callback
