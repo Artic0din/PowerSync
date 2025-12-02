@@ -1189,45 +1189,23 @@ def solar_curtailment_check():
                     current_export_rule = 'never' if non_export else 'battery_ok'
                     logger.info(f"VPP user {user.email}: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
+            # If still None, fall back to cached value from database
+            if current_export_rule is None and user.current_export_rule:
+                current_export_rule = user.current_export_rule
+                logger.info(f"Using cached export_rule='{current_export_rule}' for {user.email} (API returned None)")
+
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
                 logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
-                logger.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
-                # If already set to 'never', toggle to force apply (workaround for Tesla API bug)
+                # If already set to 'never', no action needed
                 if current_export_rule == 'never':
-                    logger.info(f"Already curtailed - toggling to force re-apply (Tesla API workaround) for {user.email}")
-
-                    # Toggle to pv_only
-                    logger.info(f"Step 1: Setting export to 'pv_only' for {user.email}")
-                    result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'pv_only')
-                    if not result:
-                        logger.error(f"Failed to toggle export to 'pv_only' for {user.email}")
-                        error_count += 1
-                        continue
-
-                    # Wait a moment for the change to register
-                    import time
-                    time.sleep(2)
-
-                    # Toggle back to never
-                    logger.info(f"Step 2: Setting export back to 'never' for {user.email}")
-                    result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
-                    if not result:
-                        logger.error(f"Failed to set export to 'never' for {user.email}")
-                        error_count += 1
-                        continue
-
-                    logger.info(f"✅ CURTAILMENT MAINTAINED: Toggled export rule to force re-apply for {user.email}")
-                    user.current_export_rule = 'never'
-                    user.current_export_rule_updated = datetime.utcnow()
-                    db.session.commit()
-
+                    logger.info(f"✅ Already curtailed (export='never') - no action needed for {user.email}")
                 else:
-                    # Not already 'never', so just set it
+                    # Not already 'never', so apply curtailment
                     logger.info(f"Applying curtailment: '{current_export_rule}' → 'never' for {user.email}")
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if not result:
@@ -1347,6 +1325,11 @@ def solar_curtailment_with_websocket_data(prices_data):
                     current_export_rule = 'never' if non_export else 'battery_ok'
                     logger.info(f"VPP user {user.email}: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
+            # If still None, fall back to cached value from database
+            if current_export_rule is None and user.current_export_rule:
+                current_export_rule = user.current_export_rule
+                logger.info(f"Using cached export_rule='{current_export_rule}' for {user.email} (API returned None)")
+
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
@@ -1355,23 +1338,8 @@ def solar_curtailment_with_websocket_data(prices_data):
                 logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
                 if current_export_rule == 'never':
-                    logger.info(f"Already curtailed - toggling to force re-apply for {user.email}")
-
-                    # Toggle to pv_only then back to never
-                    tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'pv_only')
-                    import time
-                    time.sleep(2)
-                    result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
-
-                    if result:
-                        logger.info(f"✅ CURTAILMENT MAINTAINED for {user.email}")
-                        user.current_export_rule = 'never'
-                        user.current_export_rule_updated = datetime.utcnow()
-                        db.session.commit()
-                        success_count += 1
-                    else:
-                        logger.error(f"Failed to maintain curtailment for {user.email}")
-                        error_count += 1
+                    logger.info(f"✅ Already curtailed (export='never') - no action needed for {user.email}")
+                    success_count += 1
                 else:
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if result:

@@ -1123,6 +1123,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function
         "aemo_spike_cancel": None,  # Will store the AEMO spike check cancel function
+        "cached_export_rule": None,  # Cache export rule since API doesn't return it
     }
 
     # Set up platforms
@@ -1384,6 +1385,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
+                    # If still None, fall back to cached value
+                    if current_export_rule is None:
+                        cached_rule = hass.data[DOMAIN][entry.entry_id].get("cached_export_rule")
+                        if cached_rule:
+                            current_export_rule = cached_rule
+                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None)")
+
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
             except Exception as err:
@@ -1394,48 +1402,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
                 _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
-                _LOGGER.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
-                # If already set to 'never', toggle to force apply (Tesla API bug workaround)
+                # If already curtailed, no action needed (we track state via cache)
                 if current_export_rule == "never":
-                    _LOGGER.info("Already curtailed - toggling to force re-apply (Tesla API workaround)")
-
-                    # Toggle to pv_only
-                    try:
-                        async with session.post(
-                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
-                            headers=headers,
-                            json={"customer_preferred_export_rule": "pv_only"},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status != 200:
-                                error_text = await response.text()
-                                _LOGGER.error(f"Failed to toggle export to 'pv_only': {response.status} - {error_text}")
-                                return
-
-                        # Wait for change to register
-                        await asyncio.sleep(2)
-
-                        # Toggle back to never
-                        async with session.post(
-                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
-                            headers=headers,
-                            json={"customer_preferred_export_rule": "never"},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status != 200:
-                                error_text = await response.text()
-                                _LOGGER.error(f"Failed to set export to 'never': {response.status} - {error_text}")
-                                return
-
-                        _LOGGER.info(f"✅ CURTAILMENT MAINTAINED: Toggled export rule to force re-apply")
-
-                    except Exception as err:
-                        _LOGGER.error(f"Error toggling export rule: {err}")
-                        return
-
+                    _LOGGER.info(f"✅ Already curtailed (export='never') - no action needed")
+                    _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
-                    # Not already 'never', so just set it
+                    # Not already 'never', so apply curtailment
                     _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
                     try:
                         async with session.post(
@@ -1450,12 +1423,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 return
 
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
+                        hass.data[DOMAIN][entry.entry_id]["cached_export_rule"] = "never"
+                        _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error applying curtailment: {err}")
                         return
-
-                _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
             # NORMAL MODE: Export earnings >= 1c/kWh (worth exporting)
             else:
@@ -1477,6 +1450,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 return
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
+                        hass.data[DOMAIN][entry.entry_id]["cached_export_rule"] = "battery_ok"
                         _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
 
                     except Exception as err:
@@ -1553,6 +1527,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
+                    # If still None, fall back to cached value
+                    if current_export_rule is None:
+                        cached_rule = hass.data[DOMAIN][entry.entry_id].get("cached_export_rule")
+                        if cached_rule:
+                            current_export_rule = cached_rule
+                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None)")
+
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
             except Exception as err:
@@ -1563,42 +1544,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if feedin_price < 1:
                 _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c)")
 
+                # If already curtailed, no action needed (we track state via cache)
                 if current_export_rule == "never":
-                    _LOGGER.info("Already curtailed - toggling to force re-apply (Tesla API workaround)")
-
-                    # Toggle to pv_only
-                    try:
-                        async with session.post(
-                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
-                            headers=headers,
-                            json={"customer_preferred_export_rule": "pv_only"},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status != 200:
-                                error_text = await response.text()
-                                _LOGGER.error(f"Failed to toggle export to 'pv_only': {response.status} - {error_text}")
-                                return
-
-                        await asyncio.sleep(2)
-
-                        async with session.post(
-                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
-                            headers=headers,
-                            json={"customer_preferred_export_rule": "never"},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status != 200:
-                                error_text = await response.text()
-                                _LOGGER.error(f"Failed to set export to 'never': {response.status} - {error_text}")
-                                return
-
-                        _LOGGER.info(f"✅ CURTAILMENT MAINTAINED: Toggled export rule to force re-apply")
-
-                    except Exception as err:
-                        _LOGGER.error(f"Error toggling export rule: {err}")
-                        return
-
+                    _LOGGER.info(f"✅ Already curtailed (export='never') - no action needed")
+                    _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
                 else:
+                    # Not already 'never', so apply curtailment
                     _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
                     try:
                         async with session.post(
@@ -1613,12 +1564,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 return
 
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
+                        hass.data[DOMAIN][entry.entry_id]["cached_export_rule"] = "never"
+                        _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error applying curtailment: {err}")
                         return
-
-                _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
 
             # NORMAL MODE: Export price is positive
             else:
@@ -1639,6 +1590,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 return
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
+                        hass.data[DOMAIN][entry.entry_id]["cached_export_rule"] = "battery_ok"
                         _LOGGER.info(f"📊 Action summary: Restored to normal (price: {feedin_price}c/kWh, export: 'battery_ok')")
 
                     except Exception as err:
