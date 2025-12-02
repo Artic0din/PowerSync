@@ -751,6 +751,77 @@ def amber_5min_forecast():
     return jsonify(result)
 
 
+@bp.route('/api/amber/30min-forecast')
+@login_required
+def amber_30min_forecast():
+    """Get 30-minute interval forecast for extended hours (48 hours available)"""
+    # Allow requesting up to 48 hours for the 30-min forecast view
+    hours = request.args.get('hours', 8, type=int)
+    hours = min(hours, 48)  # Cap at 48 hours
+    logger.info(f"30-minute forecast requested by user: {current_user.email} (hours={hours})")
+
+    amber_client = get_amber_client(current_user)
+    if not amber_client:
+        logger.warning("Amber client not available for 30-min forecast")
+        return jsonify({'error': 'Amber API not configured'}), 400
+
+    # Get forecast data at 30-minute resolution (has data for full 48 hours)
+    forecast = amber_client.get_price_forecast(next_hours=hours, resolution=30)
+    if not forecast:
+        logger.error("Failed to fetch 30-minute forecast")
+        return jsonify({'error': 'Failed to fetch 30-minute forecast'}), 500
+
+    # Convert nemTime to user's local timezone for each interval
+    user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+
+    # Get current time in user's timezone to filter out past intervals
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(user_tz)
+    # Round down to start of current 30-min block
+    current_30min_start = now_local.replace(minute=(now_local.minute // 30) * 30, second=0, microsecond=0)
+
+    logger.info(f"30-min forecast: Current time in user timezone: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}, filtering from: {current_30min_start.strftime('%H:%M')}")
+
+    filtered_forecast = []
+    for interval in forecast:
+        if 'nemTime' in interval:
+            try:
+                # Parse nemTime (already in Australian Eastern Time with timezone)
+                nem_dt = datetime.fromisoformat(interval['nemTime'])
+
+                # Convert to user's timezone
+                local_dt = nem_dt.astimezone(user_tz)
+
+                # Skip intervals before the start of the current 30-min block
+                if local_dt < current_30min_start:
+                    continue
+
+                # Add localTime field (naive datetime string in user's timezone)
+                interval['localTime'] = local_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                interval['localHour'] = local_dt.hour
+                interval['localMinute'] = local_dt.minute
+                filtered_forecast.append(interval)
+            except Exception as e:
+                logger.error(f"Error converting nemTime to local timezone: {e}")
+
+    logger.info(f"30-min forecast: {len(forecast)} -> {len(filtered_forecast)} intervals (kept from current 30-min block onwards)")
+
+    # Group by channel type and return
+    general_intervals = [i for i in filtered_forecast if i.get('channelType') == 'general']
+    feedin_intervals = [i for i in filtered_forecast if i.get('channelType') == 'feedIn']
+
+    result = {
+        'fetch_time': datetime.utcnow().isoformat(),
+        'total_intervals': len(forecast),
+        'forecast_type': current_user.amber_forecast_type or 'predicted',
+        'general': general_intervals,
+        'feedIn': feedin_intervals
+    }
+
+    logger.info(f"30-min forecast: {len(general_intervals)} general, {len(feedin_intervals)} feedIn intervals (using {result['forecast_type']} prices)")
+    return jsonify(result)
+
+
 @bp.route('/api/amber/debug-forecast')
 @login_required
 def amber_debug_forecast():
