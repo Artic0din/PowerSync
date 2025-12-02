@@ -68,12 +68,14 @@
 - 🔐 **Teslemetry Integration** - Secure Tesla API access via Teslemetry proxy service (no public domain required)
 - 🔒 **Secure Credential Storage** - All API tokens encrypted at rest using Fernet encryption
 - ⏱️ **Background Scheduler** - Automatic syncing every 5 minutes (aligned with Amber's forecast updates)
+- 🔄 **Smart Tariff Deduplication** - Only syncs to Tesla when tariff actually changes, preventing duplicate rate plan entries in Tesla dashboard
 - 🐳 **Docker Ready** - Pre-built multi-architecture (amd64/arm64) images for easy deployment
 - 🏠 **Home Assistant Integration** - Native HACS integration for seamless HA deployment
 - 🌏 **Australia-Wide Compatibility** - Auto-detects timezone from Amber data, works in all Australian states (QLD, NSW, VIC, SA, TAS, WA, NT)
 - 📊 **Intelligent Price Averaging** - Averages 5-minute Amber intervals into 30-minute Tesla periods for maximum accuracy
 - 🎯 **Period Alignment** - Correctly aligns with Amber's forecast labels (e.g., "18:00 forecast" → Tesla PERIOD_17_30)
 - 🔄 **Rolling 24-Hour Window** - Always provides Tesla with 9-24 hours lookahead for optimal battery management
+- 📡 **Real-Time WebSocket** - Connects to Amber's WebSocket API for instant price updates (with automatic reconnection)
 
 ## Key Features Explained
 
