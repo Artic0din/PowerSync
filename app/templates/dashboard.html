@@ -750,10 +750,11 @@
             if (!forecastDiv) return;
 
             try {
-                // Fetch 30-minute resolution forecast (8 hours by default, can go up to 48)
+                // Fetch 30-minute resolution forecast (24 hours to ensure we get data past midnight)
                 // Using 30-min resolution because it has data for the full forecast period
                 // (5-min resolution is only available ~1-1.5 hours ahead)
-                const response = await fetch('/api/amber/30min-forecast?hours=8');
+                // Note: Amber API returns data from start of day, so we request 24h to ensure coverage
+                const response = await fetch('/api/amber/30min-forecast?hours=24');
                 if (!response.ok) {
                     forecastDiv.innerHTML = '<p style="color: rgba(255,255,255,0.7);">30-minute forecast not available</p>';
                     return;
