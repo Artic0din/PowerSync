@@ -191,8 +191,8 @@ class AmberWebSocketClient:
             message: Raw message string from WebSocket
         """
         try:
-            # Log raw message first for debugging
-            logger.info(f"📨 Raw WebSocket message: {message[:500]}...")  # First 500 chars
+            # Log raw message for debugging (full message, not truncated)
+            logger.info(f"📨 Raw WebSocket message ({len(message)} bytes): {message}")
 
             data = json.loads(message)
             self._message_count += 1
@@ -268,7 +268,9 @@ class AmberWebSocketClient:
                 self._last_error = error_msg
 
             else:
-                logger.debug(f"Unhandled message type: {data.get('type')}")
+                # Log ALL unhandled messages at INFO level for debugging
+                # This helps us understand what Amber actually sends
+                logger.info(f"📨 Unhandled message - action={data.get('action')}, type={data.get('type')}, service={data.get('service')}, keys={list(data.keys())}")
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse WebSocket message as JSON: {e}")
