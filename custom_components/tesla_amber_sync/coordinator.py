@@ -425,10 +425,21 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         site_id: str,
         api_token: str,
         api_provider: str = TESLA_PROVIDER_TESLEMETRY,
+        token_getter: callable = None,
     ) -> None:
-        """Initialize the coordinator."""
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance
+            site_id: Tesla energy site ID
+            api_token: Initial API token (used if token_getter not provided)
+            api_provider: API provider (teslemetry or fleet_api)
+            token_getter: Optional callable that returns (token, provider) tuple.
+                          If provided, this is called before each request to get fresh token.
+        """
         self.site_id = site_id
-        self.api_token = api_token
+        self._api_token = api_token  # Fallback token
+        self._token_getter = token_getter  # Callable to get fresh token
         self.api_provider = api_provider
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
@@ -448,10 +459,30 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
 
+    def _get_current_token(self) -> str:
+        """Get the current API token, fetching fresh if token_getter is available."""
+        if self._token_getter:
+            try:
+                token, provider = self._token_getter()
+                if token:
+                    # Update provider and base URL if it changed
+                    if provider != self.api_provider:
+                        self.api_provider = provider
+                        if provider == TESLA_PROVIDER_FLEET_API:
+                            self.api_base_url = FLEET_API_BASE_URL
+                        else:
+                            self.api_base_url = TESLEMETRY_API_BASE_URL
+                        _LOGGER.debug(f"Token provider changed to {provider}")
+                    return token
+            except Exception as e:
+                _LOGGER.warning(f"Token getter failed, using fallback token: {e}")
+        return self._api_token
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Tesla API (Teslemetry or Fleet API)."""
+        current_token = self._get_current_token()
         headers = {
-            "Authorization": f"Bearer {self.api_token}",
+            "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
         }
 
@@ -501,8 +532,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
 
+        current_token = self._get_current_token()
         headers = {
-            "Authorization": f"Bearer {self.api_token}",
+            "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
         }
 

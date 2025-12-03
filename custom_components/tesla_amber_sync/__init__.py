@@ -432,6 +432,7 @@ class AEMOSpikeManager:
         site_id: str,
         api_token: str,
         api_provider: str = TESLA_PROVIDER_TESLEMETRY,
+        token_getter: callable = None,
     ):
         """Initialize the AEMO spike manager."""
         self.hass = hass
@@ -439,7 +440,8 @@ class AEMOSpikeManager:
         self.region = region
         self.threshold = threshold
         self.site_id = site_id
-        self.api_token = api_token
+        self._api_token = api_token  # Fallback token
+        self._token_getter = token_getter  # Callable to get fresh token
         self.api_provider = api_provider
 
         # State tracking
@@ -460,6 +462,22 @@ class AEMOSpikeManager:
             region,
             threshold,
         )
+
+    def _get_current_token(self) -> tuple[str, str]:
+        """Get the current API token, fetching fresh if token_getter is available.
+
+        Returns:
+            tuple: (token, provider)
+        """
+        if self._token_getter:
+            try:
+                token, provider = self._token_getter()
+                if token:
+                    self.api_provider = provider
+                    return token, provider
+            except Exception as e:
+                _LOGGER.warning(f"Token getter failed, using fallback token: {e}")
+        return self._api_token, self.api_provider
 
     @property
     def in_spike_mode(self) -> bool:
@@ -521,12 +539,14 @@ class AEMOSpikeManager:
         )
 
         try:
+            # Get fresh token in case it was refreshed by tesla_fleet integration
+            current_token, current_provider = self._get_current_token()
             session = async_get_clientsession(self.hass)
             headers = {
-                "Authorization": f"Bearer {self.api_token}",
+                "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if self.api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
             # Step 1: Save current tariff
             _LOGGER.info("Saving current tariff before spike mode...")
@@ -573,8 +593,8 @@ class AEMOSpikeManager:
                 self.hass,
                 self.site_id,
                 spike_tariff,
-                self.api_token,
-                self.api_provider,
+                current_token,
+                current_provider,
             )
 
             if success:
@@ -599,12 +619,14 @@ class AEMOSpikeManager:
         )
 
         try:
+            # Get fresh token in case it was refreshed by tesla_fleet integration
+            current_token, current_provider = self._get_current_token()
             session = async_get_clientsession(self.hass)
             headers = {
-                "Authorization": f"Bearer {self.api_token}",
+                "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if self.api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
             # Step 1: Switch to self_consumption mode first (helps tariff apply)
             _LOGGER.info("Switching to self_consumption mode before tariff restore...")
@@ -624,8 +646,8 @@ class AEMOSpikeManager:
                     self.hass,
                     self.site_id,
                     self._saved_tariff,
-                    self.api_token,
-                    self.api_provider,
+                    current_token,
+                    current_provider,
                 )
                 if success:
                     _LOGGER.info("Restored saved tariff successfully")
@@ -916,6 +938,35 @@ async def send_tariff_to_tesla(
     return False
 
 
+def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | None, str]:
+    """
+    Get the current Tesla API token, fetching fresh from tesla_fleet if available.
+
+    The tesla_fleet integration handles token refresh internally and updates its
+    config entry data. This function always fetches the latest token.
+
+    Returns:
+        tuple: (token, provider) where provider is 'fleet_api' or 'teslemetry'
+    """
+    # Check if Tesla Fleet integration is configured and available
+    tesla_fleet_entries = hass.config_entries.async_entries("tesla_fleet")
+    for tesla_entry in tesla_fleet_entries:
+        if tesla_entry.state == ConfigEntryState.LOADED:
+            try:
+                if CONF_TOKEN in tesla_entry.data:
+                    token_data = tesla_entry.data[CONF_TOKEN]
+                    if CONF_ACCESS_TOKEN in token_data:
+                        return token_data[CONF_ACCESS_TOKEN], TESLA_PROVIDER_FLEET_API
+            except Exception as e:
+                _LOGGER.warning(f"Failed to extract token from Tesla Fleet integration: {e}")
+
+    # Fall back to Teslemetry
+    if CONF_TESLEMETRY_API_TOKEN in entry.data:
+        return entry.data[CONF_TESLEMETRY_API_TOKEN], TESLA_PROVIDER_TESLEMETRY
+
+    return None, TESLA_PROVIDER_TESLEMETRY
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla Sync from a config entry."""
     _LOGGER.info("Setting up Tesla Sync integration")
@@ -988,47 +1039,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
 
-    # Check if Tesla Fleet integration is configured and available
-    tesla_api_token = None
-    tesla_api_provider = TESLA_PROVIDER_TESLEMETRY  # Default to Teslemetry
+    # Get initial Tesla API token and provider
+    # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
+    tesla_api_token, tesla_api_provider = get_tesla_api_token(hass, entry)
 
-    tesla_fleet_entries = hass.config_entries.async_entries("tesla_fleet")
-    if tesla_fleet_entries:
-        for tesla_entry in tesla_fleet_entries:
-            if tesla_entry.state == ConfigEntryState.LOADED:
-                # Tesla Fleet integration is loaded, try to use its tokens
-                try:
-                    if CONF_TOKEN in tesla_entry.data:
-                        token_data = tesla_entry.data[CONF_TOKEN]
-                        if CONF_ACCESS_TOKEN in token_data:
-                            tesla_api_token = token_data[CONF_ACCESS_TOKEN]
-                            tesla_api_provider = TESLA_PROVIDER_FLEET_API
-                            _LOGGER.info(
-                                "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
-                                entry.data[CONF_TESLA_ENERGY_SITE_ID]
-                            )
-                            break
-                except Exception as e:
-                    _LOGGER.warning(
-                        "Failed to extract tokens from Tesla Fleet integration: %s",
-                        e
-                    )
-
-    # Fall back to Teslemetry if Tesla Fleet not available or failed
     if not tesla_api_token:
-        if CONF_TESLEMETRY_API_TOKEN in entry.data:
-            tesla_api_token = entry.data[CONF_TESLEMETRY_API_TOKEN]
-            tesla_api_provider = TESLA_PROVIDER_TESLEMETRY
-            _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
-        else:
-            _LOGGER.error("No Tesla API credentials available (neither Fleet API nor Teslemetry)")
-            raise ConfigEntryNotReady("No Tesla API credentials configured")
+        _LOGGER.error("No Tesla API credentials available (neither Fleet API nor Teslemetry)")
+        raise ConfigEntryNotReady("No Tesla API credentials configured")
+
+    if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
+        _LOGGER.info(
+            "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
+            entry.data[CONF_TESLA_ENERGY_SITE_ID]
+        )
+    else:
+        _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
+
+    # Create token getter that always fetches fresh token (handles token refresh)
+    # This is called before each API request to ensure we use the latest token
+    def token_getter():
+        return get_tesla_api_token(hass, entry)
 
     tesla_coordinator = TeslaEnergyCoordinator(
         hass,
         entry.data[CONF_TESLA_ENERGY_SITE_ID],
         tesla_api_token,
         api_provider=tesla_api_provider,
+        token_getter=token_getter,
     )
 
     # Fetch initial data
@@ -1108,6 +1145,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_id=entry.data[CONF_TESLA_ENERGY_SITE_ID],
                 api_token=tesla_api_token,
                 api_provider=tesla_api_provider,
+                token_getter=token_getter,
             )
             _LOGGER.info(
                 "AEMO Spike Manager initialized: region=%s, threshold=$%.0f/MWh",
@@ -1138,6 +1176,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "aemo_spike_cancel": None,  # Will store the AEMO spike check cancel function
         "cached_export_rule": cached_export_rule,  # Restored from persistent storage
         "store": store,  # Reference to Store for saving updates
+        "token_getter": token_getter,  # Function to get fresh Tesla API token
     }
 
     # Helper function to update and persist cached export rule
@@ -1298,12 +1337,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         # Send tariff to Tesla via Teslemetry or Fleet API
+        # Get fresh token in case it was refreshed by tesla_fleet integration
+        current_token, current_provider = token_getter()
+        if not current_token:
+            _LOGGER.error("No Tesla API token available for TOU sync")
+            return
+
         success = await send_tariff_to_tesla(
             hass,
             entry.data[CONF_TESLA_ENERGY_SITE_ID],
             tariff,
-            tesla_api_token,
-            tesla_api_provider,
+            current_token,
+            current_provider,
         )
 
         if success:
@@ -1377,10 +1422,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"Current feed-in price from Amber: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
 
             # Get current grid export settings from Tesla
+            # Get fresh token in case it was refreshed by tesla_fleet integration
+            current_token, current_provider = token_getter()
+            if not current_token:
+                _LOGGER.error("No Tesla API token available for curtailment check")
+                return
+
             session = async_get_clientsession(hass)
-            api_base_url = TESLEMETRY_API_BASE_URL if tesla_api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base_url = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
             headers = {
-                "Authorization": f"Bearer {tesla_api_token}",
+                "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
 
@@ -1596,10 +1647,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"Current feed-in price (WebSocket): {feedin_price}c/kWh (export earnings: {export_earnings:.2f}c/kWh)")
 
             # Get current grid export settings from Tesla
+            # Get fresh token in case it was refreshed by tesla_fleet integration
+            current_token, current_provider = token_getter()
+            if not current_token:
+                _LOGGER.error("No Tesla API token available for curtailment check")
+                return
+
             session = async_get_clientsession(hass)
-            api_base_url = TESLEMETRY_API_BASE_URL if tesla_api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base_url = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
             headers = {
-                "Authorization": f"Bearer {tesla_api_token}",
+                "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
 
