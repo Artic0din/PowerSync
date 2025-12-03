@@ -1243,7 +1243,10 @@ def solar_curtailment_check():
                     # Verify the change actually took effect by reading back
                     verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
                     verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
-                    if verified_rule != 'never':
+                    if verified_rule is None:
+                        # API doesn't return this field - can't verify but not a failure
+                        logger.info(f"ℹ️ Cannot verify curtailment (API returns None for export_rule) - operation reported success for {user.email}")
+                    elif verified_rule != 'never':
                         logger.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never') for {user.email}")
                         logger.warning(f"Full verification response: {verify_settings}")
                     else:
@@ -1273,7 +1276,10 @@ def solar_curtailment_check():
                     # Verify the change actually took effect by reading back
                     verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
                     verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
-                    if verified_rule != 'battery_ok':
+                    if verified_rule is None:
+                        # API doesn't return this field - can't verify but not a failure
+                        logger.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success for {user.email}")
+                    elif verified_rule != 'battery_ok':
                         logger.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok') for {user.email}")
                         logger.warning(f"Full verification response: {verify_settings}")
                     else:
@@ -1391,7 +1397,10 @@ def solar_curtailment_with_websocket_data(prices_data):
                         # Verify the change actually took effect by reading back
                         verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
                         verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
-                        if verified_rule != 'never':
+                        if verified_rule is None:
+                            # API doesn't return this field - can't verify but not a failure
+                            logger.info(f"ℹ️ Cannot verify curtailment (API returns None for export_rule) - operation reported success for {user.email}")
+                        elif verified_rule != 'never':
                             logger.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never') for {user.email}")
                             logger.warning(f"Full verification response: {verify_settings}")
                         else:
@@ -1414,7 +1423,10 @@ def solar_curtailment_with_websocket_data(prices_data):
                         # Verify the change actually took effect by reading back
                         verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
                         verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
-                        if verified_rule != 'battery_ok':
+                        if verified_rule is None:
+                            # API doesn't return this field - can't verify but not a failure
+                            logger.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success for {user.email}")
+                        elif verified_rule != 'battery_ok':
                             logger.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok') for {user.email}")
                             logger.warning(f"Full verification response: {verify_settings}")
                         else:

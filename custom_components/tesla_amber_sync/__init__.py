@@ -1528,7 +1528,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     non_export = verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
-                                if verified_rule != "never":
+                                if verified_rule is None:
+                                    # API doesn't return this field - can't verify but not a failure
+                                    _LOGGER.info(f"ℹ️ Cannot verify curtailment (API returns None for export_rule) - operation reported success")
+                                elif verified_rule != "never":
                                     _LOGGER.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
@@ -1588,7 +1591,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     non_export = verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
-                                if verified_rule != "battery_ok":
+                                if verified_rule is None:
+                                    # API doesn't return this field - can't verify but not a failure
+                                    _LOGGER.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success")
+                                elif verified_rule != "battery_ok":
                                     _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
@@ -1753,7 +1759,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     non_export = verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
-                                if verified_rule != "never":
+                                if verified_rule is None:
+                                    # API doesn't return this field - can't verify but not a failure
+                                    _LOGGER.info(f"ℹ️ Cannot verify curtailment (API returns None for export_rule) - operation reported success")
+                                elif verified_rule != "never":
                                     _LOGGER.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
@@ -1812,7 +1821,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     non_export = verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
-                                if verified_rule != "battery_ok":
+                                if verified_rule is None:
+                                    # API doesn't return this field - can't verify but not a failure
+                                    _LOGGER.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success")
+                                elif verified_rule != "battery_ok":
                                     _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
