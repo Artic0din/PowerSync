@@ -1516,7 +1516,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("No perKwh in WebSocket feed-in data")
                 return
 
-            _LOGGER.info(f"Current export price (WebSocket): {feedin_price}c/kWh")
+            # Amber returns feed-in prices as NEGATIVE when you're paid to export
+            # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+            # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+            # So we want to curtail when feedin_price > 0 (user would pay to export)
+            export_earnings = -feedin_price  # Convert to positive = earnings per kWh
+            _LOGGER.info(f"Current feed-in price (WebSocket): {feedin_price}c/kWh (export earnings: {export_earnings:.2f}c/kWh)")
 
             # Get current grid export settings from Tesla
             session = async_get_clientsession(hass)
@@ -1562,14 +1567,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error fetching site_info: {err}")
                 return
 
-            # CURTAILMENT LOGIC: Export price is below 1c/kWh
-            if feedin_price < 1:
-                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c)")
+            # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
+            # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
+            if export_earnings < 1:
+                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
                 # If already curtailed, no action needed (we track state via cache)
                 if current_export_rule == "never":
                     _LOGGER.info(f"✅ Already curtailed (export='never') - no action needed")
-                    _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
+                    _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
                     # Not already 'never', so apply curtailment
                     _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
@@ -1587,15 +1593,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
                         await update_cached_export_rule("never")
-                        _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
+                        _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error applying curtailment: {err}")
                         return
 
-            # NORMAL MODE: Export price is positive
+            # NORMAL MODE: Export earnings >= 1c/kWh (worth exporting)
             else:
-                _LOGGER.info(f"✅ NORMAL OPERATION: Export price is {feedin_price}c/kWh (>0)")
+                _LOGGER.info(f"✅ NORMAL OPERATION: Export earnings {export_earnings:.2f}c/kWh (>=1c)")
 
                 if current_export_rule == "never":
                     _LOGGER.info(f"🔄 RESTORING FROM CURTAILMENT: 'never' → 'battery_ok'")
@@ -1613,14 +1619,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
                         await update_cached_export_rule("battery_ok")
-                        _LOGGER.info(f"📊 Action summary: Restored to normal (price: {feedin_price}c/kWh, export: 'battery_ok')")
+                        _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error restoring from curtailment: {err}")
                         return
                 else:
                     _LOGGER.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed")
-                    _LOGGER.info(f"📊 Action summary: No change needed (price: {feedin_price}c/kWh, export: '{current_export_rule}')")
+                    _LOGGER.info(f"📊 Action summary: No change needed (earnings: {export_earnings:.2f}c/kWh, export: '{current_export_rule}')")
 
         except Exception as e:
             _LOGGER.error(f"❌ Unexpected error in solar curtailment check: {e}", exc_info=True)
