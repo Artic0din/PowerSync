@@ -59,7 +59,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - 🔋 **Automatic TOU Tariff Sync** - Updates Tesla Powerwall with Amber Electric pricing every 5 minutes
 - 📊 **Real-time Pricing Dashboard** - Monitor current and historical electricity prices with live updates
 - ⚡ **Near Real-Time Energy Monitoring** - Energy usage charts update every 30 seconds
-- 🌏 **Timezone Support** - Configure your local timezone for accurate time display across all Australian states
+- 🌏 **Timezone Support** - Auto-detects timezone from Amber data for accurate time display across all Australian states
 
 ### Advanced Features
 - ⚡ **AEMO Spike Detection** - Automatically monitors Australian wholesale electricity prices and switches to spike tariff during extreme price events (configurable threshold). Includes intelligent operation mode switching - automatically saves your current Powerwall mode and switches to autonomous (TOU) mode during spikes, then restores your original mode when prices normalize
@@ -686,12 +686,7 @@ After logging in, go to the Settings page:
    - Enter your Tesla energy site ID
    - Save settings
 
-5. **Configure Timezone** (Optional)
-   - Select your Australian timezone from the dropdown
-   - All charts and timestamps will use your selected timezone
-   - Defaults to Brisbane (AEST/AEDT)
-
-6. **Verify Connection**
+4. **Verify Connection**
    - Check API status indicators turn green
    - View current prices and battery status
 
@@ -717,7 +712,6 @@ The app automatically:
 - **Energy Usage**: Near real-time charts (30-second updates) with enhanced hover tooltips
 - **Price History**: 24-hour price chart with timezone-adjusted timestamps
 - **TOU Schedule**: Upcoming 24-hour tariff plan (auto-refreshes every 30 minutes)
-- **Timezone Configuration**: Set your local timezone for accurate time display across all charts
 
 ## Architecture
 
