@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tesla Sync is a Flask web application that synchronizes Tesla Powerwall energy data with dynamic electricity pricing APIs (like Amber Electric). Users authenticate via a web interface, securely store their Tesla and pricing API credentials, and enable automated integration between the services.
+Tesla Sync is a Flask web application and Home Assistant integration that synchronizes Tesla Powerwall energy management with dynamic electricity pricing (Amber Electric). It automatically updates Tesla's Time-of-Use tariffs based on real-time prices, enables AEMO spike detection for VPP participation, and provides solar curtailment during negative pricing periods.
 
 ## Architecture
 
@@ -12,137 +12,142 @@ Tesla Sync is a Flask web application that synchronizes Tesla Powerwall energy d
 The app uses Flask's application factory pattern in `app/__init__.py`:
 - `create_app()` initializes Flask extensions (SQLAlchemy, Flask-Migrate, Flask-Login)
 - Database, migrations, and login manager are initialized separately and bound to the app instance
-- The main blueprint is registered from `app/routes.py`
+- Blueprints registered: `main` (routes), `custom_tou` (custom TOU schedules)
 
 ### Database & Models
 - **ORM**: SQLAlchemy with Flask-SQLAlchemy
-- **Database**: SQLite (`app.db` in project root)
+- **Database**: SQLite (`data/app.db`)
 - **Migrations**: Flask-Migrate (Alembic) in `migrations/` directory
-- **User Model** (`app/models.py`):
-  - Stores user email and password hash
-  - Stores encrypted API tokens (Amber and Tesla) using Fernet encryption
-  - Stores Tesla energy site ID and token expiry
-  - Tracks last update status and time
+- **Key Models** (`app/models.py`):
+  - `User` - User accounts with encrypted API credentials
+  - `PriceRecord` - Historical price data
+  - `CustomTOUSchedule`, `TOUSeason`, `TOUPeriod` - Custom TOU schedules
 
 ### Authentication & Security
 - Flask-Login handles user sessions
-- Passwords are hashed using Werkzeug's `generate_password_hash` and `check_password_hash`
-- API tokens are encrypted at rest using Fernet symmetric encryption
-- Encryption key is stored in `.env` file as `FERNET_ENCRYPTION_KEY`
-- Encryption/decryption utilities are in `app/utils.py`
+- Passwords hashed using Werkzeug
+- API tokens encrypted at rest using Fernet symmetric encryption
+- Encryption key auto-generated on first run, stored in `data/.fernet_key`
+- Encryption/decryption utilities in `app/utils.py`
 
-### Routes & Views
-All routes are in `app/routes.py` as a Blueprint named 'main':
-- Public: `/`, `/login`, `/register`
-- Protected: `/dashboard` (requires authentication)
-- Tesla OAuth: `/tesla/connect`, `/tesla/callback`
+### Tesla API Integration
+The app supports two Tesla API methods (`app/api_clients.py`):
 
-**Note**: `app/routes.py` contains duplicate code sections (the same routes are repeated multiple times). This should be cleaned up by removing duplicates.
+1. **Teslemetry** (Recommended)
+   - Simple API key authentication
+   - ~$3/month proxy service
+   - `TeslemetryAPIClient` class
 
-### Forms
-WTForms with Flask-WTF (`app/forms.py`):
-- `LoginForm`: Email/password with remember me
-- `RegistrationForm`: Email/password with confirmation, validates unique email
-- `SettingsForm`: Amber token and Tesla site ID input
+2. **Tesla Fleet API** (Free)
+   - Direct OAuth with Tesla
+   - Requires developer app registration
+   - `FleetAPIClient` class
 
-### Templates
-Jinja2 templates in `app/templates/`:
-- `base.html`: Base template with common layout
-- `index.html`, `login.html`, `register.html`, `dashboard.html`
+**Client Selection:**
+- `get_tesla_client()` returns appropriate client based on user config
+- Tries Fleet API first (if configured), falls back to Teslemetry
+
+### Key Components
+```
+app/
+├── __init__.py          # App factory, extensions
+├── models.py            # User, PriceRecord, CustomTOU models
+├── routes.py            # Main blueprint routes
+├── custom_tou_routes.py # Custom TOU blueprint
+├── api_clients.py       # Amber, Tesla (Fleet + Teslemetry) clients
+├── utils.py             # Encryption, key generation
+├── scheduler.py         # Background TOU sync (APScheduler)
+├── tariff_converter.py  # Amber → Tesla format conversion
+├── tasks.py             # Background tasks (sync, curtailment, spikes)
+└── templates/           # Jinja2 templates
+
+custom_components/tesla_amber_sync/  # Home Assistant integration
+├── __init__.py          # HA setup, services
+├── coordinator.py       # Data coordinator
+├── sensor.py            # HA sensor entities
+├── switch.py            # Auto-sync switch
+├── websocket_client.py  # Amber WebSocket client
+└── manifest.json        # HA integration manifest
+```
 
 ## Development Commands
 
 ### Setup
 ```bash
-# Create virtual environment
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Set up environment variables
-# Edit .env with your SECRET_KEY, FERNET_ENCRYPTION_KEY, Tesla credentials
+cp .env.example .env
+# Edit .env with SECRET_KEY (encryption key auto-generated)
 ```
 
 ### Database
 ```bash
-# Initialize migrations (if starting fresh)
-flask db init
-
-# Create a migration
-flask db migrate -m "Description of changes"
-
-# Apply migrations
-flask db upgrade
-
-# Rollback migration
-flask db downgrade
+flask db migrate -m "Description"  # Create migration
+flask db upgrade                   # Apply migrations
+flask db downgrade                 # Rollback
 ```
 
-### Running the Application
+### Running
 ```bash
-# Development server
+# Development
 flask run
-# Or
-python run.py
 
-# With specific host/port
-flask run --host=0.0.0.0 --port=5000
-
-# Production (using gunicorn)
-gunicorn -w 4 -b 0.0.0.0:8000 run:app
+# Production
+gunicorn -w 4 -b 0.0.0.0:5001 run:app
 ```
 
 ### Flask Shell
 ```bash
 flask shell
-# Shell context includes: db, User
+# Available: db, User, PriceRecord
 ```
 
 ## Environment Variables
 
-Required in `.env`:
-- `SECRET_KEY`: Flask session secret
-- `FERNET_ENCRYPTION_KEY`: Fernet key for token encryption (generate with `Fernet.generate_key().decode()`)
-- `TESLA_CLIENT_ID`: Tesla OAuth client ID
-- `TESLA_CLIENT_SECRET`: Tesla OAuth client secret
-- `TESLA_REDIRECT_URI`: Tesla OAuth callback URL (e.g., `http://localhost:5000/tesla/callback`)
+**Required:**
+- `SECRET_KEY` - Flask session secret
 
-## Key Implementation Details
+**Auto-generated:**
+- `FERNET_ENCRYPTION_KEY` - Created on first run, saved to `data/.fernet_key`
 
-### Token Encryption Flow
-1. User enters API tokens via `SettingsForm` in dashboard
-2. `encrypt_token()` in `app/utils.py` encrypts plaintext tokens using Fernet
-3. Encrypted bytes are stored in database (`LargeBinary` columns)
-4. `decrypt_token()` retrieves plaintext when needed for API calls
+**Optional (can configure via web UI instead):**
+- `TESLA_CLIENT_ID` - Tesla Fleet OAuth client ID
+- `TESLA_CLIENT_SECRET` - Tesla Fleet OAuth client secret
+- `TESLA_REDIRECT_URI` - Tesla OAuth callback URL
+- `APP_DOMAIN` - Application domain for OAuth
 
-### Tesla Authentication
+## Key Features
 
-The app uses **Teslemetry** as the only Tesla API authentication method:
+### TOU Sync
+- Fetches Amber prices every 5 minutes
+- Converts to Tesla TOU format via `tariff_converter.py`
+- Uploads to Powerwall via Tesla API
+- Smart deduplication prevents duplicate uploads
 
-**Setup Flow:**
-1. User signs up at teslemetry.com
-2. User enters Teslemetry API key via settings form
-3. API key encrypted and stored in database
+### AEMO Spike Detection
+- Monitors AEMO wholesale prices for configured region
+- When price exceeds threshold, uploads spike tariff to encourage export
+- Saves/restores original tariff and operation mode
+- 1-minute check interval
 
-**Routes:**
-- `POST /teslemetry/disconnect` - Clear Teslemetry API key
+### Solar Curtailment
+- Monitors feed-in prices every minute
+- Sets export rule to "never" during negative prices (≤0c/kWh)
+- Restores to "battery_ok" when prices return positive
+- Includes workaround for Tesla API bug (toggle to force apply)
 
-**Client:**
-The `get_tesla_client()` function returns a TeslemetryAPIClient if configured:
-```python
-# Returns TeslemetryAPIClient if API key exists
-# Returns None if not configured
-```
+## Home Assistant Integration
 
-### Login Flow
-- `login.login_view` is set to `'main.login'` in `app/__init__.py`
-- `@login_required` decorator redirects unauthenticated users
-- User loader function in `app/models.py` retrieves user by ID for Flask-Login
+Located in `custom_components/tesla_amber_sync/`:
+- Uses Amber WebSocket for real-time price updates
+- Supports both Teslemetry and Tesla Fleet API
+- Creates sensors for prices, energy flow, battery status
+- Auto-sync switch for TOU schedule updates
 
 ## Important Notes
 
-- The `app/routes.py` file has significant code duplication - the same routes and Tesla integration code are repeated multiple times. Clean this up before adding new features.
-- API tokens are encrypted using Fernet symmetric encryption. Keep `FERNET_ENCRYPTION_KEY` secure and never commit it to version control.
-- Database uses SQLite for simplicity. For production, consider PostgreSQL (DATABASE_URL is referenced in `.env` but not currently used).
+- Database and encryption key stored in `data/` directory
+- Always backup both `data/app.db` AND `data/.fernet_key` together
+- Tesla API credentials can be configured via web UI or environment variables
+- Docker images: `bolagnaise/tesla-sync` on Docker Hub

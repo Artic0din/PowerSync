@@ -14,6 +14,10 @@
   [![Build Status](https://github.com/bolagnaise/tesla-sync/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/bolagnaise/tesla-sync/actions)
 </div>
 
+## Disclaimer
+
+This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc. or Amber Electric. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
+
 ## Screenshots
 
 <div align="center">
