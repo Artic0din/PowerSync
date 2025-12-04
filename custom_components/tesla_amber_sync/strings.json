@@ -30,7 +30,7 @@
       },
       "tesla_provider": {
         "title": "Choose Tesla API Provider",
-        "description": "{fleet_detected}\n\nSelect how you want to access your Tesla Powerwall. Tesla Fleet API is free but requires the Tesla Fleet integration to be installed. Teslemetry is a paid proxy service (~$3/month) that's easier to set up.",
+        "description": "{fleet_detected}\n\nSelect how you want to access your Tesla Powerwall. Tesla Fleet API is free but requires the Tesla Fleet integration to be installed. Teslemetry is a paid proxy service (~$4/month) that's easier to set up.",
         "data": {
           "tesla_api_provider": "Tesla API Provider"
         }

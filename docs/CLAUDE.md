@@ -35,7 +35,7 @@ The app supports two Tesla API methods (`app/api_clients.py`):
 
 1. **Teslemetry** (Recommended)
    - Simple API key authentication
-   - ~$3/month proxy service
+   - ~$4/month proxy service
    - `TeslemetryAPIClient` class
 
 2. **Tesla Fleet API** (Free)

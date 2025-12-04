@@ -207,14 +207,14 @@ The easiest way to use Tesla Sync if you're already running Home Assistant.
 - HACS (Home Assistant Community Store) installed
 - Amber Electric account with API token (https://app.amber.com.au/developers)
 - **Tesla API access (choose one):**
-  - **Option 1 (Recommended):** Teslemetry account with API token (https://teslemetry.com) - ~$3/month
+  - **Option 1 (Recommended):** Teslemetry account with API token (https://teslemetry.com) - ~$4/month
   - **Option 2 (Free alternative):** Tesla Fleet API (direct OAuth with Tesla) - Completely free
 
 ### Tesla API Options
 
 Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose whichever works best for you.
 
-#### Option 1: Teslemetry (Recommended - ~$3/month)
+#### Option 1: Teslemetry (Recommended - ~$4/month)
 
 **Pros:**
 - ✅ Simple API key authentication
@@ -612,7 +612,7 @@ Teslemetry is a third-party proxy service for Tesla API.
 - ✅ Works with localhost
 - ✅ Configurable via web GUI
 - ✅ Reliable and well-maintained
-- ✅ ~$3/month (reasonable for convenience)
+- ✅ ~$4/month (reasonable for convenience)
 
 **Setup:**
 1. Sign up at https://teslemetry.com

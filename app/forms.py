@@ -28,7 +28,7 @@ class SettingsForm(FlaskForm):
 
     # Tesla API Provider Selection
     tesla_api_provider = SelectField('Tesla API Provider', choices=[
-        ('teslemetry', 'Teslemetry (Easier Setup, ~$3/month)'),
+        ('teslemetry', 'Teslemetry (Easier Setup, ~$4/month)'),
         ('fleet_api', 'Tesla Fleet API (Direct, Free)')
     ], default='teslemetry',
     description='Choose between Teslemetry proxy service (easier) or direct Tesla Fleet API (free but complex setup)')

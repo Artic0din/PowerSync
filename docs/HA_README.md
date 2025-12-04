@@ -24,7 +24,7 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 1. **Home Assistant** (version 2024.8.0 or newer)
 2. **Amber Electric Account** with API token from [Amber Developer Portal](https://app.amber.com.au/developers)
 3. **Tesla API Access** (choose one):
-   - **Teslemetry** (~$3/month) - Simple API key, recommended
+   - **Teslemetry** (~$4/month) - Simple API key, recommended
    - **Tesla Fleet** (free) - Requires Tesla Fleet integration configured in HA
 
 ## Installation
@@ -56,7 +56,7 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 
 | Option | Setup | Cost |
 |--------|-------|------|
-| **Teslemetry** | Enter API key during setup | ~$3/month |
+| **Teslemetry** | Enter API key during setup | ~$4/month |
 | **Tesla Fleet** | Install Tesla Fleet integration first, leave Teslemetry blank | Free |
 
 ## Entities
