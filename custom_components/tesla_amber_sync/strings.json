@@ -93,6 +93,7 @@
           "demand_charge_days": "Demand Charge Days",
           "demand_charge_billing_day": "Billing Cycle Reset Day",
           "demand_charge_apply_to": "Apply Demand Charge To",
+          "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)",
           "aemo_spike_enabled": "Enable AEMO Spike Detection",

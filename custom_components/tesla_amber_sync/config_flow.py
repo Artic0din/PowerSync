@@ -30,6 +30,7 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DEMAND_ARTIFICIAL_PRICE,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_TESLA_API_PROVIDER,
@@ -571,6 +572,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_DEMAND_CHARGE_DAYS: user_input[CONF_DEMAND_CHARGE_DAYS],
                     CONF_DEMAND_CHARGE_BILLING_DAY: user_input[CONF_DEMAND_CHARGE_BILLING_DAY],
                     CONF_DEMAND_CHARGE_APPLY_TO: user_input[CONF_DEMAND_CHARGE_APPLY_TO],
+                    CONF_DEMAND_ARTIFICIAL_PRICE: user_input.get(CONF_DEMAND_ARTIFICIAL_PRICE, False),
                 })
             else:
                 data[CONF_DEMAND_CHARGE_ENABLED] = False
@@ -601,6 +603,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_DEMAND_CHARGE_APPLY_TO, default="Buy Only"): vol.In(
                     ["Buy Only", "Sell Only", "Both"]
                 ),
+                vol.Optional(CONF_DEMAND_ARTIFICIAL_PRICE, default=False): bool,
                 vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
                 vol.Optional(CONF_MONTHLY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
             }
@@ -737,6 +740,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_DEMAND_CHARGE_APPLY_TO,
             self.config_entry.data.get(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only")
         )
+        current_artificial_price = self.config_entry.options.get(
+            CONF_DEMAND_ARTIFICIAL_PRICE,
+            self.config_entry.data.get(CONF_DEMAND_ARTIFICIAL_PRICE, False)
+        )
         current_solar_curtailment = self.config_entry.options.get(
             CONF_SOLAR_CURTAILMENT_ENABLED,
             self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
@@ -816,6 +823,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_DEMAND_CHARGE_APPLY_TO,
                         default=current_apply_to,
                     ): vol.In(["Buy Only", "Sell Only", "Both"]),
+                    vol.Optional(
+                        CONF_DEMAND_ARTIFICIAL_PRICE,
+                        default=current_artificial_price,
+                    ): bool,
                     vol.Optional(
                         CONF_DAILY_SUPPLY_CHARGE,
                         default=current_daily_supply_charge,

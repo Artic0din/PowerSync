@@ -434,6 +434,48 @@ class AmberTariffConverter:
             if feedin_prices[key] is None:
                 feedin_prices[key] = 0
 
+        # Apply artificial price increase during demand periods if enabled (ALPHA feature)
+        if user and getattr(user, 'demand_artificial_price_enabled', False) and getattr(user, 'enable_demand_charges', False):
+            artificial_increase = 2.0  # $2/kWh increase during demand periods
+            periods_modified = 0
+
+            # Check if today is a valid day for demand charges
+            weekday = now.weekday()  # 0=Monday, 6=Sunday
+            peak_days = getattr(user, 'peak_days', 'weekdays') or 'weekdays'
+
+            day_is_valid = True
+            if peak_days == 'weekdays' and weekday >= 5:  # Saturday or Sunday
+                day_is_valid = False
+            elif peak_days == 'weekends' and weekday < 5:  # Monday-Friday
+                day_is_valid = False
+            # 'all' matches any day
+
+            if day_is_valid:
+                for period_key in general_prices.keys():
+                    # Extract hour/minute from PERIOD_HH_MM
+                    parts = period_key.split('_')
+                    hour = int(parts[1])
+                    minute = int(parts[2])
+
+                    # Check if this period is in the demand peak window
+                    peak_start_hour = getattr(user, 'peak_start_hour', 14)
+                    peak_start_minute = getattr(user, 'peak_start_minute', 0)
+                    peak_end_hour = getattr(user, 'peak_end_hour', 20)
+                    peak_end_minute = getattr(user, 'peak_end_minute', 0)
+
+                    if self._is_in_time_range(hour, minute,
+                                               peak_start_hour, peak_start_minute,
+                                               peak_end_hour, peak_end_minute):
+                        original_price = general_prices[period_key]
+                        general_prices[period_key] = original_price + artificial_increase
+                        periods_modified += 1
+                        logger.debug(f"{period_key}: Artificial price increase applied: ${original_price:.4f} -> ${general_prices[period_key]:.4f} (+${artificial_increase})")
+
+                if periods_modified > 0:
+                    logger.info(f"🔺 ALPHA: Artificial price increase (+${artificial_increase}/kWh) applied to {periods_modified} demand periods")
+            else:
+                logger.debug(f"Artificial price increase skipped - today ({weekday}) not in peak_days ({peak_days})")
+
         logger.info(f"Rolling 24h window: {len([k for k in general_prices.keys()])} periods from {today} and {tomorrow}")
 
         # Validate Tesla TOU restrictions before returning

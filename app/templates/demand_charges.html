@@ -142,6 +142,20 @@
                         {{ form.offpeak_rate(placeholder="0.0000") }}
                     </label>
                 </fieldset>
+
+                <!-- Artificial Price Increase (ALPHA) -->
+                <fieldset style="margin-top: 1em; padding: 1em; background: rgba(255, 165, 0, 0.1); border-radius: 0.5em; border: 2px dashed rgba(255, 165, 0, 0.5);">
+                    <legend><strong>Experimental Feature (ALPHA)</strong></legend>
+
+                    <label for="demand_artificial_price_enabled">
+                        <input type="checkbox" id="demand_artificial_price_enabled" name="demand_artificial_price_enabled"
+                               {% if form.demand_artificial_price_enabled.data %}checked{% endif %}>
+                        {{ form.demand_artificial_price_enabled.label.text }}
+                    </label>
+                    <p style="font-size: 0.85em; margin-top: 0.5em; color: #666;">
+                        {{ form.demand_artificial_price_enabled.description }}
+                    </p>
+                </fieldset>
             </div>
 
             <!-- Daily Supply Charges (Optional) - Always visible -->

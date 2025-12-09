@@ -108,6 +108,12 @@ class DemandChargeForm(FlaskForm):
         description='Monthly account fee (e.g., $25 for Amber subscription, or other monthly charges from your provider)'
     )
 
+    demand_artificial_price_enabled = BooleanField(
+        'Artificial Price Increase (ALPHA)',
+        default=False,
+        description='When enabled, adds $2/kWh to import prices during your configured demand periods. This discourages the Powerwall from importing grid energy during peak times, helping reduce demand charges. This is an experimental feature.'
+    )
+
     submit = SubmitField('Save Demand Charges')
 
 

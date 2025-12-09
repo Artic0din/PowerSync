@@ -37,7 +37,9 @@
           "demand_charge_start_time": "Demand Period Start Time (HH:MM:SS)",
           "demand_charge_end_time": "Demand Period End Time (HH:MM:SS)",
           "demand_charge_days": "Active Days",
-          "demand_charge_billing_day": "Billing Cycle Day (1-28)"
+          "demand_charge_billing_day": "Billing Cycle Day (1-28)",
+          "demand_charge_apply_to": "Apply Demand Charge To",
+          "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)"
         }
       }
     },

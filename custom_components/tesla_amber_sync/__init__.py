@@ -30,6 +30,7 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DEMAND_ARTIFICIAL_PRICE,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_SOLAR_CURTAILMENT_ENABLED,
@@ -1310,6 +1311,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_DEMAND_CHARGE_APPLY_TO,
             entry.data.get(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only")
         )
+        demand_charge_days = entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days")
+        )
+        demand_artificial_price_enabled = entry.options.get(
+            CONF_DEMAND_ARTIFICIAL_PRICE,
+            entry.data.get(CONF_DEMAND_ARTIFICIAL_PRICE, False)
+        )
 
         if demand_charge_enabled:
             _LOGGER.info(
@@ -1332,6 +1341,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             demand_charge_start_time=demand_charge_start_time,
             demand_charge_end_time=demand_charge_end_time,
             demand_charge_apply_to=demand_charge_apply_to,
+            demand_charge_days=demand_charge_days,
+            demand_artificial_price_enabled=demand_artificial_price_enabled,
         )
 
         if not tariff:

@@ -67,6 +67,9 @@ class User(UserMixin, db.Model):
     # Demand Period Grid Charging State
     grid_charging_disabled_for_demand = db.Column(db.Boolean, default=False)  # True when grid charging disabled during peak
 
+    # Demand Period Artificial Price Increase (ALPHA)
+    demand_artificial_price_enabled = db.Column(db.Boolean, default=False)  # Add $2/kWh to import prices during demand periods
+
     # AEMO Spike Detection Configuration
     aemo_region = db.Column(db.String(10))  # NEM region: NSW1, QLD1, VIC1, SA1, TAS1
     aemo_spike_threshold = db.Column(db.Float, default=300.0)  # Spike threshold in $/MWh

@@ -222,6 +222,8 @@ def convert_amber_to_tesla_tariff(
     demand_charge_start_time: str = "14:00",
     demand_charge_end_time: str = "20:00",
     demand_charge_apply_to: str = "Buy Only",
+    demand_charge_days: str = "All Days",
+    demand_artificial_price_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -431,6 +433,66 @@ def convert_amber_to_tesla_tariff(
         )
         _LOGGER.info("Demand charges enabled: %d peak periods configured",
                      sum(1 for rate in demand_charge_rates.values() if rate > 0))
+
+    # Apply artificial price increase during demand periods if enabled (ALPHA feature)
+    if demand_artificial_price_enabled and demand_charge_enabled:
+        from datetime import datetime
+        artificial_increase = 2.0  # $2/kWh increase during demand periods
+        periods_modified = 0
+
+        # Check if today is a valid day for demand charges
+        weekday = datetime.now().weekday()  # 0=Monday, 6=Sunday
+
+        day_is_valid = True
+        if demand_charge_days == "Weekdays Only" and weekday >= 5:  # Saturday or Sunday
+            day_is_valid = False
+        elif demand_charge_days == "Weekends Only" and weekday < 5:  # Monday-Friday
+            day_is_valid = False
+        # "All Days" matches any day
+
+        if day_is_valid:
+            # Parse demand period times
+            start_parts = demand_charge_start_time.split(":")
+            start_hour, start_minute = int(start_parts[0]), int(start_parts[1]) if len(start_parts) > 1 else 0
+            end_parts = demand_charge_end_time.split(":")
+            end_hour, end_minute = int(end_parts[0]), int(end_parts[1]) if len(end_parts) > 1 else 0
+
+            for period_key in general_prices.keys():
+                # Extract hour/minute from PERIOD_HH_MM
+                parts = period_key.split("_")
+                hour = int(parts[1])
+                minute = int(parts[2])
+
+                # Check if this period is in the demand peak window
+                time_minutes = hour * 60 + minute
+                start_minutes = start_hour * 60 + start_minute
+                end_minutes = end_hour * 60 + end_minute
+
+                # Handle overnight periods
+                if end_minutes <= start_minutes:
+                    in_peak = time_minutes >= start_minutes or time_minutes < end_minutes
+                else:
+                    in_peak = start_minutes <= time_minutes < end_minutes
+
+                if in_peak:
+                    original_price = general_prices[period_key]
+                    general_prices[period_key] = original_price + artificial_increase
+                    periods_modified += 1
+                    _LOGGER.debug(
+                        "%s: Artificial price increase applied: $%.4f -> $%.4f (+$%.2f)",
+                        period_key, original_price, general_prices[period_key], artificial_increase
+                    )
+
+            if periods_modified > 0:
+                _LOGGER.info(
+                    "🔺 ALPHA: Artificial price increase (+$%.2f/kWh) applied to %d demand periods",
+                    artificial_increase, periods_modified
+                )
+        else:
+            _LOGGER.debug(
+                "Artificial price increase skipped - today (%d) not in demand_charge_days (%s)",
+                weekday, demand_charge_days
+            )
 
     # Create the Tesla tariff structure
     tariff = _build_tariff_structure(
