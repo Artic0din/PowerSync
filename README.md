@@ -381,6 +381,33 @@ automation:
           entity_id: switch.tesla_amber_sync_auto_sync
 ```
 
+### Pre-built Dashboard (Optional)
+
+A pre-built Lovelace dashboard is included for visualizing all Tesla Amber Sync data.
+
+**Required HACS Frontend Cards:**
+- `power-flow-card-plus` - Real-time energy flow visualization
+- `apexcharts-card` - Advanced charting for price/energy history
+
+**Installation:**
+1. Install the required HACS cards (HACS → Frontend → search for each card)
+2. Copy the dashboard YAML from `custom_components/tesla_amber_sync/dashboard/tesla_amber_sync_dashboard.yaml`
+3. In Home Assistant: Settings → Dashboards → Add Dashboard → "New dashboard from scratch"
+4. Edit the new dashboard → 3 dots menu → "Raw configuration editor"
+5. Paste the YAML content and save
+
+**Dashboard Features:**
+- Current price gauge with color-coded severity
+- Battery level gauge
+- Power flow visualization (solar → battery → grid → home)
+- 24-hour price history chart
+- Energy usage charts (solar, grid, battery, home load)
+- Demand charge monitoring section
+- AEMO wholesale price monitoring section
+
+**Customization:**
+If your entity prefix differs from `tesla_amber_sync`, use find/replace to change `sensor.tesla_amber_sync_` to your actual prefix.
+
 ### Troubleshooting
 
 - **No sensors appearing**: Check that the integration is enabled in Settings → Devices & Services

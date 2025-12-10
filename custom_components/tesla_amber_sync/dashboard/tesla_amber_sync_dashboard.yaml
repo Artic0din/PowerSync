@@ -1,0 +1,487 @@
+# ============================================================================
+# Tesla Amber Sync Dashboard for Home Assistant
+# ============================================================================
+#
+# INSTALLATION:
+# 1. Install required HACS cards (via HACS → Frontend):
+#    - power-flow-card-plus (https://github.com/flixlix/power-flow-card-plus)
+#    - apexcharts-card (https://github.com/RomRider/apexcharts-card)
+#
+# 2. Create new dashboard in Home Assistant:
+#    Settings → Dashboards → Add Dashboard → "New dashboard from scratch"
+#    Give it a name like "Tesla Amber Sync"
+#
+# 3. Open the new dashboard, click the 3 dots menu → "Edit dashboard"
+#    Then click 3 dots again → "Raw configuration editor"
+#    Delete all content and paste this entire file
+#
+# CUSTOMIZATION:
+# - If your entity prefix differs from 'tesla_amber_sync',
+#   use find/replace to change 'sensor.tesla_amber_sync_' to your prefix
+# - Remove demand charge or AEMO sections if not using those features
+# - Adjust thresholds and colors to match your preferences
+#
+# ============================================================================
+
+title: Tesla Amber Sync
+views:
+  - title: Energy Dashboard
+    path: energy
+    icon: mdi:lightning-bolt
+    cards:
+      # ========================================
+      # HEADER - Current Price & Status
+      # ========================================
+      - type: horizontal-stack
+        cards:
+          # Current Price Gauge
+          - type: gauge
+            entity: sensor.tesla_amber_sync_current_electricity_price
+            name: Current Price
+            unit: $/kWh
+            min: 0
+            max: 1
+            needle: true
+            severity:
+              green: 0
+              yellow: 0.20
+              red: 0.35
+
+          # Battery Level Gauge
+          - type: gauge
+            entity: sensor.tesla_amber_sync_battery_level
+            name: Battery
+            unit: "%"
+            min: 0
+            max: 100
+            needle: true
+            severity:
+              red: 0
+              yellow: 30
+              green: 60
+
+      # AEMO Spike Alert Banner (shows only when spike active)
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.tesla_amber_sync_aemo_spike_status
+            state: "Spike Active"
+        card:
+          type: markdown
+          content: >-
+            ## ⚡ PRICE SPIKE ACTIVE
+
+            AEMO wholesale price is above threshold. Powerwall configured for maximum export.
+          style: |
+            ha-card {
+              background-color: #F44336;
+              color: white;
+              text-align: center;
+            }
+
+      # ========================================
+      # POWER FLOW VISUALIZATION
+      # ========================================
+      - type: custom:power-flow-card-plus
+        entities:
+          battery:
+            entity: sensor.tesla_amber_sync_battery_power
+            state_of_charge: sensor.tesla_amber_sync_battery_level
+            name: Battery
+            color_icon: true
+            display_state: two_way
+            invert_state: false
+          grid:
+            entity: sensor.tesla_amber_sync_grid_power
+            name: Grid
+            color_icon: true
+            display_state: two_way
+          solar:
+            entity: sensor.tesla_amber_sync_solar_power
+            name: Solar
+            color_icon: true
+            display_state: one_way
+          home:
+            entity: sensor.tesla_amber_sync_home_load
+            name: Home
+            color_icon: true
+        watt_threshold: 0
+        kw_decimals: 2
+        min_flow_rate: 0.75
+        max_flow_rate: 6
+        display_zero_lines: false
+        clickable_entities: true
+        use_new_flow_rate_model: true
+
+      # ========================================
+      # REAL-TIME POWER READINGS
+      # ========================================
+      - type: horizontal-stack
+        cards:
+          - type: entity
+            entity: sensor.tesla_amber_sync_solar_power
+            name: Solar
+            icon: mdi:solar-power
+            style: |
+              :host {
+                --paper-item-icon-color: #FFD700;
+              }
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_battery_power
+            name: Battery
+            icon: mdi:battery-charging
+            style: |
+              :host {
+                --paper-item-icon-color: #2196F3;
+              }
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_grid_power
+            name: Grid
+            icon: mdi:transmission-tower
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_home_load
+            name: Home
+            icon: mdi:home-lightning-bolt
+            style: |
+              :host {
+                --paper-item-icon-color: #9C27B0;
+              }
+
+      # ========================================
+      # PRICE HISTORY CHART (24 hours)
+      # ========================================
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Electricity Price - Last 24 Hours
+          show_states: true
+          colorize_states: true
+        graph_span: 24h
+        span:
+          end: now
+        yaxis:
+          - id: price
+            min: 0
+            apex_config:
+              tickAmount: 5
+              labels:
+                formatter: |
+                  EVAL:function(val) {
+                    return (val * 100).toFixed(0) + '¢';
+                  }
+        series:
+          - entity: sensor.tesla_amber_sync_current_electricity_price
+            name: Price
+            type: area
+            color: "#FF9800"
+            yaxis_id: price
+            stroke_width: 2
+            fill_raw: last
+            group_by:
+              func: avg
+              duration: 5min
+            show:
+              legend_value: true
+              in_header: true
+        apex_config:
+          chart:
+            height: 200
+          fill:
+            type: gradient
+            gradient:
+              shadeIntensity: 0.1
+              opacityFrom: 0.7
+              opacityTo: 0.3
+          tooltip:
+            y:
+              formatter: |
+                EVAL:function(val) {
+                  return (val * 100).toFixed(2) + '¢/kWh';
+                }
+
+      # ========================================
+      # ENERGY USAGE CHARTS (2x2 Grid)
+      # ========================================
+      - type: vertical-stack
+        cards:
+          - type: horizontal-stack
+            cards:
+              # Solar Generation Chart
+              - type: custom:apexcharts-card
+                header:
+                  show: true
+                  title: Solar Generation
+                  show_states: true
+                  colorize_states: true
+                graph_span: 12h
+                span:
+                  end: now
+                series:
+                  - entity: sensor.tesla_amber_sync_solar_power
+                    name: Solar
+                    type: area
+                    color: "#FFD700"
+                    stroke_width: 2
+                    fill_raw: last
+                    group_by:
+                      func: avg
+                      duration: 5min
+                apex_config:
+                  chart:
+                    height: 150
+                  yaxis:
+                    min: 0
+                    labels:
+                      formatter: |
+                        EVAL:function(val) {
+                          return val.toFixed(1) + ' kW';
+                        }
+                  fill:
+                    type: gradient
+                    gradient:
+                      shadeIntensity: 0.1
+                      opacityFrom: 0.7
+                      opacityTo: 0.3
+
+              # Grid Power Chart
+              - type: custom:apexcharts-card
+                header:
+                  show: true
+                  title: Grid Power
+                  show_states: true
+                  colorize_states: true
+                graph_span: 12h
+                span:
+                  end: now
+                series:
+                  - entity: sensor.tesla_amber_sync_grid_power
+                    name: Grid
+                    type: area
+                    color: "#F44336"
+                    stroke_width: 2
+                    fill_raw: last
+                    group_by:
+                      func: avg
+                      duration: 5min
+                apex_config:
+                  chart:
+                    height: 150
+                  yaxis:
+                    labels:
+                      formatter: |
+                        EVAL:function(val) {
+                          return val.toFixed(1) + ' kW';
+                        }
+                  fill:
+                    type: gradient
+                    gradient:
+                      shadeIntensity: 0.1
+                      opacityFrom: 0.7
+                      opacityTo: 0.3
+
+          - type: horizontal-stack
+            cards:
+              # Battery Power Chart
+              - type: custom:apexcharts-card
+                header:
+                  show: true
+                  title: Battery Power
+                  show_states: true
+                  colorize_states: true
+                graph_span: 12h
+                span:
+                  end: now
+                series:
+                  - entity: sensor.tesla_amber_sync_battery_power
+                    name: Battery
+                    type: area
+                    color: "#2196F3"
+                    stroke_width: 2
+                    fill_raw: last
+                    group_by:
+                      func: avg
+                      duration: 5min
+                apex_config:
+                  chart:
+                    height: 150
+                  yaxis:
+                    labels:
+                      formatter: |
+                        EVAL:function(val) {
+                          return val.toFixed(1) + ' kW';
+                        }
+                  fill:
+                    type: gradient
+                    gradient:
+                      shadeIntensity: 0.1
+                      opacityFrom: 0.7
+                      opacityTo: 0.3
+
+              # Home Load Chart
+              - type: custom:apexcharts-card
+                header:
+                  show: true
+                  title: Home Load
+                  show_states: true
+                  colorize_states: true
+                graph_span: 12h
+                span:
+                  end: now
+                series:
+                  - entity: sensor.tesla_amber_sync_home_load
+                    name: Home
+                    type: area
+                    color: "#9C27B0"
+                    stroke_width: 2
+                    fill_raw: last
+                    group_by:
+                      func: avg
+                      duration: 5min
+                apex_config:
+                  chart:
+                    height: 150
+                  yaxis:
+                    min: 0
+                    labels:
+                      formatter: |
+                        EVAL:function(val) {
+                          return val.toFixed(1) + ' kW';
+                        }
+                  fill:
+                    type: gradient
+                    gradient:
+                      shadeIntensity: 0.1
+                      opacityFrom: 0.7
+                      opacityTo: 0.3
+
+      # ========================================
+      # DEMAND CHARGE SECTION
+      # (Remove this section if not using demand charges)
+      # ========================================
+      - type: markdown
+        content: "## Demand Charges"
+
+      # Demand Period Alert
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.tesla_amber_sync_in_demand_charge_period
+            state: "True"
+        card:
+          type: markdown
+          content: >-
+            ### ⚠️ IN DEMAND PERIOD
+
+            Grid charging is disabled to minimize peak demand.
+          style: |
+            ha-card {
+              background-color: #FF9800;
+              color: white;
+              text-align: center;
+            }
+
+      - type: horizontal-stack
+        cards:
+          - type: entity
+            entity: sensor.tesla_amber_sync_in_demand_charge_period
+            name: In Demand Period
+            icon: mdi:clock-alert
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_peak_demand_this_cycle
+            name: Peak Demand
+            icon: mdi:chart-bell-curve
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_estimated_demand_charge_cost
+            name: Demand Cost
+            icon: mdi:currency-usd
+
+      - type: horizontal-stack
+        cards:
+          - type: entity
+            entity: sensor.tesla_amber_sync_daily_supply_charge_cost_this_month
+            name: Daily Supply
+            icon: mdi:calendar-month
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_monthly_supply_charge
+            name: Monthly Supply
+            icon: mdi:calendar
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_total_estimated_monthly_cost
+            name: Total Monthly
+            icon: mdi:cash-multiple
+
+      # ========================================
+      # AEMO WHOLESALE MONITORING
+      # (Remove this section if not using AEMO spike detection)
+      # ========================================
+      - type: markdown
+        content: "## AEMO Wholesale Market"
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.tesla_amber_sync_aemo_wholesale_price
+            name: Wholesale Price
+            unit: $/MWh
+            min: 0
+            max: 500
+            needle: true
+            severity:
+              green: 0
+              yellow: 100
+              red: 300
+
+          - type: entity
+            entity: sensor.tesla_amber_sync_aemo_spike_status
+            name: Spike Status
+            icon: mdi:alert-decagram
+
+      # ========================================
+      # ALL SENSORS (Detailed View)
+      # ========================================
+      - type: markdown
+        content: "## All Sensors"
+
+      - type: entities
+        title: Tesla Amber Sync Sensors
+        show_header_toggle: false
+        entities:
+          - entity: sensor.tesla_amber_sync_current_electricity_price
+            name: Current Price
+            icon: mdi:currency-usd
+          - entity: sensor.tesla_amber_sync_solar_power
+            name: Solar Power
+            icon: mdi:solar-power
+          - entity: sensor.tesla_amber_sync_battery_power
+            name: Battery Power
+            icon: mdi:battery-charging
+          - entity: sensor.tesla_amber_sync_battery_level
+            name: Battery Level
+            icon: mdi:battery
+          - entity: sensor.tesla_amber_sync_grid_power
+            name: Grid Power
+            icon: mdi:transmission-tower
+          - entity: sensor.tesla_amber_sync_home_load
+            name: Home Load
+            icon: mdi:home-lightning-bolt
+          - type: divider
+          - entity: sensor.tesla_amber_sync_in_demand_charge_period
+            name: In Demand Period
+          - entity: sensor.tesla_amber_sync_peak_demand_this_cycle
+            name: Peak Demand
+          - entity: sensor.tesla_amber_sync_estimated_demand_charge_cost
+            name: Demand Cost
+          - entity: sensor.tesla_amber_sync_total_estimated_monthly_cost
+            name: Total Monthly Cost
+          - type: divider
+          - entity: sensor.tesla_amber_sync_aemo_wholesale_price
+            name: AEMO Price
+          - entity: sensor.tesla_amber_sync_aemo_spike_status
+            name: AEMO Spike Status
