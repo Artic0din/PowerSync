@@ -406,7 +406,7 @@ A pre-built Lovelace dashboard is included for visualizing all Tesla Amber Sync 
 - AEMO wholesale price monitoring section
 
 **Customization:**
-If your entity prefix differs from `tesla_amber_sync`, use find/replace to change `sensor.tesla_amber_sync_` to your actual prefix.
+If Home Assistant renamed your entities (e.g., added `_2` suffix due to conflicts), adjust the entity IDs in the YAML accordingly.
 
 ### Troubleshooting
 

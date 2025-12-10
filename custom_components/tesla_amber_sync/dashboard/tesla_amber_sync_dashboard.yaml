@@ -15,11 +15,26 @@
 #    Then click 3 dots again → "Raw configuration editor"
 #    Delete all content and paste this entire file
 #
-# CUSTOMIZATION:
-# - If your entity prefix differs from 'tesla_amber_sync',
-#   use find/replace to change 'sensor.tesla_amber_sync_' to your prefix
-# - Remove demand charge or AEMO sections if not using those features
-# - Adjust thresholds and colors to match your preferences
+# ENTITY NAMES:
+# This dashboard uses the default entity names from Tesla Amber Sync.
+# If Home Assistant renamed your entities (e.g., added _2 suffix),
+# you may need to adjust the entity IDs below.
+#
+# Default entity names:
+#   sensor.current_electricity_price
+#   sensor.solar_power
+#   sensor.grid_power
+#   sensor.battery_power
+#   sensor.home_load
+#   sensor.battery_level
+#   sensor.in_demand_charge_period
+#   sensor.peak_demand_this_cycle
+#   sensor.demand_charge_cost_this_month
+#   sensor.daily_supply_charge_cost_this_month
+#   sensor.monthly_supply_charge
+#   sensor.total_estimated_monthly_cost
+#   sensor.aemo_wholesale_price
+#   sensor.aemo_spike_status
 #
 # ============================================================================
 
@@ -36,7 +51,7 @@ views:
         cards:
           # Current Price Gauge
           - type: gauge
-            entity: sensor.tesla_amber_sync_current_electricity_price
+            entity: sensor.current_electricity_price
             name: Current Price
             unit: $/kWh
             min: 0
@@ -49,7 +64,7 @@ views:
 
           # Battery Level Gauge
           - type: gauge
-            entity: sensor.tesla_amber_sync_battery_level
+            entity: sensor.battery_level
             name: Battery
             unit: "%"
             min: 0
@@ -64,7 +79,7 @@ views:
       - type: conditional
         conditions:
           - condition: state
-            entity: sensor.tesla_amber_sync_aemo_spike_status
+            entity: sensor.aemo_spike_status
             state: "Spike Active"
         card:
           type: markdown
@@ -85,24 +100,24 @@ views:
       - type: custom:power-flow-card-plus
         entities:
           battery:
-            entity: sensor.tesla_amber_sync_battery_power
-            state_of_charge: sensor.tesla_amber_sync_battery_level
+            entity: sensor.battery_power
+            state_of_charge: sensor.battery_level
             name: Battery
             color_icon: true
             display_state: two_way
             invert_state: false
           grid:
-            entity: sensor.tesla_amber_sync_grid_power
+            entity: sensor.grid_power
             name: Grid
             color_icon: true
             display_state: two_way
           solar:
-            entity: sensor.tesla_amber_sync_solar_power
+            entity: sensor.solar_power
             name: Solar
             color_icon: true
             display_state: one_way
           home:
-            entity: sensor.tesla_amber_sync_home_load
+            entity: sensor.home_load
             name: Home
             color_icon: true
         watt_threshold: 0
@@ -119,36 +134,24 @@ views:
       - type: horizontal-stack
         cards:
           - type: entity
-            entity: sensor.tesla_amber_sync_solar_power
+            entity: sensor.solar_power
             name: Solar
             icon: mdi:solar-power
-            style: |
-              :host {
-                --paper-item-icon-color: #FFD700;
-              }
 
           - type: entity
-            entity: sensor.tesla_amber_sync_battery_power
+            entity: sensor.battery_power
             name: Battery
             icon: mdi:battery-charging
-            style: |
-              :host {
-                --paper-item-icon-color: #2196F3;
-              }
 
           - type: entity
-            entity: sensor.tesla_amber_sync_grid_power
+            entity: sensor.grid_power
             name: Grid
             icon: mdi:transmission-tower
 
           - type: entity
-            entity: sensor.tesla_amber_sync_home_load
+            entity: sensor.home_load
             name: Home
             icon: mdi:home-lightning-bolt
-            style: |
-              :host {
-                --paper-item-icon-color: #9C27B0;
-              }
 
       # ========================================
       # PRICE HISTORY CHART (24 hours)
@@ -173,7 +176,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.tesla_amber_sync_current_electricity_price
+          - entity: sensor.current_electricity_price
             name: Price
             type: area
             color: "#FF9800"
@@ -220,7 +223,7 @@ views:
                 span:
                   end: now
                 series:
-                  - entity: sensor.tesla_amber_sync_solar_power
+                  - entity: sensor.solar_power
                     name: Solar
                     type: area
                     color: "#FFD700"
@@ -257,7 +260,7 @@ views:
                 span:
                   end: now
                 series:
-                  - entity: sensor.tesla_amber_sync_grid_power
+                  - entity: sensor.grid_power
                     name: Grid
                     type: area
                     color: "#F44336"
@@ -295,7 +298,7 @@ views:
                 span:
                   end: now
                 series:
-                  - entity: sensor.tesla_amber_sync_battery_power
+                  - entity: sensor.battery_power
                     name: Battery
                     type: area
                     color: "#2196F3"
@@ -331,7 +334,7 @@ views:
                 span:
                   end: now
                 series:
-                  - entity: sensor.tesla_amber_sync_home_load
+                  - entity: sensor.home_load
                     name: Home
                     type: area
                     color: "#9C27B0"
@@ -368,7 +371,7 @@ views:
       - type: conditional
         conditions:
           - condition: state
-            entity: sensor.tesla_amber_sync_in_demand_charge_period
+            entity: sensor.in_demand_charge_period
             state: "True"
         card:
           type: markdown
@@ -386,34 +389,34 @@ views:
       - type: horizontal-stack
         cards:
           - type: entity
-            entity: sensor.tesla_amber_sync_in_demand_charge_period
+            entity: sensor.in_demand_charge_period
             name: In Demand Period
             icon: mdi:clock-alert
 
           - type: entity
-            entity: sensor.tesla_amber_sync_peak_demand_this_cycle
+            entity: sensor.peak_demand_this_cycle
             name: Peak Demand
             icon: mdi:chart-bell-curve
 
           - type: entity
-            entity: sensor.tesla_amber_sync_estimated_demand_charge_cost
+            entity: sensor.demand_charge_cost_this_month
             name: Demand Cost
             icon: mdi:currency-usd
 
       - type: horizontal-stack
         cards:
           - type: entity
-            entity: sensor.tesla_amber_sync_daily_supply_charge_cost_this_month
+            entity: sensor.daily_supply_charge_cost_this_month
             name: Daily Supply
             icon: mdi:calendar-month
 
           - type: entity
-            entity: sensor.tesla_amber_sync_monthly_supply_charge
+            entity: sensor.monthly_supply_charge
             name: Monthly Supply
             icon: mdi:calendar
 
           - type: entity
-            entity: sensor.tesla_amber_sync_total_estimated_monthly_cost
+            entity: sensor.total_estimated_monthly_cost
             name: Total Monthly
             icon: mdi:cash-multiple
 
@@ -427,7 +430,7 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.tesla_amber_sync_aemo_wholesale_price
+            entity: sensor.aemo_wholesale_price
             name: Wholesale Price
             unit: $/MWh
             min: 0
@@ -439,7 +442,7 @@ views:
               red: 300
 
           - type: entity
-            entity: sensor.tesla_amber_sync_aemo_spike_status
+            entity: sensor.aemo_spike_status
             name: Spike Status
             icon: mdi:alert-decagram
 
@@ -453,35 +456,35 @@ views:
         title: Tesla Amber Sync Sensors
         show_header_toggle: false
         entities:
-          - entity: sensor.tesla_amber_sync_current_electricity_price
+          - entity: sensor.current_electricity_price
             name: Current Price
             icon: mdi:currency-usd
-          - entity: sensor.tesla_amber_sync_solar_power
+          - entity: sensor.solar_power
             name: Solar Power
             icon: mdi:solar-power
-          - entity: sensor.tesla_amber_sync_battery_power
+          - entity: sensor.battery_power
             name: Battery Power
             icon: mdi:battery-charging
-          - entity: sensor.tesla_amber_sync_battery_level
+          - entity: sensor.battery_level
             name: Battery Level
             icon: mdi:battery
-          - entity: sensor.tesla_amber_sync_grid_power
+          - entity: sensor.grid_power
             name: Grid Power
             icon: mdi:transmission-tower
-          - entity: sensor.tesla_amber_sync_home_load
+          - entity: sensor.home_load
             name: Home Load
             icon: mdi:home-lightning-bolt
           - type: divider
-          - entity: sensor.tesla_amber_sync_in_demand_charge_period
+          - entity: sensor.in_demand_charge_period
             name: In Demand Period
-          - entity: sensor.tesla_amber_sync_peak_demand_this_cycle
+          - entity: sensor.peak_demand_this_cycle
             name: Peak Demand
-          - entity: sensor.tesla_amber_sync_estimated_demand_charge_cost
+          - entity: sensor.demand_charge_cost_this_month
             name: Demand Cost
-          - entity: sensor.tesla_amber_sync_total_estimated_monthly_cost
+          - entity: sensor.total_estimated_monthly_cost
             name: Total Monthly Cost
           - type: divider
-          - entity: sensor.tesla_amber_sync_aemo_wholesale_price
+          - entity: sensor.aemo_wholesale_price
             name: AEMO Price
-          - entity: sensor.tesla_amber_sync_aemo_spike_status
+          - entity: sensor.aemo_spike_status
             name: AEMO Spike Status
