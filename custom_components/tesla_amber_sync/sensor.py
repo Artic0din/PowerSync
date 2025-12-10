@@ -301,7 +301,10 @@ async def async_setup_entry(
     _LOGGER.info("Tariff schedule sensor added for TOU visualization")
 
     # Add solar curtailment sensor if curtailment is enabled
-    curtailment_enabled = entry.options.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+    curtailment_enabled = entry.options.get(
+        CONF_SOLAR_CURTAILMENT_ENABLED,
+        entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+    )
     if curtailment_enabled:
         entities.append(
             SolarCurtailmentSensor(
@@ -604,7 +607,10 @@ class SolarCurtailmentSensor(SensorEntity):
         """Return additional attributes."""
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         cached_rule = entry_data.get("cached_export_rule")
-        curtailment_enabled = self._entry.options.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+        curtailment_enabled = self._entry.options.get(
+            CONF_SOLAR_CURTAILMENT_ENABLED,
+            self._entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+        )
 
         return {
             "export_rule": cached_rule,
