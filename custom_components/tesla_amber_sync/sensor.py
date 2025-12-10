@@ -20,9 +20,10 @@ from homeassistant.const import (
     UnitOfPower,
     PERCENTAGE,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import (
     DOMAIN,
@@ -441,6 +442,9 @@ class AEMOSpikeSensor(SensorEntity):
         return {}
 
 
+SIGNAL_TARIFF_UPDATED = "tesla_amber_sync_tariff_updated_{}"
+
+
 class TariffScheduleSensor(SensorEntity):
     """Sensor for displaying the current tariff schedule sent to Tesla."""
 
@@ -456,6 +460,28 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_has_entity_name = True
         self._attr_name = "Tariff Schedule"
         self._attr_icon = "mdi:calendar-clock"
+        self._unsub_dispatcher = None
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        await super().async_added_to_hass()
+
+        @callback
+        def _handle_tariff_update():
+            """Handle tariff update signal."""
+            self.async_write_ha_state()
+
+        # Subscribe to tariff update signal
+        self._unsub_dispatcher = async_dispatcher_connect(
+            self.hass,
+            SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+            _handle_tariff_update,
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity is removed from hass."""
+        if self._unsub_dispatcher:
+            self._unsub_dispatcher()
 
     @property
     def native_value(self) -> Any:

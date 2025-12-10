@@ -1351,6 +1351,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Store tariff schedule in hass.data for the sensor to read
         from datetime import datetime as dt
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
         buy_prices = tariff.get("buy_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
         sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
 
@@ -1360,6 +1361,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         _LOGGER.info("Tariff schedule stored: %d buy periods, %d sell periods", len(buy_prices), len(sell_prices))
+
+        # Signal the tariff schedule sensor to update
+        async_dispatcher_send(hass, f"tesla_amber_sync_tariff_updated_{entry.entry_id}")
 
         # Send tariff to Tesla via Teslemetry or Fleet API
         # Get fresh token in case it was refreshed by tesla_fleet integration
