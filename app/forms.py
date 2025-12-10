@@ -50,7 +50,7 @@ class SettingsForm(FlaskForm):
         ('VIC1', 'VIC - Victoria'),
         ('SA1', 'SA - South Australia'),
         ('TAS1', 'TAS - Tasmania')
-    ])
+    ], validators=[Optional()])
     aemo_spike_threshold = DecimalField(
         'Spike Threshold ($/MWh)',
         validators=[Optional(), NumberRange(min=0)],

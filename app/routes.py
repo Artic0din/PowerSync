@@ -232,6 +232,14 @@ def api_aemo_price():
 def settings():
     logger.info(f"Settings page accessed by user: {current_user.email} - Method: {request.method}")
     form = SettingsForm()
+
+    # Debug: log form validation details
+    if request.method == 'POST':
+        logger.debug(f"POST data keys: {list(request.form.keys())}")
+        logger.debug(f"tesla_api_provider in form: {request.form.get('tesla_api_provider')}")
+        if not form.validate():
+            logger.warning(f"Form validation failed: {form.errors}")
+
     if form.validate_on_submit():
         logger.info(f"Settings form submitted by user: {current_user.email}")
 
