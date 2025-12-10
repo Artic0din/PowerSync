@@ -71,14 +71,14 @@ views:
       - type: entities
         title: Solar Curtailment
         entities:
-          - entity: sensor.tesla_amber_sync_solar_curtailment
+          - entity: sensor.solar_curtailment
             name: Export Status
             icon: mdi:solar-power-variant
         state_color: true
         footer:
           type: markdown
           content: >
-            {% if states('sensor.tesla_amber_sync_solar_curtailment') == 'Active' %}
+            {% if states('sensor.solar_curtailment') == 'Active' %}
             ⚠️ **Curtailment Active** - Solar export blocked due to negative feed-in price
             {% else %}
             ✅ Normal - Solar export allowed
