@@ -210,6 +210,12 @@
                         👁️
                     </button>
                 </div>
+
+                <label for="fleet_api_redirect_uri" style="margin-top: 0.5em;">
+                    {{ form.fleet_api_redirect_uri.label }}
+                    <small>OAuth callback URL. Must match what you registered at <a href="https://developer.tesla.com" target="_blank">developer.tesla.com</a>. Example: <code>http://localhost:5001/fleet-api/callback</code></small>
+                </label>
+                {{ form.fleet_api_redirect_uri(size=64, style='width: 100%;', placeholder='http://localhost:5001/fleet-api/callback') }}
             </fieldset>
 
             <fieldset style="margin-top: 1em;">

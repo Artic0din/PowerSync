@@ -235,52 +235,70 @@ def settings():
     if form.validate_on_submit():
         logger.info(f"Settings form submitted by user: {current_user.email}")
 
-        # Handle Amber API token (encrypt if provided, clear if empty)
-        if form.amber_token.data:
-            logger.info("Encrypting and saving Amber API token")
-            current_user.amber_api_token_encrypted = encrypt_token(form.amber_token.data)
-        else:
-            logger.info("Clearing Amber API token")
-            current_user.amber_api_token_encrypted = None
+        # Check which fields were actually submitted in the form
+        # This handles partial form submissions (e.g., just the provider dropdown)
+        submitted_fields = set(request.form.keys())
+        logger.debug(f"Submitted form fields: {submitted_fields}")
 
-        if form.tesla_site_id.data:
+        # Handle Amber API token (only if field was in the submitted form)
+        if 'amber_token' in submitted_fields:
+            if form.amber_token.data:
+                logger.info("Encrypting and saving Amber API token")
+                current_user.amber_api_token_encrypted = encrypt_token(form.amber_token.data)
+            else:
+                logger.info("Clearing Amber API token")
+                current_user.amber_api_token_encrypted = None
+
+        if 'tesla_site_id' in submitted_fields and form.tesla_site_id.data:
             logger.info(f"Saving Tesla Site ID: {form.tesla_site_id.data}")
             current_user.tesla_energy_site_id = form.tesla_site_id.data
 
         # Handle Tesla API Provider selection
-        if form.tesla_api_provider.data:
+        if 'tesla_api_provider' in submitted_fields and form.tesla_api_provider.data:
             logger.info(f"Saving Tesla API provider: {form.tesla_api_provider.data}")
             current_user.tesla_api_provider = form.tesla_api_provider.data
 
-        # Handle Teslemetry API key (encrypt if provided, clear if empty)
-        if form.teslemetry_api_key.data:
-            logger.info("Encrypting and saving Teslemetry API key")
-            current_user.teslemetry_api_key_encrypted = encrypt_token(form.teslemetry_api_key.data)
-        else:
-            logger.info("Clearing Teslemetry API key")
-            current_user.teslemetry_api_key_encrypted = None
+        # Handle Teslemetry API key (only if field was in the submitted form)
+        if 'teslemetry_api_key' in submitted_fields:
+            if form.teslemetry_api_key.data:
+                logger.info("Encrypting and saving Teslemetry API key")
+                current_user.teslemetry_api_key_encrypted = encrypt_token(form.teslemetry_api_key.data)
+            else:
+                logger.info("Clearing Teslemetry API key")
+                current_user.teslemetry_api_key_encrypted = None
 
-        # Handle Fleet API OAuth credentials (encrypt if provided, clear if empty)
-        if form.fleet_api_client_id.data:
-            logger.info("Encrypting and saving Fleet API Client ID")
-            current_user.fleet_api_client_id_encrypted = encrypt_token(form.fleet_api_client_id.data)
-        else:
-            logger.info("Clearing Fleet API Client ID")
-            current_user.fleet_api_client_id_encrypted = None
+        # Handle Fleet API OAuth credentials (only if fields were in the submitted form)
+        if 'fleet_api_client_id' in submitted_fields:
+            if form.fleet_api_client_id.data:
+                logger.info("Encrypting and saving Fleet API Client ID")
+                current_user.fleet_api_client_id_encrypted = encrypt_token(form.fleet_api_client_id.data)
+            else:
+                logger.info("Clearing Fleet API Client ID")
+                current_user.fleet_api_client_id_encrypted = None
 
-        if form.fleet_api_client_secret.data:
-            logger.info("Encrypting and saving Fleet API Client Secret")
-            current_user.fleet_api_client_secret_encrypted = encrypt_token(form.fleet_api_client_secret.data)
-        else:
-            logger.info("Clearing Fleet API Client Secret")
-            current_user.fleet_api_client_secret_encrypted = None
+        if 'fleet_api_client_secret' in submitted_fields:
+            if form.fleet_api_client_secret.data:
+                logger.info("Encrypting and saving Fleet API Client Secret")
+                current_user.fleet_api_client_secret_encrypted = encrypt_token(form.fleet_api_client_secret.data)
+            else:
+                logger.info("Clearing Fleet API Client Secret")
+                current_user.fleet_api_client_secret_encrypted = None
 
-        # AEMO Spike Detection settings
-        current_user.aemo_spike_detection_enabled = form.aemo_spike_detection_enabled.data
-        if form.aemo_region.data:
+        if 'fleet_api_redirect_uri' in submitted_fields:
+            if form.fleet_api_redirect_uri.data:
+                logger.info(f"Saving Fleet API Redirect URI: {form.fleet_api_redirect_uri.data}")
+                current_user.fleet_api_redirect_uri = form.fleet_api_redirect_uri.data
+            else:
+                logger.info("Clearing Fleet API Redirect URI")
+                current_user.fleet_api_redirect_uri = None
+
+        # AEMO Spike Detection settings (only if fields were in the submitted form)
+        if 'aemo_spike_detection_enabled' in submitted_fields:
+            current_user.aemo_spike_detection_enabled = form.aemo_spike_detection_enabled.data
+        if 'aemo_region' in submitted_fields and form.aemo_region.data:
             logger.info(f"Saving AEMO region: {form.aemo_region.data}")
             current_user.aemo_region = form.aemo_region.data
-        if form.aemo_spike_threshold.data:
+        if 'aemo_spike_threshold' in submitted_fields and form.aemo_spike_threshold.data:
             logger.info(f"Saving AEMO spike threshold: ${form.aemo_spike_threshold.data}/MWh")
             current_user.aemo_spike_threshold = float(form.aemo_spike_threshold.data)
 
@@ -332,6 +350,10 @@ def settings():
     except Exception as e:
         logger.error(f"Error decrypting Fleet API client secret: {e}")
         form.fleet_api_client_secret.data = None
+
+    # Pre-populate Fleet API Redirect URI (with sensible default)
+    form.fleet_api_redirect_uri.data = current_user.fleet_api_redirect_uri or os.getenv('TESLA_REDIRECT_URI', '')
+    logger.debug(f"Fleet API Redirect URI: {form.fleet_api_redirect_uri.data}")
 
     # Pre-populate AEMO settings
     form.aemo_spike_detection_enabled.data = current_user.aemo_spike_detection_enabled
@@ -2447,13 +2469,24 @@ def fleet_api_oauth_start():
     """Start Tesla Fleet API OAuth flow"""
     logger.info(f"Fleet API OAuth flow initiated by user: {current_user.email}")
 
-    # Get OAuth configuration from environment
-    client_id = os.getenv('TESLA_CLIENT_ID')
-    redirect_uri = os.getenv('TESLA_REDIRECT_URI')
+    # Get OAuth configuration - prefer user's saved credentials, fall back to environment
+    client_id = None
+    if current_user.fleet_api_client_id_encrypted:
+        client_id = decrypt_token(current_user.fleet_api_client_id_encrypted)
+    if not client_id:
+        client_id = os.getenv('TESLA_CLIENT_ID')
 
-    if not client_id or not redirect_uri:
-        logger.error("Fleet API OAuth not configured - missing TESLA_CLIENT_ID or TESLA_REDIRECT_URI")
-        flash('Tesla Fleet API is not configured. Please add TESLA_CLIENT_ID and TESLA_REDIRECT_URI to your .env file.')
+    # Redirect URI - prefer user's saved value, fall back to environment
+    redirect_uri = current_user.fleet_api_redirect_uri or os.getenv('TESLA_REDIRECT_URI')
+
+    if not client_id:
+        logger.error("Fleet API OAuth not configured - missing Client ID")
+        flash('Tesla Fleet API Client ID not configured. Please enter your Client ID in the API Configuration section below and save settings.')
+        return redirect(url_for('main.settings'))
+
+    if not redirect_uri:
+        logger.error("Fleet API OAuth not configured - missing Redirect URI")
+        flash('Tesla Fleet API Redirect URI not configured. Please enter it in the API Configuration section below (e.g., http://localhost:5001/fleet-api/callback).')
         return redirect(url_for('main.settings'))
 
     # Generate random state parameter for CSRF protection
@@ -2511,13 +2544,26 @@ def fleet_api_oauth_callback():
 
     # Exchange authorization code for access token
     try:
-        client_id = os.getenv('TESLA_CLIENT_ID')
-        client_secret = os.getenv('TESLA_CLIENT_SECRET')
-        redirect_uri = os.getenv('TESLA_REDIRECT_URI')
+        # Get credentials - prefer user's saved credentials, fall back to environment
+        client_id = None
+        client_secret = None
+        if current_user.fleet_api_client_id_encrypted:
+            client_id = decrypt_token(current_user.fleet_api_client_id_encrypted)
+        if current_user.fleet_api_client_secret_encrypted:
+            client_secret = decrypt_token(current_user.fleet_api_client_secret_encrypted)
+
+        # Fall back to environment variables if not in database
+        if not client_id:
+            client_id = os.getenv('TESLA_CLIENT_ID')
+        if not client_secret:
+            client_secret = os.getenv('TESLA_CLIENT_SECRET')
+
+        # Redirect URI - prefer user's saved value, fall back to environment
+        redirect_uri = current_user.fleet_api_redirect_uri or os.getenv('TESLA_REDIRECT_URI')
 
         if not client_id or not client_secret or not redirect_uri:
             logger.error("Fleet API OAuth not configured - missing credentials")
-            flash('Tesla Fleet API is not configured properly.')
+            flash('Tesla Fleet API credentials not configured. Please enter Client ID, Client Secret, and Redirect URI in Settings.')
             return redirect(url_for('main.settings'))
 
         # Make token request

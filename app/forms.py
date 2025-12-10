@@ -38,6 +38,8 @@ class SettingsForm(FlaskForm):
     # Fleet API OAuth Credentials
     fleet_api_client_id = StringField('Fleet API Client ID (from developer.tesla.com)')
     fleet_api_client_secret = StringField('Fleet API Client Secret (from developer.tesla.com)')
+    fleet_api_redirect_uri = StringField('Fleet API Redirect URI',
+        description='OAuth callback URL (e.g., http://localhost:5001/fleet-api/callback). Must match what you registered in Tesla Developer Portal.')
 
     # AEMO Spike Detection
     aemo_spike_detection_enabled = BooleanField('Enable AEMO Spike Detection')

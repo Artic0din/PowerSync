@@ -256,13 +256,18 @@ Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose which
 
 **Setup - Docker/Flask:**
 1. Register an OAuth application at https://developer.tesla.com
+   - Set your Redirect URI to: `http://localhost:5001/fleet-api/callback` (or your server's URL)
 2. Get your Client ID and Client Secret from the Tesla Developer Portal
-3. Configure via the Settings page in the Flask web GUI:
+3. Configure everything via the Settings page in the Flask web GUI (no .env needed!):
    - Select "Tesla Fleet API (Direct, Free)" as your Tesla API Provider
-   - Enter your Client ID and Client Secret
-   - Save settings - credentials are encrypted and stored securely
-4. Alternative: Configure via environment variables (see `.env.example`)
-5. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed OAuth app registration
+   - Enter your Client ID in the API Configuration section
+   - Enter your Client Secret
+   - Enter your Redirect URI (e.g., `http://localhost:5001/fleet-api/callback`)
+   - Click "Save Settings" - credentials are encrypted and stored securely
+   - Click "Connect to Tesla Fleet API" to complete OAuth authorization
+4. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed OAuth app registration
+
+**Note:** All Fleet API credentials are now configurable via GUI - no environment variables required!
 
 **Best for:** Users who want to avoid recurring costs and are comfortable with OAuth setup.
 
@@ -708,6 +713,7 @@ After logging in, go to the Settings page:
    **If using Tesla Fleet API:**
    - Enter your Fleet API Client ID
    - Enter your Fleet API Client Secret
+   - Enter your Fleet API Redirect URI (e.g., `http://localhost:5001/fleet-api/callback`)
 
 3. **Set Energy Site ID**
    - Enter your Tesla energy site ID

@@ -25,6 +25,7 @@ class User(UserMixin, db.Model):
     # Fleet API Credentials (for direct Tesla Fleet API)
     fleet_api_client_id_encrypted = db.Column(db.LargeBinary)
     fleet_api_client_secret_encrypted = db.Column(db.LargeBinary)
+    fleet_api_redirect_uri = db.Column(db.String(255))  # OAuth redirect URI (not encrypted, just a URL)
     fleet_api_access_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_token_expires_at = db.Column(db.DateTime)

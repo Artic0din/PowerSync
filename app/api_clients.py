@@ -1507,9 +1507,19 @@ def get_tesla_client(user):
             access_token = decrypt_token(user.fleet_api_access_token_encrypted)
             refresh_token = decrypt_token(user.fleet_api_refresh_token_encrypted) if user.fleet_api_refresh_token_encrypted else None
 
-            # Get client ID and secret from environment
-            client_id = os.getenv('TESLA_CLIENT_ID')
-            client_secret = os.getenv('TESLA_CLIENT_SECRET')
+            # Get client ID and secret - prefer user's saved credentials, fall back to environment
+            client_id = None
+            client_secret = None
+            if user.fleet_api_client_id_encrypted:
+                client_id = decrypt_token(user.fleet_api_client_id_encrypted)
+            if user.fleet_api_client_secret_encrypted:
+                client_secret = decrypt_token(user.fleet_api_client_secret_encrypted)
+
+            # Fall back to environment variables
+            if not client_id:
+                client_id = os.getenv('TESLA_CLIENT_ID')
+            if not client_secret:
+                client_secret = os.getenv('TESLA_CLIENT_SECRET')
 
             return FleetAPIClient(
                 access_token=access_token,
