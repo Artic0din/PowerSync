@@ -68,6 +68,7 @@ views:
       # ROW 2: TOU Tariff Schedule (sent to Tesla)
       # ========================================
       - type: grid
+        columns: 1
         cards:
           - type: custom:apexcharts-card
             header:
