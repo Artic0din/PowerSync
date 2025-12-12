@@ -394,6 +394,17 @@ def _sync_all_users_internal(websocket_data):
                 user.last_tariff_hash = tariff_hash  # Save hash for deduplication
                 db.session.commit()
 
+                # Enforce grid charging setting after TOU sync (counteracts VPP overrides)
+                if user.enable_demand_charges:
+                    gc_success, gc_action = enforce_grid_charging_for_user(
+                        user, tesla_client, db,
+                        force_apply=True  # Always force during TOU sync to fight VPP
+                    )
+                    if gc_success:
+                        logger.info(f"🔋 Grid charging enforcement after TOU sync: {gc_action}")
+                    else:
+                        logger.warning(f"⚠️ Grid charging enforcement failed: {gc_action}")
+
                 success_count += 1
             else:
                 logger.error(f"Failed to apply schedule to Tesla for user {user.email}")
@@ -1501,6 +1512,68 @@ def is_in_peak_period(user):
         return peak_start <= current_time < peak_end
 
 
+def enforce_grid_charging_for_user(user, tesla_client, db, force_apply=False):
+    """
+    Enforce grid charging settings for a single user based on demand period.
+
+    This is called:
+    1. After each successful TOU sync (to counteract VPP overrides)
+    2. By the periodic demand_period_grid_charging_check
+
+    Args:
+        user: User model instance
+        tesla_client: Tesla API client
+        db: Database session
+        force_apply: If True, always apply the setting even if we think it's already set
+                    (useful when VPP might have overridden our setting)
+
+    Returns:
+        tuple: (success: bool, action: str describing what was done)
+    """
+    if not user.enable_demand_charges:
+        return True, "demand_charges_disabled"
+
+    in_peak = is_in_peak_period(user)
+    currently_disabled = user.grid_charging_disabled_for_demand
+
+    logger.debug(f"User {user.email}: in_peak={in_peak}, currently_disabled={currently_disabled}, force_apply={force_apply}")
+
+    if in_peak:
+        # In peak period - ensure grid charging is disabled
+        if not currently_disabled or force_apply:
+            logger.info(f"⚡ Peak period for {user.email} - {'forcing' if force_apply else 'setting'} grid charging OFF")
+
+            result = tesla_client.set_grid_charging_enabled(user.tesla_energy_site_id, False)
+
+            if result:
+                user.grid_charging_disabled_for_demand = True
+                db.session.commit()
+                logger.info(f"✅ Grid charging DISABLED for {user.email} during peak period")
+                return True, "disabled_for_peak"
+            else:
+                logger.error(f"❌ Failed to disable grid charging for {user.email}")
+                return False, "failed_to_disable"
+        else:
+            return True, "already_disabled"
+    else:
+        # Outside peak period - ensure grid charging is enabled
+        if currently_disabled:
+            logger.info(f"⚡ Outside peak period for {user.email} - re-enabling grid charging")
+
+            result = tesla_client.set_grid_charging_enabled(user.tesla_energy_site_id, True)
+
+            if result:
+                user.grid_charging_disabled_for_demand = False
+                db.session.commit()
+                logger.info(f"✅ Grid charging ENABLED for {user.email} (peak period ended)")
+                return True, "enabled_outside_peak"
+            else:
+                logger.error(f"❌ Failed to re-enable grid charging for {user.email}")
+                return False, "failed_to_enable"
+        else:
+            return True, "already_enabled"
+
+
 def demand_period_grid_charging_check():
     """
     Check if we're in a demand period and toggle grid charging accordingly.
@@ -1508,6 +1581,9 @@ def demand_period_grid_charging_check():
 
     When in peak demand period: Disable grid charging to prevent imports
     When outside peak period: Re-enable grid charging
+
+    Note: This runs with force_apply=True during peak periods to counteract
+    VPP overrides that may re-enable grid charging.
     """
     from app import create_app
     from app.models import User, db
@@ -1539,48 +1615,17 @@ def demand_period_grid_charging_check():
                     logger.debug(f"User {user.email} has no Tesla API configured")
                     continue
 
+                # Use force_apply=True during peak periods to counteract VPP overrides
                 in_peak = is_in_peak_period(user)
-                currently_disabled = user.grid_charging_disabled_for_demand
+                success, action = enforce_grid_charging_for_user(
+                    user, tesla_client, db,
+                    force_apply=in_peak  # Force re-apply during peak to fight VPP overrides
+                )
 
-                logger.debug(f"User {user.email}: in_peak={in_peak}, currently_disabled={currently_disabled}")
-
-                if in_peak and not currently_disabled:
-                    # Entering peak period - disable grid charging
-                    logger.info(f"⚡ Entering peak demand period for {user.email} - disabling grid charging")
-
-                    result = tesla_client.set_grid_charging_enabled(user.tesla_energy_site_id, False)
-
-                    if result:
-                        user.grid_charging_disabled_for_demand = True
-                        db.session.commit()
-                        logger.info(f"✅ Grid charging DISABLED for {user.email} during peak period")
-                        success_count += 1
-                    else:
-                        logger.error(f"❌ Failed to disable grid charging for {user.email}")
-                        error_count += 1
-
-                elif not in_peak and currently_disabled:
-                    # Exiting peak period - re-enable grid charging
-                    logger.info(f"⚡ Exiting peak demand period for {user.email} - re-enabling grid charging")
-
-                    result = tesla_client.set_grid_charging_enabled(user.tesla_energy_site_id, True)
-
-                    if result:
-                        user.grid_charging_disabled_for_demand = False
-                        db.session.commit()
-                        logger.info(f"✅ Grid charging ENABLED for {user.email} (peak period ended)")
-                        success_count += 1
-                    else:
-                        logger.error(f"❌ Failed to re-enable grid charging for {user.email}")
-                        error_count += 1
-
-                else:
-                    # No state change needed
-                    if in_peak:
-                        logger.debug(f"User {user.email}: Already in peak mode, no change needed")
-                    else:
-                        logger.debug(f"User {user.email}: Already in normal mode, no change needed")
+                if success:
                     success_count += 1
+                else:
+                    error_count += 1
 
             except Exception as e:
                 logger.error(f"Error in demand period check for {user.email}: {e}", exc_info=True)
