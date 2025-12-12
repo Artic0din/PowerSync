@@ -87,26 +87,7 @@
             </header>
 
             {% if current_user.fleet_api_access_token_encrypted %}
-                <!-- Connected -->
-                <div style="padding: 0.8em; background: rgba(0, 255, 0, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
-                    <p style="margin: 0; color: #51cf66; font-size: 0.9em;">✅ <strong>Connected</strong></p>
-                </div>
-
-                <p style="font-size: 0.85em; margin: 0.5em 0;">
-                    OAuth tokens configured<br>
-                    {% if current_user.fleet_api_token_expires_at %}
-                    Token expires: {{ current_user.fleet_api_token_expires_at.strftime('%Y-%m-%d %H:%M UTC') }}
-                    {% endif %}
-                </p>
-
-                <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
-                    <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;">Reconnect</a>
-                    <form action="{{ url_for('main.fleet_api_disconnect') }}" method="post" style="flex: 1; margin: 0;">
-                        <button type="submit" class="outline secondary" style="width: 100%; font-size: 0.85em;" onclick="return confirm('Disconnect Tesla Fleet API? This will clear all OAuth tokens and credentials.')">Disconnect</button>
-                    </form>
-                </div>
-
-                <!-- Tunnel Section - FIRST for initial setup -->
+                <!-- Connected - Tunnel Section FIRST -->
                 <div id="tunnelSection" style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
                     <p style="margin: 0 0 0.5em 0; font-size: 0.85em;">
                         <strong>Public Tunnel (Cloudflare)</strong>
@@ -137,7 +118,7 @@
                 </div>
                 <p id="tunnelActionStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
 
-                <!-- Key Status and Generation -->
+                <!-- Key Status and Generation - SECOND -->
                 <div id="keyStatusSection" style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
                     <p style="margin: 0; font-size: 0.85em;">
                         <strong>Domain Keys:</strong> <span id="keyStatusText">Checking...</span>
@@ -146,7 +127,7 @@
 
                 <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
                     <button type="button" id="generateKeysBtn" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;" onclick="generateKeys()">
-                        Generate Keys
+                        Regenerate Domain Keys
                     </button>
                     <button type="button" id="deleteKeysBtn" class="outline secondary" style="flex: 1; text-align: center; font-size: 0.85em;" onclick="deleteKeys()">
                         Delete Keys
@@ -154,10 +135,30 @@
                 </div>
                 <p id="generateKeysStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
 
+                <!-- Register Domain - THIRD -->
                 <button type="button" id="registerDomainBtn" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;" onclick="registerDomain()">
                     Register Domain with Tesla
                 </button>
                 <p id="registerDomainStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
+
+                <!-- OAuth Status - FOURTH (after registration) -->
+                <div style="padding: 0.8em; background: rgba(0, 255, 0, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0; color: #51cf66; font-size: 0.9em;">✅ <strong>Connected</strong></p>
+                </div>
+
+                <p style="font-size: 0.85em; margin: 0.5em 0;">
+                    OAuth tokens configured<br>
+                    {% if current_user.fleet_api_token_expires_at %}
+                    Token expires: {{ current_user.fleet_api_token_expires_at.strftime('%Y-%m-%d %H:%M UTC') }}
+                    {% endif %}
+                </p>
+
+                <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
+                    <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;">Reconnect</a>
+                    <form action="{{ url_for('main.fleet_api_disconnect') }}" method="post" style="flex: 1; margin: 0;">
+                        <button type="submit" class="outline secondary" style="width: 100%; font-size: 0.85em;" onclick="return confirm('Disconnect Tesla Fleet API? OAuth tokens will be cleared but client credentials preserved.')">Disconnect</button>
+                    </form>
+                </div>
 
                 <details style="margin-top: 0.5em;">
                     <summary style="font-size: 0.85em;">Setup steps for new registration</summary>

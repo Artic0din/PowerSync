@@ -2934,19 +2934,17 @@ def fleet_api_oauth_callback():
 @bp.route('/fleet-api/disconnect', methods=['POST'])
 @login_required
 def fleet_api_disconnect():
-    """Disconnect Tesla Fleet API - clear OAuth tokens and credentials."""
+    """Disconnect Tesla Fleet API - clear OAuth tokens but keep client credentials."""
     try:
         logger.info(f"Fleet API disconnect requested by user: {current_user.email}")
 
-        # Clear Fleet API OAuth tokens
+        # Clear Fleet API OAuth tokens only
         current_user.fleet_api_access_token_encrypted = None
         current_user.fleet_api_refresh_token_encrypted = None
         current_user.fleet_api_token_expires_at = None
 
-        # Clear Fleet API credentials
-        current_user.fleet_api_client_id_encrypted = None
-        current_user.fleet_api_client_secret_encrypted = None
-        current_user.fleet_api_redirect_uri = None
+        # Keep client ID, secret, and redirect URI - they're reusable
+        # Only the tunnel URL changes, not the app credentials
 
         # Clear Tesla site ID since it was obtained via Fleet API
         current_user.tesla_energy_site_id = None
@@ -2954,7 +2952,7 @@ def fleet_api_disconnect():
         db.session.commit()
 
         logger.info(f"Fleet API disconnected for user: {current_user.email}")
-        flash('Tesla Fleet API disconnected successfully')
+        flash('Tesla Fleet API disconnected. Client credentials preserved.')
         return redirect(url_for('main.settings'))
 
     except Exception as e:
