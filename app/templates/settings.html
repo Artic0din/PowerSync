@@ -83,7 +83,7 @@
         <article style="margin-top: 1em;">
             <header style="background: rgba(100, 150, 255, 0.1); padding: 0.5em; border-radius: 0.5em;">
                 <strong>Tesla Fleet API</strong>
-                <br><small>Direct Tesla API (Free, Complex Setup)</small>
+                <br><small>Direct Tesla API (Free)</small>
             </header>
 
             {% if current_user.fleet_api_access_token_encrypted %}
@@ -122,9 +122,9 @@
                         <label for="ngrokAuthtoken" style="font-size: 0.8em; margin-bottom: 0.2em; display: block;">
                             Authtoken <small>(<a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank">get free token</a>)</small>
                         </label>
-                        <div style="display: flex; gap: 0.3em;">
-                            <input type="password" id="ngrokAuthtoken" placeholder="Enter ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em;" value="{{ ngrok_authtoken or '' }}">
-                            <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.6em;" onclick="saveNgrokToken()">Save</button>
+                        <div style="display: flex; gap: 0.3em; align-items: center;">
+                            <input type="password" id="ngrokAuthtoken" placeholder="Enter ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em; margin: 0;" value="{{ ngrok_authtoken or '' }}">
+                            <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.8em; margin: 0; white-space: nowrap; width: auto;" onclick="saveNgrokToken()">Save</button>
                         </div>
                         <p id="ngrokTokenStatus" style="font-size: 0.75em; margin: 0.2em 0 0 0; display: none;"></p>
                     </div>
@@ -189,28 +189,59 @@
                     </div>
                 </details>
             {% else %}
-                <!-- Not connected -->
-                <div style="padding: 0.8em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
-                    <p style="margin: 0; color: #999; font-size: 0.9em;">⭕ <strong>Not Configured</strong></p>
-                    <p style="margin: 0.3em 0 0 0; font-size: 0.75em;">Complete OAuth setup below</p>
+                <!-- Not connected - Setup Flow -->
+
+                <!-- Step 1: Tunnel -->
+                <div style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0 0 0.4em 0; font-size: 0.85em;">
+                        <strong>1. Start Public Tunnel</strong>
+                        <small style="color: #888; margin-left: 0.5em;">(<a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank">get free ngrok token</a>)</small>
+                    </p>
+                    <div style="display: flex; gap: 0.3em; align-items: center; margin-bottom: 0.4em;">
+                        <input type="password" id="ngrokAuthtokenSetup" placeholder="ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em; margin: 0;" value="{{ ngrok_authtoken or '' }}">
+                        <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.8em; margin: 0; white-space: nowrap; width: auto;" onclick="saveNgrokTokenSetup()">Save</button>
+                    </div>
+                    <p id="ngrokTokenStatusSetup" style="font-size: 0.75em; margin: 0 0 0.3em 0; display: none;"></p>
+                    <div style="display: flex; align-items: center; gap: 0.5em;">
+                        <span style="font-size: 0.85em;"><span id="tunnelStatusTextSetup">Checking...</span></span>
+                        <button type="button" id="startTunnelBtnSetup" class="outline" style="font-size: 0.8em; padding: 0.3em 0.8em; margin: 0;" onclick="startTunnel()">Start</button>
+                        <button type="button" id="stopTunnelBtnSetup" class="outline secondary" style="font-size: 0.8em; padding: 0.3em 0.8em; margin: 0; display: none;" onclick="stopTunnel()">Stop</button>
+                    </div>
+                    <div id="tunnelUrlDisplaySetup" style="display: none; margin-top: 0.4em;">
+                        <code id="tunnelUrlSetup" style="font-size: 0.75em; word-break: break-all;"></code>
+                    </div>
+                    <p id="tunnelActionStatusSetup" style="font-size: 0.75em; margin: 0.3em 0 0 0; display: none;"></p>
                 </div>
 
-                <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="primary" style="display: block; text-align: center; width: 100%; margin-top: 0.5em;">Connect to Tesla Fleet API</a>
-
-                <details style="margin-top: 0.5em;">
-                    <summary style="font-size: 0.85em;">Setup Instructions</summary>
-                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 255, 0.1); border-radius: 0.3em;">
-                        <p style="margin: 0 0 0.5em 0;"><strong>📝 Setup Steps:</strong></p>
-
-                        <ol style="margin: 0.3em 0 0 1.2em; padding: 0;">
-                            <li style="margin: 0.3em 0;">Register an application at <a href="https://developer.tesla.com" target="_blank">developer.tesla.com</a></li>
-                            <li style="margin: 0.3em 0;">Get your Client ID and Client Secret</li>
-                            <li style="margin: 0.3em 0;">Enter them in the "Tesla Fleet API" section below</li>
-                            <li style="margin: 0.3em 0;">Click "Save Settings" to store your credentials</li>
-                            <li style="margin: 0.3em 0;">Click "Connect to Tesla Fleet API" above to authorize</li>
-                        </ol>
+                <!-- Step 2: Tesla Developer Portal -->
+                <div style="padding: 0.6em; background: rgba(255, 200, 100, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>2. Update <a href="https://developer.tesla.com" target="_blank">Tesla Developer Portal</a></strong></p>
+                    <div style="font-size: 0.8em; background: rgba(0,0,0,0.2); padding: 0.4em; border-radius: 0.3em;">
+                        <div style="margin-bottom: 0.2em;"><strong>Allowed Origins:</strong> <code id="allowedOriginHint" style="font-size: 0.9em;">[start tunnel]</code></div>
+                        <div><strong>Redirect URI:</strong> <code id="redirectUriHint" style="font-size: 0.9em;">[start tunnel]</code></div>
                     </div>
-                </details>
+                    <p style="margin: 0.3em 0 0 0; font-size: 0.75em; color: #888;">Copy Client ID & Secret to the form below, then save.</p>
+                </div>
+
+                <!-- Step 3: Generate Keys & Register -->
+                <div style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>3. Generate Keys & Register Domain</strong></p>
+                    <div id="keyStatusSectionSetup" style="margin-bottom: 0.3em;">
+                        <span style="font-size: 0.8em;">Keys: <span id="keyStatusTextSetup">Checking...</span></span>
+                    </div>
+                    <div style="display: flex; gap: 0.5em;">
+                        <button type="button" id="generateKeysBtnSetup" class="outline" style="flex: 1; font-size: 0.8em; padding: 0.4em;" onclick="generateKeys()">Generate Keys</button>
+                        <button type="button" id="registerDomainBtnSetup" class="outline" style="flex: 1; font-size: 0.8em; padding: 0.4em;" onclick="registerDomain()">Register Domain</button>
+                    </div>
+                    <p id="generateKeysStatusSetup" style="font-size: 0.75em; margin: 0.3em 0 0 0; display: none;"></p>
+                    <p id="registerDomainStatusSetup" style="font-size: 0.75em; margin: 0.3em 0 0 0; display: none;"></p>
+                </div>
+
+                <!-- Step 4: OAuth -->
+                <div style="padding: 0.6em; background: rgba(0, 200, 100, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>4. Connect to Tesla</strong></p>
+                    <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em;">Authorize with Tesla</a>
+                </div>
 
                 <details style="margin-top: 0.5em;">
                     <summary style="font-size: 0.85em;">About Fleet API</summary>
@@ -454,11 +485,13 @@
             checkTunnelStatus();
         });
 
-        async function saveNgrokToken() {
-            const input = document.getElementById('ngrokAuthtoken');
-            const status = document.getElementById('ngrokTokenStatus');
-            const token = input.value.trim();
+        // Helper to save ngrok token (works for both connected and setup views)
+        async function saveNgrokTokenGeneric(inputId, statusId) {
+            const input = document.getElementById(inputId);
+            const status = document.getElementById(statusId);
+            if (!input || !status) return;
 
+            const token = input.value.trim();
             status.style.display = 'block';
             status.style.color = '#666';
             status.textContent = 'Saving...';
@@ -485,48 +518,91 @@
             }
         }
 
+        function saveNgrokToken() {
+            saveNgrokTokenGeneric('ngrokAuthtoken', 'ngrokTokenStatus');
+        }
+
+        function saveNgrokTokenSetup() {
+            saveNgrokTokenGeneric('ngrokAuthtokenSetup', 'ngrokTokenStatusSetup');
+        }
+
         async function checkTunnelStatus() {
-            const statusText = document.getElementById('tunnelStatusText');
-            const statusSection = document.getElementById('tunnelSection');
-            const urlDisplay = document.getElementById('tunnelUrlDisplay');
-            const urlText = document.getElementById('tunnelUrl');
-            const startBtn = document.getElementById('startTunnelBtn');
-            const stopBtn = document.getElementById('stopTunnelBtn');
-
-            if (!statusText) return;
-
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_tunnel_status") }}');
                 const data = await response.json();
 
+                // Update connected view elements (if they exist)
+                updateTunnelUI('tunnelStatusText', 'tunnelSection', 'tunnelUrlDisplay', 'tunnelUrl',
+                              'startTunnelBtn', 'stopTunnelBtn', data);
+
+                // Update setup view elements (if they exist)
+                updateTunnelUI('tunnelStatusTextSetup', null, 'tunnelUrlDisplaySetup', 'tunnelUrlSetup',
+                              'startTunnelBtnSetup', 'stopTunnelBtnSetup', data);
+
+                // Update the hints in step 2 for setup view
                 if (data.active && data.public_url) {
-                    statusText.innerHTML = '<span style="color: #51cf66;">✓ Active</span>';
-                    statusSection.style.background = 'rgba(0, 255, 0, 0.1)';
-                    urlDisplay.style.display = 'block';
-                    urlText.textContent = data.public_url;
-                    startBtn.style.display = 'none';
-                    stopBtn.style.display = 'block';
+                    const originHint = document.getElementById('allowedOriginHint');
+                    const redirectHint = document.getElementById('redirectUriHint');
+                    if (originHint) originHint.textContent = data.public_url;
+                    if (redirectHint) redirectHint.textContent = data.public_url + '/fleet-api/callback';
+
+                    // Auto-fill the Redirect URI field in the form
+                    const redirectUriField = document.getElementById('fleet_api_redirect_uri');
+                    if (redirectUriField && (!redirectUriField.value || redirectUriField.value.includes('localhost') || redirectUriField.value.includes('ngrok'))) {
+                        redirectUriField.value = data.public_url + '/fleet-api/callback';
+                    }
                 } else {
-                    statusText.innerHTML = '<span style="color: #999;">Not running</span>';
-                    statusSection.style.background = 'rgba(100, 150, 255, 0.1)';
-                    urlDisplay.style.display = 'none';
-                    startBtn.style.display = 'block';
-                    stopBtn.style.display = 'none';
+                    // Reset hints when tunnel is not active
+                    const originHint = document.getElementById('allowedOriginHint');
+                    const redirectHint = document.getElementById('redirectUriHint');
+                    if (originHint) originHint.textContent = '[start tunnel first]';
+                    if (redirectHint) redirectHint.textContent = '[start tunnel first]';
                 }
             } catch (error) {
-                statusText.innerHTML = '<span style="color: #999;">Unable to check</span>';
+                console.error('Failed to check tunnel status:', error);
+            }
+        }
+
+        function updateTunnelUI(statusTextId, sectionId, urlDisplayId, urlTextId, startBtnId, stopBtnId, data) {
+            const statusText = document.getElementById(statusTextId);
+            const statusSection = sectionId ? document.getElementById(sectionId) : null;
+            const urlDisplay = document.getElementById(urlDisplayId);
+            const urlText = document.getElementById(urlTextId);
+            const startBtn = document.getElementById(startBtnId);
+            const stopBtn = document.getElementById(stopBtnId);
+
+            if (!statusText) return;
+
+            if (data.active && data.public_url) {
+                statusText.innerHTML = '<span style="color: #51cf66;">✓ Active</span>';
+                if (statusSection) statusSection.style.background = 'rgba(0, 255, 0, 0.1)';
+                if (urlDisplay) urlDisplay.style.display = 'block';
+                if (urlText) urlText.textContent = data.public_url;
+                if (startBtn) startBtn.style.display = 'none';
+                if (stopBtn) stopBtn.style.display = 'block';
+            } else {
+                statusText.innerHTML = '<span style="color: #999;">Not running</span>';
+                if (statusSection) statusSection.style.background = 'rgba(100, 150, 255, 0.1)';
+                if (urlDisplay) urlDisplay.style.display = 'none';
+                if (startBtn) startBtn.style.display = 'block';
+                if (stopBtn) stopBtn.style.display = 'none';
             }
         }
 
         async function startTunnel() {
-            const btn = document.getElementById('startTunnelBtn');
-            const status = document.getElementById('tunnelActionStatus');
+            // Get buttons from both views
+            const btn = document.getElementById('startTunnelBtn') || document.getElementById('startTunnelBtnSetup');
+            const status = document.getElementById('tunnelActionStatus') || document.getElementById('tunnelActionStatusSetup');
 
-            btn.disabled = true;
-            btn.textContent = 'Starting...';
-            status.style.display = 'block';
-            status.textContent = 'Initializing ngrok tunnel...';
-            status.style.color = '#666';
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Starting...';
+            }
+            if (status) {
+                status.style.display = 'block';
+                status.textContent = 'Initializing ngrok tunnel...';
+                status.style.color = '#666';
+            }
 
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_start_tunnel") }}', {
@@ -555,14 +631,19 @@
         }
 
         async function stopTunnel() {
-            const btn = document.getElementById('stopTunnelBtn');
-            const status = document.getElementById('tunnelActionStatus');
+            // Get buttons from both views
+            const btn = document.getElementById('stopTunnelBtn') || document.getElementById('stopTunnelBtnSetup');
+            const status = document.getElementById('tunnelActionStatus') || document.getElementById('tunnelActionStatusSetup');
 
-            btn.disabled = true;
-            btn.textContent = 'Stopping...';
-            status.style.display = 'block';
-            status.textContent = 'Stopping tunnel...';
-            status.style.color = '#666';
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Stopping...';
+            }
+            if (status) {
+                status.style.display = 'block';
+                status.textContent = 'Stopping tunnel...';
+                status.style.color = '#666';
+            }
 
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_stop_tunnel") }}', {
@@ -573,56 +654,83 @@
                 const data = await response.json();
 
                 if (data.success) {
-                    status.style.color = '#51cf66';
-                    status.textContent = '✓ Tunnel stopped';
+                    if (status) {
+                        status.style.color = '#51cf66';
+                        status.textContent = '✓ Tunnel stopped';
+                    }
                     checkTunnelStatus();
+                    // Reset hints
+                    const originHint = document.getElementById('allowedOriginHint');
+                    const redirectHint = document.getElementById('redirectUriHint');
+                    if (originHint) originHint.textContent = '[start tunnel first]';
+                    if (redirectHint) redirectHint.textContent = '[start tunnel first]';
                 } else {
+                    if (status) {
+                        status.style.color = '#ff6b6b';
+                        status.textContent = '✗ ' + data.error;
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Stop Tunnel';
+                    }
+                }
+            } catch (error) {
+                if (status) {
                     status.style.color = '#ff6b6b';
-                    status.textContent = '✗ ' + data.error;
+                    status.textContent = '✗ Request failed: ' + error.message;
+                }
+                if (btn) {
                     btn.disabled = false;
                     btn.textContent = 'Stop Tunnel';
                 }
-            } catch (error) {
-                status.style.color = '#ff6b6b';
-                status.textContent = '✗ Request failed: ' + error.message;
-                btn.disabled = false;
-                btn.textContent = 'Stop Tunnel';
             }
         }
 
         async function checkKeyStatus() {
-            const statusText = document.getElementById('keyStatusText');
-            const statusSection = document.getElementById('keyStatusSection');
-            const generateBtn = document.getElementById('generateKeysBtn');
-
-            if (!statusText) return; // Element doesn't exist on this page
-
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_key_status") }}');
                 const data = await response.json();
 
-                if (data.keys_exist) {
-                    statusText.innerHTML = '<span style="color: #51cf66;">✓ Keys configured</span>';
-                    statusSection.style.background = 'rgba(0, 255, 0, 0.1)';
-                    if (generateBtn) generateBtn.textContent = 'Regenerate Domain Keys';
-                } else {
-                    statusText.innerHTML = '<span style="color: #ff6b6b;">✗ Keys not found</span>';
-                    statusSection.style.background = 'rgba(255, 100, 100, 0.1)';
-                }
+                // Update connected view
+                updateKeyStatusUI('keyStatusText', 'keyStatusSection', 'generateKeysBtn', data);
+                // Update setup view
+                updateKeyStatusUI('keyStatusTextSetup', 'keyStatusSectionSetup', 'generateKeysBtnSetup', data);
             } catch (error) {
-                statusText.innerHTML = '<span style="color: #999;">Unable to check</span>';
+                console.error('Failed to check key status:', error);
+            }
+        }
+
+        function updateKeyStatusUI(statusTextId, statusSectionId, generateBtnId, data) {
+            const statusText = document.getElementById(statusTextId);
+            const statusSection = document.getElementById(statusSectionId);
+            const generateBtn = document.getElementById(generateBtnId);
+
+            if (!statusText) return; // Element doesn't exist on this page
+
+            if (data.keys_exist) {
+                statusText.innerHTML = '<span style="color: #51cf66;">✓ Keys configured</span>';
+                if (statusSection) statusSection.style.background = 'rgba(0, 255, 0, 0.1)';
+                if (generateBtn) generateBtn.textContent = 'Regenerate Domain Keys';
+            } else {
+                statusText.innerHTML = '<span style="color: #ff6b6b;">✗ Keys not found</span>';
+                if (statusSection) statusSection.style.background = 'rgba(255, 100, 100, 0.1)';
             }
         }
 
         async function generateKeys() {
-            const btn = document.getElementById('generateKeysBtn');
-            const status = document.getElementById('generateKeysStatus');
+            // Get buttons from both views
+            const btn = document.getElementById('generateKeysBtn') || document.getElementById('generateKeysBtnSetup');
+            const status = document.getElementById('generateKeysStatus') || document.getElementById('generateKeysStatusSetup');
 
-            btn.disabled = true;
-            btn.textContent = 'Generating...';
-            status.style.display = 'block';
-            status.textContent = 'Creating EC key pair...';
-            status.style.color = '#666';
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Generating...';
+            }
+            if (status) {
+                status.style.display = 'block';
+                status.textContent = 'Creating EC key pair...';
+                status.style.color = '#666';
+            }
 
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_generate_keys") }}', {
@@ -635,39 +743,56 @@
                 const data = await response.json();
 
                 if (data.success) {
-                    status.style.color = '#51cf66';
-                    if (data.keys_replaced) {
-                        status.textContent = '✓ Keys regenerated successfully';
-                    } else {
-                        status.textContent = '✓ Keys generated successfully';
+                    if (status) {
+                        status.style.color = '#51cf66';
+                        if (data.keys_replaced) {
+                            status.textContent = '✓ Keys regenerated successfully';
+                        } else {
+                            status.textContent = '✓ Keys generated successfully';
+                        }
                     }
-                    btn.textContent = 'Regenerate Domain Keys';
-                    btn.disabled = false;
+                    if (btn) {
+                        btn.textContent = 'Regenerate Domain Keys';
+                        btn.disabled = false;
+                    }
                     // Update the key status display
                     checkKeyStatus();
                 } else {
+                    if (status) {
+                        status.style.color = '#ff6b6b';
+                        status.textContent = '✗ ' + data.error;
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Generate Domain Keys';
+                    }
+                }
+            } catch (error) {
+                if (status) {
                     status.style.color = '#ff6b6b';
-                    status.textContent = '✗ ' + data.error;
+                    status.textContent = '✗ Request failed: ' + error.message;
+                }
+                if (btn) {
                     btn.disabled = false;
                     btn.textContent = 'Generate Domain Keys';
                 }
-            } catch (error) {
-                status.style.color = '#ff6b6b';
-                status.textContent = '✗ Request failed: ' + error.message;
-                btn.disabled = false;
-                btn.textContent = 'Generate Domain Keys';
             }
         }
 
         async function registerDomain() {
-            const btn = document.getElementById('registerDomainBtn');
-            const status = document.getElementById('registerDomainStatus');
+            // Get buttons from both views
+            const btn = document.getElementById('registerDomainBtn') || document.getElementById('registerDomainBtnSetup');
+            const status = document.getElementById('registerDomainStatus') || document.getElementById('registerDomainStatusSetup');
 
-            btn.disabled = true;
-            btn.textContent = 'Registering...';
-            status.style.display = 'block';
-            status.textContent = 'Contacting Tesla...';
-            status.style.color = '#666';
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Registering...';
+            }
+            if (status) {
+                status.style.display = 'block';
+                status.textContent = 'Contacting Tesla...';
+                status.style.color = '#666';
+            }
 
             try {
                 const response = await fetch('{{ url_for("main.fleet_api_register_partner") }}', {
@@ -680,24 +805,34 @@
                 const data = await response.json();
 
                 if (data.success) {
-                    status.style.color = '#51cf66';
-                    if (data.already_registered) {
-                        status.textContent = '✓ ' + data.message;
-                    } else {
-                        status.textContent = '✓ ' + data.message + ' - API should now work!';
+                    if (status) {
+                        status.style.color = '#51cf66';
+                        if (data.already_registered) {
+                            status.textContent = '✓ ' + data.message;
+                        } else {
+                            status.textContent = '✓ ' + data.message + ' - API should now work!';
+                        }
                     }
-                    btn.textContent = 'Domain Registered ✓';
+                    if (btn) btn.textContent = 'Domain Registered ✓';
                 } else {
+                    if (status) {
+                        status.style.color = '#ff6b6b';
+                        status.textContent = '✗ ' + data.error;
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Register Domain with Tesla';
+                    }
+                }
+            } catch (error) {
+                if (status) {
                     status.style.color = '#ff6b6b';
-                    status.textContent = '✗ ' + data.error;
+                    status.textContent = '✗ Request failed: ' + error.message;
+                }
+                if (btn) {
                     btn.disabled = false;
                     btn.textContent = 'Register Domain with Tesla';
                 }
-            } catch (error) {
-                status.style.color = '#ff6b6b';
-                status.textContent = '✗ Request failed: ' + error.message;
-                btn.disabled = false;
-                btn.textContent = 'Register Domain with Tesla';
             }
         }
 

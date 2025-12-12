@@ -141,8 +141,10 @@ def register():
 def dashboard():
     logger.info(f"Dashboard accessed by user: {current_user.email}")
     has_amber_token = current_user.amber_api_token_encrypted is not None
+    tesla_api_provider = current_user.tesla_api_provider or 'teslemetry'
     return render_template('dashboard.html', title='Dashboard', has_amber_token=has_amber_token,
-                           solar_curtailment_enabled=current_user.solar_curtailment_enabled or False)
+                           solar_curtailment_enabled=current_user.solar_curtailment_enabled or False,
+                           tesla_api_provider=tesla_api_provider)
 
 
 @bp.route('/api/curtailment-status')
@@ -2955,14 +2957,14 @@ def fleet_api_start_tunnel():
     logger.info(f"Tunnel start requested by user: {current_user.email}")
 
     try:
-        from pyngrok import ngrok, conf
+        from pyngrok import ngrok
 
         # Set authtoken if user has one saved
         if current_user.ngrok_authtoken_encrypted:
             authtoken = decrypt_token(current_user.ngrok_authtoken_encrypted)
             if authtoken:
-                conf.get_default().auth_token = authtoken
-                logger.info("Using saved ngrok authtoken")
+                ngrok.set_auth_token(authtoken)
+                logger.info(f"Using saved ngrok authtoken (length: {len(authtoken)})")
 
         # Check if tunnel is already running
         existing_tunnels = ngrok.get_tunnels()

@@ -239,11 +239,11 @@ Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose which
 - ✅ Direct Tesla API access via OAuth
 - ✅ Works with both Docker and Home Assistant deployments
 - ✅ Automatic token refresh
+- ✅ Built-in ngrok tunnel for easy setup (no port forwarding needed)
 
 **Cons:**
 - ⚠️ Requires OAuth app registration with Tesla
-- ⚠️ More complex initial setup
-- ⚠️ Different configuration method for each deployment type
+- ⚠️ Slightly more setup steps than Teslemetry
 
 **Setup - Home Assistant:**
 1. Install the official "Tesla Fleet" integration in Home Assistant
@@ -652,24 +652,25 @@ Teslemetry is a third-party proxy service for Tesla API.
 3. Copy your API key
 4. Paste into Settings page in dashboard
 
-### Option 2: Tesla Fleet API (Free - More Complex)
+### Option 2: Tesla Fleet API (Free)
 
-Direct OAuth access to Tesla's Fleet API.
+Direct OAuth access to Tesla's Fleet API with built-in tunnel support.
 
 **Pros:**
 - ✅ Completely free
 - ✅ Direct API access
 - ✅ Configurable via web GUI
-
-**Cons:**
-- ⚠️ Requires OAuth app registration
-- ⚠️ More setup steps
+- ✅ Built-in ngrok tunnel (no port forwarding or public domain needed)
+- ✅ Step-by-step guided setup in the UI
 
 **Setup:**
 1. Register OAuth app at https://developer.tesla.com
-2. Get Client ID and Client Secret
-3. Configure via Settings page in dashboard
-4. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
+2. In Settings, start the ngrok tunnel to get a public URL
+3. Update Tesla Developer Portal with the tunnel URL
+4. Enter Client ID and Client Secret in Settings
+5. Generate keys and register domain (one-click buttons)
+6. Authorize with Tesla
+7. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
 
 ## Configuration
 

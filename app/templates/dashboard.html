@@ -23,7 +23,11 @@
                 </div>
             </div>
             <div id="tesla-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
-                <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">🔋 Tesla Energy</h4>
+                <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">🔋 Tesla Energy
+                    <span style="font-weight: normal; font-size: 0.85em; opacity: 0.7;">
+                        via {% if tesla_api_provider == 'fleet_api' %}Fleet API{% else %}Teslemetry{% endif %}
+                    </span>
+                </h4>
                 <div id="tesla-status-content">
                     <p style="margin: 0; font-size: 0.8em;">Checking connection...</p>
                 </div>
