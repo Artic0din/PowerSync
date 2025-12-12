@@ -2902,3 +2902,117 @@ def fleet_api_register_partner():
             'success': False,
             'error': f'Request failed: {str(e)}'
         }), 500
+
+
+@bp.route('/fleet-api/start-tunnel', methods=['POST'])
+@login_required
+def fleet_api_start_tunnel():
+    """
+    Start an ngrok tunnel for Tesla Fleet API registration.
+
+    This creates a temporary public URL that Tesla's servers can reach
+    to verify the public key and complete domain registration.
+    """
+    logger.info(f"Tunnel start requested by user: {current_user.email}")
+
+    try:
+        from pyngrok import ngrok
+        from pyngrok.conf import PyngrokConfig
+
+        # Check if tunnel is already running
+        existing_tunnels = ngrok.get_tunnels()
+        for tunnel in existing_tunnels:
+            if 'localhost:5001' in tunnel.config.get('addr', ''):
+                logger.info(f"Tunnel already active: {tunnel.public_url}")
+                return jsonify({
+                    'success': True,
+                    'public_url': tunnel.public_url,
+                    'public_key_url': f"{tunnel.public_url}/.well-known/appspecific/com.tesla.3p.public-key.pem",
+                    'callback_url': f"{tunnel.public_url}/fleet-api/callback",
+                    'already_running': True
+                })
+
+        # Start new tunnel
+        logger.info("Starting new ngrok tunnel on port 5001")
+        tunnel = ngrok.connect(5001, bind_tls=True)
+        public_url = tunnel.public_url
+
+        # Store in app config
+        current_app.config['NGROK_URL'] = public_url
+
+        logger.info(f"Tunnel started successfully: {public_url}")
+
+        return jsonify({
+            'success': True,
+            'public_url': public_url,
+            'public_key_url': f"{public_url}/.well-known/appspecific/com.tesla.3p.public-key.pem",
+            'callback_url': f"{public_url}/fleet-api/callback",
+            'already_running': False
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to start tunnel: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to start tunnel: {str(e)}'
+        }), 500
+
+
+@bp.route('/fleet-api/stop-tunnel', methods=['POST'])
+@login_required
+def fleet_api_stop_tunnel():
+    """Stop all ngrok tunnels."""
+    logger.info(f"Tunnel stop requested by user: {current_user.email}")
+
+    try:
+        from pyngrok import ngrok
+
+        ngrok.disconnect_all()
+        current_app.config.pop('NGROK_URL', None)
+
+        logger.info("All tunnels stopped")
+
+        return jsonify({
+            'success': True,
+            'message': 'Tunnel stopped'
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to stop tunnel: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to stop tunnel: {str(e)}'
+        }), 500
+
+
+@bp.route('/fleet-api/tunnel-status')
+@login_required
+def fleet_api_tunnel_status():
+    """Check if an ngrok tunnel is currently running."""
+    try:
+        from pyngrok import ngrok
+
+        tunnels = ngrok.get_tunnels()
+        active_tunnel = None
+
+        for tunnel in tunnels:
+            if 'localhost:5001' in tunnel.config.get('addr', '') or ':5001' in tunnel.config.get('addr', ''):
+                active_tunnel = tunnel.public_url
+                break
+
+        return jsonify({
+            'active': active_tunnel is not None,
+            'public_url': active_tunnel,
+            'public_key_url': f"{active_tunnel}/.well-known/appspecific/com.tesla.3p.public-key.pem" if active_tunnel else None,
+            'callback_url': f"{active_tunnel}/fleet-api/callback" if active_tunnel else None
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to check tunnel status: {e}")
+        return jsonify({
+            'active': False,
+            'public_url': None,
+            'error': str(e)
+        })
