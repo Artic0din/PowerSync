@@ -118,6 +118,43 @@
                 </div>
                 <p id="tunnelActionStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
 
+                <!-- Named Tunnel Configuration -->
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;"><strong>Configure Named Tunnel (Stable URL)</strong></summary>
+                    <div style="padding: 0.5em; margin-top: 0.5em; background: rgba(100, 200, 100, 0.1); border-radius: 0.3em;">
+                        <p style="font-size: 0.8em; margin: 0 0 0.5em 0;">
+                            Named tunnels provide a stable URL using your own domain.
+                            <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/" target="_blank">Create a tunnel</a> in Cloudflare dashboard first.
+                        </p>
+
+                        <label style="font-size: 0.85em; display: block; margin-bottom: 0.3em;">
+                            Tunnel Token
+                            <input type="password" id="tunnelToken" placeholder="eyJhIjoiNj..." style="font-size: 0.85em; width: 100%;">
+                        </label>
+
+                        <label style="font-size: 0.85em; display: block; margin-bottom: 0.3em;">
+                            Custom Domain
+                            <input type="text" id="tunnelDomain" placeholder="tesla.mydomain.com"
+                                   value="{{ current_user.cloudflare_tunnel_domain or '' }}" style="font-size: 0.85em; width: 100%;">
+                        </label>
+
+                        <label style="font-size: 0.85em; display: flex; align-items: center; gap: 0.3em; margin: 0.5em 0;">
+                            <input type="checkbox" id="tunnelAutoStart" {% if current_user.cloudflare_tunnel_enabled %}checked{% endif %}>
+                            Auto-start tunnel on app startup
+                        </label>
+
+                        <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
+                            <button type="button" class="outline" style="flex: 1; font-size: 0.85em;" onclick="saveTunnelConfig()">
+                                Save Configuration
+                            </button>
+                            <button type="button" class="outline" style="flex: 1; font-size: 0.85em;" onclick="startNamedTunnel()">
+                                Start Named Tunnel
+                            </button>
+                        </div>
+                        <p id="namedTunnelStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
+                    </div>
+                </details>
+
                 <!-- Key Status and Generation - SECOND -->
                 <div id="keyStatusSection" style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
                     <p style="margin: 0; font-size: 0.85em;">
@@ -213,6 +250,27 @@
                         <code id="tunnelUrlSetup" style="font-size: 0.75em; word-break: break-all;"></code>
                     </div>
                     <p id="tunnelActionStatusSetup" style="font-size: 0.75em; margin: 0.3em 0 0 0; display: none;"></p>
+
+                    <!-- Named Tunnel Option -->
+                    <details style="margin-top: 0.4em;">
+                        <summary style="font-size: 0.8em;">Or use a Named Tunnel (stable URL)</summary>
+                        <div style="padding: 0.4em; margin-top: 0.3em; background: rgba(100, 200, 100, 0.1); border-radius: 0.3em;">
+                            <p style="font-size: 0.75em; margin: 0 0 0.3em 0;">
+                                <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/" target="_blank">Create a tunnel</a> in Cloudflare dashboard first.
+                            </p>
+                            <input type="password" id="tunnelTokenSetup" placeholder="Tunnel Token" style="font-size: 0.8em; width: 100%; margin-bottom: 0.2em;">
+                            <input type="text" id="tunnelDomainSetup" placeholder="tesla.mydomain.com" value="{{ current_user.cloudflare_tunnel_domain or '' }}" style="font-size: 0.8em; width: 100%; margin-bottom: 0.2em;">
+                            <label style="font-size: 0.75em; display: flex; align-items: center; gap: 0.3em;">
+                                <input type="checkbox" id="tunnelAutoStartSetup" {% if current_user.cloudflare_tunnel_enabled %}checked{% endif %}>
+                                Auto-start on app startup
+                            </label>
+                            <div style="display: flex; gap: 0.3em; margin-top: 0.3em;">
+                                <button type="button" class="outline" style="flex: 1; font-size: 0.75em; padding: 0.3em;" onclick="saveTunnelConfigSetup()">Save</button>
+                                <button type="button" class="outline" style="flex: 1; font-size: 0.75em; padding: 0.3em;" onclick="startNamedTunnelSetup()">Start</button>
+                            </div>
+                            <p id="namedTunnelStatusSetup" style="font-size: 0.75em; margin: 0.3em 0 0 0; display: none;"></p>
+                        </div>
+                    </details>
                 </div>
 
                 <!-- Step 2: Tesla Developer Portal -->
@@ -736,6 +794,112 @@
                     btn.disabled = false;
                     btn.textContent = 'Stop Tunnel';
                 }
+            }
+        }
+
+        // Named tunnel functions
+        async function saveTunnelConfig() {
+            const statusEl = document.getElementById('namedTunnelStatus');
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = '<span style="color: #fcc419;">Saving...</span>';
+
+            try {
+                const response = await fetch('{{ url_for("main.save_tunnel_config") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tunnel_token: document.getElementById('tunnelToken').value,
+                        tunnel_domain: document.getElementById('tunnelDomain').value,
+                        tunnel_enabled: document.getElementById('tunnelAutoStart').checked
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    statusEl.innerHTML = '<span style="color: #51cf66;">✓ Configuration saved!</span>';
+                } else {
+                    statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ Error: ' + data.error + '</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ Request failed: ' + error.message + '</span>';
+            }
+        }
+
+        async function saveTunnelConfigSetup() {
+            const statusEl = document.getElementById('namedTunnelStatusSetup');
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = '<span style="color: #fcc419;">Saving...</span>';
+
+            try {
+                const response = await fetch('{{ url_for("main.save_tunnel_config") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tunnel_token: document.getElementById('tunnelTokenSetup').value,
+                        tunnel_domain: document.getElementById('tunnelDomainSetup').value,
+                        tunnel_enabled: document.getElementById('tunnelAutoStartSetup').checked
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    statusEl.innerHTML = '<span style="color: #51cf66;">✓ Saved!</span>';
+                } else {
+                    statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ ' + data.error + '</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ ' + error.message + '</span>';
+            }
+        }
+
+        async function startNamedTunnel() {
+            const statusEl = document.getElementById('namedTunnelStatus');
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = '<span style="color: #fcc419;">Starting named tunnel...</span>';
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_start_named_tunnel") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    statusEl.innerHTML = '<span style="color: #51cf66;">✓ Connected to ' + data.domain + '</span>';
+                    checkTunnelStatus();
+                } else {
+                    statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ Error: ' + data.error + '</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ Request failed: ' + error.message + '</span>';
+            }
+        }
+
+        async function startNamedTunnelSetup() {
+            const statusEl = document.getElementById('namedTunnelStatusSetup');
+            statusEl.style.display = 'block';
+            statusEl.innerHTML = '<span style="color: #fcc419;">Starting...</span>';
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_start_named_tunnel") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    statusEl.innerHTML = '<span style="color: #51cf66;">✓ ' + data.domain + '</span>';
+                    checkTunnelStatus();
+                    // Update hints with the named tunnel URL
+                    const originHint = document.getElementById('allowedOriginHint');
+                    const redirectHint = document.getElementById('redirectUriHint');
+                    if (originHint) originHint.textContent = data.public_url;
+                    if (redirectHint) redirectHint.textContent = data.public_url + '/fleet-api/callback';
+                } else {
+                    statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ ' + data.error + '</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span style="color: #ff6b6b;">✗ ' + error.message + '</span>';
             }
         }
 

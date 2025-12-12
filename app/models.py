@@ -31,6 +31,11 @@ class User(UserMixin, db.Model):
     fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_token_expires_at = db.Column(db.DateTime)
 
+    # Named Cloudflare Tunnel (for stable custom domain)
+    cloudflare_tunnel_token_encrypted = db.Column(db.LargeBinary)  # Tunnel token (encrypted)
+    cloudflare_tunnel_domain = db.Column(db.String(255))  # Custom domain (e.g., tesla.mydomain.com)
+    cloudflare_tunnel_enabled = db.Column(db.Boolean, default=False)  # Auto-start on app startup
+
     # Two-Factor Authentication
     totp_secret = db.Column(db.String(32))  # Base32 encoded secret for TOTP
     two_factor_enabled = db.Column(db.Boolean, default=False)

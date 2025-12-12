@@ -3428,6 +3428,58 @@ class CloudflareTunnel:
         self.stop()
         raise TimeoutError("Timed out waiting for tunnel URL")
 
+    def start_named_tunnel(self, token, timeout=30):
+        """
+        Start a named Cloudflare tunnel using a tunnel token.
+
+        Args:
+            token: Cloudflare tunnel token from dashboard
+            timeout: Max seconds to wait for connection
+
+        Returns:
+            True if connected successfully
+
+        Raises:
+            FileNotFoundError: If cloudflared is not installed
+            TimeoutError: If connection not established within timeout
+        """
+        cloudflared_bin = get_cloudflared_path()
+        if not cloudflared_bin:
+            raise FileNotFoundError("cloudflared not installed")
+
+        cmd = [cloudflared_bin, 'tunnel', 'run', '--token', token]
+
+        logger.info("Starting cloudflared named tunnel")
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Read output in background thread
+        self._output_lines = []
+        self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+        self._reader_thread.start()
+
+        # Wait for "Connection" or "Registered tunnel connection" message
+        import time as time_module
+        start_time = time_module.time()
+
+        while time_module.time() - start_time < timeout:
+            for line in self._output_lines:
+                if 'INF Connection' in line or 'Registered tunnel connection' in line:
+                    self.tunnel_type = 'named'
+                    logger.info("Cloudflare named tunnel connected")
+                    return True
+            time_module.sleep(0.5)
+
+        # Timeout - kill process
+        self.stop()
+        raise TimeoutError("Timed out waiting for tunnel connection")
+
     def _read_output(self):
         """Read process output in background thread."""
         try:
@@ -3654,3 +3706,73 @@ def fleet_api_tunnel_status():
             'public_url': None,
             'error': str(e)
         })
+
+
+@bp.route('/fleet-api/save-tunnel-config', methods=['POST'])
+@login_required
+def save_tunnel_config():
+    """Save named tunnel configuration."""
+    data = request.get_json()
+
+    tunnel_token = data.get('tunnel_token')
+    tunnel_domain = data.get('tunnel_domain')
+    tunnel_enabled = data.get('tunnel_enabled', False)
+
+    if tunnel_token:
+        current_user.cloudflare_tunnel_token_encrypted = encrypt_token(tunnel_token)
+    current_user.cloudflare_tunnel_domain = tunnel_domain
+    current_user.cloudflare_tunnel_enabled = tunnel_enabled
+
+    # Also update the redirect URI to use the custom domain
+    if tunnel_domain:
+        current_user.fleet_api_redirect_uri = f"https://{tunnel_domain}/fleet-api/callback"
+
+    db.session.commit()
+
+    return jsonify({'success': True})
+
+
+@bp.route('/fleet-api/start-named-tunnel', methods=['POST'])
+@login_required
+def fleet_api_start_named_tunnel():
+    """Start a named Cloudflare tunnel."""
+    global _cloudflare_tunnel
+
+    if not current_user.cloudflare_tunnel_token_encrypted:
+        return jsonify({'success': False, 'error': 'No tunnel token configured'}), 400
+
+    token = decrypt_token(current_user.cloudflare_tunnel_token_encrypted)
+
+    if _cloudflare_tunnel and _cloudflare_tunnel.is_running():
+        return jsonify({
+            'success': True,
+            'message': 'Tunnel already running',
+            'tunnel_type': _cloudflare_tunnel.tunnel_type,
+            'domain': current_user.cloudflare_tunnel_domain
+        })
+
+    try:
+        _cloudflare_tunnel = CloudflareTunnel()
+        _cloudflare_tunnel.start_named_tunnel(token)
+        _cloudflare_tunnel.public_url = f"https://{current_user.cloudflare_tunnel_domain}"
+
+        return jsonify({
+            'success': True,
+            'tunnel_type': 'named',
+            'domain': current_user.cloudflare_tunnel_domain,
+            'public_url': _cloudflare_tunnel.public_url
+        })
+    except Exception as e:
+        logger.error(f"Failed to start named tunnel: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/fleet-api/get-tunnel-config')
+@login_required
+def get_tunnel_config():
+    """Get the current named tunnel configuration."""
+    return jsonify({
+        'has_token': current_user.cloudflare_tunnel_token_encrypted is not None,
+        'domain': current_user.cloudflare_tunnel_domain,
+        'auto_start': current_user.cloudflare_tunnel_enabled
+    })
