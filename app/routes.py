@@ -1,5 +1,5 @@
 # app/routes.py
-from flask import render_template, flash, redirect, url_for, request, Blueprint, jsonify, session, current_app
+from flask import render_template, flash, redirect, url_for, request, Blueprint, jsonify, session, current_app, send_file
 from flask_login import login_user, logout_user, current_user, login_required
 from app import db, cache
 from app.models import User, PriceRecord, SavedTOUProfile
@@ -2637,3 +2637,228 @@ def fleet_api_oauth_callback():
         db.session.rollback()
 
     return redirect(url_for('main.settings'))
+
+
+@bp.route('/fleet-api/generate-keys', methods=['POST'])
+@login_required
+def fleet_api_generate_keys():
+    """
+    Generate EC key pair for Tesla Fleet API domain verification.
+
+    Creates:
+    - data/tesla-keys/private-key.pem (keep secret!)
+    - data/tesla-keys/com.tesla.3p.public-key.pem (served publicly)
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.backends import default_backend
+
+    logger.info(f"Key generation initiated by user: {current_user.email}")
+
+    # Define key directory and paths
+    keys_dir = os.path.join(current_app.root_path, '..', 'data', 'tesla-keys')
+    private_key_path = os.path.join(keys_dir, 'private-key.pem')
+    public_key_path = os.path.join(keys_dir, 'com.tesla.3p.public-key.pem')
+
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(keys_dir, exist_ok=True)
+
+        # Check if keys already exist
+        keys_exist = os.path.exists(private_key_path) and os.path.exists(public_key_path)
+
+        # Generate EC key pair using prime256v1 (secp256r1) curve
+        # This is required by Tesla Fleet API
+        private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        public_key = private_key.public_key()
+
+        # Serialize private key to PEM format
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+
+        # Serialize public key to PEM format
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+        # Write private key with restricted permissions
+        with open(private_key_path, 'wb') as f:
+            f.write(private_pem)
+        os.chmod(private_key_path, 0o600)  # Owner read/write only
+
+        # Write public key
+        with open(public_key_path, 'wb') as f:
+            f.write(public_pem)
+
+        logger.info(f"Successfully generated Tesla Fleet API keys at {keys_dir}")
+
+        return jsonify({
+            'success': True,
+            'message': 'Keys generated successfully',
+            'keys_replaced': keys_exist,
+            'public_key_path': '/.well-known/appspecific/com.tesla.3p.public-key.pem'
+        })
+
+    except PermissionError as e:
+        logger.error(f"Permission error generating keys: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Permission denied: {str(e)}. Check directory permissions.'
+        }), 500
+    except Exception as e:
+        logger.error(f"Error generating keys: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to generate keys: {str(e)}'
+        }), 500
+
+
+@bp.route('/fleet-api/key-status')
+@login_required
+def fleet_api_key_status():
+    """Check if Tesla Fleet API keys exist and are accessible."""
+    keys_dir = os.path.join(current_app.root_path, '..', 'data', 'tesla-keys')
+    private_key_path = os.path.join(keys_dir, 'private-key.pem')
+    public_key_path = os.path.join(keys_dir, 'com.tesla.3p.public-key.pem')
+
+    private_exists = os.path.exists(private_key_path)
+    public_exists = os.path.exists(public_key_path)
+
+    return jsonify({
+        'keys_exist': private_exists and public_exists,
+        'private_key_exists': private_exists,
+        'public_key_exists': public_exists,
+        'public_key_url': '/.well-known/appspecific/com.tesla.3p.public-key.pem'
+    })
+
+
+@bp.route('/.well-known/appspecific/com.tesla.3p.public-key.pem')
+def tesla_public_key():
+    """
+    Serve Tesla Fleet API public key for domain verification.
+
+    Tesla requires this key to be publicly accessible (no auth) at this exact path
+    for partner registration to work.
+    """
+    key_path = os.path.join(current_app.root_path, '..', 'data', 'tesla-keys', 'com.tesla.3p.public-key.pem')
+
+    if os.path.exists(key_path):
+        logger.info(f"Serving Tesla public key from {key_path}")
+        return send_file(key_path, mimetype='application/x-pem-file')
+    else:
+        logger.warning(f"Tesla public key not found at {key_path}")
+        return 'Public key not found. Generate keys first: openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem && openssl ec -in private-key.pem -pubout -out com.tesla.3p.public-key.pem', 404
+
+
+@bp.route('/fleet-api/register-partner', methods=['POST'])
+@login_required
+def fleet_api_register_partner():
+    """
+    Register this app's domain with Tesla Fleet API.
+
+    This calls POST /api/1/partner_accounts to register the domain.
+    Required before any Fleet API calls will work (fixes 412 Precondition Failed).
+    """
+    logger.info(f"Partner registration initiated by user: {current_user.email}")
+
+    # Check if we have an access token
+    if not current_user.fleet_api_access_token_encrypted:
+        logger.error("No Fleet API access token - user needs to authenticate first")
+        return jsonify({
+            'success': False,
+            'error': 'No access token. Please connect to Tesla Fleet API first.'
+        }), 400
+
+    # Decrypt the access token
+    access_token = decrypt_token(current_user.fleet_api_access_token_encrypted)
+    if not access_token:
+        logger.error("Failed to decrypt Fleet API access token")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to decrypt access token.'
+        }), 500
+
+    # Get the domain from the redirect URI or environment
+    redirect_uri = current_user.fleet_api_redirect_uri or os.getenv('TESLA_REDIRECT_URI')
+    if not redirect_uri:
+        return jsonify({
+            'success': False,
+            'error': 'No redirect URI configured. Please set it in settings.'
+        }), 400
+
+    # Extract domain from redirect URI (e.g., https://example.com/callback -> example.com)
+    from urllib.parse import urlparse
+    parsed = urlparse(redirect_uri)
+    domain = parsed.netloc
+
+    if not domain:
+        return jsonify({
+            'success': False,
+            'error': f'Could not extract domain from redirect URI: {redirect_uri}'
+        }), 400
+
+    logger.info(f"Registering domain: {domain}")
+
+    # Call Tesla's partner registration endpoint
+    # Use the same region as configured in the API client
+    base_url = "https://fleet-api.prd.na.vn.cloud.tesla.com"
+    register_url = f"{base_url}/api/1/partner_accounts"
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+
+    payload = {
+        'domain': domain
+    }
+
+    try:
+        logger.info(f"Calling Tesla partner registration: POST {register_url}")
+        response = requests.post(register_url, json=payload, headers=headers, timeout=30)
+
+        logger.info(f"Partner registration response: {response.status_code}")
+        logger.debug(f"Response body: {response.text}")
+
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"Partner registration successful: {result}")
+            return jsonify({
+                'success': True,
+                'message': f'Successfully registered domain: {domain}',
+                'response': result
+            })
+        elif response.status_code == 409:
+            # Already registered
+            logger.info(f"Domain already registered: {domain}")
+            return jsonify({
+                'success': True,
+                'message': f'Domain already registered: {domain}',
+                'already_registered': True
+            })
+        else:
+            error_text = response.text
+            logger.error(f"Partner registration failed: {response.status_code} - {error_text}")
+            return jsonify({
+                'success': False,
+                'error': f'Registration failed: {response.status_code} - {error_text}'
+            }), response.status_code
+
+    except requests.exceptions.Timeout:
+        logger.error("Partner registration request timed out")
+        return jsonify({
+            'success': False,
+            'error': 'Request timed out. Please try again.'
+        }), 504
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Partner registration request failed: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Request failed: {str(e)}'
+        }), 500

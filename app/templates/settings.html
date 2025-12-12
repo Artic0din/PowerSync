@@ -100,6 +100,35 @@
                 </p>
 
                 <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;">Reconnect / Refresh Tokens</a>
+
+                <!-- Key Status and Generation -->
+                <div id="keyStatusSection" style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0; font-size: 0.85em;">
+                        <strong>Domain Keys:</strong> <span id="keyStatusText">Checking...</span>
+                    </p>
+                </div>
+
+                <button type="button" id="generateKeysBtn" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;" onclick="generateKeys()">
+                    Generate Domain Keys
+                </button>
+                <p id="generateKeysStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
+
+                <button type="button" id="registerDomainBtn" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;" onclick="registerDomain()">
+                    Register Domain with Tesla
+                </button>
+                <p id="registerDomainStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
+
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;">Getting 412 Precondition Failed?</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(255, 200, 100, 0.1); border-radius: 0.3em;">
+                        <p style="margin: 0 0 0.5em 0;">If you see "412 Precondition Failed" errors, follow these steps:</p>
+                        <ol style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.3em 0;">Click <strong>"Generate Domain Keys"</strong> above</li>
+                            <li style="margin: 0.3em 0;">Verify the key is accessible at your domain: <code>/.well-known/appspecific/com.tesla.3p.public-key.pem</code></li>
+                            <li style="margin: 0.3em 0;">Click <strong>"Register Domain with Tesla"</strong></li>
+                        </ol>
+                    </div>
+                </details>
             {% else %}
                 <!-- Not connected -->
                 <div style="padding: 0.8em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
@@ -360,6 +389,122 @@
     {% endif %}
 
     <script>
+        // Check key status on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            checkKeyStatus();
+        });
+
+        async function checkKeyStatus() {
+            const statusText = document.getElementById('keyStatusText');
+            const statusSection = document.getElementById('keyStatusSection');
+            const generateBtn = document.getElementById('generateKeysBtn');
+
+            if (!statusText) return; // Element doesn't exist on this page
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_key_status") }}');
+                const data = await response.json();
+
+                if (data.keys_exist) {
+                    statusText.innerHTML = '<span style="color: #51cf66;">✓ Keys configured</span>';
+                    statusSection.style.background = 'rgba(0, 255, 0, 0.1)';
+                    if (generateBtn) generateBtn.textContent = 'Regenerate Domain Keys';
+                } else {
+                    statusText.innerHTML = '<span style="color: #ff6b6b;">✗ Keys not found</span>';
+                    statusSection.style.background = 'rgba(255, 100, 100, 0.1)';
+                }
+            } catch (error) {
+                statusText.innerHTML = '<span style="color: #999;">Unable to check</span>';
+            }
+        }
+
+        async function generateKeys() {
+            const btn = document.getElementById('generateKeysBtn');
+            const status = document.getElementById('generateKeysStatus');
+
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+            status.style.display = 'block';
+            status.textContent = 'Creating EC key pair...';
+            status.style.color = '#666';
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_generate_keys") }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    status.style.color = '#51cf66';
+                    if (data.keys_replaced) {
+                        status.textContent = '✓ Keys regenerated successfully';
+                    } else {
+                        status.textContent = '✓ Keys generated successfully';
+                    }
+                    btn.textContent = 'Regenerate Domain Keys';
+                    btn.disabled = false;
+                    // Update the key status display
+                    checkKeyStatus();
+                } else {
+                    status.style.color = '#ff6b6b';
+                    status.textContent = '✗ ' + data.error;
+                    btn.disabled = false;
+                    btn.textContent = 'Generate Domain Keys';
+                }
+            } catch (error) {
+                status.style.color = '#ff6b6b';
+                status.textContent = '✗ Request failed: ' + error.message;
+                btn.disabled = false;
+                btn.textContent = 'Generate Domain Keys';
+            }
+        }
+
+        async function registerDomain() {
+            const btn = document.getElementById('registerDomainBtn');
+            const status = document.getElementById('registerDomainStatus');
+
+            btn.disabled = true;
+            btn.textContent = 'Registering...';
+            status.style.display = 'block';
+            status.textContent = 'Contacting Tesla...';
+            status.style.color = '#666';
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_register_partner") }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    status.style.color = '#51cf66';
+                    if (data.already_registered) {
+                        status.textContent = '✓ ' + data.message;
+                    } else {
+                        status.textContent = '✓ ' + data.message + ' - API should now work!';
+                    }
+                    btn.textContent = 'Domain Registered ✓';
+                } else {
+                    status.style.color = '#ff6b6b';
+                    status.textContent = '✗ ' + data.error;
+                    btn.disabled = false;
+                    btn.textContent = 'Register Domain with Tesla';
+                }
+            } catch (error) {
+                status.style.color = '#ff6b6b';
+                status.textContent = '✗ Request failed: ' + error.message;
+                btn.disabled = false;
+                btn.textContent = 'Register Domain with Tesla';
+            }
+        }
+
         function toggleAemoFields(enabled) {
             const fields = document.getElementById('aemo-fields');
             if (enabled) {

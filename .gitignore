@@ -31,6 +31,10 @@ Thumbs.db
 docker-volumes/
 data/
 
+# Tesla Fleet API private keys (NEVER commit these)
+**/private-key.pem
+**/tesla-keys/private-key.pem
+
 # Logs
 *.log
 logs/
