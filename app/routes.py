@@ -1887,8 +1887,8 @@ def tou_schedule():
         current_user.electricity_provider == 'flow_power' and
         current_user.flow_power_price_source == 'aemo'
     )
-    if use_aemo and current_user.network_tariff_type:
-        logger.info("Preview: Applying network tariff to AEMO wholesale prices")
+    if use_aemo:
+        logger.info("Applying network tariff to AEMO wholesale prices")
         tariff = apply_network_tariff(tariff, current_user)
 
     # Apply Flow Power export rates if user is on Flow Power (for preview display)
@@ -2028,7 +2028,7 @@ def sync_tesla_schedule(tesla_client):
             return jsonify({'error': 'Failed to convert Amber prices to Tesla tariff format'}), 500
 
         # Apply network tariff if using AEMO wholesale prices (no network fees included)
-        if use_aemo and current_user.network_tariff_type:
+        if use_aemo:
             logger.info("Applying network tariff to AEMO wholesale prices")
             tariff = apply_network_tariff(tariff, current_user)
 
