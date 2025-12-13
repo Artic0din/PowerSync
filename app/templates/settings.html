@@ -96,21 +96,66 @@
                     <div id="networkTariffConfig" style="margin-top: 1em; {% if current_user.flow_power_price_source != 'aemo' %}display: none;{% endif %}">
                         <fieldset style="border: 1px solid var(--muted-border-color); padding: 1em; border-radius: 0.5em;">
                             <legend style="font-weight: bold;">Network Tariff (DNSP Charges)</legend>
-                            <p style="font-size: 0.8em; margin: 0 0 0.5em 0; color: var(--muted-color);">
-                                AEMO provides wholesale prices only. Add your network (DNSP) charges to get accurate total costs.
-                                Check your distributor's website (Energex, Ausgrid, AusNet, SA Power Networks, etc.) for your tariff rates.
-                            </p>
-                            <p style="font-size: 0.75em; margin: 0 0 1em 0; padding: 0.5em; background: rgba(59, 130, 246, 0.1); border-radius: 4px; color: var(--primary);">
-                                <strong>⚠️ Enter rates in cents/kWh:</strong> If your tariff shows $0.19367/kWh, enter <strong>19.367</strong>
+                            <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
+                                AEMO provides wholesale prices only. Select your distributor and tariff code to automatically apply network charges.
                             </p>
 
-                            <label for="network_tariff_type">
-                                Tariff Type
-                                <select id="network_tariff_type" name="network_tariff_type" onchange="toggleNetworkTariffType()">
-                                    <option value="flat" {% if current_user.network_tariff_type == 'flat' %}selected{% endif %}>Flat Rate (single rate all day)</option>
-                                    <option value="tou" {% if current_user.network_tariff_type == 'tou' %}selected{% endif %}>Time of Use (peak/shoulder/off-peak)</option>
-                                </select>
-                            </label>
+                            <!-- Distributor Selection -->
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                                <label for="network_distributor">
+                                    Network Distributor (DNSP)
+                                    <select id="network_distributor" name="network_distributor" onchange="updateTariffCodes()">
+                                        <option value="energex" {% if current_user.network_distributor == 'energex' %}selected{% endif %}>Energex (QLD SE)</option>
+                                        <option value="ergon" {% if current_user.network_distributor == 'ergon' %}selected{% endif %}>Ergon Energy (QLD Regional)</option>
+                                        <option value="ausgrid" {% if current_user.network_distributor == 'ausgrid' %}selected{% endif %}>Ausgrid (NSW)</option>
+                                        <option value="endeavour" {% if current_user.network_distributor == 'endeavour' %}selected{% endif %}>Endeavour Energy (NSW)</option>
+                                        <option value="essential" {% if current_user.network_distributor == 'essential' %}selected{% endif %}>Essential Energy (NSW Regional)</option>
+                                        <option value="sapn" {% if current_user.network_distributor == 'sapn' %}selected{% endif %}>SA Power Networks (SA)</option>
+                                        <option value="powercor" {% if current_user.network_distributor == 'powercor' %}selected{% endif %}>Powercor (VIC)</option>
+                                        <option value="citipower" {% if current_user.network_distributor == 'citipower' %}selected{% endif %}>CitiPower (VIC)</option>
+                                        <option value="ausnet" {% if current_user.network_distributor == 'ausnet' %}selected{% endif %}>AusNet Services (VIC)</option>
+                                        <option value="jemena" {% if current_user.network_distributor == 'jemena' %}selected{% endif %}>Jemena (VIC)</option>
+                                        <option value="united" {% if current_user.network_distributor == 'united' %}selected{% endif %}>United Energy (VIC)</option>
+                                        <option value="tasnetworks" {% if current_user.network_distributor == 'tasnetworks' %}selected{% endif %}>TasNetworks (TAS)</option>
+                                        <option value="evoenergy" {% if current_user.network_distributor == 'evoenergy' %}selected{% endif %}>Evoenergy (ACT)</option>
+                                    </select>
+                                </label>
+
+                                <label for="network_tariff_code">
+                                    Tariff Code
+                                    <input type="text" id="network_tariff_code" name="network_tariff_code"
+                                           value="{{ current_user.network_tariff_code or 'NTC6900' }}"
+                                           placeholder="e.g., NTC6900, EA025">
+                                    <small style="font-size: 0.75em; color: var(--muted-color);">Check your electricity bill for your tariff code</small>
+                                </label>
+                            </div>
+
+                            <!-- Manual Override Checkbox -->
+                            <div style="margin-top: 1em; padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
+                                <label style="display: flex; align-items: center; gap: 0.5em; cursor: pointer; margin: 0;">
+                                    <input type="checkbox" id="network_use_manual_rates" name="network_use_manual_rates"
+                                           {% if current_user.network_use_manual_rates %}checked{% endif %}
+                                           onchange="toggleManualRates()" style="width: auto;">
+                                    <span>Use manual rate entry instead of automatic tariff lookup</span>
+                                </label>
+                                <p style="font-size: 0.75em; color: var(--muted-color); margin: 0.5em 0 0 1.5em;">
+                                    Enable if your tariff isn't supported or you want to enter custom rates
+                                </p>
+                            </div>
+
+                            <!-- Manual Rate Entry Section (hidden by default) -->
+                            <div id="manualRatesSection" style="margin-top: 1em; {% if not current_user.network_use_manual_rates %}display: none;{% endif %}">
+                                <p style="font-size: 0.75em; margin: 0 0 1em 0; padding: 0.5em; background: rgba(59, 130, 246, 0.1); border-radius: 4px; color: var(--primary);">
+                                    <strong>⚠️ Enter rates in cents/kWh:</strong> If your tariff shows $0.19367/kWh, enter <strong>19.367</strong>
+                                </p>
+
+                                <label for="network_tariff_type">
+                                    Tariff Type
+                                    <select id="network_tariff_type" name="network_tariff_type" onchange="toggleNetworkTariffType()">
+                                        <option value="flat" {% if current_user.network_tariff_type == 'flat' %}selected{% endif %}>Flat Rate (single rate all day)</option>
+                                        <option value="tou" {% if current_user.network_tariff_type == 'tou' %}selected{% endif %}>Time of Use (peak/shoulder/off-peak)</option>
+                                    </select>
+                                </label>
 
                             <!-- Flat Rate Configuration -->
                             <div id="networkFlatRateConfig" style="margin-top: 1em; {% if current_user.network_tariff_type == 'tou' %}display: none;{% endif %}">
@@ -192,7 +237,7 @@
                                 </p>
                             </div>
 
-                            <!-- Other Fees and GST -->
+                            <!-- Other Fees and GST (only for manual rates) -->
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-top: 1em; padding-top: 1em; border-top: 1px solid var(--muted-border-color);">
                                 <div>
                                     <label for="network_other_fees" style="font-size: 0.9em;">
@@ -211,6 +256,7 @@
                                     </label>
                                 </div>
                             </div>
+                            </div><!-- End manualRatesSection -->
                         </fieldset>
                     </div>
 
@@ -1269,6 +1315,15 @@
             // Show network tariff config only when using AEMO (no network fees in AEMO data)
             if (networkTariffDiv) {
                 networkTariffDiv.style.display = (priceSource === 'aemo') ? 'block' : 'none';
+            }
+        }
+
+        // Toggle manual rates section visibility
+        function toggleManualRates() {
+            const useManual = document.getElementById('network_use_manual_rates').checked;
+            const manualSection = document.getElementById('manualRatesSection');
+            if (manualSection) {
+                manualSection.style.display = useManual ? 'block' : 'none';
             }
         }
 

@@ -4,6 +4,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict
 
+# Import aemo_to_tariff library for automatic network tariff calculation
+try:
+    from aemo_to_tariff import spot_to_tariff, get_daily_fee
+    AEMO_TARIFF_AVAILABLE = True
+except ImportError:
+    AEMO_TARIFF_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -872,7 +879,7 @@ def apply_network_tariff(tariff: Dict, user) -> Dict:
     Apply network tariff (DNSP) charges to wholesale prices.
 
     AEMO wholesale prices only include energy costs. This function adds:
-    - Network (DNSP) charges (flat rate or TOU)
+    - Network (DNSP) charges (via aemo_to_tariff library or manual rates)
     - Other fees (environmental, market fees)
     - GST (optional)
 
@@ -887,13 +894,98 @@ def apply_network_tariff(tariff: Dict, user) -> Dict:
         logger.warning("No tariff provided for network tariff adjustment")
         return tariff
 
+    # Check if user wants manual rates or library-based calculation
+    use_manual_rates = getattr(user, 'network_use_manual_rates', False)
+
+    # If library is available and user doesn't want manual rates, use it
+    if AEMO_TARIFF_AVAILABLE and not use_manual_rates:
+        return _apply_network_tariff_library(tariff, user)
+
+    # Otherwise fall back to manual rate entry
+    if not AEMO_TARIFF_AVAILABLE and not use_manual_rates:
+        logger.warning("aemo_to_tariff library not available, falling back to manual rates")
+
+    return _apply_network_tariff_manual(tariff, user)
+
+
+def _apply_network_tariff_library(tariff: Dict, user) -> Dict:
+    """
+    Apply network tariff using the aemo_to_tariff library.
+
+    Uses distributor and tariff code to automatically calculate network charges.
+    """
+    distributor = getattr(user, 'network_distributor', 'energex') or 'energex'
+    tariff_code = getattr(user, 'network_tariff_code', 'NTC6900') or 'NTC6900'
+
+    logger.info(f"Applying network tariff via library: distributor={distributor}, tariff_code={tariff_code}")
+
+    # Apply to Summer season buy rates (energy_charges)
+    for season in ['Summer']:
+        if season not in tariff.get('energy_charges', {}):
+            continue
+
+        rates = tariff['energy_charges'][season].get('rates', {})
+        modified_count = 0
+
+        for period, price in list(rates.items()):
+            # Extract hour and minute from PERIOD_HH_MM
+            try:
+                parts = period.split('_')
+                hour = int(parts[1])
+                minute = int(parts[2])
+
+                # Create datetime for this period
+                now = datetime.now()
+                interval_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+                # Convert wholesale price from $/kWh to $/MWh for the library
+                wholesale_mwh = price * 1000
+
+                # Use aemo_to_tariff library to get total retail price
+                # Returns price in c/kWh including network charges
+                try:
+                    retail_price_cents = spot_to_tariff(
+                        interval_time=interval_time,
+                        network=distributor.capitalize(),  # Library expects "Energex" not "energex"
+                        tariff=tariff_code,
+                        rrp=wholesale_mwh
+                    )
+
+                    # Convert from c/kWh to $/kWh
+                    new_price = round(retail_price_cents / 100, 4)
+
+                    # Tesla restriction: no negative prices
+                    new_price = max(0, new_price)
+
+                    if rates[period] != new_price:
+                        modified_count += 1
+                        logger.debug(f"{period}: ${price:.4f} wholesale -> ${new_price:.4f} retail (via library)")
+                        rates[period] = new_price
+
+                except Exception as e:
+                    logger.warning(f"{period}: Library error for {distributor}/{tariff_code}: {e}, keeping wholesale price")
+
+            except (IndexError, ValueError):
+                continue
+
+        logger.info(f"Network tariff (library) applied to {modified_count} periods in {season}")
+
+    return tariff
+
+
+def _apply_network_tariff_manual(tariff: Dict, user) -> Dict:
+    """
+    Apply network tariff using user-entered manual rates.
+
+    Falls back to this when library is unavailable or user prefers manual entry.
+    """
     # Check if network tariff is configured
     tariff_type = getattr(user, 'network_tariff_type', 'flat') or 'flat'
     raw_other_fees = getattr(user, 'network_other_fees', None)
     other_fees = _normalize_network_rate(raw_other_fees, 1.5, "other_fees")
     include_gst = getattr(user, 'network_include_gst', True)
 
-    logger.info(f"Applying network tariff: type={tariff_type}, other_fees={other_fees}c/kWh, gst={include_gst}")
+    logger.info(f"Applying network tariff (manual): type={tariff_type}, other_fees={other_fees}c/kWh, gst={include_gst}")
 
     # Get rate configuration
     if tariff_type == 'flat':

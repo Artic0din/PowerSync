@@ -547,6 +547,21 @@ def settings():
                 current_user.flow_power_price_source = source
 
         # Network Tariff Configuration (for Flow Power + AEMO)
+        # Distributor and tariff code for aemo_to_tariff library
+        if 'network_distributor' in submitted_fields:
+            distributor = request.form.get('network_distributor', 'energex')
+            current_user.network_distributor = distributor
+            logger.info(f"Saving network distributor: {distributor}")
+
+        if 'network_tariff_code' in submitted_fields:
+            tariff_code = request.form.get('network_tariff_code', 'NTC6900')
+            current_user.network_tariff_code = tariff_code
+            logger.info(f"Saving network tariff code: {tariff_code}")
+
+        # Checkbox - use manual rates instead of library
+        current_user.network_use_manual_rates = 'network_use_manual_rates' in request.form
+        logger.info(f"Using manual rates: {current_user.network_use_manual_rates}")
+
         if 'network_tariff_type' in submitted_fields:
             tariff_type = request.form.get('network_tariff_type')
             if tariff_type in ['flat', 'tou']:

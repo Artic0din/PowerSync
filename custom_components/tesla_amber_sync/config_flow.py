@@ -56,6 +56,9 @@ from .const import (
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
     # Network Tariff configuration
+    CONF_NETWORK_DISTRIBUTOR,
+    CONF_NETWORK_TARIFF_CODE,
+    CONF_NETWORK_USE_MANUAL_RATES,
     CONF_NETWORK_TARIFF_TYPE,
     CONF_NETWORK_FLAT_RATE,
     CONF_NETWORK_PEAK_RATE,
@@ -68,6 +71,7 @@ from .const import (
     CONF_NETWORK_OTHER_FEES,
     CONF_NETWORK_INCLUDE_GST,
     NETWORK_TARIFF_TYPES,
+    NETWORK_DISTRIBUTORS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -293,40 +297,15 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_FLOW_POWER_STATE, default="QLD1"): vol.In(FLOW_POWER_STATES),
                 vol.Required(CONF_FLOW_POWER_PRICE_SOURCE, default="aemo"): vol.In(FLOW_POWER_PRICE_SOURCES),
-                # Network Tariff Configuration
-                vol.Optional(CONF_NETWORK_TARIFF_TYPE, default="flat"): vol.In(NETWORK_TARIFF_TYPES),
-                vol.Optional(CONF_NETWORK_FLAT_RATE, default=8.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_RATE, default=15.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_SHOULDER_RATE, default=5.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_RATE, default=2.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_START, default="16:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_END, default="21:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_START, default="10:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_END, default="15:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OTHER_FEES, default=3.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=20.0)
-                ),
-                vol.Optional(CONF_NETWORK_INCLUDE_GST, default=True): bool,
+                # Network Tariff - Auto via aemo_to_tariff library
+                vol.Required(CONF_NETWORK_DISTRIBUTOR, default="energex"): vol.In(NETWORK_DISTRIBUTORS),
+                vol.Required(CONF_NETWORK_TARIFF_CODE, default="NTC6900"): str,
+                # Manual override - enable to enter rates manually instead of using library
+                vol.Optional(CONF_NETWORK_USE_MANUAL_RATES, default=False): bool,
             }),
             errors=errors,
             description_placeholders={
-                "rate_hint": "Enter rates in cents/kWh (e.g., 19.37 not $0.19)",
+                "rate_hint": "Select your distributor and tariff code for automatic rate calculation",
             },
         )
 

@@ -92,6 +92,13 @@ FLOW_POWER_PRICE_SOURCES = {
 
 # Network Tariff configuration (for Flow Power + AEMO)
 # AEMO wholesale prices don't include DNSP network fees
+# Primary: Use aemo_to_tariff library with distributor + tariff code
+# Fallback: Manual rate entry when use_manual_rates is True
+CONF_NETWORK_DISTRIBUTOR = "network_distributor"
+CONF_NETWORK_TARIFF_CODE = "network_tariff_code"
+CONF_NETWORK_USE_MANUAL_RATES = "network_use_manual_rates"
+
+# Manual rate entry configuration
 CONF_NETWORK_TARIFF_TYPE = "network_tariff_type"
 CONF_NETWORK_FLAT_RATE = "network_flat_rate"
 CONF_NETWORK_PEAK_RATE = "network_peak_rate"
@@ -108,6 +115,23 @@ CONF_NETWORK_INCLUDE_GST = "network_include_gst"
 NETWORK_TARIFF_TYPES = {
     "flat": "Flat Rate (single rate all day)",
     "tou": "Time of Use (peak/shoulder/off-peak)",
+}
+
+# Network distributor (DNSP) options
+NETWORK_DISTRIBUTORS = {
+    "energex": "Energex (QLD SE)",
+    "ergon": "Ergon Energy (QLD Regional)",
+    "ausgrid": "Ausgrid (NSW)",
+    "endeavour": "Endeavour Energy (NSW)",
+    "essential": "Essential Energy (NSW Regional)",
+    "sapn": "SA Power Networks (SA)",
+    "powercor": "Powercor (VIC)",
+    "citipower": "CitiPower (VIC)",
+    "ausnet": "AusNet Services (VIC)",
+    "jemena": "Jemena (VIC)",
+    "united": "United Energy (VIC)",
+    "tasnetworks": "TasNetworks (TAS)",
+    "evoenergy": "Evoenergy (ACT)",
 }
 
 # Flow Power Happy Hour export rates ($/kWh)

@@ -99,7 +99,13 @@ class User(UserMixin, db.Model):
     flow_power_price_source = db.Column(db.String(20), default='amber')  # 'amber', 'aemo'
 
     # Network Tariff Configuration (for Flow Power + AEMO)
-    # Users look up their DNSP tariff and enter the rates
+    # Primary: Use aemo_to_tariff library with distributor + tariff code
+    # Fallback: Manual rate entry when use_manual_rates is True
+    network_distributor = db.Column(db.String(20), default='energex')  # DNSP: energex, ausgrid, endeavour, etc.
+    network_tariff_code = db.Column(db.String(20), default='NTC6900')  # Tariff code: NTC6900, EA025, etc.
+    network_use_manual_rates = db.Column(db.Boolean, default=False)  # True = use manual rates below instead of library
+
+    # Manual rate entry (used when network_use_manual_rates is True)
     network_tariff_type = db.Column(db.String(10), default='flat')  # 'flat' or 'tou'
     network_flat_rate = db.Column(db.Float, default=8.0)  # Flat network rate in c/kWh
     network_peak_rate = db.Column(db.Float, default=15.0)  # Peak network rate in c/kWh
