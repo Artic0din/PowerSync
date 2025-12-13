@@ -98,6 +98,11 @@ class AmberTariffConverter:
             interval_types[interval_type] = interval_types.get(interval_type, 0) + 1
         logger.info(f"Forecast data contains: {interval_types}")
 
+        # Debug: Log sample of forecast data to understand date keys
+        if forecast_data:
+            sample = forecast_data[:4] if len(forecast_data) >= 4 else forecast_data
+            logger.debug(f"AEMO/Amber forecast sample: {[p.get('nemTime') for p in sample]}")
+
         for point in forecast_data:
             try:
                 nem_time = point.get('nemTime', '')
@@ -219,6 +224,13 @@ class AmberTariffConverter:
             except Exception as e:
                 logger.error(f"Error processing price point: {e}")
                 continue
+
+        # Debug: Log what dates are in the lookup tables
+        if general_lookup:
+            dates_in_lookup = sorted(set(k[0] for k in general_lookup.keys()))
+            times_sample = sorted(list(general_lookup.keys())[:5])
+            logger.debug(f"Lookup dates available: {dates_in_lookup}")
+            logger.debug(f"Lookup keys sample: {times_sample}")
 
         # Now build the rolling 24-hour tariff
         general_prices, feedin_prices = self._build_rolling_24h_tariff(
@@ -371,7 +383,13 @@ class AmberTariffConverter:
                         logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} price): ${buy_price:.4f}")
                 else:
                     # Mark as missing - will be counted below
-                    logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d})")
+                    # Debug: Log what key we tried to find
+                    tried_keys = [
+                        (date_str, hour, minute),
+                        (today.isoformat(), hour, minute),
+                        (tomorrow.isoformat(), hour, minute)
+                    ]
+                    logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d}) - tried keys: {tried_keys}")
                     general_prices[period_key] = None
 
                 # Get feedin price (sell price)
