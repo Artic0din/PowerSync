@@ -485,6 +485,27 @@ def save_price_history():
     _save_price_history_internal(None)  # None = use REST API
 
 
+def _normalize_rate(rate, default, name="rate"):
+    """
+    Normalize network rate to cents/kWh.
+
+    If value is < 0.1, assume it was entered in dollars and convert to cents.
+
+    Threshold rationale:
+    - Lowest legitimate DNSP rate is ~0.4c/kWh (NTC6900 off-peak: 0.476c)
+    - Values like 0.08 (8c entered as $0.08) need conversion
+    - Values like 0.476 (legitimate off-peak) should NOT be converted
+    """
+    if rate is None:
+        return default
+    if rate < 0.1:
+        # Very likely entered in dollars instead of cents - convert
+        corrected = rate * 100
+        logger.warning(f"Network {name} appears to be in dollars ({rate}), converting to cents: {corrected:.2f}c/kWh")
+        return corrected
+    return rate
+
+
 def _save_price_history_internal(websocket_data):
     """Internal price history logic shared by both event-driven and cron-fallback paths."""
     from app import db
@@ -528,13 +549,14 @@ def _save_price_history_internal(websocket_data):
                     error_count += 1
                     continue
 
-                # Calculate network tariff
+                # Calculate network tariff with normalization
+                # Values may be stored in dollars (0.08) instead of cents (8) - normalize them
                 now = datetime.now()
                 hour, minute = now.hour, now.minute
 
                 network_tariff_type = user.network_tariff_type or 'flat'
                 if network_tariff_type == 'flat':
-                    network_charge_cents = user.network_flat_rate or 8.0
+                    network_charge_cents = _normalize_rate(user.network_flat_rate, 8.0, "flat_rate")
                 else:
                     time_minutes = hour * 60 + minute
                     peak_start = user.network_peak_start or '16:00'
@@ -548,13 +570,13 @@ def _save_price_history_internal(websocket_data):
                     offpeak_end_mins = int(offpeak_end.split(':')[0]) * 60 + int(offpeak_end.split(':')[1])
 
                     if peak_start_mins <= time_minutes < peak_end_mins:
-                        network_charge_cents = user.network_peak_rate or 15.0
+                        network_charge_cents = _normalize_rate(user.network_peak_rate, 15.0, "peak_rate")
                     elif offpeak_start_mins <= time_minutes < offpeak_end_mins:
-                        network_charge_cents = user.network_offpeak_rate or 2.0
+                        network_charge_cents = _normalize_rate(user.network_offpeak_rate, 2.0, "offpeak_rate")
                     else:
-                        network_charge_cents = user.network_shoulder_rate or 5.0
+                        network_charge_cents = _normalize_rate(user.network_shoulder_rate, 5.0, "shoulder_rate")
 
-                network_other_fees = user.network_other_fees or 1.5
+                network_other_fees = _normalize_rate(user.network_other_fees, 1.5, "other_fees")
                 network_include_gst = user.network_include_gst if user.network_include_gst is not None else True
 
                 total_network_cents = network_charge_cents + network_other_fees

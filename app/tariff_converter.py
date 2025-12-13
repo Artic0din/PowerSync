@@ -843,6 +843,30 @@ class AmberTariffConverter:
 # For Flow Power + AEMO, apply user-configured network (DNSP) charges
 # since AEMO wholesale prices don't include network fees
 
+def _normalize_network_rate(rate, default, name="rate"):
+    """
+    Normalize network rate to cents/kWh.
+
+    If value is < 0.1, assume it was entered in dollars and convert to cents.
+
+    Threshold rationale:
+    - Lowest legitimate DNSP rate is ~0.4c/kWh (NTC6900 off-peak: 0.476c)
+    - Values like 0.08 (8c entered as $0.08) need conversion
+    - Values like 0.476 (legitimate off-peak) should NOT be converted
+
+    Using 0.1 as threshold catches most dollar-value mistakes while
+    preserving very low but legitimate off-peak rates.
+    """
+    if rate is None:
+        return default
+    if rate < 0.1:
+        # Very likely entered in dollars instead of cents - convert
+        corrected = rate * 100
+        logger.warning(f"Network {name} appears to be in dollars ({rate}), converting to cents: {corrected:.2f}c/kWh")
+        return corrected
+    return rate
+
+
 def apply_network_tariff(tariff: Dict, user) -> Dict:
     """
     Apply network tariff (DNSP) charges to wholesale prices.
@@ -865,20 +889,26 @@ def apply_network_tariff(tariff: Dict, user) -> Dict:
 
     # Check if network tariff is configured
     tariff_type = getattr(user, 'network_tariff_type', 'flat') or 'flat'
-    other_fees = getattr(user, 'network_other_fees', 0) or 0
+    raw_other_fees = getattr(user, 'network_other_fees', None)
+    other_fees = _normalize_network_rate(raw_other_fees, 1.5, "other_fees")
     include_gst = getattr(user, 'network_include_gst', True)
 
     logger.info(f"Applying network tariff: type={tariff_type}, other_fees={other_fees}c/kWh, gst={include_gst}")
 
     # Get rate configuration
     if tariff_type == 'flat':
-        flat_rate = getattr(user, 'network_flat_rate', 8.0) or 8.0
+        raw_flat = getattr(user, 'network_flat_rate', None)
+        flat_rate = _normalize_network_rate(raw_flat, 8.0, "flat_rate")
         logger.info(f"Network flat rate: {flat_rate}c/kWh")
     else:
-        # TOU rates
-        peak_rate = getattr(user, 'network_peak_rate', 15.0) or 15.0
-        shoulder_rate = getattr(user, 'network_shoulder_rate', 5.0) or 5.0
-        offpeak_rate = getattr(user, 'network_offpeak_rate', 2.0) or 2.0
+        # TOU rates - normalize each one
+        raw_peak = getattr(user, 'network_peak_rate', None)
+        raw_shoulder = getattr(user, 'network_shoulder_rate', None)
+        raw_offpeak = getattr(user, 'network_offpeak_rate', None)
+
+        peak_rate = _normalize_network_rate(raw_peak, 15.0, "peak_rate")
+        shoulder_rate = _normalize_network_rate(raw_shoulder, 5.0, "shoulder_rate")
+        offpeak_rate = _normalize_network_rate(raw_offpeak, 2.0, "offpeak_rate")
 
         # Time periods
         peak_start = getattr(user, 'network_peak_start', '16:00') or '16:00'

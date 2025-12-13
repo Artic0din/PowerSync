@@ -96,9 +96,12 @@
                     <div id="networkTariffConfig" style="margin-top: 1em; {% if current_user.flow_power_price_source != 'aemo' %}display: none;{% endif %}">
                         <fieldset style="border: 1px solid var(--muted-border-color); padding: 1em; border-radius: 0.5em;">
                             <legend style="font-weight: bold;">Network Tariff (DNSP Charges)</legend>
-                            <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
+                            <p style="font-size: 0.8em; margin: 0 0 0.5em 0; color: var(--muted-color);">
                                 AEMO provides wholesale prices only. Add your network (DNSP) charges to get accurate total costs.
                                 Check your distributor's website (Energex, Ausgrid, AusNet, SA Power Networks, etc.) for your tariff rates.
+                            </p>
+                            <p style="font-size: 0.75em; margin: 0 0 1em 0; padding: 0.5em; background: rgba(59, 130, 246, 0.1); border-radius: 4px; color: var(--primary);">
+                                <strong>⚠️ Enter rates in cents/kWh:</strong> If your tariff shows $0.19367/kWh, enter <strong>19.367</strong>
                             </p>
 
                             <label for="network_tariff_type">

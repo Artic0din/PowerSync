@@ -1084,9 +1084,18 @@ def current_price():
             return jsonify({'error': 'Failed to fetch AEMO price'}), 500
 
         # Get network tariff settings for price adjustment
+        # Normalize rates - if < 0.1, assume entered in dollars and convert to cents
+        # Threshold 0.1 catches dollar mistakes while preserving low off-peak rates (~0.4c/kWh)
+        def normalize_rate(rate, default):
+            if rate is None:
+                return default
+            if rate < 0.1:
+                return rate * 100  # Convert dollars to cents
+            return rate
+
         network_tariff_type = current_user.network_tariff_type or 'flat'
-        network_flat_rate = current_user.network_flat_rate or 8.0
-        network_other_fees = current_user.network_other_fees or 1.5
+        network_flat_rate = normalize_rate(current_user.network_flat_rate, 8.0)
+        network_other_fees = normalize_rate(current_user.network_other_fees, 1.5)
         network_include_gst = current_user.network_include_gst if current_user.network_include_gst is not None else True
 
         # Calculate network charges for current time
@@ -1109,11 +1118,11 @@ def current_price():
             offpeak_end_mins = int(offpeak_end.split(':')[0]) * 60 + int(offpeak_end.split(':')[1])
 
             if peak_start_mins <= time_minutes < peak_end_mins:
-                network_charge_cents = current_user.network_peak_rate or 15.0
+                network_charge_cents = normalize_rate(current_user.network_peak_rate, 15.0)
             elif offpeak_start_mins <= time_minutes < offpeak_end_mins:
-                network_charge_cents = current_user.network_offpeak_rate or 2.0
+                network_charge_cents = normalize_rate(current_user.network_offpeak_rate, 2.0)
             else:
-                network_charge_cents = current_user.network_shoulder_rate or 5.0
+                network_charge_cents = normalize_rate(current_user.network_shoulder_rate, 5.0)
 
         # Add other fees and GST
         total_network_cents = network_charge_cents + network_other_fees
