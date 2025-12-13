@@ -1057,6 +1057,14 @@ def _apply_network_tariff_library(
     """
     from datetime import datetime, timezone, timedelta
 
+    # Map distributors to library module names
+    # CitiPower and United Energy use the generic Victoria module
+    library_distributor_map = {
+        "citipower": "victoria",
+        "united": "victoria",
+    }
+    library_distributor = library_distributor_map.get(distributor, distributor)
+
     # Apply to Summer season buy rates (energy_charges)
     for season in ["Summer"]:
         if season not in tariff.get("energy_charges", {}):
@@ -1090,7 +1098,7 @@ def _apply_network_tariff_library(
                 # spot_to_tariff returns price in c/kWh including all fees + GST
                 retail_cents = spot_to_tariff(
                     interval_time=interval_time,
-                    network=distributor,
+                    network=library_distributor,
                     tariff=tariff_code,
                     rrp=wholesale_mwh  # RRP in $/MWh
                 )

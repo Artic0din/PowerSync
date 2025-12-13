@@ -923,9 +923,17 @@ def _apply_network_tariff_library(tariff: Dict, user) -> Dict:
     Uses distributor and tariff code to automatically calculate network charges.
     """
     distributor = getattr(user, 'network_distributor', 'energex') or 'energex'
-    tariff_code = getattr(user, 'network_tariff_code', 'NTC6900') or 'NTC6900'
+    tariff_code = getattr(user, 'network_tariff_code', '6900') or '6900'
 
-    logger.info(f"Applying network tariff via library: distributor={distributor}, tariff_code={tariff_code}")
+    # Map distributors to library module names
+    # CitiPower and United Energy use the generic Victoria module
+    library_distributor_map = {
+        "citipower": "victoria",
+        "united": "victoria",
+    }
+    library_distributor = library_distributor_map.get(distributor, distributor)
+
+    logger.info(f"Applying network tariff via library: distributor={distributor} -> {library_distributor}, tariff_code={tariff_code}")
 
     # Apply to Summer season buy rates (energy_charges)
     for season in ['Summer']:
@@ -954,7 +962,7 @@ def _apply_network_tariff_library(tariff: Dict, user) -> Dict:
                 try:
                     retail_price_cents = spot_to_tariff(
                         interval_time=interval_time,
-                        network=distributor.capitalize(),  # Library expects "Energex" not "energex"
+                        network=library_distributor,
                         tariff=tariff_code,
                         rrp=wholesale_mwh
                     )

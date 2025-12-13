@@ -111,9 +111,11 @@
                                         <option value="endeavour" {% if current_user.network_distributor == 'endeavour' %}selected{% endif %}>Endeavour Energy (NSW)</option>
                                         <option value="essential" {% if current_user.network_distributor == 'essential' %}selected{% endif %}>Essential Energy (NSW Regional)</option>
                                         <option value="sapower" {% if current_user.network_distributor == 'sapower' %}selected{% endif %}>SA Power Networks (SA)</option>
-                                        <option value="powercor" {% if current_user.network_distributor == 'powercor' %}selected{% endif %}>Powercor (VIC)</option>
-                                        <option value="ausnet" {% if current_user.network_distributor == 'ausnet' %}selected{% endif %}>AusNet Services (VIC)</option>
-                                        <option value="jemena" {% if current_user.network_distributor == 'jemena' %}selected{% endif %}>Jemena (VIC)</option>
+                                        <option value="powercor" {% if current_user.network_distributor == 'powercor' %}selected{% endif %}>Powercor (VIC West)</option>
+                                        <option value="citipower" {% if current_user.network_distributor == 'citipower' %}selected{% endif %}>CitiPower (VIC Melbourne)</option>
+                                        <option value="ausnet" {% if current_user.network_distributor == 'ausnet' %}selected{% endif %}>AusNet Services (VIC East)</option>
+                                        <option value="jemena" {% if current_user.network_distributor == 'jemena' %}selected{% endif %}>Jemena (VIC North)</option>
+                                        <option value="united" {% if current_user.network_distributor == 'united' %}selected{% endif %}>United Energy (VIC South)</option>
                                         <option value="tasnetworks" {% if current_user.network_distributor == 'tasnetworks' %}selected{% endif %}>TasNetworks (TAS)</option>
                                         <option value="evoenergy" {% if current_user.network_distributor == 'evoenergy' %}selected{% endif %}>Evoenergy (ACT)</option>
                                     </select>
@@ -1403,12 +1405,28 @@
                 "NDTOU": "NDTOU TOU",
                 "PRDS": "Residential Daytime Saver"
             },
+            "citipower": {
+                "VICR_TOU": "Residential Time of Use",
+                "VICR_SINGLE": "Residential Single Rate",
+                "VICR_DEMAND": "Residential Demand",
+                "VICS_TOU": "Small Business Time of Use",
+                "VICS_SINGLE": "Small Business Single Rate",
+                "VICS_DEMAND": "Small Business Demand"
+            },
             "ausnet": {
                 "NAST11S": "Small Business Time of Use"
             },
             "jemena": {
                 "PRTOU": "Residential TOU",
                 "D1": "Residential Single Rate"
+            },
+            "united": {
+                "VICR_TOU": "Residential Time of Use",
+                "VICR_SINGLE": "Residential Single Rate",
+                "VICR_DEMAND": "Residential Demand",
+                "VICS_TOU": "Small Business Time of Use",
+                "VICS_SINGLE": "Small Business Single Rate",
+                "VICS_DEMAND": "Small Business Demand"
             },
             "tasnetworks": {
                 "TAS93": "Residential TOU Consumption",

@@ -119,6 +119,7 @@ NETWORK_TARIFF_TYPES = {
 
 # Network distributor (DNSP) options
 # These match the module names in the aemo_to_tariff library
+# CitiPower and United use generic Victoria tariffs
 NETWORK_DISTRIBUTORS = {
     "energex": "Energex (QLD SE)",
     "ergon": "Ergon Energy (QLD Regional)",
@@ -126,9 +127,11 @@ NETWORK_DISTRIBUTORS = {
     "endeavour": "Endeavour Energy (NSW)",
     "essential": "Essential Energy (NSW Regional)",
     "sapower": "SA Power Networks (SA)",
-    "powercor": "Powercor (VIC)",
-    "ausnet": "AusNet Services (VIC)",
-    "jemena": "Jemena (VIC)",
+    "powercor": "Powercor (VIC West)",
+    "citipower": "CitiPower (VIC Melbourne)",
+    "ausnet": "AusNet Services (VIC East)",
+    "jemena": "Jemena (VIC North)",
+    "united": "United Energy (VIC South)",
     "tasnetworks": "TasNetworks (TAS)",
     "evoenergy": "Evoenergy (ACT)",
 }
@@ -212,12 +215,28 @@ NETWORK_TARIFFS = {
         "NDTOU": "NDTOU TOU",
         "PRDS": "Residential Daytime Saver",
     },
+    "citipower": {
+        "VICR_TOU": "Residential Time of Use",
+        "VICR_SINGLE": "Residential Single Rate",
+        "VICR_DEMAND": "Residential Demand",
+        "VICS_TOU": "Small Business Time of Use",
+        "VICS_SINGLE": "Small Business Single Rate",
+        "VICS_DEMAND": "Small Business Demand",
+    },
     "ausnet": {
         "NAST11S": "Small Business Time of Use",
     },
     "jemena": {
         "PRTOU": "Residential TOU",
         "D1": "Residential Single Rate",
+    },
+    "united": {
+        "VICR_TOU": "Residential Time of Use",
+        "VICR_SINGLE": "Residential Single Rate",
+        "VICR_DEMAND": "Residential Demand",
+        "VICS_TOU": "Small Business Time of Use",
+        "VICS_SINGLE": "Small Business Single Rate",
+        "VICS_DEMAND": "Small Business Demand",
     },
     "tasnetworks": {
         "TAS93": "Residential TOU Consumption",
