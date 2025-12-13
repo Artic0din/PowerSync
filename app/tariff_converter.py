@@ -342,7 +342,23 @@ class AmberTariffConverter:
                 lookup_key = (date_str, hour, minute)
 
                 # Get general price (buy price)
-                if lookup_key in general_lookup:
+                # Try primary lookup key first, then try both today and tomorrow as fallbacks
+                # This handles AEMO data where all prices are keyed to forecast dates
+                found_in_lookup = lookup_key in general_lookup
+                if not found_in_lookup:
+                    # Try today's date first (for AEMO forecasts that start from now)
+                    today_key = (today.isoformat(), hour, minute)
+                    if today_key in general_lookup:
+                        lookup_key = today_key
+                        found_in_lookup = True
+                    else:
+                        # Try tomorrow's date (for AEMO forecasts that extend past midnight)
+                        tomorrow_key = (tomorrow.isoformat(), hour, minute)
+                        if tomorrow_key in general_lookup:
+                            lookup_key = tomorrow_key
+                            found_in_lookup = True
+
+                if found_in_lookup:
                     prices = general_lookup[lookup_key]
                     buy_price = self._round_price(sum(prices) / len(prices))
 
@@ -354,20 +370,27 @@ class AmberTariffConverter:
                         general_prices[period_key] = buy_price
                         logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} price): ${buy_price:.4f}")
                 else:
-                    # Fallback: Use today's data when tomorrow's not available
-                    fallback_key = (today.isoformat(), hour, minute)
-                    if fallback_key in general_lookup:
-                        prices = general_lookup[fallback_key]
-                        buy_price = max(0, self._round_price(sum(prices) / len(prices)))
-                        general_prices[period_key] = buy_price
-                    else:
-                        # Mark as missing - will be counted below
-                        logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d})")
-                        general_prices[period_key] = None
+                    # Mark as missing - will be counted below
+                    logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d})")
+                    general_prices[period_key] = None
 
                 # Get feedin price (sell price)
-                if lookup_key in feedin_lookup:
-                    prices = feedin_lookup[lookup_key]
+                # Use same flexible lookup approach for AEMO compatibility
+                feedin_lookup_key = lookup_key  # Start with same key as general
+                found_feedin = feedin_lookup_key in feedin_lookup
+                if not found_feedin:
+                    today_key = (today.isoformat(), hour, minute)
+                    if today_key in feedin_lookup:
+                        feedin_lookup_key = today_key
+                        found_feedin = True
+                    else:
+                        tomorrow_key = (tomorrow.isoformat(), hour, minute)
+                        if tomorrow_key in feedin_lookup:
+                            feedin_lookup_key = tomorrow_key
+                            found_feedin = True
+
+                if found_feedin:
+                    prices = feedin_lookup[feedin_lookup_key]
                     sell_price = self._round_price(sum(prices) / len(prices))
                     original_sell = sell_price
                     adjustments = []
@@ -393,18 +416,9 @@ class AmberTariffConverter:
                     if not adjustments:
                         logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} sell price): ${sell_price:.4f}")
                 else:
-                    # Fallback: Use today's data when tomorrow's not available
-                    fallback_key = (today.isoformat(), hour, minute)
-                    if fallback_key in feedin_lookup:
-                        prices = feedin_lookup[fallback_key]
-                        sell_price = max(0, self._round_price(sum(prices) / len(prices)))
-                        if period_key in general_prices and general_prices[period_key] is not None and sell_price > general_prices[period_key]:
-                            sell_price = general_prices[period_key]
-                        feedin_prices[period_key] = sell_price
-                    else:
-                        # Mark as missing - will be counted below
-                        logger.warning(f"{period_key}: No feedIn price data available (current or next slot)")
-                        feedin_prices[period_key] = None
+                    # Mark as missing - will be counted below
+                    logger.warning(f"{period_key}: No feedIn price data available for ({hour:02d}:{minute:02d})")
+                    feedin_prices[period_key] = None
 
         # Count missing periods and abort if too many are missing
         # This prevents sending bad tariffs when API is unreachable
