@@ -595,10 +595,18 @@ class AmberTariffConverter:
             if apply_to_sell:
                 demand_charges_sell = base_demand_charges
 
-        # Set tariff metadata
-        code = "TESLA_SYNC:AMBER:AMBER"
-        name = "Amber Electric (Tesla Sync)"
-        utility = "Amber Electric"
+        # Set tariff metadata based on electricity provider
+        provider_names = {
+            "amber": "Amber Electric",
+            "flow_power": "Flow Power",
+            "globird": "Globird",
+        }
+        electricity_provider = getattr(user, 'electricity_provider', 'amber') if user else 'amber'
+        provider_name = provider_names.get(electricity_provider, "Amber Electric")
+
+        code = f"TESLA_SYNC:{electricity_provider.upper()}"
+        name = f"{provider_name} (Tesla Sync)"
+        utility = provider_name
 
         # Build daily charges list
         daily_charges_list = []
@@ -658,8 +666,8 @@ class AmberTariffConverter:
                 }
             },
             "sell_tariff": {
-                "name": "Amber Electric (managed by Tesla Sync, do not edit)",
-                "utility": "Amber Electric",
+                "name": f"{provider_name} (managed by Tesla Sync)",
+                "utility": provider_name,
                 "daily_charges": daily_charges_list,
                 "demand_charges": {
                     "ALL": {
