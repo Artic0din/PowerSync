@@ -110,12 +110,10 @@
                                         <option value="ausgrid" {% if current_user.network_distributor == 'ausgrid' %}selected{% endif %}>Ausgrid (NSW)</option>
                                         <option value="endeavour" {% if current_user.network_distributor == 'endeavour' %}selected{% endif %}>Endeavour Energy (NSW)</option>
                                         <option value="essential" {% if current_user.network_distributor == 'essential' %}selected{% endif %}>Essential Energy (NSW Regional)</option>
-                                        <option value="sapn" {% if current_user.network_distributor == 'sapn' %}selected{% endif %}>SA Power Networks (SA)</option>
+                                        <option value="sapower" {% if current_user.network_distributor == 'sapower' %}selected{% endif %}>SA Power Networks (SA)</option>
                                         <option value="powercor" {% if current_user.network_distributor == 'powercor' %}selected{% endif %}>Powercor (VIC)</option>
-                                        <option value="citipower" {% if current_user.network_distributor == 'citipower' %}selected{% endif %}>CitiPower (VIC)</option>
                                         <option value="ausnet" {% if current_user.network_distributor == 'ausnet' %}selected{% endif %}>AusNet Services (VIC)</option>
                                         <option value="jemena" {% if current_user.network_distributor == 'jemena' %}selected{% endif %}>Jemena (VIC)</option>
-                                        <option value="united" {% if current_user.network_distributor == 'united' %}selected{% endif %}>United Energy (VIC)</option>
                                         <option value="tasnetworks" {% if current_user.network_distributor == 'tasnetworks' %}selected{% endif %}>TasNetworks (TAS)</option>
                                         <option value="evoenergy" {% if current_user.network_distributor == 'evoenergy' %}selected{% endif %}>Evoenergy (ACT)</option>
                                     </select>
@@ -123,10 +121,10 @@
 
                                 <label for="network_tariff_code">
                                     Tariff Code
-                                    <input type="text" id="network_tariff_code" name="network_tariff_code"
-                                           value="{{ current_user.network_tariff_code or 'NTC6900' }}"
-                                           placeholder="e.g., NTC6900, EA025">
-                                    <small style="font-size: 0.75em; color: var(--muted-color);">Check your electricity bill for your tariff code</small>
+                                    <select id="network_tariff_code" name="network_tariff_code">
+                                        <!-- Options populated by JavaScript based on distributor -->
+                                    </select>
+                                    <small style="font-size: 0.75em; color: var(--muted-color);">Select your tariff from your electricity bill</small>
                                 </label>
                             </div>
 
@@ -1326,6 +1324,139 @@
                 manualSection.style.display = useManual ? 'block' : 'none';
             }
         }
+
+        // Network tariffs per distributor (from aemo_to_tariff library)
+        const NETWORK_TARIFFS = {
+            "energex": {
+                "6900": "Residential Time of Use",
+                "8400": "Residential Flat",
+                "3700": "Residential Demand",
+                "3900": "Residential Transitional Demand",
+                "6800": "Small Business ToU",
+                "8500": "Small Business Flat",
+                "3600": "Small Business Demand",
+                "3800": "Small Business Transitional Demand",
+                "6000": "Small Business Wide IFT",
+                "8800": "Small 8800 TOU",
+                "8900": "Small 8900 TOU",
+                "6600": "Large Residential Energy",
+                "6700": "Large Business Energy",
+                "7200": "LV Demand Time-of-Use",
+                "8100": "Demand Large",
+                "8300": "SAC Demand Small",
+                "94300": "Large TOU Energy"
+            },
+            "ergon": {
+                "6900": "Residential Time of Use",
+                "ERTOUET1": "Residential Battery ToU",
+                "WRTOUET1": "Residential Wide ToU",
+                "MRTOUET4": "Residential Multi ToU"
+            },
+            "ausgrid": {
+                "EA025": "Residential ToU",
+                "EA010": "Residential Flat",
+                "EA111": "Residential Demand (Intro)",
+                "EA116": "Residential Demand",
+                "EA225": "Small Business ToU",
+                "EA305": "Small Business LV"
+            },
+            "endeavour": {
+                "N71": "Residential Seasonal TOU",
+                "N70": "Residential Flat",
+                "N90": "General Supply Block",
+                "N91": "GS Seasonal TOU",
+                "N19": "LV Seasonal STOU Demand",
+                "N95": "Storage"
+            },
+            "essential": {
+                "BLNT3AU": "Residential TOU (Basic)",
+                "BLNT3AL": "Residential TOU (Interval)",
+                "BLNN2AU": "Residential Anytime",
+                "BLNRSS2": "Residential Sun Soaker",
+                "BLND1AR": "Residential Demand",
+                "BLNT2AU": "Small Business TOU (Basic)",
+                "BLNT2AL": "Small Business TOU (Interval)",
+                "BLNN1AU": "Small Business Anytime",
+                "BLNBSS1": "Small Business Sun Soaker",
+                "BLND1AB": "Small Business Demand",
+                "BLNC1AU": "Controlled Load 1",
+                "BLNC2AU": "Controlled Load 2",
+                "BLNT1AO": "Small Business TOU (100-160 MWh)"
+            },
+            "sapower": {
+                "RTOU": "Residential Time of Use",
+                "RSR": "Residential Single Rate",
+                "RTOUNE": "Residential TOU (New)",
+                "RPRO": "Residential Prosumer",
+                "RELE": "Residential Electrify",
+                "RESELE": "Residential Electrify (Alt)",
+                "RELE2W": "Residential Electrify 2W",
+                "SBTOU": "Small Business Time of Use",
+                "SBTOUNE": "Small Business TOU (New)",
+                "SBELE": "Small Business Electrify",
+                "B2R": "Business Two Rate"
+            },
+            "powercor": {
+                "PRTOU": "Residential TOU",
+                "D1": "Residential Single Rate",
+                "NDMO21": "NDMO21 TOU",
+                "NDTOU": "NDTOU TOU",
+                "PRDS": "Residential Daytime Saver"
+            },
+            "ausnet": {
+                "NAST11S": "Small Business Time of Use"
+            },
+            "jemena": {
+                "PRTOU": "Residential TOU",
+                "D1": "Residential Single Rate"
+            },
+            "tasnetworks": {
+                "TAS93": "Residential TOU Consumption",
+                "TAS87": "Residential TOU Demand",
+                "TAS97": "Residential TOU CER",
+                "TAS94": "Small Business TOU Consumption",
+                "TAS88": "Small Business TOU Demand"
+            },
+            "evoenergy": {
+                "017": "Residential TOU Network",
+                "018": "Residential TOU Network XMC",
+                "015": "Residential TOU (Closed)",
+                "016": "Residential TOU XMC (Closed)",
+                "026": "Residential Demand",
+                "090": "Component Charge"
+            }
+        };
+
+        // Update tariff code dropdown based on selected distributor
+        function updateTariffCodes() {
+            const distributor = document.getElementById('network_distributor').value;
+            const tariffSelect = document.getElementById('network_tariff_code');
+            const currentValue = '{{ current_user.network_tariff_code or "6900" }}';
+
+            if (!tariffSelect) return;
+
+            // Clear existing options
+            tariffSelect.innerHTML = '';
+
+            // Get tariffs for selected distributor
+            const tariffs = NETWORK_TARIFFS[distributor] || {};
+
+            // Add options
+            for (const [code, name] of Object.entries(tariffs)) {
+                const option = document.createElement('option');
+                option.value = code;
+                option.textContent = `${code} - ${name}`;
+                if (code === currentValue) {
+                    option.selected = true;
+                }
+                tariffSelect.appendChild(option);
+            }
+        }
+
+        // Initialize tariff dropdown on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            updateTariffCodes();
+        });
 
         // Toggle between flat rate and TOU network tariff configuration
         function toggleNetworkTariffType() {

@@ -118,6 +118,7 @@ NETWORK_TARIFF_TYPES = {
 }
 
 # Network distributor (DNSP) options
+# These match the module names in the aemo_to_tariff library
 NETWORK_DISTRIBUTORS = {
     "energex": "Energex (QLD SE)",
     "ergon": "Ergon Energy (QLD Regional)",
