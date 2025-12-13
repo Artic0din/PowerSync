@@ -652,28 +652,29 @@ def create_app(config_class=Config):
 
     # Auto-start named Cloudflare tunnel if configured
     if not app.config.get('TESTING'):
-        try:
-            from app.models import User
-            user = User.query.filter_by(cloudflare_tunnel_enabled=True).first()
-            if user and user.cloudflare_tunnel_token_encrypted and user.cloudflare_tunnel_domain:
-                from app.routes import CloudflareTunnel, _cloudflare_tunnel, get_cloudflared_path
-                import app.routes as routes_module
+        with app.app_context():
+            try:
+                from app.models import User
+                user = User.query.filter_by(cloudflare_tunnel_enabled=True).first()
+                if user and user.cloudflare_tunnel_token_encrypted and user.cloudflare_tunnel_domain:
+                    from app.routes import CloudflareTunnel, get_cloudflared_path
+                    import app.routes as routes_module
 
-                cloudflared_bin = get_cloudflared_path()
-                if cloudflared_bin:
-                    try:
-                        token = decrypt_token(user.cloudflare_tunnel_token_encrypted)
-                        tunnel = CloudflareTunnel()
-                        tunnel.start_named_tunnel(token)
-                        tunnel.public_url = f"https://{user.cloudflare_tunnel_domain}"
-                        routes_module._cloudflare_tunnel = tunnel
-                        logger.info(f"🚇 Auto-started named tunnel for {user.cloudflare_tunnel_domain}")
-                    except Exception as e:
-                        logger.error(f"Failed to auto-start named tunnel: {e}")
-                else:
-                    logger.warning("cloudflared not found - cannot auto-start named tunnel")
-        except Exception as e:
-            logger.error(f"Error checking for auto-start tunnel: {e}")
+                    cloudflared_bin = get_cloudflared_path()
+                    if cloudflared_bin:
+                        try:
+                            token = decrypt_token(user.cloudflare_tunnel_token_encrypted)
+                            tunnel = CloudflareTunnel()
+                            tunnel.start_named_tunnel(token)
+                            tunnel.public_url = f"https://{user.cloudflare_tunnel_domain}"
+                            routes_module._cloudflare_tunnel = tunnel
+                            logger.info(f"🚇 Auto-started named tunnel for {user.cloudflare_tunnel_domain}")
+                        except Exception as e:
+                            logger.error(f"Failed to auto-start named tunnel: {e}")
+                    else:
+                        logger.warning("cloudflared not found - cannot auto-start named tunnel")
+            except Exception as e:
+                logger.error(f"Error checking for auto-start tunnel: {e}")
 
     logger.info("Flask application created successfully")
     return app
