@@ -697,25 +697,135 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         except Exception as e:
             _LOGGER.error(f"Error restoring export rule: {e}")
 
+    def _get_option(self, key: str, default: Any = None) -> Any:
+        """Get option value with fallback to data for backwards compatibility."""
+        return self.config_entry.options.get(
+            key, self.config_entry.data.get(key, default)
+        )
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage the options."""
+        """Step 1: Select electricity provider."""
+        if user_input is not None:
+            # Store provider selection and route to provider-specific step
+            self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+
+            if self._provider == "amber":
+                return await self.async_step_amber_options()
+            elif self._provider == "flow_power":
+                return await self.async_step_flow_power_options()
+            elif self._provider == "globird":
+                return await self.async_step_globird_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER,
+                        default=current_provider,
+                    ): vol.In(ELECTRICITY_PROVIDERS),
+                }
+            ),
+        )
+
+    async def async_step_amber_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2a: Amber Electric specific options."""
         if user_input is not None:
             # Check if solar curtailment is being disabled
-            was_curtailment_enabled = self.config_entry.options.get(
-                CONF_SOLAR_CURTAILMENT_ENABLED,
-                self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
-            )
+            was_curtailment_enabled = self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False)
             new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
 
             if was_curtailment_enabled and not new_curtailment_enabled:
-                # Restore Tesla export rule to battery_ok when disabling curtailment
                 await self._restore_export_rule()
 
-            # Auto-generate AEMO sensor entity names if Flow Power with AEMO sensor source
-            if (user_input.get(CONF_ELECTRICITY_PROVIDER) == "flow_power" and
-                user_input.get(CONF_FLOW_POWER_PRICE_SOURCE) == "aemo_sensor"):
+            # Add provider to the data
+            user_input[CONF_ELECTRICITY_PROVIDER] = "amber"
+            return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="amber_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_AUTO_SYNC_ENABLED,
+                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+                    ): bool,
+                    vol.Optional(
+                        CONF_AMBER_FORECAST_TYPE,
+                        default=self._get_option(CONF_AMBER_FORECAST_TYPE, "predicted"),
+                    ): vol.In({
+                        "predicted": "Predicted (Default)",
+                        "low": "Low (Conservative)",
+                        "high": "High (Optimistic)"
+                    }),
+                    vol.Optional(
+                        CONF_SOLAR_CURTAILMENT_ENABLED,
+                        default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_ENABLED,
+                        default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_RATE,
+                        default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_START_TIME,
+                        default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+                    ): str,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_END_TIME,
+                        default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+                    ): str,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_DAYS,
+                        default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+                    ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_BILLING_DAY,
+                        default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_APPLY_TO,
+                        default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
+                    ): vol.In(["Buy Only", "Sell Only", "Both"]),
+                    vol.Optional(
+                        CONF_DEMAND_ARTIFICIAL_PRICE,
+                        default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_DAILY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                    ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_MONTHLY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+                    ): vol.Coerce(float),
+                }
+            ),
+        )
+
+    async def async_step_flow_power_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2b: Flow Power specific options."""
+        if user_input is not None:
+            # Check if solar curtailment is being disabled
+            was_curtailment_enabled = self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+
+            if was_curtailment_enabled and not new_curtailment_enabled:
+                await self._restore_export_rule()
+
+            # Auto-generate AEMO sensor entity names if using AEMO sensor source
+            if user_input.get(CONF_FLOW_POWER_PRICE_SOURCE) == "aemo_sensor":
                 region = user_input.get(CONF_FLOW_POWER_STATE, "NSW1").lower()
                 user_input[CONF_AEMO_SENSOR_5MIN] = AEMO_SENSOR_5MIN_PATTERN.format(region=region)
                 user_input[CONF_AEMO_SENSOR_30MIN] = AEMO_SENSOR_30MIN_PATTERN.format(region=region)
@@ -726,183 +836,97 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input[CONF_AEMO_SENSOR_30MIN]
                 )
 
+            # Add provider to the data
+            user_input[CONF_ELECTRICITY_PROVIDER] = "flow_power"
             return self.async_create_entry(title="", data=user_input)
 
-        # Get current values from options (fallback to data for backwards compatibility)
-        current_auto_sync = self.config_entry.options.get(
-            CONF_AUTO_SYNC_ENABLED,
-            self.config_entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
-        )
-        current_forecast_type = self.config_entry.options.get(
-            CONF_AMBER_FORECAST_TYPE,
-            self.config_entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted")
-        )
-        current_demand_enabled = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_ENABLED,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
-        )
-        current_demand_rate = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_RATE,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_RATE, 10.0)
-        )
-        current_start_time = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_START_TIME,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00")
-        )
-        current_end_time = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_END_TIME,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00")
-        )
-        current_days = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_DAYS,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days")
-        )
-        current_billing_day = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_BILLING_DAY,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_BILLING_DAY, 1)
-        )
-        current_apply_to = self.config_entry.options.get(
-            CONF_DEMAND_CHARGE_APPLY_TO,
-            self.config_entry.data.get(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only")
-        )
-        current_artificial_price = self.config_entry.options.get(
-            CONF_DEMAND_ARTIFICIAL_PRICE,
-            self.config_entry.data.get(CONF_DEMAND_ARTIFICIAL_PRICE, False)
-        )
-        current_solar_curtailment = self.config_entry.options.get(
-            CONF_SOLAR_CURTAILMENT_ENABLED,
-            self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
-        )
-        current_daily_supply_charge = self.config_entry.options.get(
-            CONF_DAILY_SUPPLY_CHARGE,
-            self.config_entry.data.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
-        )
-        current_monthly_supply_charge = self.config_entry.options.get(
-            CONF_MONTHLY_SUPPLY_CHARGE,
-            self.config_entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
-        )
-
-        # AEMO Spike Detection settings
-        current_aemo_enabled = self.config_entry.options.get(
-            CONF_AEMO_SPIKE_ENABLED,
-            self.config_entry.data.get(CONF_AEMO_SPIKE_ENABLED, False)
-        )
-        current_aemo_region = self.config_entry.options.get(
-            CONF_AEMO_REGION,
-            self.config_entry.data.get(CONF_AEMO_REGION, "")
-        )
-        current_aemo_threshold = self.config_entry.options.get(
-            CONF_AEMO_SPIKE_THRESHOLD,
-            self.config_entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 300.0)
+        return self.async_show_form(
+            step_id="flow_power_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_FLOW_POWER_STATE,
+                        default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
+                    ): vol.In(FLOW_POWER_STATES),
+                    vol.Required(
+                        CONF_FLOW_POWER_PRICE_SOURCE,
+                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "amber"),
+                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
+                    vol.Optional(
+                        CONF_AUTO_SYNC_ENABLED,
+                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+                    ): bool,
+                    vol.Optional(
+                        CONF_SOLAR_CURTAILMENT_ENABLED,
+                        default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_ENABLED,
+                        default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_RATE,
+                        default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_START_TIME,
+                        default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+                    ): str,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_END_TIME,
+                        default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+                    ): str,
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_DAYS,
+                        default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+                    ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_BILLING_DAY,
+                        default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
+                    vol.Optional(
+                        CONF_DEMAND_CHARGE_APPLY_TO,
+                        default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
+                    ): vol.In(["Buy Only", "Sell Only", "Both"]),
+                    vol.Optional(
+                        CONF_DAILY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                    ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_MONTHLY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+                    ): vol.Coerce(float),
+                }
+            ),
         )
 
-        # Flow Power / Electricity Provider settings
-        current_electricity_provider = self.config_entry.options.get(
-            CONF_ELECTRICITY_PROVIDER,
-            self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-        )
-        current_flow_power_state = self.config_entry.options.get(
-            CONF_FLOW_POWER_STATE,
-            self.config_entry.data.get(CONF_FLOW_POWER_STATE, "NSW1")
-        )
-        current_flow_power_price_source = self.config_entry.options.get(
-            CONF_FLOW_POWER_PRICE_SOURCE,
-            self.config_entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
-        )
-        # Note: AEMO sensor entities are now auto-generated based on state selection
+    async def async_step_globird_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2c: Globird (AEMO Spike Detection) specific options."""
+        if user_input is not None:
+            # Add provider to the data
+            user_input[CONF_ELECTRICITY_PROVIDER] = "globird"
+            # Enable AEMO spike detection for Globird
+            user_input[CONF_AEMO_SPIKE_ENABLED] = True
+            return self.async_create_entry(title="", data=user_input)
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
         region_choices.update(AEMO_REGIONS)
 
         return self.async_show_form(
-            step_id="init",
+            step_id="globird_options",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        CONF_AUTO_SYNC_ENABLED,
-                        default=current_auto_sync,
-                    ): bool,
-                    vol.Optional(
-                        CONF_AMBER_FORECAST_TYPE,
-                        default=current_forecast_type,
-                    ): vol.In({
-                        "predicted": "Predicted (Default)",
-                        "low": "Low (Conservative)",
-                        "high": "High (Optimistic)"
-                    }),
-                    vol.Optional(
-                        CONF_SOLAR_CURTAILMENT_ENABLED,
-                        default=current_solar_curtailment,
-                    ): bool,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_ENABLED,
-                        default=current_demand_enabled,
-                    ): bool,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_RATE,
-                        default=current_demand_rate,
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_START_TIME,
-                        default=current_start_time,
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_END_TIME,
-                        default=current_end_time,
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_DAYS,
-                        default=current_days,
-                    ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_BILLING_DAY,
-                        default=current_billing_day,
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_APPLY_TO,
-                        default=current_apply_to,
-                    ): vol.In(["Buy Only", "Sell Only", "Both"]),
-                    vol.Optional(
-                        CONF_DEMAND_ARTIFICIAL_PRICE,
-                        default=current_artificial_price,
-                    ): bool,
-                    vol.Optional(
-                        CONF_DAILY_SUPPLY_CHARGE,
-                        default=current_daily_supply_charge,
-                    ): vol.Coerce(float),
-                    vol.Optional(
-                        CONF_MONTHLY_SUPPLY_CHARGE,
-                        default=current_monthly_supply_charge,
-                    ): vol.Coerce(float),
-                    # AEMO Spike Detection Options
-                    vol.Optional(
-                        CONF_AEMO_SPIKE_ENABLED,
-                        default=current_aemo_enabled,
-                    ): bool,
-                    vol.Optional(
+                    vol.Required(
                         CONF_AEMO_REGION,
-                        default=current_aemo_region,
+                        default=self._get_option(CONF_AEMO_REGION, ""),
                     ): vol.In(region_choices),
                     vol.Optional(
                         CONF_AEMO_SPIKE_THRESHOLD,
-                        default=current_aemo_threshold,
+                        default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 300.0),
                     ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
-                    # Flow Power / Electricity Provider Options
-                    vol.Optional(
-                        CONF_ELECTRICITY_PROVIDER,
-                        default=current_electricity_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
-                    vol.Optional(
-                        CONF_FLOW_POWER_STATE,
-                        default=current_flow_power_state,
-                    ): vol.In(FLOW_POWER_STATES),
-                    vol.Optional(
-                        CONF_FLOW_POWER_PRICE_SOURCE,
-                        default=current_flow_power_price_source,
-                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
-                    # Note: AEMO sensor entities are auto-generated based on state selection
-                    # No manual input required
                 }
             ),
         )

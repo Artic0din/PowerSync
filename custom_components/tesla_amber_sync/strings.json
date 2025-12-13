@@ -80,8 +80,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "Tesla Sync Options",
-        "description": "Configure automatic syncing, demand charge tracking, AEMO spike detection, and electricity provider settings. Flow Power users: Set your electricity provider to Flow Power to get fixed export rates during Happy Hour (5:30pm-7:30pm).",
+        "title": "Select Electricity Provider",
+        "description": "Choose your electricity provider to configure provider-specific settings.",
+        "data": {
+          "electricity_provider": "Electricity Provider"
+        }
+      },
+      "amber_options": {
+        "title": "Amber Electric Options",
+        "description": "Configure Amber Electric TOU sync, demand charges, and supply charges.",
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
@@ -95,13 +102,34 @@
           "demand_charge_apply_to": "Apply Demand Charge To",
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
-          "monthly_supply_charge": "Monthly Supply Charge ($)",
-          "aemo_spike_enabled": "Enable AEMO Spike Detection",
+          "monthly_supply_charge": "Monthly Supply Charge ($)"
+        }
+      },
+      "flow_power_options": {
+        "title": "Flow Power Options",
+        "description": "Configure Flow Power wholesale electricity with Happy Hour export rates (5:30pm-7:30pm: 45c NSW/QLD/SA, 35c VIC).",
+        "data": {
+          "flow_power_state": "State / NEM Region",
+          "flow_power_price_source": "Import Price Source",
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
+          "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
+          "demand_charge_enabled": "Enable Demand Charge Tracking",
+          "demand_charge_rate": "Demand Charge Rate ($/kW)",
+          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
+          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
+          "demand_charge_days": "Demand Charge Days",
+          "demand_charge_billing_day": "Billing Cycle Reset Day",
+          "demand_charge_apply_to": "Apply Demand Charge To",
+          "daily_supply_charge": "Daily Supply Charge ($)",
+          "monthly_supply_charge": "Monthly Supply Charge ($)"
+        }
+      },
+      "globird_options": {
+        "title": "Globird - AEMO Spike Detection",
+        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, the Powerwall will export to the grid.",
+        "data": {
           "aemo_region": "AEMO NEM Region",
-          "aemo_spike_threshold": "Spike Threshold ($/MWh)",
-          "electricity_provider": "Electricity Provider",
-          "flow_power_state": "Flow Power State (for export rates)",
-          "flow_power_price_source": "Flow Power Price Source"
+          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
         }
       }
     }
