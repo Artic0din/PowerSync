@@ -129,33 +129,33 @@ class AmberTariffConverter:
 
                 advanced_price = point.get('advancedPrice')
 
-                # For ForecastInterval: REQUIRE advancedPrice (no fallback)
+                # For ForecastInterval: Prefer advancedPrice, fall back to perKwh (for AEMO data)
                 if interval_type == 'ForecastInterval':
-                    if not advanced_price:
-                        # Expected for far-future forecasts (>36h) - Amber API doesn't provide advancedPrice
-                        logger.debug(f"Skipping ForecastInterval at {nem_time} - no advancedPrice (expected for far-future forecasts)")
-                        continue
+                    if advanced_price:
+                        # Handle dict format (standard: {predicted, low, high})
+                        if isinstance(advanced_price, dict):
+                            if forecast_type not in advanced_price:
+                                available = list(advanced_price.keys())
+                                error_msg = f"Forecast type '{forecast_type}' not found in advancedPrice. Available: {available}"
+                                logger.error(f"{nem_time}: {error_msg}")
+                                raise ValueError(error_msg)
 
-                    # Handle dict format (standard: {predicted, low, high})
-                    if isinstance(advanced_price, dict):
-                        if forecast_type not in advanced_price:
-                            available = list(advanced_price.keys())
-                            error_msg = f"Forecast type '{forecast_type}' not found in advancedPrice. Available: {available}"
-                            logger.error(f"{nem_time}: {error_msg}")
+                            per_kwh_cents = advanced_price[forecast_type]
+                            logger.debug(f"{nem_time} [ForecastInterval]: advancedPrice.{forecast_type}={per_kwh_cents:.2f}c/kWh")
+
+                        # Handle simple number format (legacy)
+                        elif isinstance(advanced_price, (int, float)):
+                            per_kwh_cents = advanced_price
+                            logger.debug(f"{nem_time} [ForecastInterval]: advancedPrice={per_kwh_cents:.2f}c/kWh (numeric)")
+
+                        else:
+                            error_msg = f"Invalid advancedPrice format at {nem_time}: {type(advanced_price).__name__}"
+                            logger.error(error_msg)
                             raise ValueError(error_msg)
-
-                        per_kwh_cents = advanced_price[forecast_type]
-                        logger.debug(f"{nem_time} [ForecastInterval]: advancedPrice.{forecast_type}={per_kwh_cents:.2f}c/kWh")
-
-                    # Handle simple number format (legacy)
-                    elif isinstance(advanced_price, (int, float)):
-                        per_kwh_cents = advanced_price
-                        logger.debug(f"{nem_time} [ForecastInterval]: advancedPrice={per_kwh_cents:.2f}c/kWh (numeric)")
-
                     else:
-                        error_msg = f"Invalid advancedPrice format at {nem_time}: {type(advanced_price).__name__}"
-                        logger.error(error_msg)
-                        raise ValueError(error_msg)
+                        # No advancedPrice - use perKwh directly (AEMO data or far-future Amber forecasts)
+                        per_kwh_cents = point.get('perKwh', 0)
+                        logger.debug(f"{nem_time} [ForecastInterval]: perKwh={per_kwh_cents:.2f}c/kWh (AEMO/wholesale)")
 
                 # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
                 # For ActualInterval: Use perKwh (actual settled retail price)
