@@ -64,8 +64,7 @@
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "electricity_provider": "Electricity Provider",
           "flow_power_state": "Flow Power State (for export rates)",
-          "flow_power_price_source": "Flow Power Price Source",
-          "aemo_sensor_entity": "AEMO Sensor Entity (if using AEMO sensor)"
+          "flow_power_price_source": "Flow Power Price Source"
         }
       }
     }

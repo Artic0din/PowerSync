@@ -58,7 +58,16 @@ AEMO_REGIONS = {
 CONF_ELECTRICITY_PROVIDER = "electricity_provider"
 CONF_FLOW_POWER_STATE = "flow_power_state"
 CONF_FLOW_POWER_PRICE_SOURCE = "flow_power_price_source"
-CONF_AEMO_SENSOR_ENTITY = "aemo_sensor_entity"
+CONF_AEMO_SENSOR_ENTITY = "aemo_sensor_entity"  # Legacy - kept for backwards compatibility
+
+# AEMO NEM Data sensor configuration (auto-generated based on state selection)
+CONF_AEMO_SENSOR_5MIN = "aemo_sensor_5min"
+CONF_AEMO_SENSOR_30MIN = "aemo_sensor_30min"
+
+# AEMO NEM Data sensor naming patterns
+# These match the sensor entity_ids created by the HA_AemoNemData integration
+AEMO_SENSOR_5MIN_PATTERN = "sensor.aemo_nem_{region}_current_5min_period_price"
+AEMO_SENSOR_30MIN_PATTERN = "sensor.aemo_nem_{region}_current_30min_forecast"
 
 # Electricity provider options
 ELECTRICITY_PROVIDERS = {

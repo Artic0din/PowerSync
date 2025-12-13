@@ -832,16 +832,20 @@ class AEMOSensorCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
-        aemo_sensor_entity: str,
+        sensor_5min: str,
+        sensor_30min: str,
     ) -> None:
         """Initialize the coordinator.
 
         Args:
             hass: HomeAssistant instance
-            aemo_sensor_entity: Entity ID of the AEMO NEM Data sensor
-                               (e.g., 'sensor.aemo_nem_qld1_current_30min_forecast')
+            sensor_5min: Entity ID of the 5-min current price sensor
+                        (e.g., 'sensor.aemo_nem_qld1_current_5min_period_price')
+            sensor_30min: Entity ID of the 30-min forecast sensor
+                         (e.g., 'sensor.aemo_nem_qld1_current_30min_forecast')
         """
-        self.aemo_sensor_entity = aemo_sensor_entity
+        self.sensor_5min = sensor_5min
+        self.sensor_30min = sensor_30min
 
         super().__init__(
             hass,
@@ -851,26 +855,32 @@ class AEMOSensorCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from AEMO sensor and convert to Amber-compatible format.
+        """Fetch data from AEMO sensors and convert to Amber-compatible format.
 
-        The HA_AemoNemData sensor provides:
-        - state: Current price in $/kWh
-        - forecast attribute: List of 30-min periods with {start_time, end_time, price}
+        Uses two AEMO NEM Data sensors:
+        - 5-min sensor: Current real-time price (state in $/kWh)
+        - 30-min sensor: Forecast data (state + forecast attribute)
 
         Returns:
             dict with 'current', 'forecast', and 'last_update' in Amber-compatible format
         """
-        state = self.hass.states.get(self.aemo_sensor_entity)
+        # Get 5-min sensor for current price (more accurate real-time price)
+        state_5min = self.hass.states.get(self.sensor_5min)
+        if not state_5min or state_5min.state in ('unknown', 'unavailable'):
+            _LOGGER.warning(f"5-min AEMO sensor {self.sensor_5min} unavailable, falling back to 30-min sensor")
+            state_5min = None
 
-        if not state or state.state in ('unknown', 'unavailable'):
-            raise UpdateFailed(f"AEMO sensor {self.aemo_sensor_entity} unavailable")
+        # Get 30-min sensor for forecast data
+        state_30min = self.hass.states.get(self.sensor_30min)
+        if not state_30min or state_30min.state in ('unknown', 'unavailable'):
+            raise UpdateFailed(f"30-min AEMO sensor {self.sensor_30min} unavailable")
 
         try:
-            # Get forecast from sensor attributes
-            forecast_attr = state.attributes.get('forecast', [])
+            # Get forecast from 30-min sensor attributes
+            forecast_attr = state_30min.attributes.get('forecast', [])
 
             if not forecast_attr:
-                _LOGGER.warning(f"AEMO sensor {self.aemo_sensor_entity} has no forecast data")
+                _LOGGER.warning(f"AEMO sensor {self.sensor_30min} has no forecast data")
                 raise UpdateFailed("No forecast data in AEMO sensor")
 
             # Convert to Amber-compatible format for tariff converter
@@ -902,8 +912,13 @@ class AEMOSensorCoordinator(DataUpdateCoordinator):
                     'duration': 30
                 })
 
-            # Current price from sensor state ($/kWh -> c/kWh)
-            current_price_cents = float(state.state) * 100
+            # Current price: prefer 5-min sensor (more accurate), fall back to 30-min
+            if state_5min:
+                current_price_cents = float(state_5min.state) * 100
+                price_source = "5min"
+            else:
+                current_price_cents = float(state_30min.state) * 100
+                price_source = "30min"
 
             # Create current price in Amber format
             current_prices = [
@@ -920,7 +935,7 @@ class AEMOSensorCoordinator(DataUpdateCoordinator):
             ]
 
             _LOGGER.info(
-                f"AEMO sensor data: current={current_price_cents:.2f}c/kWh, "
+                f"AEMO sensor data: current={current_price_cents:.2f}c/kWh ({price_source}), "
                 f"forecast_periods={len(intervals) // 2}"
             )
 

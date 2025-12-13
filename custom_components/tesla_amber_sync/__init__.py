@@ -52,6 +52,10 @@ from .const import (
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
     CONF_AEMO_SENSOR_ENTITY,
+    CONF_AEMO_SENSOR_5MIN,
+    CONF_AEMO_SENSOR_30MIN,
+    AEMO_SENSOR_5MIN_PATTERN,
+    AEMO_SENSOR_30MIN_PATTERN,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1169,27 +1173,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_FLOW_POWER_PRICE_SOURCE,
         entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
     )
-    aemo_sensor_entity = entry.options.get(
-        CONF_AEMO_SENSOR_ENTITY,
-        entry.data.get(CONF_AEMO_SENSOR_ENTITY, "")
+    flow_power_state = entry.options.get(
+        CONF_FLOW_POWER_STATE,
+        entry.data.get(CONF_FLOW_POWER_STATE, "NSW1")
     )
 
-    if flow_power_price_source == "aemo_sensor" and aemo_sensor_entity:
+    # Get auto-generated sensor entities, or generate them for backwards compatibility
+    sensor_5min = entry.options.get(
+        CONF_AEMO_SENSOR_5MIN,
+        entry.data.get(CONF_AEMO_SENSOR_5MIN, "")
+    )
+    sensor_30min = entry.options.get(
+        CONF_AEMO_SENSOR_30MIN,
+        entry.data.get(CONF_AEMO_SENSOR_30MIN, "")
+    )
+
+    # Backwards compatibility: if new config keys not set, generate from state
+    if flow_power_price_source == "aemo_sensor" and (not sensor_5min or not sensor_30min):
+        region = flow_power_state.lower()
+        sensor_5min = AEMO_SENSOR_5MIN_PATTERN.format(region=region)
+        sensor_30min = AEMO_SENSOR_30MIN_PATTERN.format(region=region)
+        _LOGGER.info(
+            "Auto-generated AEMO sensor entities for %s: 5min=%s, 30min=%s",
+            flow_power_state, sensor_5min, sensor_30min
+        )
+
+    if flow_power_price_source == "aemo_sensor" and sensor_30min:
         aemo_sensor_coordinator = AEMOSensorCoordinator(
             hass,
-            aemo_sensor_entity,
+            sensor_5min,
+            sensor_30min,
         )
         try:
             await aemo_sensor_coordinator.async_config_entry_first_refresh()
             _LOGGER.info(
-                "AEMO Sensor Coordinator initialized with sensor: %s",
-                aemo_sensor_entity,
+                "AEMO Sensor Coordinator initialized: 5min=%s, 30min=%s",
+                sensor_5min,
+                sensor_30min,
             )
         except Exception as e:
             _LOGGER.error(f"Failed to initialize AEMO sensor coordinator: {e}")
             aemo_sensor_coordinator = None
-    elif flow_power_price_source == "aemo_sensor" and not aemo_sensor_entity:
-        _LOGGER.warning("AEMO sensor price source selected but no sensor entity configured")
+    elif flow_power_price_source == "aemo_sensor" and not sensor_30min:
+        _LOGGER.warning("AEMO sensor price source selected but no sensor entities configured")
 
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)

@@ -48,6 +48,10 @@ from .const import (
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
     CONF_AEMO_SENSOR_ENTITY,
+    CONF_AEMO_SENSOR_5MIN,
+    CONF_AEMO_SENSOR_30MIN,
+    AEMO_SENSOR_5MIN_PATTERN,
+    AEMO_SENSOR_30MIN_PATTERN,
     ELECTRICITY_PROVIDERS,
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
@@ -709,6 +713,19 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 # Restore Tesla export rule to battery_ok when disabling curtailment
                 await self._restore_export_rule()
 
+            # Auto-generate AEMO sensor entity names if Flow Power with AEMO sensor source
+            if (user_input.get(CONF_ELECTRICITY_PROVIDER) == "flow_power" and
+                user_input.get(CONF_FLOW_POWER_PRICE_SOURCE) == "aemo_sensor"):
+                region = user_input.get(CONF_FLOW_POWER_STATE, "NSW1").lower()
+                user_input[CONF_AEMO_SENSOR_5MIN] = AEMO_SENSOR_5MIN_PATTERN.format(region=region)
+                user_input[CONF_AEMO_SENSOR_30MIN] = AEMO_SENSOR_30MIN_PATTERN.format(region=region)
+                _LOGGER.info(
+                    "Auto-generated AEMO sensor entities for %s: 5min=%s, 30min=%s",
+                    region.upper(),
+                    user_input[CONF_AEMO_SENSOR_5MIN],
+                    user_input[CONF_AEMO_SENSOR_30MIN]
+                )
+
             return self.async_create_entry(title="", data=user_input)
 
         # Get current values from options (fallback to data for backwards compatibility)
@@ -792,10 +809,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_FLOW_POWER_PRICE_SOURCE,
             self.config_entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
         )
-        current_aemo_sensor_entity = self.config_entry.options.get(
-            CONF_AEMO_SENSOR_ENTITY,
-            self.config_entry.data.get(CONF_AEMO_SENSOR_ENTITY, "")
-        )
+        # Note: AEMO sensor entities are now auto-generated based on state selection
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
@@ -887,10 +901,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_FLOW_POWER_PRICE_SOURCE,
                         default=current_flow_power_price_source,
                     ): vol.In(FLOW_POWER_PRICE_SOURCES),
-                    vol.Optional(
-                        CONF_AEMO_SENSOR_ENTITY,
-                        default=current_aemo_sensor_entity,
-                    ): str,
+                    # Note: AEMO sensor entities are auto-generated based on state selection
+                    # No manual input required
                 }
             ),
         )
