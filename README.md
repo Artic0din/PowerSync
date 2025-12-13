@@ -3,7 +3,7 @@
 
   # Tesla Sync
 
-  Intelligent Tesla Powerwall energy management for Australia. Automatically sync with Amber Electric dynamic pricing, create custom TOU schedules for any provider, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
+  Intelligent Tesla Powerwall energy management for Australia. Automatically sync with Amber Electric or Flow Power (AEMO wholesale) dynamic pricing, create custom TOU schedules for any provider, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
 
   <a href="https://paypal.me/benboller" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
@@ -64,6 +64,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ### Advanced Features
 - ⚡ **AEMO Spike Detection** - Automatically monitors Australian wholesale electricity prices and switches to spike tariff during extreme price events (configurable threshold). Includes intelligent operation mode switching - automatically saves your current Powerwall mode and switches to autonomous (TOU) mode during spikes, then restores your original mode when prices normalize
 - 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system sets Powerwall export to "never" to avoid paying to export, then restores to "battery_ok" when prices return to positive
+- 🔌 **Flow Power + AEMO Support** - Full support for Flow Power and other wholesale electricity retailers using direct AEMO NEM pricing with configurable network tariffs
 - 🎯 **Custom TOU Schedules** - Create and manage custom time-of-use schedules for any electricity provider (not just Amber)
 - 💾 **Saved TOU Profiles** - Backup, restore, and manage multiple tariff configurations
 - 📈 **Demand Charge Tracking** - Monitor and track peak demand for electricity plans with capacity-based fees
@@ -116,6 +117,44 @@ Prevents paying to export solar during negative pricing periods common with Ambe
 - Default: Disabled (opt-in feature)
 
 This feature is particularly useful with Amber's wholesale pricing to avoid paying to export your solar during oversupply periods.
+
+### Flow Power + AEMO Wholesale Pricing
+
+Full support for **Flow Power** and other wholesale electricity retailers that pass through AEMO NEM spot prices.
+
+**How It Works:**
+AEMO wholesale prices only include the energy cost - they don't include network (DNSP) charges, environmental fees, or GST. Tesla Sync lets you configure these additional charges so your Powerwall sees accurate total prices.
+
+**Configuration:**
+1. Select **Flow Power** as your electricity provider
+2. Choose your **NEM Region** (QLD1, NSW1, VIC1, SA1)
+3. Select **AEMO NEM Wholesale** as the price source
+4. Configure your **Network Tariff**:
+   - **Flat Rate**: Single rate all day (e.g., 8c/kWh)
+   - **Time of Use**: Peak/Shoulder/Off-Peak rates with time windows
+   - **Other Fees**: Environmental levies, market charges (~3-4c/kWh typical)
+   - **GST**: Automatically adds 10%
+
+**Example - Energex NTC6900 Tariff:**
+| Period | Time | Rate |
+|--------|------|------|
+| Peak | 4pm - 9pm | 19.37 c/kWh |
+| Shoulder | Other times | 4.87 c/kWh |
+| Off-Peak | 11am - 4pm | 0.48 c/kWh |
+
+**Flow Power Happy Hour:**
+Export rates during Happy Hour (5:30pm - 7:30pm daily):
+- NSW, QLD, SA: 45c/kWh
+- VIC: 35c/kWh
+- Outside Happy Hour: 0c/kWh
+
+**Total Price Calculation:**
+```
+Total = AEMO Wholesale + Network Charges + Other Fees + GST
+Example: 8c + 5c + 3c + 10% = 17.6c/kWh
+```
+
+**Note:** Enter all rates in **cents/kWh**. If your tariff shows $0.19367/kWh, enter `19.367`.
 
 ### Custom TOU Schedules
 Not using Amber Electric? No problem! Create custom time-of-use schedules for any Australian electricity provider:
