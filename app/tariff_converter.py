@@ -305,6 +305,13 @@ class AmberTariffConverter:
         general_prices = {}
         feedin_prices = {}
 
+        # Track last valid prices for fallback when AEMO forecast doesn't extend far enough
+        # AEMO pre-dispatch typically provides only ~20 hours of forecast (39-40 periods)
+        # Early morning tomorrow (04:00-08:00) often won't have data
+        # Using the last known price is better than failing the sync
+        last_valid_buy_price = None
+        last_valid_sell_price = None
+
         # Build all 48 half-hour periods in a day
         for hour in range(24):
             for minute in [0, 30]:
@@ -387,17 +394,23 @@ class AmberTariffConverter:
                         general_prices[period_key] = 0
                     else:
                         general_prices[period_key] = buy_price
+                        last_valid_buy_price = buy_price  # Track for fallback
                         logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} price): ${buy_price:.4f}")
                 else:
-                    # Mark as missing - will be counted below
-                    # Debug: Log what key we tried to find
+                    # No data found - use fallback price if available
+                    # This commonly happens with AEMO forecast which only provides ~20 hours ahead
+                    # Early morning tomorrow (04:00-08:00) typically won't have forecast data
                     tried_keys = [
                         (date_str, hour, minute),
                         (today.isoformat(), hour, minute),
                         (tomorrow.isoformat(), hour, minute)
                     ]
-                    logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d}) - tried keys: {tried_keys}")
-                    general_prices[period_key] = None
+                    if last_valid_buy_price is not None:
+                        general_prices[period_key] = last_valid_buy_price
+                        logger.info(f"{period_key}: Using fallback buy price ${last_valid_buy_price:.4f} (AEMO forecast gap)")
+                    else:
+                        logger.warning(f"{period_key}: No price data available for ({hour:02d}:{minute:02d}) - tried keys: {tried_keys}")
+                        general_prices[period_key] = None
 
                 # Get feedin price (sell price)
                 # Use same flexible lookup approach for AEMO compatibility
@@ -438,12 +451,23 @@ class AmberTariffConverter:
                         logger.debug(f"{period_key}: Sell price adjusted: {original_sell:.4f} -> {sell_price:.4f} ({', '.join(adjustments)})")
 
                     feedin_prices[period_key] = sell_price
+                    last_valid_sell_price = sell_price  # Track for fallback
                     if not adjustments:
                         logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} sell price): ${sell_price:.4f}")
                 else:
-                    # Mark as missing - will be counted below
-                    logger.warning(f"{period_key}: No feedIn price data available for ({hour:02d}:{minute:02d})")
-                    feedin_prices[period_key] = None
+                    # No data found - use fallback price if available
+                    # This commonly happens with AEMO forecast which only provides ~20 hours ahead
+                    if last_valid_sell_price is not None:
+                        # Ensure fallback sell price doesn't exceed current buy price
+                        fallback_sell = last_valid_sell_price
+                        if period_key in general_prices and general_prices[period_key] is not None:
+                            if fallback_sell > general_prices[period_key]:
+                                fallback_sell = general_prices[period_key]
+                        feedin_prices[period_key] = fallback_sell
+                        logger.info(f"{period_key}: Using fallback sell price ${fallback_sell:.4f} (AEMO forecast gap)")
+                    else:
+                        logger.warning(f"{period_key}: No feedIn price data available for ({hour:02d}:{minute:02d})")
+                        feedin_prices[period_key] = None
 
         # Count missing periods and abort if too many are missing
         # This prevents sending bad tariffs when API is unreachable

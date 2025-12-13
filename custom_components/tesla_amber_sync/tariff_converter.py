@@ -564,6 +564,13 @@ def _build_rolling_24h_tariff(
     general_prices: dict[str, float] = {}
     feedin_prices: dict[str, float] = {}
 
+    # Track last valid prices for fallback when AEMO forecast doesn't extend far enough
+    # AEMO pre-dispatch typically provides only ~20 hours of forecast (39-40 periods)
+    # Early morning tomorrow (04:00-08:00) often won't have data
+    # Using the last known price is better than failing the sync
+    last_valid_buy_price: float | None = None
+    last_valid_sell_price: float | None = None
+
     # Build all 48 half-hour periods in a day
     for hour in range(24):
         for minute in [0, 30]:
@@ -657,11 +664,23 @@ def _build_rolling_24h_tariff(
                 prices = general_lookup[lookup_key]
                 buy_price = _round_price(sum(prices) / len(prices))
                 # Tesla restriction: No negative prices
-                general_prices[period_key] = max(0, buy_price)
+                buy_price = max(0, buy_price)
+                general_prices[period_key] = buy_price
+                last_valid_buy_price = buy_price  # Track for fallback
             else:
-                # Mark as missing - will be counted below
-                general_prices[period_key] = None
-                _LOGGER.warning("%s: No price data available", period_key)
+                # No data found - use fallback price if available
+                # This commonly happens with AEMO forecast which only provides ~20 hours ahead
+                # Early morning tomorrow (04:00-08:00) typically won't have forecast data
+                if last_valid_buy_price is not None:
+                    general_prices[period_key] = last_valid_buy_price
+                    _LOGGER.info(
+                        "%s: Using fallback buy price $%.4f (AEMO forecast gap)",
+                        period_key, last_valid_buy_price
+                    )
+                else:
+                    # Mark as missing - will be counted below
+                    general_prices[period_key] = None
+                    _LOGGER.warning("%s: No price data available", period_key)
 
             # Get feedin price (sell price)
             # Use same flexible lookup approach for AEMO compatibility
@@ -690,10 +709,25 @@ def _build_rolling_24h_tariff(
                     sell_price = min(sell_price, general_prices[period_key])
 
                 feedin_prices[period_key] = sell_price
+                last_valid_sell_price = sell_price  # Track for fallback
             else:
-                # Mark as missing - will be counted below
-                feedin_prices[period_key] = None
-                _LOGGER.warning("%s: No sell price data available", period_key)
+                # No data found - use fallback price if available
+                # This commonly happens with AEMO forecast which only provides ~20 hours ahead
+                if last_valid_sell_price is not None:
+                    # Ensure fallback sell price doesn't exceed current buy price
+                    fallback_sell = last_valid_sell_price
+                    if period_key in general_prices and general_prices[period_key] is not None:
+                        if fallback_sell > general_prices[period_key]:
+                            fallback_sell = general_prices[period_key]
+                    feedin_prices[period_key] = fallback_sell
+                    _LOGGER.info(
+                        "%s: Using fallback sell price $%.4f (AEMO forecast gap)",
+                        period_key, fallback_sell
+                    )
+                else:
+                    # Mark as missing - will be counted below
+                    feedin_prices[period_key] = None
+                    _LOGGER.warning("%s: No sell price data available", period_key)
 
     # Count missing periods and abort if too many are missing
     # This prevents sending bad tariffs when API is unreachable
