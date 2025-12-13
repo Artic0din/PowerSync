@@ -819,12 +819,13 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             return days_remaining_this_month + self.billing_day
 
 
-class AEMOSensorCoordinator(DataUpdateCoordinator):
-    """Coordinator that reads AEMO price data from HA_AemoNemData sensor.
+class AEMOPriceCoordinator(DataUpdateCoordinator):
+    """Coordinator that fetches AEMO price data directly from AEMO API.
 
     This coordinator provides an alternative to AmberPriceCoordinator for users
     who want to use AEMO wholesale pricing without an Amber subscription.
 
+    Fetches data directly from AEMO NEMWeb - no external integration required.
     The data is converted to Amber-compatible format so the existing tariff
     converter can be reused.
     """
@@ -832,123 +833,85 @@ class AEMOSensorCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
-        sensor_5min: str,
-        sensor_30min: str,
+        region: str,
+        session: aiohttp.ClientSession,
     ) -> None:
         """Initialize the coordinator.
 
         Args:
             hass: HomeAssistant instance
-            sensor_5min: Entity ID of the 5-min current price sensor
-                        (e.g., 'sensor.aemo_nem_qld1_current_5min_period_price')
-            sensor_30min: Entity ID of the 30-min forecast sensor
-                         (e.g., 'sensor.aemo_nem_qld1_current_30min_forecast')
+            region: NEM region code (NSW1, QLD1, VIC1, SA1, TAS1)
+            session: aiohttp client session for API requests
         """
-        self.sensor_5min = sensor_5min
-        self.sensor_30min = sensor_30min
+        from .aemo_api import AEMOAPIClient
+
+        self.region = region
+        self._client = AEMOAPIClient(session)
 
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN}_aemo_sensor",
+            name=f"{DOMAIN}_aemo",
             update_interval=timedelta(minutes=5),  # Match AEMO update frequency
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from AEMO sensors and convert to Amber-compatible format.
-
-        Uses two AEMO NEM Data sensors:
-        - 5-min sensor: Current real-time price (state in $/kWh)
-        - 30-min sensor: Forecast data (state + forecast attribute)
+        """Fetch data from AEMO API and convert to Amber-compatible format.
 
         Returns:
             dict with 'current', 'forecast', and 'last_update' in Amber-compatible format
         """
-        # Get 5-min sensor for current price (more accurate real-time price)
-        state_5min = self.hass.states.get(self.sensor_5min)
-        if not state_5min or state_5min.state in ('unknown', 'unavailable'):
-            _LOGGER.warning(f"5-min AEMO sensor {self.sensor_5min} unavailable, falling back to 30-min sensor")
-            state_5min = None
-
-        # Get 30-min sensor for forecast data
-        state_30min = self.hass.states.get(self.sensor_30min)
-        if not state_30min or state_30min.state in ('unknown', 'unavailable'):
-            raise UpdateFailed(f"30-min AEMO sensor {self.sensor_30min} unavailable")
-
         try:
-            # Get forecast from 30-min sensor attributes
-            forecast_attr = state_30min.attributes.get('forecast', [])
+            # Fetch current price (5-min dispatch price)
+            current_price_data = await self._client.get_region_price(self.region)
 
-            if not forecast_attr:
-                _LOGGER.warning(f"AEMO sensor {self.sensor_30min} has no forecast data")
-                raise UpdateFailed("No forecast data in AEMO sensor")
+            # Fetch forecast (pre-dispatch prices)
+            # Request 96 periods (48 hours) to ensure full coverage for rolling 24h window
+            forecast = await self._client.get_price_forecast(self.region, periods=96)
 
-            # Convert to Amber-compatible format for tariff converter
-            intervals = []
+            if not forecast:
+                raise UpdateFailed(f"Failed to fetch AEMO forecast for {self.region}")
 
-            for period in forecast_attr:
-                # AEMO sensor provides price in $/kWh, Amber uses c/kWh
-                # Multiply by 100 to convert $ to cents
-                price_cents = float(period['price']) * 100
-
-                end_time = period.get('end_time')
-
-                # Add import (general) price
-                intervals.append({
-                    'nemTime': end_time,
-                    'perKwh': price_cents,
-                    'channelType': 'general',
-                    'type': 'ForecastInterval',
-                    'duration': 30
-                })
-
-                # Add export (feedIn) price - same as import for AEMO
-                # (will be overridden by Flow Power Happy Hour rates)
-                intervals.append({
-                    'nemTime': end_time,
-                    'perKwh': -price_cents,  # Amber convention: negative = you get paid
-                    'channelType': 'feedIn',
-                    'type': 'ForecastInterval',
-                    'duration': 30
-                })
-
-            # Current price: prefer 5-min sensor (more accurate), fall back to 30-min
-            if state_5min:
-                current_price_cents = float(state_5min.state) * 100
-                price_source = "5min"
+            # Get current price - prefer current dispatch price, fall back to first forecast
+            if current_price_data:
+                # Convert $/MWh to c/kWh: $/MWh / 10 = c/kWh
+                current_price_cents = current_price_data["price"] / 10.0
+                price_source = "dispatch"
             else:
-                current_price_cents = float(state_30min.state) * 100
-                price_source = "30min"
+                # Fall back to first forecast period
+                current_price_cents = forecast[0]["perKwh"] if forecast else 0
+                price_source = "forecast"
+                _LOGGER.warning("Could not get current AEMO price, using forecast")
 
             # Create current price in Amber format
             current_prices = [
                 {
-                    'perKwh': current_price_cents,
-                    'channelType': 'general',
-                    'type': 'CurrentInterval',
+                    "perKwh": current_price_cents,
+                    "channelType": "general",
+                    "type": "CurrentInterval",
                 },
                 {
-                    'perKwh': -current_price_cents,
-                    'channelType': 'feedIn',
-                    'type': 'CurrentInterval',
-                }
+                    "perKwh": -current_price_cents,
+                    "channelType": "feedIn",
+                    "type": "CurrentInterval",
+                },
             ]
 
             _LOGGER.info(
-                f"AEMO sensor data: current={current_price_cents:.2f}c/kWh ({price_source}), "
-                f"forecast_periods={len(intervals) // 2}"
+                "AEMO API data for %s: current=%.2fc/kWh (%s), forecast_periods=%d",
+                self.region, current_price_cents, price_source, len(forecast) // 2
             )
 
             return {
                 "current": current_prices,
-                "forecast": intervals,
+                "forecast": forecast,
                 "last_update": dt_util.utcnow(),
-                "source": "aemo_sensor",
+                "source": "aemo_api",
             }
 
-        except KeyError as err:
-            raise UpdateFailed(f"Invalid AEMO sensor data format: {err}") from err
-        except ValueError as err:
-            raise UpdateFailed(f"Error parsing AEMO sensor data: {err}") from err
         except Exception as err:
-            raise UpdateFailed(f"Unexpected error reading AEMO sensor: {err}") from err
+            raise UpdateFailed(f"Error fetching AEMO data: {err}") from err
+
+
+# Keep old name as alias for backwards compatibility
+AEMOSensorCoordinator = AEMOPriceCoordinator

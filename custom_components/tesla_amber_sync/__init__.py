@@ -1016,13 +1016,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     has_flow_power_aemo = (
         electricity_provider == "flow_power" and
-        flow_power_price_source == "aemo_sensor"
+        flow_power_price_source in ("aemo_sensor", "aemo")
     )
 
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_flow_power_aemo:
-        _LOGGER.info("Running in Flow Power mode with AEMO sensor pricing")
+        _LOGGER.info("Running in Flow Power mode with AEMO API pricing")
     elif aemo_spike_enabled:
         _LOGGER.info("Running in AEMO Spike Detection only mode (Globird)")
     else:
@@ -1198,52 +1198,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
-    # Initialize AEMO Sensor Coordinator for Flow Power AEMO sensor mode
-    aemo_sensor_coordinator = None
+    # Initialize AEMO Price Coordinator for Flow Power AEMO mode
+    # Now fetches directly from AEMO API - no external integration required
+    aemo_sensor_coordinator = None  # Keep variable name for compatibility
     # flow_power_price_source already defined at top of function
     flow_power_state = entry.options.get(
         CONF_FLOW_POWER_STATE,
         entry.data.get(CONF_FLOW_POWER_STATE, "NSW1")
     )
 
-    # Get auto-generated sensor entities, or generate them for backwards compatibility
-    sensor_5min = entry.options.get(
-        CONF_AEMO_SENSOR_5MIN,
-        entry.data.get(CONF_AEMO_SENSOR_5MIN, "")
-    )
-    sensor_30min = entry.options.get(
-        CONF_AEMO_SENSOR_30MIN,
-        entry.data.get(CONF_AEMO_SENSOR_30MIN, "")
-    )
+    # Check for "aemo_sensor" (legacy) or "aemo" (new) price source
+    # Both now use the direct AEMO API
+    use_aemo_pricing = flow_power_price_source in ("aemo_sensor", "aemo")
 
-    # Backwards compatibility: if new config keys not set, generate from state
-    if flow_power_price_source == "aemo_sensor" and (not sensor_5min or not sensor_30min):
-        region = flow_power_state.lower()
-        sensor_5min = AEMO_SENSOR_5MIN_PATTERN.format(region=region)
-        sensor_30min = AEMO_SENSOR_30MIN_PATTERN.format(region=region)
-        _LOGGER.info(
-            "Auto-generated AEMO sensor entities for %s: 5min=%s, 30min=%s",
-            flow_power_state, sensor_5min, sensor_30min
-        )
+    if use_aemo_pricing and flow_power_state:
+        from .coordinator import AEMOPriceCoordinator
 
-    if flow_power_price_source == "aemo_sensor" and sensor_30min:
-        aemo_sensor_coordinator = AEMOSensorCoordinator(
+        # Get aiohttp session from Home Assistant
+        session = async_get_clientsession(hass)
+
+        aemo_sensor_coordinator = AEMOPriceCoordinator(
             hass,
-            sensor_5min,
-            sensor_30min,
+            flow_power_state,  # Region code (NSW1, QLD1, VIC1, SA1, TAS1)
+            session,
         )
         try:
             await aemo_sensor_coordinator.async_config_entry_first_refresh()
             _LOGGER.info(
-                "AEMO Sensor Coordinator initialized: 5min=%s, 30min=%s",
-                sensor_5min,
-                sensor_30min,
+                "AEMO Price Coordinator initialized for region %s (direct API)",
+                flow_power_state,
             )
         except Exception as e:
-            _LOGGER.error(f"Failed to initialize AEMO sensor coordinator: {e}")
+            _LOGGER.error("Failed to initialize AEMO price coordinator: %s", e)
             aemo_sensor_coordinator = None
-    elif flow_power_price_source == "aemo_sensor" and not sensor_30min:
-        _LOGGER.warning("AEMO sensor price source selected but no sensor entities configured")
+    elif use_aemo_pricing and not flow_power_state:
+        _LOGGER.warning("AEMO price source selected but no region configured")
 
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)
@@ -1325,31 +1314,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             extract_most_recent_actual_interval,
         )
 
-        # Determine price source: AEMO sensor or Amber
+        # Determine price source: AEMO API or Amber
+        # Support both "aemo_sensor" (legacy) and "aemo" (new) price source names
         use_aemo_sensor = (
             aemo_sensor_coordinator is not None and
-            flow_power_price_source == "aemo_sensor"
+            flow_power_price_source in ("aemo_sensor", "aemo")
         )
 
         if use_aemo_sensor:
-            _LOGGER.info("📊 Using AEMO sensor for pricing data")
+            _LOGGER.info("📊 Using AEMO API for pricing data")
         else:
             _LOGGER.info("🟠 Using Amber for pricing data")
 
         # Get current interval price from WebSocket (real-time) or REST API fallback
         # WebSocket is PRIMARY source for current price, REST API is fallback if timeout
-        # Note: AEMO sensor mode doesn't have WebSocket - uses forecast data only
+        # Note: AEMO mode doesn't have WebSocket - uses direct AEMO API
         current_actual_interval = None
 
         if use_aemo_sensor:
-            # AEMO sensor mode: Refresh sensor coordinator
+            # AEMO mode: Refresh AEMO coordinator
             await aemo_sensor_coordinator.async_request_refresh()
 
             if not aemo_sensor_coordinator.data:
-                _LOGGER.error("No AEMO sensor data available")
+                _LOGGER.error("No AEMO API data available")
                 return
 
-            # Current price from AEMO sensor data
+            # Current price from AEMO API data
             current_prices = aemo_sensor_coordinator.data.get("current", [])
             if current_prices:
                 current_actual_interval = {'general': None, 'feedIn': None}
@@ -1358,7 +1348,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if channel in ['general', 'feedIn']:
                         current_actual_interval[channel] = price
                 general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
-                _LOGGER.info(f"📊 Using AEMO sensor price for current interval: general={general_price:.2f}¢/kWh")
+                _LOGGER.info(f"📊 Using AEMO API price for current interval: general={general_price:.2f}¢/kWh")
         elif websocket_data:
             # WebSocket data received within 60s - use it directly as primary source
             current_actual_interval = websocket_data
@@ -1387,12 +1377,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Get forecast data from appropriate coordinator
         if use_aemo_sensor:
-            # AEMO sensor already refreshed above
+            # AEMO coordinator already refreshed above
             forecast_data = aemo_sensor_coordinator.data.get("forecast", [])
             if not forecast_data:
-                _LOGGER.error("No AEMO forecast data available from sensor")
+                _LOGGER.error("No AEMO forecast data available from API")
                 return
-            _LOGGER.info(f"Using AEMO sensor forecast: {len(forecast_data) // 2} periods")
+            _LOGGER.info(f"Using AEMO API forecast: {len(forecast_data) // 2} periods")
         else:
             # Refresh Amber coordinator to get latest forecast data (regardless of WebSocket status)
             await amber_coordinator.async_request_refresh()
@@ -1500,7 +1490,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         # Apply network tariff if using AEMO wholesale prices (no network fees included)
-        if electricity_provider == "flow_power" and flow_power_price_source == "aemo_sensor":
+        if electricity_provider == "flow_power" and flow_power_price_source in ("aemo_sensor", "aemo"):
             from .tariff_converter import apply_network_tariff
             _LOGGER.info("Applying network tariff to AEMO wholesale prices")
 
