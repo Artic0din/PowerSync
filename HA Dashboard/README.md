@@ -91,5 +91,29 @@ Install the **card-mod** HACS integration for full styling support.
 ### Charts showing no data
 
 - Ensure the Tesla Amber Sync integration is properly configured
-- Check that entity names match your actual entities
+- Check that entity names match your actual entities (see below)
 - Wait for the integration to collect some data (may take 5-10 minutes)
+- Trigger a sync via the "Sync Now" service or wait for automatic sync
+
+### Finding Your Entity IDs
+
+The dashboard uses generic entity names like `sensor.tariff_schedule`. Your actual entity IDs may differ based on your Home Assistant configuration.
+
+To find your actual entity IDs:
+1. Go to **Developer Tools → States**
+2. Search for "tesla" or "tariff" to find your entities
+3. Look in the HA logs for: `Tariff schedule sensor registered with entity_id: sensor.xxx`
+4. Update the dashboard YAML with your actual entity IDs
+
+Common entity ID patterns:
+- `sensor.tariff_schedule` (if no device prefix)
+- `sensor.tesla_amber_sync_tariff_schedule` (with integration prefix)
+- `sensor.<site_name>_tariff_schedule` (with site name prefix)
+
+### TOU Schedule Chart Not Updating
+
+If the TOU Schedule chart shows old data or no data:
+1. Check HA logs for "Tariff schedule stored" messages to verify sync happened
+2. Verify the entity_id in the dashboard matches your actual sensor
+3. Reload the dashboard page (not just refresh)
+4. Check that `apexcharts-card` is installed from HACS

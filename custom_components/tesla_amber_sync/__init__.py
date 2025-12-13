@@ -1534,7 +1534,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "sell_prices": sell_prices,
             "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-        _LOGGER.info("Tariff schedule stored: %d buy periods, %d sell periods", len(buy_prices), len(sell_prices))
+
+        # Log price summary for debugging dashboard display issues
+        if buy_prices:
+            buy_values = list(buy_prices.values())
+            sell_values = list(sell_prices.values()) if sell_prices else [0]
+            _LOGGER.info(
+                "Tariff schedule stored: %d periods, buy $%.4f-$%.4f (avg $%.4f), sell $%.4f-$%.4f",
+                len(buy_prices),
+                min(buy_values), max(buy_values), sum(buy_values)/len(buy_values),
+                min(sell_values), max(sell_values)
+            )
+            # Log a sample period for verification
+            sample_period = "PERIOD_18_00"  # 6pm
+            if sample_period in buy_prices:
+                _LOGGER.info(
+                    "Sample %s: buy=$%.4f (%.1fc), sell=$%.4f (%.1fc)",
+                    sample_period,
+                    buy_prices[sample_period], buy_prices[sample_period] * 100,
+                    sell_prices.get(sample_period, 0), sell_prices.get(sample_period, 0) * 100
+                )
+        else:
+            _LOGGER.warning("No buy prices in tariff schedule!")
 
         # Signal the tariff schedule sensor to update
         async_dispatcher_send(hass, f"tesla_amber_sync_tariff_updated_{entry.entry_id}")

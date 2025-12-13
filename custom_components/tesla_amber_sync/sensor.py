@@ -482,9 +482,16 @@ class TariffScheduleSensor(SensorEntity):
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
 
+        # Log entity_id to help users configure dashboards
+        _LOGGER.info(
+            "Tariff schedule sensor registered with entity_id: %s",
+            self.entity_id
+        )
+
         @callback
         def _handle_tariff_update():
             """Handle tariff update signal."""
+            _LOGGER.debug("Tariff schedule sensor received update signal")
             self.async_write_ha_state()
 
         # Subscribe to tariff update signal
