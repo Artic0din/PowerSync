@@ -261,7 +261,7 @@
                     </div>
 
                     <!-- Flow Power PEA (Price Efficiency Adjustment) Settings -->
-                    <div id="peaSettings" style="margin-top: 1em; {% if current_user.flow_power_price_source != 'aemo' %}display: none;{% endif %}">
+                    <div id="peaSettings" style="margin-top: 1em;">
                         <fieldset style="border: 1px solid var(--primary); padding: 1em; border-radius: 0.5em; background: rgba(59, 130, 246, 0.05);">
                             <legend style="font-weight: bold; color: var(--primary);">⚡ Flow Power PEA Pricing</legend>
                             <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
@@ -1370,12 +1370,13 @@
             if (amberTokenDiv) {
                 amberTokenDiv.style.display = (priceSource === 'aemo') ? 'none' : 'block';
             }
-            // Show network tariff config and PEA settings only when using AEMO
+            // Show network tariff config only when using AEMO (for non-PEA fallback)
             if (networkTariffDiv) {
                 networkTariffDiv.style.display = (priceSource === 'aemo') ? 'block' : 'none';
             }
+            // PEA settings always shown for Flow Power (works with both AEMO and Amber)
             if (peaSettingsDiv) {
-                peaSettingsDiv.style.display = (priceSource === 'aemo') ? 'block' : 'none';
+                peaSettingsDiv.style.display = 'block';
             }
         }
 
