@@ -277,6 +277,56 @@ Tesla Sync is available in two deployment options:
 1. **[Home Assistant Integration](#home-assistant-integration)** - Native HA custom integration (Recommended for HA users)
 2. **[Docker Application](#docker-deployment)** - Standalone web app with dashboard
 
+Both options require **Tesla API access** - see [Tesla API Options](#tesla-api-options) below for setup.
+
+---
+
+## Tesla API Options
+
+Tesla Sync supports two methods for accessing your Tesla Powerwall. **Choose one** - you don't need both.
+
+### Option 1: Teslemetry (Recommended - ~$4/month)
+
+The easiest setup option. Teslemetry is a third-party proxy service for Tesla API.
+
+| Pros | |
+|------|---|
+| ✅ Simple API key authentication | No OAuth complexity |
+| ✅ Works with localhost | No public domain needed |
+| ✅ 2-minute setup | Just copy/paste API key |
+| ✅ Reliable service | Well-maintained proxy |
+
+**Setup:**
+1. Sign up at https://teslemetry.com
+2. Connect your Tesla account
+3. Copy your API key
+4. Paste into Tesla Sync settings
+
+### Option 2: Tesla Fleet API (Free)
+
+Direct OAuth access to Tesla's Fleet API. Completely free but requires more setup.
+
+| Pros | Cons |
+|------|------|
+| ✅ Completely free | ⚠️ Requires OAuth app registration |
+| ✅ Direct API access | ⚠️ More setup steps |
+| ✅ Built-in Cloudflare Tunnel | |
+| ✅ Automatic token refresh | |
+
+**Setup for Home Assistant:**
+1. Install the official **Tesla Fleet** integration in Home Assistant
+   - Settings → Devices & Services → Add Integration → "Tesla Fleet"
+   - Follow the OAuth login flow
+2. Tesla Sync automatically detects your Tesla Fleet credentials
+3. Leave the Teslemetry field empty during Tesla Sync setup
+
+**Setup for Docker:**
+1. Register an OAuth app at https://developer.tesla.com
+2. In Tesla Sync Settings, select "Tesla Fleet API (Direct, Free)"
+3. Enter Client ID, Client Secret, and Redirect URI
+4. Click "Connect to Tesla Fleet API" to authorize
+5. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed instructions
+
 ---
 
 ## Home Assistant Integration
@@ -287,81 +337,17 @@ The easiest way to use Tesla Sync if you're already running Home Assistant.
 
 - ✅ **Native HA Integration** - Seamless integration with your Home Assistant instance
 - ✅ **HACS Installation** - Install and update via HACS (Home Assistant Community Store)
-- ✅ **Automatic Discovery** - Auto-discovers Tesla energy sites from Teslemetry
+- ✅ **Automatic Discovery** - Auto-discovers Tesla energy sites
 - ✅ **Real-time Sensors** - Amber pricing and Tesla energy data as HA sensors
-- ✅ **Automatic TOU Sync** - Background syncing every 5 minutes (just like Docker version)
+- ✅ **Automatic TOU Sync** - Background syncing every 5 minutes
 - ✅ **Manual Services** - On-demand sync services for advanced automation
-- ✅ **No External Services** - Runs entirely within Home Assistant
 
 ### Prerequisites
 
 - Home Assistant installed and running
 - HACS (Home Assistant Community Store) installed
-- Amber Electric account with API token (https://app.amber.com.au/developers)
-- **Tesla API access (choose one):**
-  - **Option 1 (Recommended):** Teslemetry account with API token (https://teslemetry.com) - ~$4/month
-  - **Option 2 (Free alternative):** Tesla Fleet API (direct OAuth with Tesla) - Completely free
-
-### Tesla API Options
-
-Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose whichever works best for you.
-
-#### Option 1: Teslemetry (Recommended - ~$4/month)
-
-**Pros:**
-- ✅ Simple API key authentication
-- ✅ No OAuth setup required
-- ✅ Works with both Docker and Home Assistant deployments
-- ✅ Configurable via web GUI (Flask) or integration setup (HA)
-- ✅ Reliable and well-maintained proxy service
-- ✅ Fastest setup (2 minutes)
-
-**Setup:**
-1. Sign up at https://teslemetry.com
-2. Connect your Tesla account
-3. Copy your API key
-4. Enter it during Tesla Sync setup
-
-**Best for:** Users who want a simple, reliable setup and don't mind a small monthly fee.
-
-#### Option 2: Tesla Fleet API (FREE)
-
-**Pros:**
-- ✅ Completely free (no monthly costs)
-- ✅ Direct Tesla API access via OAuth
-- ✅ Works with both Docker and Home Assistant deployments
-- ✅ Automatic token refresh
-- ✅ Built-in Cloudflare Tunnel for easy setup (no port forwarding needed)
-
-**Cons:**
-- ⚠️ Requires OAuth app registration with Tesla
-- ⚠️ Slightly more setup steps than Teslemetry
-
-**Setup - Home Assistant:**
-1. Install the official "Tesla Fleet" integration in Home Assistant
-   - Go to Settings → Devices & Services → Add Integration
-   - Search for "Tesla Fleet"
-   - Follow the OAuth login flow
-2. Tesla Sync will automatically detect and use your Tesla Fleet credentials
-3. During Tesla Sync setup, **leave the Teslemetry token field empty**
-4. The integration will display: "Tesla Fleet integration detected! You can leave this field empty to use your existing Tesla Fleet OAuth tokens (free)"
-
-**Setup - Docker/Flask:**
-1. Register an OAuth application at https://developer.tesla.com
-   - Set your Redirect URI to: `http://localhost:5001/fleet-api/callback` (or your server's URL)
-2. Get your Client ID and Client Secret from the Tesla Developer Portal
-3. Configure everything via the Settings page in the Flask web GUI (no .env needed!):
-   - Select "Tesla Fleet API (Direct, Free)" as your Tesla API Provider
-   - Enter your Client ID in the API Configuration section
-   - Enter your Client Secret
-   - Enter your Redirect URI (e.g., `http://localhost:5001/fleet-api/callback`)
-   - Click "Save Settings" - credentials are encrypted and stored securely
-   - Click "Connect to Tesla Fleet API" to complete OAuth authorization
-4. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed OAuth app registration
-
-**Note:** All Fleet API credentials are now configurable via GUI - no environment variables required!
-
-**Best for:** Users who want to avoid recurring costs and are comfortable with OAuth setup.
+- Amber Electric API token ([get one here](https://app.amber.com.au/developers))
+- Tesla API access ([choose an option above](#tesla-api-options))
 
 ### Installation Steps
 
@@ -382,22 +368,10 @@ Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose which
    - Click to add
 
 3. **Configure**
-   - **Step 1: Amber Electric**
-     - Enter your Amber API token
-     - Get token from: https://app.amber.com.au/developers
-
-   - **Step 2: Tesla API**
-     - **Using Teslemetry (Recommended):** Enter your Teslemetry API token
-       - Get token from: https://teslemetry.com
-     - **Using Tesla Fleet (Optional):** Leave the Teslemetry token field empty
-       - If you have Tesla Fleet configured, the integration will automatically detect it
-       - You'll see: "Tesla Fleet integration detected! You can leave this field empty to use your existing Tesla Fleet OAuth tokens (free)"
-       - Your existing Tesla Fleet OAuth tokens will be used automatically
-
-   - **Step 3: Site Selection**
-     - Select your Tesla energy site from the dropdown
-     - Select Amber site (if you have multiple)
-     - Enable automatic TOU schedule syncing (recommended)
+   - Enter your **Amber API token** ([get one here](https://app.amber.com.au/developers))
+   - Enter your **Tesla API credentials** (Teslemetry key or leave empty for Tesla Fleet)
+   - Select your Tesla energy site and Amber site
+   - Enable automatic TOU schedule syncing (recommended)
 
 4. **Verify Setup**
    - Check that new sensors appear:
@@ -725,99 +699,14 @@ docker restart tesla-sync
 - Troubleshooting database issues
 - Unraid-specific setup
 
-## Tesla API Authentication
-
-This application supports two methods for Tesla API access:
-
-### Option 1: Teslemetry (Recommended - Easier Setup)
-
-Teslemetry is a third-party proxy service for Tesla API.
-
-**Pros:**
-- ✅ Simple setup (2 minutes)
-- ✅ Works with localhost
-- ✅ Configurable via web GUI
-- ✅ Reliable and well-maintained
-- ✅ ~$4/month (reasonable for convenience)
-
-**Setup:**
-1. Sign up at https://teslemetry.com
-2. Connect your Tesla account
-3. Copy your API key
-4. Paste into Settings page in dashboard
-
-### Option 2: Tesla Fleet API (Free)
-
-Direct OAuth access to Tesla's Fleet API with built-in tunnel support.
-
-**Pros:**
-- ✅ Completely free
-- ✅ Direct API access
-- ✅ Configurable via web GUI
-- ✅ Built-in Cloudflare Tunnel (no port forwarding or public domain needed)
-- ✅ Step-by-step guided setup in the UI
-
-**Setup:**
-1. Register OAuth app at https://developer.tesla.com
-2. In Settings, click "Install" to auto-download cloudflared (or it's pre-installed in Docker)
-3. Start the Cloudflare tunnel to get a public URL
-4. Update Tesla Developer Portal with the tunnel URL
-5. Enter Client ID and Client Secret in Settings
-6. Generate keys and register domain (one-click buttons)
-7. Authorize with Tesla
-8. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
-
 ## Configuration
 
-### Required Credentials
+After starting Tesla Sync, open the web interface at `http://localhost:5001` and go to **Settings**:
 
-1. **Amber Electric API Token**
-   - Get from: https://app.amber.com.au/developers
-   - Used for: Fetching real-time electricity prices
-   - Configure: Via Settings page in dashboard
-
-2. **Tesla API Access** (choose one):
-   - **Option A - Teslemetry API Key** (Recommended)
-     - Get from: https://teslemetry.com
-     - Used for: Tesla Powerwall communication
-     - Configure: Via Settings page in dashboard
-
-   - **Option B - Tesla Fleet API OAuth** (Free)
-     - Get from: https://developer.tesla.com (register OAuth app)
-     - Used for: Direct Tesla Fleet API access
-     - Configure: Via Settings page in dashboard
-
-3. **Tesla Energy Site ID**
-   - Your Powerwall/Solar site ID
-   - Find in: Teslemetry dashboard or Tesla app
-   - Configure: Via Settings page in dashboard
-
-### Dashboard Setup
-
-After logging in, go to the Settings page:
-
-1. **Configure Amber Electric**
-   - Enter your Amber API token
-   - Save settings
-
-2. **Choose Tesla API Method**
-   - Select either "Teslemetry" or "Tesla Fleet API" from dropdown
-
-   **If using Teslemetry:**
-   - Enter your Teslemetry API key
-
-   **If using Tesla Fleet API:**
-   - Enter your Fleet API Client ID
-   - Enter your Fleet API Client Secret
-   - Enter your Fleet API Redirect URI (e.g., `http://localhost:5001/fleet-api/callback`)
-
-3. **Set Energy Site ID**
-   - Enter your Tesla energy site ID
-   - Save settings
-
-4. **Verify Connection**
-   - Check API status indicators turn green
-   - View current prices and battery status
+1. **Amber Electric** - Enter your API token ([get one here](https://app.amber.com.au/developers))
+2. **Tesla API** - Choose Teslemetry or Fleet API ([see options](#tesla-api-options))
+3. **Energy Site** - Enter your Tesla Energy Site ID (found in Teslemetry or Tesla app)
+4. **Save & Verify** - Check that API status indicators turn green
 
 ## Usage
 
@@ -995,51 +884,40 @@ gunicorn -w 4 -b 0.0.0.0:5001 run:app
 
 ### Common Issues
 
-**"Teslemetry API connection failed"**
-- Verify API key is correct
-- Check that your Tesla account is connected to Teslemetry
-- Ensure API key has proper permissions
-
-**"No energy sites found"**
-- Verify your Tesla Powerwall/Solar is connected to your Tesla account
-- Check Teslemetry dashboard to confirm site is visible
-- Ensure site is properly commissioned in Tesla app
-- Check public key is accessible externally
+| Problem | Solution |
+|---------|----------|
+| **Teslemetry connection failed** | Verify API key is correct and Tesla account is linked in Teslemetry |
+| **Tesla Fleet API failed** | Check OAuth tokens, try re-authorizing via Settings |
+| **No energy sites found** | Ensure Powerwall is commissioned and visible in Tesla app |
+| **TOU sync not working** | Check logs, verify Energy Site ID is correct |
 
 ### Logs
 
-Check Flask logs for detailed errors:
 ```bash
-tail -f flask.log
-```
+# Docker
+docker logs -f tesla-sync
 
-Enable debug mode for more details:
-```bash
-export FLASK_DEBUG=1
-flask run
+# Local development
+tail -f flask.log
 ```
 
 ## Documentation
 
-- **[UNRAID_SETUP.md](docs/UNRAID_SETUP.md)** - Complete Unraid deployment guide
-- **[TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md)** - Complete Tesla Fleet API setup guide
-- **[CLAUDE.md](docs/CLAUDE.md)** - Development guide for Claude Code
-- **[Docker Hub](https://hub.docker.com/r/bolagnaise/tesla-sync)** - Pre-built container images
-- **[GitHub Actions](https://github.com/bolagnaise/tesla-sync/actions)** - Automated build status
-- **Tesla Developer Docs:** https://developer.tesla.com/docs/fleet-api
-- **Amber API Docs:** https://api.amber.com.au/docs
+| Guide | Description |
+|-------|-------------|
+| [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) | Tesla Fleet API setup guide |
+| [UNRAID_SETUP.md](docs/UNRAID_SETUP.md) | Unraid deployment guide |
+| [Docker Hub](https://hub.docker.com/r/bolagnaise/tesla-sync) | Pre-built images |
+
+**External Docs:** [Tesla Fleet API](https://developer.tesla.com/docs/fleet-api) · [Amber API](https://api.amber.com.au/docs)
+
+## Support
+
+For issues: Check logs first, then [open a GitHub issue](https://github.com/bolagnaise/tesla-sync/issues) or join [Discord](https://discord.gg/eaWDWxEWE3).
 
 ## License
 
 MIT
-
-## Support
-
-For issues or questions:
-1. Review Flask logs for error details
-2. Verify Teslemetry API key is correct
-3. Check Teslemetry dashboard for connection status
-4. Ensure Tesla Energy Site ID is correct
 
 ## Contributing
 
