@@ -77,7 +77,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - 🔄 **Smart Tariff Deduplication** - Only syncs to Tesla when tariff actually changes, preventing duplicate rate plan entries in Tesla dashboard
 - 🐳 **Docker Ready** - Pre-built multi-architecture (amd64/arm64) images for easy deployment
 - 🏠 **Home Assistant Integration** - Native HACS integration for seamless HA deployment
-- 🌏 **Australia-Wide Compatibility** - Auto-detects timezone from Amber data, works in all Australian states (QLD, NSW, VIC, SA, TAS, WA, NT)
+- 🌏 **Australia-Wide Compatibility** - Auto-detects timezone from Amber data, works in all Australian states and territories (QLD, NSW, ACT, VIC, SA, TAS, WA, NT)
 - 📊 **Intelligent Price Averaging** - Averages 5-minute Amber intervals into 30-minute Tesla periods for maximum accuracy
 - 🎯 **Period Alignment** - Correctly aligns with Amber's forecast labels (e.g., "18:00 forecast" → Tesla PERIOD_17_30)
 - 🔄 **Rolling 24-Hour Window** - Always provides Tesla with 9-24 hours lookahead for optimal battery management
@@ -254,7 +254,7 @@ PERIOD_23_30 → Tomorrow's 00:00 forecast (+9h 45m lookahead)
 #### 4. **Timezone Auto-Detection**
 Works anywhere in Australia without configuration:
 - **Brisbane (AEST UTC+10:00):** No DST
-- **Sydney/Melbourne (AEDT UTC+11:00):** DST in summer
+- **Sydney/Melbourne/Canberra (AEDT UTC+11:00):** DST in summer
 - **Adelaide (ACDT UTC+10:30):** Unique 30-minute offset + DST
 - **Perth (AWST UTC+8:00):** No DST
 - **Darwin (ACST UTC+9:30):** No DST
