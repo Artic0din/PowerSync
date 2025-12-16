@@ -704,6 +704,7 @@ def create_app(config_class=Config):
                     cloudflared_bin = get_cloudflared_path()
                     if cloudflared_bin:
                         try:
+                            from app.utils import decrypt_token
                             token = decrypt_token(user.cloudflare_tunnel_token_encrypted)
                             tunnel = CloudflareTunnel()
                             tunnel.start_named_tunnel(token)
