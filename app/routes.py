@@ -571,36 +571,6 @@ def settings():
                 current_user.pea_custom_value = None
                 logger.info("Clearing custom PEA (auto-calculate from wholesale)")
 
-        # Export Price Boost settings (for Amber)
-        current_user.export_boost_enabled = 'export_boost_enabled' in request.form
-        logger.info(f"Saving export boost enabled: {current_user.export_boost_enabled}")
-
-        if 'export_price_offset' in submitted_fields:
-            try:
-                offset = float(request.form.get('export_price_offset', 0))
-                current_user.export_price_offset = offset
-                logger.info(f"Saving export price offset: {offset} c/kWh")
-            except (ValueError, TypeError):
-                pass
-
-        if 'export_min_price' in submitted_fields:
-            try:
-                min_price = float(request.form.get('export_min_price', 0))
-                current_user.export_min_price = min_price
-                logger.info(f"Saving export min price: {min_price} c/kWh")
-            except (ValueError, TypeError):
-                pass
-
-        if 'export_boost_start' in submitted_fields:
-            start_time = request.form.get('export_boost_start', '17:00')
-            current_user.export_boost_start = start_time
-            logger.info(f"Saving export boost start: {start_time}")
-
-        if 'export_boost_end' in submitted_fields:
-            end_time = request.form.get('export_boost_end', '21:00')
-            current_user.export_boost_end = end_time
-            logger.info(f"Saving export boost end: {end_time}")
-
         # Network Tariff Configuration (for Flow Power + AEMO)
         # Distributor and tariff code for aemo_to_tariff library
         if 'network_distributor' in submitted_fields:
@@ -874,6 +844,28 @@ def amber_settings():
         elif form.amber_site_id.data:
             current_user.amber_site_id = form.amber_site_id.data
             logger.info(f"User selected Amber site: {current_user.amber_site_id}")
+
+        # Export Price Boost settings
+        current_user.export_boost_enabled = 'export_boost_enabled' in request.form
+        logger.info(f"Saving export boost enabled: {current_user.export_boost_enabled}")
+
+        if 'export_price_offset' in request.form:
+            try:
+                current_user.export_price_offset = float(request.form.get('export_price_offset', 0))
+            except (ValueError, TypeError):
+                pass
+
+        if 'export_min_price' in request.form:
+            try:
+                current_user.export_min_price = float(request.form.get('export_min_price', 0))
+            except (ValueError, TypeError):
+                pass
+
+        if 'export_boost_start' in request.form:
+            current_user.export_boost_start = request.form.get('export_boost_start', '17:00')
+
+        if 'export_boost_end' in request.form:
+            current_user.export_boost_end = request.form.get('export_boost_end', '21:00')
 
         try:
             db.session.commit()
