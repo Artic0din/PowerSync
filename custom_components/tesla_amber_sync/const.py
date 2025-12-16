@@ -374,6 +374,20 @@ SENSOR_TYPE_SOLAR_CURTAILMENT = "solar_curtailment"
 SENSOR_TYPE_FLOW_POWER_PRICE = "flow_power_price"
 SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE = "flow_power_export_price"
 
+# Amber Export Price Boost configuration
+# Artificially increase export prices to trigger Powerwall exports
+CONF_EXPORT_PRICE_OFFSET = "export_price_offset"
+CONF_EXPORT_MIN_PRICE = "export_min_price"
+CONF_EXPORT_BOOST_ENABLED = "export_boost_enabled"
+CONF_EXPORT_BOOST_START = "export_boost_start"
+CONF_EXPORT_BOOST_END = "export_boost_end"
+
+# Default values for export boost
+DEFAULT_EXPORT_PRICE_OFFSET = 0.0  # c/kWh
+DEFAULT_EXPORT_MIN_PRICE = 0.0     # c/kWh
+DEFAULT_EXPORT_BOOST_START = "17:00"
+DEFAULT_EXPORT_BOOST_END = "21:00"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"

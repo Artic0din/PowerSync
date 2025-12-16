@@ -571,6 +571,36 @@ def settings():
                 current_user.pea_custom_value = None
                 logger.info("Clearing custom PEA (auto-calculate from wholesale)")
 
+        # Export Price Boost settings (for Amber)
+        current_user.export_boost_enabled = 'export_boost_enabled' in request.form
+        logger.info(f"Saving export boost enabled: {current_user.export_boost_enabled}")
+
+        if 'export_price_offset' in submitted_fields:
+            try:
+                offset = float(request.form.get('export_price_offset', 0))
+                current_user.export_price_offset = offset
+                logger.info(f"Saving export price offset: {offset} c/kWh")
+            except (ValueError, TypeError):
+                pass
+
+        if 'export_min_price' in submitted_fields:
+            try:
+                min_price = float(request.form.get('export_min_price', 0))
+                current_user.export_min_price = min_price
+                logger.info(f"Saving export min price: {min_price} c/kWh")
+            except (ValueError, TypeError):
+                pass
+
+        if 'export_boost_start' in submitted_fields:
+            start_time = request.form.get('export_boost_start', '17:00')
+            current_user.export_boost_start = start_time
+            logger.info(f"Saving export boost start: {start_time}")
+
+        if 'export_boost_end' in submitted_fields:
+            end_time = request.form.get('export_boost_end', '21:00')
+            current_user.export_boost_end = end_time
+            logger.info(f"Saving export boost end: {end_time}")
+
         # Network Tariff Configuration (for Flow Power + AEMO)
         # Distributor and tariff code for aemo_to_tariff library
         if 'network_distributor' in submitted_fields:
@@ -1974,6 +2004,16 @@ def tou_schedule():
         logger.info(f"Preview: Applying Flow Power export rates for state: {current_user.flow_power_state}")
         tariff = apply_flow_power_export(tariff, current_user.flow_power_state)
 
+    # Apply export price boost for Amber users (if enabled)
+    if current_user.electricity_provider == 'amber' and getattr(current_user, 'export_boost_enabled', False):
+        from app.tariff_converter import apply_export_boost
+        offset = getattr(current_user, 'export_price_offset', 0) or 0
+        min_price = getattr(current_user, 'export_min_price', 0) or 0
+        boost_start = getattr(current_user, 'export_boost_start', '17:00') or '17:00'
+        boost_end = getattr(current_user, 'export_boost_end', '21:00') or '21:00'
+        logger.info(f"Preview: Applying export boost: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
+        tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+
     # Extract tariff periods for display
     energy_rates = tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {})
     feedin_rates = tariff.get('sell_tariff', {}).get('energy_charges', {}).get('Summer', {}).get('rates', {})
@@ -2136,6 +2176,16 @@ def sync_tesla_schedule(tesla_client):
         if current_user.electricity_provider == 'flow_power' and current_user.flow_power_state:
             logger.info(f"Applying Flow Power export rates for state: {current_user.flow_power_state}")
             tariff = apply_flow_power_export(tariff, current_user.flow_power_state)
+
+        # Apply export price boost for Amber users (if enabled)
+        if current_user.electricity_provider == 'amber' and getattr(current_user, 'export_boost_enabled', False):
+            from app.tariff_converter import apply_export_boost
+            offset = getattr(current_user, 'export_price_offset', 0) or 0
+            min_price = getattr(current_user, 'export_min_price', 0) or 0
+            boost_start = getattr(current_user, 'export_boost_start', '17:00') or '17:00'
+            boost_end = getattr(current_user, 'export_boost_end', '21:00') or '21:00'
+            logger.info(f"Applying export boost: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
+            tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
 
         num_periods = len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))
         logger.info(f"Applying TESLA SYNC tariff with {num_periods} rate periods")

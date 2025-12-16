@@ -60,6 +60,14 @@ from .const import (
     CONF_FLOW_POWER_BASE_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
+    # Export price boost configuration
+    CONF_EXPORT_BOOST_ENABLED,
+    CONF_EXPORT_PRICE_OFFSET,
+    CONF_EXPORT_MIN_PRICE,
+    CONF_EXPORT_BOOST_START,
+    CONF_EXPORT_BOOST_END,
+    DEFAULT_EXPORT_BOOST_START,
+    DEFAULT_EXPORT_BOOST_END,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -857,6 +865,26 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_SOLAR_CURTAILMENT_ENABLED,
                         default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
                     ): bool,
+                    vol.Optional(
+                        CONF_EXPORT_BOOST_ENABLED,
+                        default=self._get_option(CONF_EXPORT_BOOST_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_EXPORT_PRICE_OFFSET,
+                        default=self._get_option(CONF_EXPORT_PRICE_OFFSET, 0.0),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    vol.Optional(
+                        CONF_EXPORT_MIN_PRICE,
+                        default=self._get_option(CONF_EXPORT_MIN_PRICE, 0.0),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    vol.Optional(
+                        CONF_EXPORT_BOOST_START,
+                        default=self._get_option(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START),
+                    ): str,
+                    vol.Optional(
+                        CONF_EXPORT_BOOST_END,
+                        default=self._get_option(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END),
+                    ): str,
                     vol.Optional(
                         CONF_DEMAND_CHARGE_ENABLED,
                         default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),

@@ -94,11 +94,16 @@
       },
       "amber_options": {
         "title": "Amber Electric Options",
-        "description": "Configure Amber Electric TOU sync, demand charges, and supply charges.",
+        "description": "Configure Amber Electric TOU sync, export boost, demand charges, and supply charges.",
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
+          "export_boost_enabled": "Enable Export Price Boost",
+          "export_price_offset": "Export Price Offset (c/kWh)",
+          "export_min_price": "Minimum Export Price (c/kWh)",
+          "export_boost_start": "Boost Start Time (HH:MM)",
+          "export_boost_end": "Boost End Time (HH:MM)",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",

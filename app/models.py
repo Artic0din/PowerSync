@@ -55,6 +55,14 @@ class User(UserMixin, db.Model):
     current_export_rule_updated = db.Column(db.DateTime)  # When the export rule was last updated
     last_tariff_hash = db.Column(db.String(32))  # MD5 hash of last synced tariff for deduplication
 
+    # Export Price Boost Configuration
+    # Artificially increase export prices to trigger Powerwall exports at lower price points
+    export_boost_enabled = db.Column(db.Boolean, default=False)
+    export_price_offset = db.Column(db.Float, default=0.0)  # c/kWh offset to add to export prices
+    export_min_price = db.Column(db.Float, default=0.0)  # Minimum export price floor in c/kWh
+    export_boost_start = db.Column(db.String(5), default='17:00')  # Start time for boost (HH:MM)
+    export_boost_end = db.Column(db.String(5), default='21:00')  # End time for boost (HH:MM)
+
     # Demand Charge Configuration
     enable_demand_charges = db.Column(db.Boolean, default=False)
     peak_demand_rate = db.Column(db.Float, default=0.0)

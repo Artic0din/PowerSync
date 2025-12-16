@@ -1459,3 +1459,129 @@ def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float
 
     _LOGGER.debug("Built wholesale lookup with %d periods", len(result))
     return result
+
+
+def apply_export_boost(
+    tariff: dict[str, Any],
+    offset_cents: float = 0.0,
+    min_price_cents: float = 0.0,
+    boost_start: str = "17:00",
+    boost_end: str = "21:00",
+) -> dict[str, Any]:
+    """
+    Apply export price boost to trigger Powerwall exports at lower price points.
+
+    This artificially increases sell prices so the Powerwall sees higher export
+    value and is more willing to discharge. Useful when actual export prices are
+    in the 20-25c range where Tesla's algorithm may not trigger exports.
+
+    The boost is only applied during the configured time window.
+
+    Args:
+        tariff: Tesla tariff structure with energy_charges containing sell_prices
+        offset_cents: Fixed offset to add to all export prices (c/kWh)
+        min_price_cents: Minimum export price floor (c/kWh)
+        boost_start: Time to start applying boost (HH:MM format)
+        boost_end: Time to stop applying boost (HH:MM format)
+
+    Returns:
+        Modified tariff with boosted export prices
+
+    Example:
+        Amber says export = 18c
+        With offset_cents=5, min_price_cents=20:
+        → Tesla sees 23c (18 + 5 = 23, above min)
+
+        Amber says export = 12c
+        With offset_cents=5, min_price_cents=20:
+        → Tesla sees 20c (12 + 5 = 17, below min, so use min)
+    """
+    if offset_cents == 0 and min_price_cents == 0:
+        _LOGGER.debug("Export boost disabled (offset=0, min=0)")
+        return tariff
+
+    # Parse time window
+    try:
+        start_parts = boost_start.split(":")
+        start_hour, start_minute = int(start_parts[0]), int(start_parts[1])
+        end_parts = boost_end.split(":")
+        end_hour, end_minute = int(end_parts[0]), int(end_parts[1])
+    except (ValueError, IndexError) as err:
+        _LOGGER.error("Invalid export boost time format: %s", err)
+        return tariff
+
+    # Build list of periods within the time window
+    boost_periods: set[str] = set()
+    for hour in range(24):
+        for minute in [0, 30]:
+            period_minutes = hour * 60 + minute
+            start_minutes = start_hour * 60 + start_minute
+            end_minutes = end_hour * 60 + end_minute
+
+            # Handle overnight windows (e.g., 22:00 to 06:00)
+            if end_minutes <= start_minutes:
+                in_window = period_minutes >= start_minutes or period_minutes < end_minutes
+            else:
+                in_window = start_minutes <= period_minutes < end_minutes
+
+            if in_window:
+                boost_periods.add(f"PERIOD_{hour:02d}_{minute:02d}")
+
+    _LOGGER.debug(
+        "Export boost active for %d periods (%s to %s): offset=%.1fc, min=%.1fc",
+        len(boost_periods), boost_start, boost_end, offset_cents, min_price_cents
+    )
+
+    modified_count = 0
+    boosted_prices: list[float] = []
+
+    # Process each season in the tariff
+    for season, season_data in tariff.get("energy_charges", {}).items():
+        sell_prices = season_data.get("sell_prices", {})
+        buy_prices = season_data.get("rates", {})
+
+        for period in boost_periods:
+            if period not in sell_prices:
+                continue
+
+            original_dollars = sell_prices[period]
+            original_cents = original_dollars * 100
+
+            # Apply offset
+            boosted_cents = original_cents + offset_cents
+
+            # Apply minimum floor
+            boosted_cents = max(boosted_cents, min_price_cents)
+
+            # Convert back to dollars
+            boosted_dollars = round(boosted_cents / 100, 4)
+
+            # Tesla restriction: sell cannot exceed buy
+            if period in buy_prices and boosted_dollars > buy_prices[period]:
+                _LOGGER.debug(
+                    "%s: Boosted sell price capped to buy price (%.4f -> %.4f)",
+                    period, boosted_dollars, buy_prices[period]
+                )
+                boosted_dollars = buy_prices[period]
+
+            if boosted_dollars != original_dollars:
+                modified_count += 1
+                boosted_prices.append(boosted_cents)
+                _LOGGER.debug(
+                    "%s: Export boost %.2fc → %.2fc (offset=%.1fc, min=%.1fc)",
+                    period, original_cents, boosted_dollars * 100, offset_cents, min_price_cents
+                )
+
+            sell_prices[period] = boosted_dollars
+
+    # Log summary
+    if boosted_prices:
+        avg_boost = sum(boosted_prices) / len(boosted_prices)
+        _LOGGER.info(
+            "Export boost applied to %d periods: avg=%.1fc/kWh, range=[%.1fc to %.1fc]",
+            modified_count, avg_boost, min(boosted_prices), max(boosted_prices)
+        )
+    else:
+        _LOGGER.info("Export boost: no periods modified (prices already meet criteria)")
+
+    return tariff

@@ -76,6 +76,14 @@ from .const import (
     CONF_FLOW_POWER_BASE_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
+    # Export price boost configuration
+    CONF_EXPORT_BOOST_ENABLED,
+    CONF_EXPORT_PRICE_OFFSET,
+    CONF_EXPORT_MIN_PRICE,
+    CONF_EXPORT_BOOST_START,
+    CONF_EXPORT_BOOST_END,
+    DEFAULT_EXPORT_BOOST_START,
+    DEFAULT_EXPORT_BOOST_END,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1551,6 +1559,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .tariff_converter import apply_flow_power_export
             _LOGGER.info("Applying Flow Power export rates for state: %s", flow_power_state)
             tariff = apply_flow_power_export(tariff, flow_power_state)
+
+        # Apply export price boost for Amber users (if enabled)
+        if electricity_provider == "amber":
+            export_boost_enabled = entry.options.get(CONF_EXPORT_BOOST_ENABLED, False)
+            if export_boost_enabled:
+                from .tariff_converter import apply_export_boost
+                offset = entry.options.get(CONF_EXPORT_PRICE_OFFSET, 0) or 0
+                min_price = entry.options.get(CONF_EXPORT_MIN_PRICE, 0) or 0
+                boost_start = entry.options.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+                boost_end = entry.options.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+                _LOGGER.info(
+                    "Applying export boost: offset=%.1fc, min=%.1fc, window=%s-%s",
+                    offset, min_price, boost_start, boost_end
+                )
+                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
 
         # Store tariff schedule in hass.data for the sensor to read
         from datetime import datetime as dt

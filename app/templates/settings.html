@@ -44,6 +44,65 @@
                             👁️
                         </button>
                     </div>
+
+                    <!-- Export Price Boost Settings -->
+                    <div id="exportBoostSettings" style="margin-top: 1.5em; padding-top: 1em; border-top: 1px solid var(--muted-border-color);">
+                        <h4 style="margin: 0 0 0.5em 0; font-size: 0.95em;">Export Price Boost</h4>
+                        <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
+                            Artificially increase export prices to trigger Powerwall exports. Useful when prices are in the 20-25c range where Tesla may not export.
+                        </p>
+
+                        <label for="export_boost_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                            <input type="checkbox" id="export_boost_enabled" name="export_boost_enabled"
+                                   {% if current_user.export_boost_enabled %}checked{% endif %}
+                                   onchange="toggleExportBoostDetails()">
+                            <span>Enable Export Price Boost</span>
+                        </label>
+
+                        <div id="exportBoostDetails" style="margin-top: 1em; {% if not current_user.export_boost_enabled %}display: none;{% endif %}">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                                <label for="export_price_offset">
+                                    Price Offset (c/kWh)
+                                    <small>Added to all export prices</small>
+                                    <input type="number" id="export_price_offset" name="export_price_offset"
+                                           value="{{ current_user.export_price_offset or 0 }}"
+                                           step="0.1" min="0" max="50"
+                                           style="width: 100%;">
+                                </label>
+
+                                <label for="export_min_price">
+                                    Minimum Price (c/kWh)
+                                    <small>Floor for export prices</small>
+                                    <input type="number" id="export_min_price" name="export_min_price"
+                                           value="{{ current_user.export_min_price or 0 }}"
+                                           step="0.1" min="0" max="100"
+                                           style="width: 100%;">
+                                </label>
+                            </div>
+
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-top: 1em;">
+                                <label for="export_boost_start">
+                                    Boost Start Time
+                                    <small>When to start applying boost</small>
+                                    <input type="time" id="export_boost_start" name="export_boost_start"
+                                           value="{{ current_user.export_boost_start or '17:00' }}"
+                                           style="width: 100%;">
+                                </label>
+
+                                <label for="export_boost_end">
+                                    Boost End Time
+                                    <small>When to stop applying boost</small>
+                                    <input type="time" id="export_boost_end" name="export_boost_end"
+                                           value="{{ current_user.export_boost_end or '21:00' }}"
+                                           style="width: 100%;">
+                                </label>
+                            </div>
+
+                            <p style="font-size: 0.75em; margin: 1em 0 0 0; color: var(--muted-color);">
+                                Example: With offset=5c and min=20c, an 18c export becomes 23c (18+5). A 12c export becomes 20c (floor).
+                            </p>
+                        </div>
+                    </div>
                 </fieldset>
             </div>
 
@@ -1391,6 +1450,15 @@
             }
             if (peaDisabledNote) {
                 peaDisabledNote.style.display = peaEnabled ? 'none' : 'block';
+            }
+        }
+
+        // Toggle export boost settings detail visibility
+        function toggleExportBoostDetails() {
+            const enabled = document.getElementById('export_boost_enabled').checked;
+            const details = document.getElementById('exportBoostDetails');
+            if (details) {
+                details.style.display = enabled ? 'block' : 'none';
             }
         }
 

@@ -434,6 +434,16 @@ def _sync_all_users_internal(websocket_data):
                 logger.info(f"Applying Flow Power export rates for {user.email} (state: {user.flow_power_state})")
                 tariff = apply_flow_power_export(tariff, user.flow_power_state)
 
+            # Apply export price boost for Amber users (if enabled)
+            if user.electricity_provider == 'amber' and getattr(user, 'export_boost_enabled', False):
+                from app.tariff_converter import apply_export_boost
+                offset = getattr(user, 'export_price_offset', 0) or 0
+                min_price = getattr(user, 'export_min_price', 0) or 0
+                boost_start = getattr(user, 'export_boost_start', '17:00') or '17:00'
+                boost_end = getattr(user, 'export_boost_end', '21:00') or '21:00'
+                logger.info(f"Applying export boost for {user.email}: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
+                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+
             logger.info(f"Applying tariff for {user.email} with {len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))} rate periods")
 
             # Deduplication: Check if tariff has changed since last sync
