@@ -4593,15 +4593,28 @@ def api_powerwall_register_key():
 
 
 @bp.route('/api/powerwall/authorized-clients', methods=['GET'])
-@require_api_token
 def list_authorized_clients():
     """
     List authorized clients registered with the Powerwall.
     Shows key state: 1 = pending acceptance, 3 = accepted
+
+    Authentication: Bearer token in Authorization header
     """
-    user = get_current_user()
+    from app.api_clients import get_tesla_client
+
+    # Check for Bearer token
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'success': False, 'error': 'Missing or invalid Authorization header'}), 401
+
+    token = auth_header.split(' ', 1)[1]
+    if not token:
+        return jsonify({'success': False, 'error': 'Empty token'}), 401
+
+    # Find user by API token
+    user = User.query.filter_by(battery_health_api_token=token).first()
     if not user:
-        return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+        return jsonify({'success': False, 'error': 'Invalid API token'}), 401
 
     tesla_client = get_tesla_client(user)
     if not tesla_client:
