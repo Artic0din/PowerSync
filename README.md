@@ -132,24 +132,36 @@ The feature adds a configurable offset to export prices and/or sets a minimum fl
 | Enable Export Price Boost | Toggle the feature on/off | Off |
 | Price Offset (c/kWh) | Fixed amount added to all export prices | 0 |
 | Minimum Price (c/kWh) | Floor for export prices | 0 |
+| Activation Threshold (c/kWh) | Boost only applies if actual price is at or above this value (0 = always apply) | 0 |
 | Boost Start Time | When to start applying boost | 17:00 |
 | Boost End Time | When to stop applying boost | 21:00 |
 
 **Example Calculation:**
 ```
+With offset=5c, min=20c, and threshold=10c:
+
 Amber export price: 18c/kWh
-With offset=5c and min=20c:
-→ 18 + 5 = 23c (above min, so Tesla sees 23c)
+→ 18 >= 10 (threshold), so boost applies
+→ 18 + 5 = 23c (above min, Tesla sees 23c)
 
 Amber export price: 12c/kWh
-With offset=5c and min=20c:
-→ 12 + 5 = 17c (below min, so Tesla sees 20c floor)
+→ 12 >= 10 (threshold), so boost applies
+→ 12 + 5 = 17c (below min, Tesla sees 20c floor)
+
+Amber export price: 5c/kWh
+→ 5 < 10 (below threshold), boost skipped
+→ Tesla sees 5c (unchanged)
+
+Amber export price: -3c/kWh
+→ -3 < 10 (below threshold), boost skipped
+→ Tesla sees -3c (unchanged)
 ```
 
 **Use Cases:**
 - Force Powerwall to export during evening peak when prices are moderate (20-25c)
 - Overcome Tesla's internal decision-making that may not export at certain price points
 - Maximize battery revenue during predictable high-demand periods
+- Use activation threshold to skip boosting very low or negative prices where exporting doesn't make financial sense
 
 **Note:** The boosted price is only what Tesla sees for decision-making - you still get paid the actual Amber export rate. This feature tricks the Powerwall into exporting when it otherwise wouldn't.
 
