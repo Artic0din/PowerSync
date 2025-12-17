@@ -984,9 +984,10 @@ class FleetAPIClient(TeslaAPIClientBase):
             # Tesla Fleet API command endpoint
             url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
 
-            # The command payload - Tesla uses protobuf but may also accept JSON
+            # The command payload - Tesla uses add_authorized_client_request
+            # per pypowerwall issue #165 documentation
             payload = {
-                "command": "add_authorized_client",
+                "command": "add_authorized_client_request",
                 "public_key": public_key_base64,
             }
 
@@ -1717,7 +1718,7 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
             url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
 
             payload = {
-                "command": "add_authorized_client",
+                "command": "add_authorized_client_request",
                 "public_key": public_key_base64,
             }
 
