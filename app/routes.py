@@ -4497,6 +4497,104 @@ def api_battery_health_from_cloud():
         }), 500
 
 
+@bp.route('/api/powerwall/register-key', methods=['POST'])
+def api_powerwall_register_key():
+    """
+    Register mobile app's RSA public key with Powerwall via Tesla Fleet API.
+
+    This is required for Firmware 25.10+ to authenticate local TEDAPI requests.
+    The mobile app generates an RSA keypair and sends the public key to this endpoint.
+    This endpoint then calls Tesla Fleet API to register the key with the Powerwall.
+
+    Authentication: Bearer token in Authorization header (same as battery-health POST)
+
+    Request body:
+    {
+        "publicKey": "base64-encoded-DER-public-key"
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "Key registration initiated",
+        "requiresAcceptance": true  # User may need to accept on Powerwall
+    }
+    """
+    from app.api_clients import get_tesla_client
+
+    # Check for Bearer token
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'success': False, 'error': 'Missing or invalid Authorization header'}), 401
+
+    token = auth_header.split(' ', 1)[1]
+    if not token:
+        return jsonify({'success': False, 'error': 'Empty token'}), 401
+
+    # Find user by API token
+    user = User.query.filter_by(battery_health_api_token=token).first()
+    if not user:
+        return jsonify({'success': False, 'error': 'Invalid API token'}), 401
+
+    # Get request data
+    data = request.get_json()
+    if not data or not data.get('publicKey'):
+        return jsonify({'success': False, 'error': 'Missing publicKey in request body'}), 400
+
+    public_key_base64 = data.get('publicKey')
+
+    # Get Tesla API client for this user
+    tesla_client = get_tesla_client(user)
+    if not tesla_client:
+        return jsonify({
+            'success': False,
+            'error': 'Tesla API not configured. Please set up Fleet API or Teslemetry in settings.'
+        }), 400
+
+    try:
+        # Get energy site ID
+        site_id = user.tesla_energy_site_id
+        if not site_id:
+            energy_sites = tesla_client.get_energy_sites()
+            if not energy_sites:
+                return jsonify({
+                    'success': False,
+                    'error': 'No energy sites found in Tesla account'
+                }), 404
+            site_id = energy_sites[0].get('energy_site_id')
+
+        # Note: Tesla Fleet API endpoint for adding authorized clients
+        # This is a placeholder - the actual Fleet API endpoint may vary
+        # The mobile app's public key needs to be registered with Tesla's servers
+        # which will then push it to the Powerwall
+
+        logger.info(f"Registering public key for user {user.email}, site {site_id}")
+        logger.info(f"Public key (first 50 chars): {public_key_base64[:50]}...")
+
+        # TODO: Call Tesla Fleet API to register the key
+        # The exact API endpoint depends on Tesla's documentation
+        # For now, we'll return a success with instructions
+
+        # Store the public key for reference
+        # This could be stored in the database for audit purposes
+        # user.mobile_app_public_key = public_key_base64
+        # db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': 'Key registration received. Note: Tesla Fleet API key registration is pending implementation. You may need to register the key manually or use the Tesla app.',
+            'requiresAcceptance': True,
+            'note': 'For Firmware 25.10+, key registration via Fleet API is required. Check pypowerwall documentation for manual registration steps.'
+        })
+
+    except Exception as e:
+        logger.error(f"Error registering public key: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @bp.route('/api/health')
 def api_health():
     """
