@@ -4563,32 +4563,84 @@ def api_powerwall_register_key():
                 }), 404
             site_id = energy_sites[0].get('energy_site_id')
 
-        # Note: Tesla Fleet API endpoint for adding authorized clients
-        # This is a placeholder - the actual Fleet API endpoint may vary
-        # The mobile app's public key needs to be registered with Tesla's servers
-        # which will then push it to the Powerwall
-
         logger.info(f"Registering public key for user {user.email}, site {site_id}")
         logger.info(f"Public key (first 50 chars): {public_key_base64[:50]}...")
 
-        # TODO: Call Tesla Fleet API to register the key
-        # The exact API endpoint depends on Tesla's documentation
-        # For now, we'll return a success with instructions
+        # Call Tesla Fleet API to register the key with the Powerwall
+        result = tesla_client.add_authorized_client(site_id, public_key_base64)
 
-        # Store the public key for reference
-        # This could be stored in the database for audit purposes
-        # user.mobile_app_public_key = public_key_base64
-        # db.session.commit()
-
-        return jsonify({
-            'success': True,
-            'message': 'Key registration received. Note: Tesla Fleet API key registration is pending implementation. You may need to register the key manually or use the Tesla app.',
-            'requiresAcceptance': True,
-            'note': 'For Firmware 25.10+, key registration via Fleet API is required. Check pypowerwall documentation for manual registration steps.'
-        })
+        if result and result.get('success'):
+            return jsonify({
+                'success': True,
+                'message': 'Key registration request sent to Powerwall.',
+                'requiresAcceptance': True,
+                'acceptanceInstructions': 'To accept the key on your Powerwall 3: Toggle the power switch on the Gateway OFF, wait 5 seconds, then turn it back ON. This must be done within 30 seconds of registration.',
+                'response': result.get('response', {})
+            })
+        else:
+            error_msg = result.get('error', 'Unknown error') if result else 'No response from Tesla API'
+            return jsonify({
+                'success': False,
+                'error': f'Failed to register key: {error_msg}'
+            }), 400
 
     except Exception as e:
         logger.error(f"Error registering public key: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/powerwall/authorized-clients', methods=['GET'])
+@require_api_token
+def list_authorized_clients():
+    """
+    List authorized clients registered with the Powerwall.
+    Shows key state: 1 = pending acceptance, 3 = accepted
+    """
+    user = get_current_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+
+    tesla_client = get_tesla_client(user)
+    if not tesla_client:
+        return jsonify({
+            'success': False,
+            'error': 'Tesla API not configured'
+        }), 400
+
+    try:
+        site_id = user.tesla_energy_site_id
+        if not site_id:
+            energy_sites = tesla_client.get_energy_sites()
+            if not energy_sites:
+                return jsonify({
+                    'success': False,
+                    'error': 'No energy sites found'
+                }), 404
+            site_id = energy_sites[0].get('energy_site_id')
+
+        result = tesla_client.list_authorized_clients(site_id)
+
+        if result and result.get('success'):
+            clients = result.get('clients', [])
+            return jsonify({
+                'success': True,
+                'clients': clients,
+                'keyStates': {
+                    1: 'pending acceptance (toggle Powerwall power switch)',
+                    3: 'accepted and ready to use'
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Failed to list clients') if result else 'No response'
+            }), 400
+
+    except Exception as e:
+        logger.error(f"Error listing authorized clients: {e}")
         return jsonify({
             'success': False,
             'error': str(e)

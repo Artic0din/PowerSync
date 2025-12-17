@@ -962,6 +962,117 @@ class FleetAPIClient(TeslaAPIClientBase):
                 logger.error(f"Error response: {e.response.text}")
             return None
 
+    def add_authorized_client(self, site_id, public_key_base64):
+        """
+        Register an RSA public key as an authorized client for local TEDAPI access.
+
+        Required for Powerwall Firmware 25.10+ which uses RSA-signed requests
+        for local API authentication.
+
+        Args:
+            site_id: Energy site ID
+            public_key_base64: Base64-encoded DER (PKCS1) formatted RSA public key
+
+        Returns:
+            dict: Response with success status, or None on error
+
+        Note: After calling this, user must toggle Powerwall power switch to accept the key.
+        """
+        try:
+            logger.info(f"Registering authorized client for site {site_id} via Fleet API")
+
+            # Tesla Fleet API command endpoint
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
+
+            # The command payload - Tesla uses protobuf but may also accept JSON
+            payload = {
+                "command": "add_authorized_client",
+                "public_key": public_key_base64,
+            }
+
+            logger.debug(f"Fleet API request: POST {url}")
+
+            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            # Handle token refresh on 401
+            if response.status_code == 401 and self.refresh_token:
+                logger.warning("Fleet API token expired, attempting refresh...")
+                self.refresh_access_token()
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            # Log response for debugging
+            logger.info(f"Add authorized client response: {response.status_code}")
+            logger.debug(f"Response body: {response.text[:500] if response.text else 'empty'}")
+
+            if response.status_code == 404:
+                # Try alternative endpoint
+                logger.info("Trying alternative command endpoint...")
+                url = f"{self.base_url}/api/1/energy_sites/{site_id}/command"
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+                logger.info(f"Alternative endpoint response: {response.status_code}")
+
+            response.raise_for_status()
+            data = response.json()
+
+            return {
+                'success': True,
+                'response': data,
+                'message': 'Key registration sent. Toggle Powerwall power switch to accept the key.',
+                'requiresAcceptance': True
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error adding authorized client via Fleet API: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Error response: {e.response.text}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def list_authorized_clients(self, site_id):
+        """
+        List authorized clients registered with the Powerwall.
+
+        Args:
+            site_id: Energy site ID
+
+        Returns:
+            dict: List of authorized clients with their states, or None on error
+        """
+        try:
+            logger.info(f"Listing authorized clients for site {site_id} via Fleet API")
+
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
+            payload = {
+                "command": "list_authorized_clients",
+            }
+
+            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            if response.status_code == 404:
+                url = f"{self.base_url}/api/1/energy_sites/{site_id}/command"
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            response.raise_for_status()
+            data = response.json()
+
+            return {
+                'success': True,
+                'clients': data.get('response', {}).get('clients', [])
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error listing authorized clients via Fleet API: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
 
 class TeslemetryAPIClient(TeslaAPIClientBase):
     """Client for Teslemetry API (Tesla API proxy service)"""
@@ -1582,6 +1693,106 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Error response: {e.response.text}")
             return None
+
+    def add_authorized_client(self, site_id, public_key_base64):
+        """
+        Register an RSA public key as an authorized client for local TEDAPI access.
+
+        Required for Powerwall Firmware 25.10+ which uses RSA-signed requests
+        for local API authentication.
+
+        Args:
+            site_id: Energy site ID
+            public_key_base64: Base64-encoded DER (PKCS1) formatted RSA public key
+
+        Returns:
+            dict: Response with success status, or None on error
+
+        Note: After calling this, user must toggle Powerwall power switch to accept the key.
+        """
+        try:
+            logger.info(f"Registering authorized client for site {site_id} via Teslemetry")
+
+            # Teslemetry command endpoint
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
+
+            payload = {
+                "command": "add_authorized_client",
+                "public_key": public_key_base64,
+            }
+
+            logger.debug(f"Teslemetry request: POST {url}")
+
+            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            # Log response for debugging
+            logger.info(f"Add authorized client response: {response.status_code}")
+            logger.debug(f"Response body: {response.text[:500] if response.text else 'empty'}")
+
+            if response.status_code == 404:
+                # Try alternative endpoint
+                logger.info("Trying alternative command endpoint...")
+                url = f"{self.base_url}/api/1/energy_sites/{site_id}/command"
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+                logger.info(f"Alternative endpoint response: {response.status_code}")
+
+            response.raise_for_status()
+            data = response.json()
+
+            return {
+                'success': True,
+                'response': data,
+                'message': 'Key registration sent. Toggle Powerwall power switch to accept the key.',
+                'requiresAcceptance': True
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error adding authorized client via Teslemetry: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Error response: {e.response.text}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def list_authorized_clients(self, site_id):
+        """
+        List authorized clients registered with the Powerwall.
+
+        Args:
+            site_id: Energy site ID
+
+        Returns:
+            dict: List of authorized clients with their states, or None on error
+        """
+        try:
+            logger.info(f"Listing authorized clients for site {site_id} via Teslemetry")
+
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/signed_command"
+            payload = {
+                "command": "list_authorized_clients",
+            }
+
+            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            if response.status_code == 404:
+                url = f"{self.base_url}/api/1/energy_sites/{site_id}/command"
+                response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+
+            response.raise_for_status()
+            data = response.json()
+
+            return {
+                'success': True,
+                'clients': data.get('response', {}).get('clients', [])
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error listing authorized clients via Teslemetry: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
 
 
 def get_amber_client(user):
