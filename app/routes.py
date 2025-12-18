@@ -3111,7 +3111,7 @@ def api_restore_normal(tesla_client):
         restore_method = 'none'
 
         # Check if user has Amber configured (should sync instead of restore static tariff)
-        use_amber_sync = bool(current_user.amber_api_token_encrypted and current_user.auto_sync_enabled)
+        use_amber_sync = bool(current_user.amber_api_token_encrypted and current_user.sync_enabled)
 
         if use_amber_sync:
             # For Amber users, trigger a sync to get fresh prices
