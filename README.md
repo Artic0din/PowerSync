@@ -527,10 +527,23 @@ A pre-built Lovelace dashboard is included for visualizing all Tesla Sync data.
 4. Edit the new dashboard → 3 dots menu → "Raw configuration editor"
 5. Paste the YAML content and save
 
+**Required Helper Entity:**
+
+The Force Discharge controls require an `input_select` helper for duration selection:
+
+1. Go to **Settings → Devices & Services → Helpers**
+2. Click **+ Create Helper → Dropdown**
+3. Configure:
+   - Name: `Force Discharge Duration`
+   - Entity ID: `input_select.force_discharge_duration`
+   - Options: `15`, `30`, `45`, `60`, `90`, `120`
+4. Click **Create**
+
 **Dashboard Features:**
 - Current price gauge with color-coded severity
 - Battery level gauge
 - Power flow visualization (solar → battery → grid → home)
+- Force discharge controls with duration dropdown and restore button
 - 24-hour price history chart
 - Energy usage charts (solar, grid, battery, home load)
 - Demand charge monitoring section
