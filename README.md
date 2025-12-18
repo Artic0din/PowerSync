@@ -534,8 +534,7 @@ The Force Discharge controls require an `input_select` helper for duration selec
 1. Go to **Settings → Devices & Services → Helpers**
 2. Click **+ Create Helper → Dropdown**
 3. Configure:
-   - Name: `Force Discharge Duration`
-   - Entity ID: `input_select.force_discharge_duration`
+   - Name: `force_discharge_duration` (creates entity `input_select.force_discharge_duration`)
    - Options: `15`, `30`, `45`, `60`, `90`, `120`
 4. Click **Create**
 
