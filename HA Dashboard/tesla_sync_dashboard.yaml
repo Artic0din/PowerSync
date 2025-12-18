@@ -39,6 +39,79 @@ views:
               red: 0
               yellow: 30
               green: 60
+      # Force Discharge & Restore Controls
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: Force 30m
+            secondary: Discharge
+            icon: mdi:battery-arrow-down
+            icon_color: orange
+            tap_action:
+              action: call-service
+              service: tesla_sync.force_discharge
+              service_data:
+                duration: 30
+              confirmation:
+                text: Force discharge for 30 minutes?
+            card_mod:
+              style: |
+                ha-card {
+                  --card-primary-font-size: 12px;
+                  --card-secondary-font-size: 10px;
+                }
+          - type: custom:mushroom-template-card
+            primary: Force 1h
+            secondary: Discharge
+            icon: mdi:battery-arrow-down
+            icon_color: orange
+            tap_action:
+              action: call-service
+              service: tesla_sync.force_discharge
+              service_data:
+                duration: 60
+              confirmation:
+                text: Force discharge for 1 hour?
+            card_mod:
+              style: |
+                ha-card {
+                  --card-primary-font-size: 12px;
+                  --card-secondary-font-size: 10px;
+                }
+          - type: custom:mushroom-template-card
+            primary: Force 2h
+            secondary: Discharge
+            icon: mdi:battery-arrow-down
+            icon_color: deep-orange
+            tap_action:
+              action: call-service
+              service: tesla_sync.force_discharge
+              service_data:
+                duration: 120
+              confirmation:
+                text: Force discharge for 2 hours?
+            card_mod:
+              style: |
+                ha-card {
+                  --card-primary-font-size: 12px;
+                  --card-secondary-font-size: 10px;
+                }
+          - type: custom:mushroom-template-card
+            primary: Restore
+            secondary: Normal
+            icon: mdi:battery-sync
+            icon_color: green
+            tap_action:
+              action: call-service
+              service: tesla_sync.restore_normal
+              confirmation:
+                text: Restore normal battery operation?
+            card_mod:
+              style: |
+                ha-card {
+                  --card-primary-font-size: 12px;
+                  --card-secondary-font-size: 10px;
+                }
       - type: custom:power-flow-card-plus
         entities:
           battery:
