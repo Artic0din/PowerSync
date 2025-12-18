@@ -355,102 +355,174 @@ async def fetch_active_amber_site_id(hass: HomeAssistant, api_token: str) -> str
 
 class SyncCoordinator:
     """
-    Coordinates Tesla sync between WebSocket and REST API (async version for Home Assistant).
+    Coordinates Tesla sync with smarter price-aware logic (async version for Home Assistant).
 
-    - WebSocket: If price data arrives, sync immediately (event-driven)
-    - Cron fallback: At 60s into each 5-minute period (e.g., :01, :06, :11...),
-      fetch directly from REST API (no wait needed - prices are fresh at 60s offset)
+    Sync flow for each 5-minute period:
+    1. At 0s: Sync immediately using forecast price (get price to Tesla ASAP)
+    2. When WebSocket arrives: Re-sync only if price differs from forecast
+    3. At 35s: If no WebSocket yet, check REST API and sync if price differs
+    4. At 60s: Final REST API check if price still hasn't been confirmed
 
-    Only ONE sync per 5-minute period.
+    This ensures:
+    - Fast response: Price synced at start of period using forecast
+    - Accuracy: Re-sync when actual price differs from forecast
+    - Reliability: Multiple fallback checks if WebSocket fails
     """
+
+    # Price difference threshold (in cents) to trigger re-sync
+    PRICE_DIFF_THRESHOLD = 0.5  # Re-sync if price differs by more than 0.5c/kWh
 
     def __init__(self):
         self._websocket_event = asyncio.Event()
         self._websocket_data = None
         self._current_period = None  # Track which 5-min period we're in
         self._lock = asyncio.Lock()
+        self._initial_sync_done = False  # Has initial forecast sync happened this period?
+        self._last_synced_prices = {}  # {'general': price, 'feedIn': price}
+        self._websocket_received = False  # Has WebSocket delivered this period?
+
+    def _get_current_period(self):
+        """Get the current 5-minute period timestamp."""
+        from homeassistant.util import dt as dt_util
+        now = dt_util.utcnow()
+        current_period = now.replace(second=0, microsecond=0)
+        return current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+    async def _reset_if_new_period(self):
+        """Reset state if we've moved to a new 5-minute period."""
+        current_period = self._get_current_period()
+        if self._current_period != current_period:
+            _LOGGER.info(f"🆕 New sync period: {current_period}")
+            self._current_period = current_period
+            self._initial_sync_done = False
+            self._websocket_received = False
+            self._last_synced_prices = {}
+            self._websocket_event.clear()
+            self._websocket_data = None
+            return True
+        return False
 
     def notify_websocket_update(self, prices_data):
         """Called by WebSocket when new price data arrives."""
         self._websocket_data = prices_data
+        self._websocket_received = True
         self._websocket_event.set()
         _LOGGER.info("📡 WebSocket price update received, notifying sync coordinator")
 
-    async def wait_for_websocket_or_timeout(self, timeout_seconds=15):
+    def get_websocket_data(self):
+        """Get the current WebSocket data if available."""
+        return self._websocket_data
+
+    async def mark_initial_sync_done(self):
+        """Mark that the initial forecast sync has been completed for this period."""
+        async with self._lock:
+            await self._reset_if_new_period()
+            self._initial_sync_done = True
+            _LOGGER.info("✅ Initial forecast sync marked as done for this period")
+
+    async def should_do_initial_sync(self):
         """
-        Wait for WebSocket data or timeout.
+        Check if we should do the initial forecast sync at start of period.
 
         Returns:
-            dict: WebSocket price data if arrived within timeout, None if timeout
+            bool: True if initial sync hasn't been done yet this period
         """
+        async with self._lock:
+            await self._reset_if_new_period()
+            if self._initial_sync_done:
+                _LOGGER.debug("⏭️  Initial sync already done this period")
+                return False
+            return True
+
+    async def has_websocket_delivered(self):
+        """Check if WebSocket has delivered price data this period."""
+        async with self._lock:
+            await self._reset_if_new_period()
+            return self._websocket_received
+
+    def record_synced_price(self, general_price, feedin_price):
+        """
+        Record the price that was synced.
+
+        Args:
+            general_price: The general (buy) price in c/kWh
+            feedin_price: The feedIn (sell) price in c/kWh
+        """
+        self._last_synced_prices = {
+            'general': general_price,
+            'feedIn': feedin_price
+        }
+        _LOGGER.debug(f"Recorded synced price: general={general_price}c, feedIn={feedin_price}c")
+
+    def should_resync_for_price(self, new_general_price, new_feedin_price):
+        """
+        Check if we should re-sync because the price has changed significantly.
+
+        Args:
+            new_general_price: The new general price from WebSocket/REST
+            new_feedin_price: The new feedIn price from WebSocket/REST
+
+        Returns:
+            bool: True if price difference exceeds threshold
+        """
+        last_prices = self._last_synced_prices
+
+        if not last_prices:
+            # No previous sync - should sync
+            _LOGGER.info("No previous price recorded, will sync")
+            return True
+
+        last_general = last_prices.get('general')
+        last_feedin = last_prices.get('feedIn')
+
+        # Check general price difference
+        if last_general is not None and new_general_price is not None:
+            general_diff = abs(new_general_price - last_general)
+            if general_diff > self.PRICE_DIFF_THRESHOLD:
+                _LOGGER.info(f"General price changed by {general_diff:.2f}c ({last_general:.2f}c → {new_general_price:.2f}c) - will re-sync")
+                return True
+
+        # Check feedIn price difference
+        if last_feedin is not None and new_feedin_price is not None:
+            feedin_diff = abs(new_feedin_price - last_feedin)
+            if feedin_diff > self.PRICE_DIFF_THRESHOLD:
+                _LOGGER.info(f"FeedIn price changed by {feedin_diff:.2f}c ({last_feedin:.2f}c → {new_feedin_price:.2f}c) - will re-sync")
+                return True
+
+        _LOGGER.debug(f"Price unchanged (general={new_general_price}c, feedIn={new_feedin_price}c) - skipping re-sync")
+        return False
+
+    # Legacy methods for backwards compatibility
+    async def wait_for_websocket_or_timeout(self, timeout_seconds=15):
+        """Wait for WebSocket data or timeout (legacy method)."""
         _LOGGER.info(f"⏱️  Waiting up to {timeout_seconds}s for WebSocket price update...")
 
         try:
-            # Wait for event with timeout
             await asyncio.wait_for(self._websocket_event.wait(), timeout=timeout_seconds)
 
             async with self._lock:
                 if self._websocket_data:
                     _LOGGER.info("✅ WebSocket data received, using real-time prices")
-                    data = self._websocket_data
-                    # Clear for next period
-                    self._websocket_event.clear()
-                    self._websocket_data = None
-                    return data
+                    return self._websocket_data
                 else:
                     _LOGGER.warning("⏰ WebSocket event set but no data available")
-                    self._websocket_event.clear()
                     return None
 
         except asyncio.TimeoutError:
             _LOGGER.info(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
-            # Clear for next period
-            self._websocket_event.clear()
-            async with self._lock:
-                self._websocket_data = None
             return None
 
     async def already_synced_this_period(self):
-        """
-        Check if we already synced for the current 5-minute period (read-only).
-        Used by cron fallback to determine if WebSocket already handled this period.
-
-        Returns:
-            bool: True if already synced this period, False if not synced yet
-        """
-        from homeassistant.util import dt as dt_util
-
-        now = dt_util.utcnow()
-        # Calculate current 5-minute period
-        current_period = now.replace(second=0, microsecond=0)
-        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
-
+        """Legacy method - check if initial sync is done."""
         async with self._lock:
-            return self._current_period == current_period
+            await self._reset_if_new_period()
+            return self._initial_sync_done
 
     async def should_sync_this_period(self):
-        """
-        Check if we should sync for the current 5-minute period.
-        Prevents duplicate syncs within the same period.
-
-        Returns:
-            bool: True if this is a new period and we should sync
-        """
-        from homeassistant.util import dt as dt_util
-
-        now = dt_util.utcnow()
-        # Calculate current 5-minute period (e.g., 17:00, 17:05, 17:10, etc.)
-        current_period = now.replace(second=0, microsecond=0)
-        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
-
+        """Legacy method - now always returns True for initial sync check."""
         async with self._lock:
-            if self._current_period == current_period:
-                _LOGGER.info(f"⏭️  Already synced for period {current_period}, skipping")
-                return False
-
-            self._current_period = current_period
-            _LOGGER.info(f"🆕 New sync period: {current_period}")
-            return True
+            await self._reset_if_new_period()
+            return not self._initial_sync_done
 
 
 class AEMOSpikeManager:
@@ -1290,36 +1362,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
-    async def handle_sync_tou_with_websocket_data(websocket_data) -> None:
+    async def handle_sync_initial_forecast() -> None:
         """
-        EVENT-DRIVEN: Handle sync with pre-fetched WebSocket data (called by WebSocket callback).
-        This is the fast path - data already arrived, no waiting.
-        """
-        await _handle_sync_tou_internal(websocket_data)
+        STAGE 1 (0s): Sync immediately at start of 5-min period using forecast price.
 
-    async def handle_sync_tou(call: ServiceCall) -> None:
-        """
-        CRON FALLBACK: Handle sync only if WebSocket hasn't delivered yet.
-
-        Runs at :01 (60s into each 5-min period) so Amber REST API prices are fresh.
-        No wait needed - just fetch directly from REST API.
+        This gets the predicted price to Tesla ASAP at the start of each period.
+        Later stages will re-sync if the actual price differs from forecast.
         """
         # Skip if no price coordinator available (AEMO spike-only mode without pricing)
         if not amber_coordinator and not aemo_sensor_coordinator:
             _LOGGER.debug("TOU sync skipped - no price coordinator available (AEMO spike-only mode)")
             return
 
-        # FALLBACK CHECK: Has WebSocket already synced this period?
-        if await coordinator.already_synced_this_period():
-            _LOGGER.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
+        if not await coordinator.should_do_initial_sync():
+            _LOGGER.info("⏭️  Initial forecast sync already done this period")
             return
 
-        # No wait needed - at 60s into period, REST API prices are fresh
-        _LOGGER.info("⏰ Cron fallback: fetching prices from REST API (60s into period)")
-        await _handle_sync_tou_internal(None)  # None = use REST API
+        _LOGGER.info("🚀 Stage 1: Initial forecast sync at start of period")
+        await _handle_sync_tou_internal(None, sync_mode='initial_forecast')
+        await coordinator.mark_initial_sync_done()
 
-    async def _handle_sync_tou_internal(websocket_data) -> None:
-        """Internal sync logic shared by both event-driven and cron-fallback paths."""
+    async def handle_sync_tou_with_websocket_data(websocket_data) -> None:
+        """
+        STAGE 2 (WebSocket): Re-sync only if price differs from what we synced.
+
+        Called by WebSocket callback when new price data arrives.
+        Compares with last synced price and only re-syncs if difference > threshold.
+        """
+        _LOGGER.info("📡 Stage 2: WebSocket price received - checking if re-sync needed")
+        await _handle_sync_tou_internal(websocket_data, sync_mode='websocket_update')
+
+    async def handle_sync_rest_api_check(check_name="fallback") -> None:
+        """
+        STAGE 3/4 (35s/60s): Check REST API and re-sync if price differs.
+
+        Called at 35s and 60s as fallback if WebSocket hasn't delivered.
+        Fetches current price from REST API and compares with last synced price.
+
+        Args:
+            check_name: Label for logging (e.g., "35s check", "60s final")
+        """
+        # Skip if no price coordinator available (AEMO spike-only mode without pricing)
+        if not amber_coordinator and not aemo_sensor_coordinator:
+            _LOGGER.debug("TOU sync skipped - no price coordinator available (AEMO spike-only mode)")
+            return
+
+        if await coordinator.has_websocket_delivered():
+            _LOGGER.info(f"⏭️  REST API {check_name}: WebSocket already delivered this period, skipping")
+            return
+
+        _LOGGER.info(f"⏰ Stage 3/4: REST API {check_name} - checking if re-sync needed")
+        await _handle_sync_tou_internal(None, sync_mode='rest_api_check')
+
+    async def handle_sync_tou(call: ServiceCall) -> None:
+        """
+        LEGACY: Cron fallback sync (now calls handle_sync_rest_api_check).
+        Kept for backwards compatibility and service call.
+        """
+        await handle_sync_rest_api_check(check_name="legacy fallback")
+
+    async def _handle_sync_tou_internal(websocket_data, sync_mode='initial_forecast') -> None:
+        """
+        Internal sync logic with smart price-aware re-sync.
+
+        Args:
+            websocket_data: Price data from WebSocket (or None to fetch from REST API)
+            sync_mode: One of:
+                - 'initial_forecast': Always sync, record the price (Stage 1)
+                - 'websocket_update': Re-sync only if price differs (Stage 2)
+                - 'rest_api_check': Check REST API and re-sync if differs (Stage 3/4)
+        """
 
         _LOGGER.info("=== Starting TOU sync ===")
 
@@ -1346,6 +1458,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Note: AEMO mode doesn't have WebSocket - uses direct AEMO API
         current_actual_interval = None
 
+        # Track prices for comparison
+        general_price = None
+        feedin_price = None
+
         if use_aemo_sensor:
             # AEMO mode: Refresh AEMO coordinator
             await aemo_sensor_coordinator.async_request_refresh()
@@ -1363,6 +1479,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if channel in ['general', 'feedIn']:
                         current_actual_interval[channel] = price
                 general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
+                feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
                 _LOGGER.info(f"📊 Using AEMO API price for current interval: general={general_price:.2f}¢/kWh")
         elif websocket_data:
             # WebSocket data received within 60s - use it directly as primary source
@@ -1372,7 +1489,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"✅ Using WebSocket price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
         else:
             # WebSocket timeout - fallback to REST API for current price
-            _LOGGER.info(f"⏰ WebSocket timeout - using REST API fallback for current price")
+            _LOGGER.info(f"⏰ Fetching current price from REST API")
 
             # Refresh coordinator to get REST API current prices
             await amber_coordinator.async_request_refresh()
@@ -1384,11 +1501,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 if current_actual_interval:
                     general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
-                    _LOGGER.info(f"📡 Using REST API price for current interval: general={general_price}¢/kWh")
+                    feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
+                    _LOGGER.info(f"📡 Using REST API price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
                 else:
                     _LOGGER.warning("No current price data available, proceeding with 30-min forecast only")
             else:
                 _LOGGER.error("No Amber price data available from REST API")
+
+        # SMART SYNC: For non-initial syncs, check if price has changed enough to warrant re-sync
+        if sync_mode != 'initial_forecast':
+            if general_price is not None or feedin_price is not None:
+                if not coordinator.should_resync_for_price(general_price, feedin_price):
+                    _LOGGER.info(f"⏭️  Price unchanged - skipping re-sync")
+                    return
+                _LOGGER.info(f"🔄 Price changed - proceeding with re-sync")
 
         # Get forecast data from appropriate coordinator
         if use_aemo_sensor:
@@ -1632,7 +1758,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         if success:
-            _LOGGER.info("TOU schedule synced successfully")
+            _LOGGER.info(f"TOU schedule synced successfully ({sync_mode})")
+
+            # Record the synced price for smart price-change detection
+            if general_price is not None or feedin_price is not None:
+                coordinator.record_synced_price(general_price, feedin_price)
 
             # Enforce grid charging setting after TOU sync (counteracts VPP overrides)
             entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
@@ -2171,21 +2301,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if ws_client:
         def websocket_sync_callback(prices_data):
             """
-            EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
-            This is the primary trigger - cron jobs are just fallback.
+            STAGE 2: WebSocket price arrival triggers re-sync IF price differs.
+
+            Smart sync flow:
+            - Stage 1 (0s): Initial forecast already synced
+            - Stage 2 (WebSocket): Re-sync only if price differs from forecast
+            - Stage 3 (35s): REST API fallback if no WebSocket
+            - Stage 4 (60s): Final REST API check
 
             NOTE: This callback is called from a background WebSocket thread,
             so we must use call_soon_threadsafe to schedule work on the HA event loop.
             """
-            # Notify coordinator (for period deduplication)
+            # Notify coordinator that WebSocket delivered (for REST API fallback checks)
             coordinator.notify_websocket_update(prices_data)
 
-            # Check if we should sync this period (prevents duplicates)
+            # Trigger sync with price comparison (handle_sync_tou_with_websocket_data does comparison)
             async def trigger_sync():
-                if not await coordinator.should_sync_this_period():
-                    _LOGGER.info("⏭️  WebSocket price received but already synced this period, skipping")
-                    return
-
                 # Check if auto-sync is enabled (respect user's preference)
                 auto_sync_enabled = entry.options.get(
                     CONF_AUTO_SYNC_ENABLED,
@@ -2203,10 +2334,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.debug("⏭️  WebSocket price received but auto-sync and curtailment both disabled, skipping")
                     return
 
-                _LOGGER.info("🚀 WebSocket price received - triggering event-driven actions")
+                _LOGGER.info("📡 Stage 2: WebSocket price received - checking if re-sync needed")
 
                 try:
-                    # 1. Sync TOU to Tesla with WebSocket price (only if auto-sync enabled)
+                    # 1. Re-sync TOU to Tesla if price changed (handles comparison internally)
                     if auto_sync_enabled:
                         await handle_sync_tou_with_websocket_data(prices_data)
                     else:
@@ -2218,9 +2349,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.debug("⏭️  Skipping solar curtailment check (curtailment disabled)")
 
-                    _LOGGER.info("✅ Event-driven actions completed successfully")
+                    _LOGGER.info("✅ Stage 2 WebSocket sync completed")
                 except Exception as e:
-                    _LOGGER.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
+                    _LOGGER.error(f"❌ Error in Stage 2 WebSocket sync: {e}", exc_info=True)
 
             # Schedule the async sync using thread-safe method
             # This callback runs in a background WebSocket thread, not the HA event loop
@@ -2230,11 +2361,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Assign callback to WebSocket client
         ws_client._sync_callback = websocket_sync_callback
-        _LOGGER.info("🔗 WebSocket sync callback configured to trigger immediate sync")
+        _LOGGER.info("🔗 WebSocket sync callback configured for smart price-aware sync")
 
-    # Set up automatic TOU sync every 5 minutes if auto-sync is enabled
-    async def auto_sync_tou(now):
-        """Automatically sync TOU schedule if enabled."""
+    # Set up SMART SYNC with 4-stage approach
+    # Stage 1 (0s): Initial forecast sync at start of period
+    async def auto_sync_initial_forecast(now):
+        """Stage 1: Initial forecast sync at start of 5-min period."""
         # Ensure WebSocket thread is alive (restart if it died)
         if ws_client:
             await ws_client.ensure_running()
@@ -2245,18 +2377,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
         )
 
-        _LOGGER.debug(
-            "Auto-sync check: options=%s, data=%s, enabled=%s",
-            entry.options.get(CONF_AUTO_SYNC_ENABLED),
-            entry.data.get(CONF_AUTO_SYNC_ENABLED),
-            auto_sync_enabled
+        if auto_sync_enabled:
+            await handle_sync_initial_forecast()
+        else:
+            _LOGGER.debug("Auto-sync disabled, skipping initial forecast sync")
+
+    # Stage 3 (35s): REST API fallback check if no WebSocket
+    async def auto_sync_rest_api_35s(now):
+        """Stage 3: REST API check at 35s if WebSocket hasn't delivered."""
+        auto_sync_enabled = entry.options.get(
+            CONF_AUTO_SYNC_ENABLED,
+            entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
         )
 
         if auto_sync_enabled:
-            _LOGGER.debug("Auto-sync enabled, triggering TOU sync")
-            await handle_sync_tou(None)
+            await handle_sync_rest_api_check(check_name="35s check")
         else:
-            _LOGGER.debug("Auto-sync disabled, skipping TOU sync")
+            _LOGGER.debug("Auto-sync disabled, skipping REST API 35s check")
+
+    # Stage 4 (60s): Final REST API check
+    async def auto_sync_rest_api_60s(now):
+        """Stage 4: Final REST API check at 60s."""
+        auto_sync_enabled = entry.options.get(
+            CONF_AUTO_SYNC_ENABLED,
+            entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
+        )
+
+        if auto_sync_enabled:
+            await handle_sync_rest_api_check(check_name="60s final")
+        else:
+            _LOGGER.debug("Auto-sync disabled, skipping REST API 60s check")
 
     # Perform initial TOU sync if auto-sync is enabled (only in Amber mode)
     auto_sync_enabled = entry.options.get(
@@ -2266,22 +2416,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if auto_sync_enabled and (amber_coordinator or aemo_sensor_coordinator):
         _LOGGER.info("Performing initial TOU sync")
-        await handle_sync_tou(None)
+        await handle_sync_initial_forecast()
     elif not amber_coordinator and not aemo_sensor_coordinator:
         _LOGGER.info("Skipping initial TOU sync - AEMO spike-only mode (no pricing data)")
 
-    # Start the automatic sync timer (every 5 minutes, 60s after Amber price updates)
-    # Triggers at :01:00, :06:00, :11:00, :16:00, :21:00, :26:00, :31:00, :36:00, :41:00, :46:00, :51:00, :56:00
-    # Running 60s after period start ensures Amber prices are fresh when using REST API fallback
-    cancel_timer = async_track_utc_time_change(
+    # STAGE 1: Initial forecast sync at start of each 5-min period (0s)
+    cancel_timer_stage1 = async_track_utc_time_change(
         hass,
-        auto_sync_tou,
-        minute=[1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56],
-        second=0,  # 60s after Amber price update, REST API prices are fresh
+        auto_sync_initial_forecast,
+        minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
+        second=0,  # Start of each 5-min period
     )
 
-    # Store the cancel function so we can clean it up later
-    hass.data[DOMAIN][entry.entry_id]["auto_sync_cancel"] = cancel_timer
+    # STAGE 2: WebSocket-triggered sync (handled by callback, not scheduler)
+
+    # STAGE 3: REST API fallback check at 35s if WebSocket hasn't delivered
+    cancel_timer_stage3 = async_track_utc_time_change(
+        hass,
+        auto_sync_rest_api_35s,
+        minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
+        second=35,  # 35s into each period
+    )
+
+    # STAGE 4: Final REST API check at 60s (1 minute into period)
+    cancel_timer_stage4 = async_track_utc_time_change(
+        hass,
+        auto_sync_rest_api_60s,
+        minute=[1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56],
+        second=0,  # 60s after period start
+    )
+
+    # Store the cancel functions so we can clean them up later
+    hass.data[DOMAIN][entry.entry_id]["auto_sync_cancel"] = cancel_timer_stage1
+    hass.data[DOMAIN][entry.entry_id]["auto_sync_cancel_35s"] = cancel_timer_stage3
+    hass.data[DOMAIN][entry.entry_id]["auto_sync_cancel_60s"] = cancel_timer_stage4
+    _LOGGER.info("✅ Smart sync scheduled with 4-stage approach:")
+    _LOGGER.info("  - Stage 1 (0s): Initial forecast sync at :00, :05, :10, etc.")
+    _LOGGER.info("  - Stage 2 (WebSocket): Re-sync on price change (event-driven)")
+    _LOGGER.info("  - Stage 3 (35s): REST API fallback if no WebSocket")
+    _LOGGER.info("  - Stage 4 (60s): Final REST API check at :01, :06, :11, etc.")
 
     # Set up automatic curtailment check every 5 minutes (same timing as TOU sync)
     # Triggers at :01:00, :06:00, :11:00, etc. - 60s after Amber price updates
@@ -2400,11 +2573,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     _LOGGER.info("Unloading Tesla Sync integration")
 
-    # Cancel the auto-sync timer if it exists
+    # Cancel the auto-sync timers if they exist (4-stage smart sync)
     entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
     if cancel_timer := entry_data.get("auto_sync_cancel"):
         cancel_timer()
-        _LOGGER.debug("Cancelled auto-sync timer")
+        _LOGGER.debug("Cancelled auto-sync timer (Stage 1)")
+    if cancel_timer_35s := entry_data.get("auto_sync_cancel_35s"):
+        cancel_timer_35s()
+        _LOGGER.debug("Cancelled auto-sync timer (Stage 3 - 35s)")
+    if cancel_timer_60s := entry_data.get("auto_sync_cancel_60s"):
+        cancel_timer_60s()
+        _LOGGER.debug("Cancelled auto-sync timer (Stage 4 - 60s)")
 
     # Cancel the curtailment timer if it exists
     if curtailment_cancel := entry_data.get("curtailment_cancel"):

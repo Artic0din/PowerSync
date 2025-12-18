@@ -432,17 +432,28 @@ def create_app(config_class=Config):
         logger.info("🔒 This worker acquired the scheduler lock - initializing background scheduler")
         scheduler = BackgroundScheduler()
 
-        # Add job to sync all users' TOU schedules every 5 minutes (aligned with Amber's update cycle)
-        from app.tasks import sync_all_users, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check
+        # Add jobs for smart TOU sync (3-stage approach)
+        from app.tasks import sync_initial_forecast, sync_rest_api_check, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check
 
         # Wrapper functions to run tasks within app context
-        def run_sync_all_users():
+        def run_sync_initial_forecast():
+            """Stage 1: Initial forecast sync at start of 5-min period."""
             with app.app_context():
                 # Ensure WebSocket thread is alive (restart if it died)
                 ws_client = app.config.get('AMBER_WEBSOCKET_CLIENT')
                 if ws_client:
                     ws_client.ensure_running()
-                sync_all_users()
+                sync_initial_forecast()
+
+        def run_sync_rest_api_check_35s():
+            """Stage 3: REST API fallback check at 35s if no WebSocket."""
+            with app.app_context():
+                sync_rest_api_check(check_name="35s check")
+
+        def run_sync_rest_api_check_60s():
+            """Stage 4: Final REST API check at 60s if still no update."""
+            with app.app_context():
+                sync_rest_api_check(check_name="60s final")
 
         def run_save_price_history():
             with app.app_context():
@@ -464,11 +475,34 @@ def create_app(config_class=Config):
             with app.app_context():
                 demand_period_grid_charging_check()
 
+        # STAGE 1: Initial forecast sync at start of each 5-min period (0s)
+        # Gets predicted price to Tesla ASAP
         scheduler.add_job(
-            func=run_sync_all_users,
-            trigger=CronTrigger(minute='1-59/5', second='0'),  # Run at :01, :06, :11, etc. (60s after Amber price updates)
-            id='sync_tou_schedules',
-            name='Sync TOU schedules from Amber to Tesla',
+            func=run_sync_initial_forecast,
+            trigger=CronTrigger(minute='0-59/5', second='0'),  # Run at :00, :05, :10, etc. (start of period)
+            id='sync_initial_forecast',
+            name='Stage 1: Initial forecast sync at start of period',
+            replace_existing=True
+        )
+
+        # STAGE 2: WebSocket-triggered sync (handled by callback, not scheduler)
+        # Re-syncs only if price differs from forecast
+
+        # STAGE 3: REST API fallback check at 35s if WebSocket hasn't delivered
+        scheduler.add_job(
+            func=run_sync_rest_api_check_35s,
+            trigger=CronTrigger(minute='0-59/5', second='35'),  # Run at :00:35, :05:35, etc.
+            id='sync_rest_api_35s',
+            name='Stage 3: REST API check at 35s if no WebSocket',
+            replace_existing=True
+        )
+
+        # STAGE 4: Final REST API check at 60s (1 minute into period)
+        scheduler.add_job(
+            func=run_sync_rest_api_check_60s,
+            trigger=CronTrigger(minute='1-59/5', second='0'),  # Run at :01, :06, :11, etc.
+            id='sync_rest_api_60s',
+            name='Stage 4: Final REST API check at 60s',
             replace_existing=True
         )
 
@@ -521,12 +555,15 @@ def create_app(config_class=Config):
 
         # Start the scheduler
         scheduler.start()
-        logger.info("✅ Background scheduler started:")
-        logger.info("  - TOU sync: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
-        logger.info("  - Solar curtailment: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
-        logger.info("  - Price history: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
-        logger.info("  - Energy usage logging: every minute (Teslemetry allows 1/min)")
-        logger.info("  - AEMO price monitoring: every 1 minute at :35 seconds for spike detection")
+        logger.info("✅ Background scheduler started with SMART SYNC:")
+        logger.info("  - Stage 1 (0s): Initial forecast sync at :00, :05, :10, etc.")
+        logger.info("  - Stage 2 (WebSocket): Re-sync on price change (event-driven)")
+        logger.info("  - Stage 3 (35s): REST API fallback if no WebSocket")
+        logger.info("  - Stage 4 (60s): Final REST API check at :01, :06, :11, etc.")
+        logger.info("  - Solar curtailment: WebSocket event-driven + REST API fallback at :01")
+        logger.info("  - Price history: WebSocket event-driven + REST API fallback at :01")
+        logger.info("  - Energy usage: every minute (Teslemetry allows 1/min)")
+        logger.info("  - AEMO monitoring: every minute at :35 seconds")
         logger.info("  - Demand period grid charging: every 1 minute at :45 seconds")
 
         # Shut down the scheduler and release lock when exiting the app
@@ -552,27 +589,27 @@ def create_app(config_class=Config):
         """Create callback function for WebSocket price updates."""
         def websocket_sync_callback(prices_data):
             """
-            EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
-            This is the primary trigger - cron jobs are just fallback.
+            STAGE 2: WebSocket price arrival triggers re-sync IF price differs.
+
+            Smart sync flow:
+            - Stage 1 (0s): Initial forecast already synced
+            - Stage 2 (WebSocket): Re-sync only if price differs from forecast
+            - Stage 3 (35s): REST API fallback if no WebSocket
+            - Stage 4 (60s): Final REST API check
             """
             from app.tasks import get_sync_coordinator, sync_all_users_with_websocket_data, save_price_history_with_websocket_data, solar_curtailment_with_websocket_data
 
-            # Notify coordinator (for period deduplication)
+            # Notify coordinator that WebSocket delivered (for REST API fallback checks)
             coordinator = get_sync_coordinator()
             coordinator.notify_websocket_update(prices_data)
 
-            # Check if we should sync this period (prevents duplicates)
-            if not coordinator.should_sync_this_period():
-                logger.info("⏭️  WebSocket price received but already synced this period, skipping")
-                return
-
-            # TRIGGER SYNC IMMEDIATELY with WebSocket data (event-driven!)
-            logger.info("🚀 WebSocket price received - triggering immediate sync (event-driven)")
+            # TRIGGER SYNC with price comparison (sync_all_users_with_websocket_data handles the comparison)
+            logger.info("📡 Stage 2: WebSocket price received - checking if re-sync needed")
 
             # Run sync in app context (needed for database operations)
             with app.app_context():
                 try:
-                    # 1. Sync TOU to Tesla with WebSocket price
+                    # 1. Re-sync TOU to Tesla if price changed (handles comparison internally)
                     sync_all_users_with_websocket_data(prices_data)
 
                     # 2. Save price history with WebSocket price
@@ -581,9 +618,9 @@ def create_app(config_class=Config):
                     # 3. Check solar curtailment with WebSocket price
                     solar_curtailment_with_websocket_data(prices_data)
 
-                    logger.info("✅ Event-driven sync completed successfully")
+                    logger.info("✅ Stage 2 WebSocket sync completed")
                 except Exception as e:
-                    logger.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
+                    logger.error(f"❌ Error in Stage 2 WebSocket sync: {e}", exc_info=True)
 
         return websocket_sync_callback
 

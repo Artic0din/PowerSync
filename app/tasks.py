@@ -26,92 +26,174 @@ def get_tariff_hash(tariff_structure):
 
 class SyncCoordinator:
     """
-    Coordinates Tesla sync between WebSocket and REST API.
+    Coordinates Tesla sync with smarter price-aware logic.
 
-    - WebSocket: If price data arrives, sync immediately (event-driven)
-    - Cron fallback: At 60s into each 5-minute period (e.g., :01, :06, :11...),
-      fetch directly from REST API (no wait needed - prices are fresh at 60s offset)
+    Sync flow for each 5-minute period:
+    1. At 0s: Sync immediately using forecast price (get price to Tesla ASAP)
+    2. When WebSocket arrives: Re-sync only if price differs from forecast
+    3. At 35s: If no WebSocket yet, check REST API and sync if price differs
+    4. At 60s: Final REST API check if price still hasn't been confirmed
 
-    Only ONE sync per 5-minute period.
+    This ensures:
+    - Fast response: Price synced at start of period using forecast
+    - Accuracy: Re-sync when actual price differs from forecast
+    - Reliability: Multiple fallback checks if WebSocket fails
     """
+
+    # Price difference threshold (in cents) to trigger re-sync
+    PRICE_DIFF_THRESHOLD = 0.5  # Re-sync if price differs by more than 0.5c/kWh
 
     def __init__(self):
         self._lock = threading.Lock()
         self._websocket_event = threading.Event()
         self._websocket_data = None
         self._current_period = None  # Track which 5-min period we're in
+        self._initial_sync_done = False  # Has initial forecast sync happened this period?
+        self._last_synced_prices = {}  # {user_id: {'general': price, 'feedIn': price}}
+        self._websocket_received = False  # Has WebSocket delivered this period?
+
+    def _get_current_period(self):
+        """Get the current 5-minute period timestamp."""
+        now = datetime.now(timezone.utc)
+        current_period = now.replace(second=0, microsecond=0)
+        return current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+    def _reset_if_new_period(self):
+        """Reset state if we've moved to a new 5-minute period."""
+        current_period = self._get_current_period()
+        if self._current_period != current_period:
+            logger.info(f"🆕 New sync period: {current_period}")
+            self._current_period = current_period
+            self._initial_sync_done = False
+            self._websocket_received = False
+            self._last_synced_prices = {}
+            self._websocket_event.clear()
+            self._websocket_data = None
+            return True
+        return False
 
     def notify_websocket_update(self, prices_data):
         """Called by WebSocket when new price data arrives."""
         with self._lock:
+            self._reset_if_new_period()
             self._websocket_data = prices_data
+            self._websocket_received = True
             self._websocket_event.set()
             logger.info("📡 WebSocket price update received, notifying sync coordinator")
 
-    def wait_for_websocket_or_timeout(self, timeout_seconds=15):
+    def get_websocket_data(self):
+        """Get the current WebSocket data if available."""
+        with self._lock:
+            return self._websocket_data
+
+    def mark_initial_sync_done(self):
+        """Mark that the initial forecast sync has been completed for this period."""
+        with self._lock:
+            self._reset_if_new_period()
+            self._initial_sync_done = True
+            logger.info("✅ Initial forecast sync marked as done for this period")
+
+    def should_do_initial_sync(self):
         """
-        Wait for WebSocket data or timeout.
+        Check if we should do the initial forecast sync at start of period.
 
         Returns:
-            dict: WebSocket price data if arrived within timeout, None if timeout
+            bool: True if initial sync hasn't been done yet this period
         """
-        logger.info(f"⏱️  Waiting up to {timeout_seconds}s for WebSocket price update...")
+        with self._lock:
+            self._reset_if_new_period()
+            if self._initial_sync_done:
+                logger.debug("⏭️  Initial sync already done this period")
+                return False
+            return True
 
-        # Wait for event with timeout
+    def has_websocket_delivered(self):
+        """Check if WebSocket has delivered price data this period."""
+        with self._lock:
+            self._reset_if_new_period()
+            return self._websocket_received
+
+    def record_synced_price(self, user_id, general_price, feedin_price):
+        """
+        Record the price that was synced for a user.
+
+        Args:
+            user_id: The user's ID
+            general_price: The general (buy) price in c/kWh
+            feedin_price: The feedIn (sell) price in c/kWh
+        """
+        with self._lock:
+            self._last_synced_prices[user_id] = {
+                'general': general_price,
+                'feedIn': feedin_price
+            }
+            logger.debug(f"Recorded synced price for user {user_id}: general={general_price}c, feedIn={feedin_price}c")
+
+    def should_resync_for_price(self, user_id, new_general_price, new_feedin_price):
+        """
+        Check if we should re-sync because the price has changed significantly.
+
+        Args:
+            user_id: The user's ID
+            new_general_price: The new general price from WebSocket/REST
+            new_feedin_price: The new feedIn price from WebSocket/REST
+
+        Returns:
+            bool: True if price difference exceeds threshold
+        """
+        with self._lock:
+            last_prices = self._last_synced_prices.get(user_id)
+
+            if not last_prices:
+                # No previous sync - should sync
+                logger.info(f"User {user_id}: No previous price recorded, will sync")
+                return True
+
+            last_general = last_prices.get('general')
+            last_feedin = last_prices.get('feedIn')
+
+            # Check general price difference
+            if last_general is not None and new_general_price is not None:
+                general_diff = abs(new_general_price - last_general)
+                if general_diff > self.PRICE_DIFF_THRESHOLD:
+                    logger.info(f"User {user_id}: General price changed by {general_diff:.2f}c ({last_general:.2f}c → {new_general_price:.2f}c) - will re-sync")
+                    return True
+
+            # Check feedIn price difference
+            if last_feedin is not None and new_feedin_price is not None:
+                feedin_diff = abs(new_feedin_price - last_feedin)
+                if feedin_diff > self.PRICE_DIFF_THRESHOLD:
+                    logger.info(f"User {user_id}: FeedIn price changed by {feedin_diff:.2f}c ({last_feedin:.2f}c → {new_feedin_price:.2f}c) - will re-sync")
+                    return True
+
+            logger.debug(f"User {user_id}: Price unchanged (general={new_general_price}c, feedIn={new_feedin_price}c) - skipping re-sync")
+            return False
+
+    # Legacy methods for backwards compatibility
+    def wait_for_websocket_or_timeout(self, timeout_seconds=15):
+        """Wait for WebSocket data or timeout (legacy method)."""
+        logger.info(f"⏱️  Waiting up to {timeout_seconds}s for WebSocket price update...")
         received = self._websocket_event.wait(timeout=timeout_seconds)
 
         with self._lock:
             if received and self._websocket_data:
                 logger.info("✅ WebSocket data received, using real-time prices")
-                data = self._websocket_data
-                # Clear for next period
-                self._websocket_event.clear()
-                self._websocket_data = None
-                return data
+                return self._websocket_data
             else:
                 logger.info(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
-                # Clear for next period
-                self._websocket_event.clear()
-                self._websocket_data = None
                 return None
 
     def should_sync_this_period(self):
-        """
-        Check if we should sync for the current 5-minute period.
-        Prevents duplicate syncs within the same period.
-
-        Returns:
-            bool: True if this is a new period and we should sync
-        """
-        now = datetime.now(timezone.utc)
-        # Calculate current 5-minute period (e.g., 17:00, 17:05, 17:10, etc.)
-        current_period = now.replace(second=0, microsecond=0)
-        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
-
+        """Legacy method - now always returns True for initial sync check."""
         with self._lock:
-            if self._current_period == current_period:
-                logger.info(f"⏭️  Already synced for period {current_period}, skipping")
-                return False
-
-            self._current_period = current_period
-            logger.info(f"🆕 New sync period: {current_period}")
-            return True
+            self._reset_if_new_period()
+            return not self._initial_sync_done
 
     def already_synced_this_period(self):
-        """
-        Check if we already synced for the current 5-minute period (read-only).
-        Used by cron fallback to determine if WebSocket already handled this period.
-
-        Returns:
-            bool: True if already synced this period, False if not synced yet
-        """
-        now = datetime.now(timezone.utc)
-        # Calculate current 5-minute period
-        current_period = now.replace(second=0, microsecond=0)
-        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
-
+        """Legacy method - check if initial sync is done."""
         with self._lock:
-            return self._current_period == current_period
+            self._reset_if_new_period()
+            return self._initial_sync_done
 
 
 # Global sync coordinator
@@ -233,35 +315,70 @@ def extract_most_recent_actual_interval(forecast_data, timezone_str=None):
         return None
 
 
+def sync_initial_forecast():
+    """
+    STAGE 1 (0s): Sync immediately at start of 5-min period using forecast price.
+
+    This gets the predicted price to Tesla ASAP at the start of each period.
+    Later stages will re-sync if the actual price differs from forecast.
+    """
+    if not _sync_coordinator.should_do_initial_sync():
+        logger.info("⏭️  Initial forecast sync already done this period")
+        return
+
+    logger.info("🚀 Stage 1: Initial forecast sync at start of period")
+    _sync_all_users_internal(None, sync_mode='initial_forecast')
+    _sync_coordinator.mark_initial_sync_done()
+
+
 def sync_all_users_with_websocket_data(websocket_data):
     """
-    EVENT-DRIVEN: Sync TOU with pre-fetched WebSocket data (called by WebSocket callback).
-    This is the fast path - data already arrived, no waiting.
+    STAGE 2 (WebSocket): Re-sync only if price differs from what we synced.
+
+    Called by WebSocket callback when new price data arrives.
+    Compares with last synced price and only re-syncs if difference > threshold.
     """
-    _sync_all_users_internal(websocket_data)
+    logger.info("📡 Stage 2: WebSocket price received - checking if re-sync needed")
+    _sync_all_users_internal(websocket_data, sync_mode='websocket_update')
+
+
+def sync_rest_api_check(check_name="fallback"):
+    """
+    STAGE 3/4 (35s/60s): Check REST API and re-sync if price differs.
+
+    Called at 35s and 60s as fallback if WebSocket hasn't delivered.
+    Fetches current price from REST API and compares with last synced price.
+
+    Args:
+        check_name: Label for logging (e.g., "35s check", "60s final")
+    """
+    if _sync_coordinator.has_websocket_delivered():
+        logger.info(f"⏭️  REST API {check_name}: WebSocket already delivered this period, skipping")
+        return
+
+    logger.info(f"⏰ Stage 3/4: REST API {check_name} - checking if re-sync needed")
+    _sync_all_users_internal(None, sync_mode='rest_api_check')
 
 
 def sync_all_users():
     """
-    CRON FALLBACK: Sync TOU only if WebSocket hasn't delivered yet.
-
-    Runs at :01 (60s into each 5-min period) so Amber REST API prices are fresh.
-    No wait needed - just fetch directly from REST API.
+    LEGACY: Cron fallback sync (now calls sync_rest_api_check).
+    Kept for backwards compatibility.
     """
-    from app import db
-
-    # FALLBACK CHECK: Has WebSocket already synced this period?
-    if _sync_coordinator.already_synced_this_period():
-        logger.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
-        return
-
-    # No wait needed - at 60s into period, REST API prices are fresh
-    logger.info("⏰ Cron fallback: fetching prices from REST API (60s into period)")
-    _sync_all_users_internal(None)  # None = use REST API
+    sync_rest_api_check(check_name="legacy fallback")
 
 
-def _sync_all_users_internal(websocket_data):
-    """Internal sync logic shared by both event-driven and cron-fallback paths."""
+def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
+    """
+    Internal sync logic with smart price-aware re-sync.
+
+    Args:
+        websocket_data: Price data from WebSocket (or None to fetch from REST API)
+        sync_mode: One of:
+            - 'initial_forecast': Always sync, record the price (Stage 1)
+            - 'websocket_update': Re-sync only if price differs (Stage 2)
+            - 'rest_api_check': Check REST API and re-sync if differs (Stage 3/4)
+    """
     from app import db
 
     logger.info("=== Starting automatic TOU sync for all users ===")
@@ -327,6 +444,10 @@ def _sync_all_users_internal(websocket_data):
             # Note: AEMO mode doesn't have WebSocket - uses forecast data only
             current_actual_interval = None
 
+            # Track prices for this user to compare later
+            general_price = None
+            feedin_price = None
+
             if use_aemo:
                 # AEMO mode: No WebSocket, use AEMO API for forecast
                 # Current price will be derived from the first forecast interval
@@ -339,7 +460,7 @@ def _sync_all_users_internal(websocket_data):
                 logger.info(f"✅ Using WebSocket price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
             else:
                 # WebSocket timeout - fallback to REST API for current price
-                logger.info(f"⏰ WebSocket timeout - using REST API fallback for current price")
+                logger.info(f"⏰ Fetching current price from REST API")
                 current_prices = amber_client.get_current_prices()
 
                 if current_prices:
@@ -350,9 +471,19 @@ def _sync_all_users_internal(websocket_data):
                             current_actual_interval[channel] = price
 
                     general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
-                    logger.info(f"📡 Using REST API price for current interval: general={general_price}¢/kWh")
+                    feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
+                    logger.info(f"📡 Using REST API price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
                 else:
                     logger.warning(f"No current price data available for {user.email}, proceeding with 30-min forecast only")
+
+            # SMART SYNC: For non-initial syncs, check if price has changed enough to warrant re-sync
+            if sync_mode != 'initial_forecast' and not use_aemo:
+                if general_price is not None or feedin_price is not None:
+                    if not _sync_coordinator.should_resync_for_price(user.id, general_price, feedin_price):
+                        logger.info(f"⏭️  Price unchanged for {user.email} - skipping re-sync")
+                        success_count += 1
+                        continue
+                    logger.info(f"🔄 Price changed for {user.email} - proceeding with re-sync")
 
             # Step 2: Fetch forecast for TOU schedule building
             # Request 96 periods (48 hours) for AEMO to ensure rolling 24h window is fully covered
@@ -465,9 +596,13 @@ def _sync_all_users_internal(websocket_data):
 
                 # Update user's last_update timestamp and tariff hash
                 user.last_update_time = datetime.now(timezone.utc)
-                user.last_update_status = "Auto-sync successful"
+                user.last_update_status = f"Auto-sync successful ({sync_mode})"
                 user.last_tariff_hash = tariff_hash  # Save hash for deduplication
                 db.session.commit()
+
+                # Record the synced price for smart price-change detection
+                if general_price is not None or feedin_price is not None:
+                    _sync_coordinator.record_synced_price(user.id, general_price, feedin_price)
 
                 # Enforce grid charging setting after TOU sync (counteracts VPP overrides)
                 if user.enable_demand_charges:
