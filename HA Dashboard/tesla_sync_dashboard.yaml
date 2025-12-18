@@ -40,78 +40,39 @@ views:
               yellow: 30
               green: 60
       # Force Discharge & Restore Controls
+      # NOTE: Requires input_select helper. Create via Settings > Devices > Helpers > Add Helper > Dropdown
+      #       Name: Force Discharge Duration, Entity ID: input_select.force_discharge_duration
+      #       Options: 15, 30, 45, 60, 90, 120
       - type: horizontal-stack
         cards:
-          - type: custom:mushroom-template-card
-            primary: Force 30m
-            secondary: Discharge
+          - type: tile
+            entity: input_select.force_discharge_duration
+            name: Duration (mins)
+            icon: mdi:timer-outline
+            color: orange
+            vertical: true
+            features:
+              - type: select-options
+          - type: button
+            name: Force Discharge
             icon: mdi:battery-arrow-down
-            icon_color: orange
+            icon_height: 40px
             tap_action:
               action: call-service
               service: tesla_sync.force_discharge
-              service_data:
-                duration: 30
+              data:
+                duration: "{{ states('input_select.force_discharge_duration') | int }}"
               confirmation:
-                text: Force discharge for 30 minutes?
-            card_mod:
-              style: |
-                ha-card {
-                  --card-primary-font-size: 12px;
-                  --card-secondary-font-size: 10px;
-                }
-          - type: custom:mushroom-template-card
-            primary: Force 1h
-            secondary: Discharge
-            icon: mdi:battery-arrow-down
-            icon_color: orange
-            tap_action:
-              action: call-service
-              service: tesla_sync.force_discharge
-              service_data:
-                duration: 60
-              confirmation:
-                text: Force discharge for 1 hour?
-            card_mod:
-              style: |
-                ha-card {
-                  --card-primary-font-size: 12px;
-                  --card-secondary-font-size: 10px;
-                }
-          - type: custom:mushroom-template-card
-            primary: Force 2h
-            secondary: Discharge
-            icon: mdi:battery-arrow-down
-            icon_color: deep-orange
-            tap_action:
-              action: call-service
-              service: tesla_sync.force_discharge
-              service_data:
-                duration: 120
-              confirmation:
-                text: Force discharge for 2 hours?
-            card_mod:
-              style: |
-                ha-card {
-                  --card-primary-font-size: 12px;
-                  --card-secondary-font-size: 10px;
-                }
-          - type: custom:mushroom-template-card
-            primary: Restore
-            secondary: Normal
+                text: "Force discharge for {{ states('input_select.force_discharge_duration') }} minutes?"
+          - type: button
+            name: Restore Normal
             icon: mdi:battery-sync
-            icon_color: green
+            icon_height: 40px
             tap_action:
               action: call-service
               service: tesla_sync.restore_normal
               confirmation:
                 text: Restore normal battery operation?
-            card_mod:
-              style: |
-                ha-card {
-                  --card-primary-font-size: 12px;
-                  --card-secondary-font-size: 10px;
-                }
       - type: custom:power-flow-card-plus
         entities:
           battery:
