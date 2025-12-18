@@ -213,12 +213,7 @@ class CustomTOUBuilder:
             if sell_rate < 0:
                 violations.append(f"{period_key}: Sell rate is negative: ${sell_rate:.4f}")
 
-            # Check that buy >= sell
-            if sell_rate > buy_rate:
-                violations.append(
-                    f"{period_key}: Sell rate (${sell_rate:.4f}) > Buy rate (${buy_rate:.4f}) "
-                    f"- Tesla will reject this!"
-                )
+            # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
         if violations:
             logger.error(f"Season '{season_name}' validation FAILED:")

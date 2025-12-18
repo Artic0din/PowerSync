@@ -339,11 +339,6 @@ class AmberTariffConverter:
                         sell_price = self._round_price(-actual_feedin_cents / 100)
                         sell_price = max(0, sell_price)  # No negatives
 
-                        # Tesla restriction: sell cannot exceed buy
-                        if period_key in general_prices and sell_price > general_prices[period_key]:
-                            logger.debug(f"{period_key}: Sell price capped to buy price ({sell_price:.4f} -> {general_prices[period_key]:.4f})")
-                            sell_price = general_prices[period_key]
-
                         feedin_prices[period_key] = sell_price
                         logger.info(f"{period_key} (CURRENT): Using ActualInterval sell price: ${sell_price:.4f}/kWh")
 
@@ -433,18 +428,10 @@ class AmberTariffConverter:
                     original_sell = sell_price
                     adjustments = []
 
-                    # Tesla restriction #1: No negative prices - clamp to 0
+                    # Tesla restriction: No negative prices - clamp to 0
                     if sell_price < 0:
                         adjustments.append(f"negative({sell_price:.4f})->zero")
                         sell_price = 0
-
-                    # Tesla restriction #2: Sell price cannot exceed buy price
-                    # If necessary, adjust sell price downward to comply
-                    if period_key in general_prices and general_prices[period_key] is not None:
-                        buy_price = general_prices[period_key]
-                        if sell_price > buy_price:
-                            adjustments.append(f"exceeds_buy({sell_price:.4f}>{buy_price:.4f})->match_buy")
-                            sell_price = buy_price
 
                     # Log all adjustments made for this period
                     if adjustments:
@@ -458,13 +445,8 @@ class AmberTariffConverter:
                     # No data found - use fallback price if available
                     # This commonly happens with AEMO forecast which only provides ~20 hours ahead
                     if last_valid_sell_price is not None:
-                        # Ensure fallback sell price doesn't exceed current buy price
-                        fallback_sell = last_valid_sell_price
-                        if period_key in general_prices and general_prices[period_key] is not None:
-                            if fallback_sell > general_prices[period_key]:
-                                fallback_sell = general_prices[period_key]
-                        feedin_prices[period_key] = fallback_sell
-                        logger.info(f"{period_key}: Using fallback sell price ${fallback_sell:.4f} (AEMO forecast gap)")
+                        feedin_prices[period_key] = last_valid_sell_price
+                        logger.info(f"{period_key}: Using fallback sell price ${last_valid_sell_price:.4f} (AEMO forecast gap)")
                     else:
                         logger.warning(f"{period_key}: No feedIn price data available for ({hour:02d}:{minute:02d})")
                         feedin_prices[period_key] = None
@@ -605,14 +587,14 @@ class AmberTariffConverter:
         """
         Validate that the tariff complies with Tesla's restrictions:
         1. No negative prices
-        2. Buy price >= Sell price for every period
-        3. No gaps or overlaps in periods
+
+        Note: The buy >= sell restriction has been removed by Tesla.
 
         Logs detailed warnings if any violations are found.
         """
         violations = []
 
-        # Check for negative prices
+        # Check for negative prices (still not allowed)
         for period, price in general_prices.items():
             if price < 0:
                 violations.append(f"{period}: Buy price is negative: {price:.4f}")
@@ -621,13 +603,7 @@ class AmberTariffConverter:
             if price < 0:
                 violations.append(f"{period}: Sell price is negative: {price:.4f}")
 
-        # Check that buy >= sell for every period
-        for period in general_prices.keys():
-            buy_price = general_prices[period]
-            sell_price = feedin_prices.get(period, 0)
-
-            if sell_price > buy_price:
-                violations.append(f"{period}: Sell ({sell_price:.4f}) > Buy ({buy_price:.4f}) - TESLA WILL REJECT THIS")
+        # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
         # Log validation results
         if violations:
@@ -635,7 +611,7 @@ class AmberTariffConverter:
             for violation in violations:
                 logger.error(f"  - {violation}")
         else:
-            logger.info("Tesla TOU validation PASSED - all restrictions met")
+            logger.info("Tesla TOU validation PASSED - no negative prices")
 
         # Log summary statistics
         buy_prices = [p for p in general_prices.values()]
@@ -1530,12 +1506,7 @@ def apply_export_boost(
             # Convert back to dollars
             boosted_dollars = round(boosted_cents / 100, 4)
 
-            # Tesla restriction: sell cannot exceed buy
-            if period in buy_prices and boosted_dollars > buy_prices[period]:
-                logger.debug(
-                    f"{period}: Boosted sell price capped to buy price ({boosted_dollars:.4f} -> {buy_prices[period]:.4f})"
-                )
-                boosted_dollars = buy_prices[period]
+            # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
             if boosted_dollars != original_dollars:
                 modified_count += 1

@@ -604,15 +604,7 @@ def _build_rolling_24h_tariff(
                     sell_price = _round_price(-actual_feedin_cents / 100)
                     sell_price = max(0, sell_price)  # No negatives
 
-                    # Tesla restriction: sell cannot exceed buy
-                    if period_key in general_prices and sell_price > general_prices[period_key]:
-                        _LOGGER.debug(
-                            "%s: Sell price capped to buy price (%.4f -> %.4f)",
-                            period_key,
-                            sell_price,
-                            general_prices[period_key],
-                        )
-                        sell_price = general_prices[period_key]
+                    # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
                     feedin_prices[period_key] = sell_price
                     _LOGGER.info(
@@ -701,12 +693,10 @@ def _build_rolling_24h_tariff(
                 prices = feedin_lookup[feedin_lookup_key]
                 sell_price = _round_price(sum(prices) / len(prices))
 
-                # Tesla restriction #1: No negative prices
+                # Tesla restriction: No negative prices
                 sell_price = max(0, sell_price)
 
-                # Tesla restriction #2: Sell price cannot exceed buy price
-                if period_key in general_prices and general_prices[period_key] is not None:
-                    sell_price = min(sell_price, general_prices[period_key])
+                # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
                 feedin_prices[period_key] = sell_price
                 last_valid_sell_price = sell_price  # Track for fallback
@@ -714,15 +704,10 @@ def _build_rolling_24h_tariff(
                 # No data found - use fallback price if available
                 # This commonly happens with AEMO forecast which only provides ~20 hours ahead
                 if last_valid_sell_price is not None:
-                    # Ensure fallback sell price doesn't exceed current buy price
-                    fallback_sell = last_valid_sell_price
-                    if period_key in general_prices and general_prices[period_key] is not None:
-                        if fallback_sell > general_prices[period_key]:
-                            fallback_sell = general_prices[period_key]
-                    feedin_prices[period_key] = fallback_sell
+                    feedin_prices[period_key] = last_valid_sell_price
                     _LOGGER.info(
                         "%s: Using fallback sell price $%.4f (AEMO forecast gap)",
-                        period_key, fallback_sell
+                        period_key, last_valid_sell_price
                     )
                 else:
                     # Mark as missing - will be counted below
@@ -1574,13 +1559,7 @@ def apply_export_boost(
             # Convert back to dollars
             boosted_dollars = round(boosted_cents / 100, 4)
 
-            # Tesla restriction: sell cannot exceed buy
-            if period in buy_prices and boosted_dollars > buy_prices[period]:
-                _LOGGER.debug(
-                    "%s: Boosted sell price capped to buy price (%.4f -> %.4f)",
-                    period, boosted_dollars, buy_prices[period]
-                )
-                boosted_dollars = buy_prices[period]
+            # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
             if boosted_dollars != original_dollars:
                 modified_count += 1
