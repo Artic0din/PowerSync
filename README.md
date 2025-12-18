@@ -64,6 +64,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ### Advanced Features
 - ⚡ **AEMO Spike Detection** - Automatically monitors Australian wholesale electricity prices and switches to spike tariff during extreme price events (configurable threshold). Includes intelligent operation mode switching - automatically saves your current Powerwall mode and switches to autonomous (TOU) mode during spikes, then restores your original mode when prices normalize
 - 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system sets Powerwall export to "never" to avoid paying to export, then restores to "battery_ok" when prices return to positive
+- 🛡️ **Spike Protection** - Prevents Powerwall from charging from grid during Amber price spikes. Overrides buy prices when Amber detects spike status to eliminate arbitrage opportunities
 - 📤 **Export Price Boost** - Artificially increase export prices to trigger Powerwall exports at lower price points. Useful when prices are in the 20-25c range where Tesla's algorithm may not trigger exports
 - 🔌 **Flow Power + AEMO Support** - Full support for Flow Power and other wholesale electricity retailers using direct AEMO NEM pricing with configurable network tariffs
 - 🎯 **Custom TOU Schedules** - Create and manage custom time-of-use schedules for any electricity provider (not just Amber)
@@ -118,6 +119,53 @@ Prevents paying to export solar during negative pricing periods common with Ambe
 - Default: Disabled (opt-in feature)
 
 This feature is particularly useful with Amber's wholesale pricing to avoid paying to export your solar during oversupply periods.
+
+### Spike Protection (Amber Only)
+
+Prevents your Powerwall from charging from the grid during Amber price spikes. When wholesale prices spike, Tesla may see an arbitrage opportunity and charge from grid - this feature stops that behavior.
+
+**The Problem:**
+During price spikes, the Powerwall receives 30-minute averaged forecast prices (~$0.85/kWh) rather than the real-time spike prices ($10-$20/kWh). It doesn't "see" the spike and may decide to charge from grid for later arbitrage.
+
+**How It Works:**
+When Amber reports `spikeStatus: 'potential'` or `'spike'` for a period, buy prices are overridden:
+
+```
+override_buy = max(all_sell_prices) + $1.00
+```
+
+This ensures charging from grid is always unprofitable during spikes - eliminating any arbitrage opportunity.
+
+**Example:**
+```
+During a spike event:
+  Actual import price: $16.48/kWh
+  Actual export price: $14.69/kWh
+  Max export in forecast: $21.29/kWh
+
+Without spike protection:
+  Tesla sees forecast: ~$0.85/kWh buy
+  Powerwall thinks: "Charge now, sell later!"
+  Result: Grid charging during $16/kWh spike
+
+With spike protection:
+  Override buy: $21.29 + $1.00 = $22.29/kWh
+  Powerwall calculates: $22.29 buy - $21.29 sell = $1.00 LOSS
+  Result: No grid charging
+```
+
+**Key Features:**
+- **Per-period protection** - Only affects periods Amber flags as spikes, not your whole day
+- **Uses Amber's detection** - Relies on Amber's `spikeStatus` field, not arbitrary thresholds
+- **Works with Export Boost** - They complement each other (spike protection = buy prices, export boost = sell prices)
+
+**Note for 30-minute billing customers:**
+If you're on 30-minute billing (not 5-minute), spike prices get averaged out in your bill. This feature is most critical for 5-minute billed customers who pay the full spike price.
+
+**Configuration:**
+- Enable/disable in Amber Settings (Flask web interface)
+- Enable/disable during Home Assistant integration options flow
+- Default: Disabled (opt-in feature)
 
 ### Export Price Boost
 
