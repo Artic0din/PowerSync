@@ -413,6 +413,12 @@ DEFAULT_EXPORT_BOOST_START = "17:00"
 DEFAULT_EXPORT_BOOST_END = "21:00"
 DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0  # c/kWh (0 = always apply boost)
 
+# Amber Spike Protection configuration
+# Prevents Powerwall from charging from grid during price spikes
+# When Amber reports spikeStatus='potential' or 'spike', override buy prices
+# to max(sell_prices) + $1.00 to eliminate arbitrage opportunities
+CONF_SPIKE_PROTECTION_ENABLED = "spike_protection_enabled"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"

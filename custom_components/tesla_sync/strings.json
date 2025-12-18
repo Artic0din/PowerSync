@@ -129,6 +129,7 @@
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
+          "spike_protection_enabled": "Enable Spike Protection (prevent grid charging during spikes)",
           "export_boost_enabled": "Enable Export Price Boost",
           "export_price_offset": "Export Price Offset (c/kWh)",
           "export_min_price": "Minimum Export Price (c/kWh)",
@@ -147,6 +148,7 @@
           "monthly_supply_charge": "Monthly Supply Charge ($)"
         },
         "data_description": {
+          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid (stops arbitrage behavior)",
           "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
           "export_boost_threshold": "Boost will only apply if actual export price is at or above this value (0 = always apply)"
         }

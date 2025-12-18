@@ -87,6 +87,8 @@ from .const import (
     CONF_EXPORT_BOOST_START,
     CONF_EXPORT_BOOST_END,
     CONF_EXPORT_BOOST_THRESHOLD,
+    # Spike protection configuration
+    CONF_SPIKE_PROTECTION_ENABLED,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
     DEFAULT_EXPORT_BOOST_THRESHOLD,
@@ -1602,6 +1604,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
         )
 
+        # Get spike protection setting (Amber only, default enabled)
+        spike_protection_enabled = entry.options.get(
+            CONF_SPIKE_PROTECTION_ENABLED,
+            entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, True)
+        )
+
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
         tariff = convert_amber_to_tesla_tariff(
@@ -1618,6 +1626,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             demand_charge_days=demand_charge_days,
             demand_artificial_price_enabled=demand_artificial_price_enabled,
             electricity_provider=electricity_provider,
+            spike_protection_enabled=spike_protection_enabled,
         )
 
         if not tariff:

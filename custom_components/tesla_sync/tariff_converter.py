@@ -232,6 +232,7 @@ def convert_amber_to_tesla_tariff(
     demand_charge_days: str = "All Days",
     demand_artificial_price_enabled: bool = False,
     electricity_provider: str = "amber",
+    spike_protection_enabled: bool = True,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -417,7 +418,8 @@ def convert_amber_to_tesla_tariff(
 
     # Build the rolling 24-hour tariff
     general_prices, feedin_prices = _build_rolling_24h_tariff(
-        general_lookup, feedin_lookup, detected_tz, current_actual_interval
+        general_lookup, feedin_lookup, detected_tz, current_actual_interval,
+        spike_protection_enabled=spike_protection_enabled
     )
 
     # If too many periods are missing, abort sync to preserve last good tariff
@@ -518,6 +520,7 @@ def _build_rolling_24h_tariff(
     feedin_lookup: dict[tuple[str, int, int], list[float]],
     detected_tz: Any = None,
     current_actual_interval: dict[str, Any] | None = None,
+    spike_protection_enabled: bool = True,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     Build a rolling 24-hour tariff where past periods use tomorrow's prices.
@@ -743,6 +746,63 @@ def _build_rolling_24h_tariff(
     for key in feedin_prices:
         if feedin_prices[key] is None:
             feedin_prices[key] = 0
+
+    # SPIKE PROTECTION: Prevent grid charging during Amber price spikes
+    # When Amber reports spikeStatus='potential' or 'spike', the Powerwall may see an
+    # arbitrage opportunity (cheap now, expensive later) and charge from grid.
+    # This defeats the purpose of buying cheap and selling high during the spike.
+    # Solution: Override buy prices to max(all_sell_prices) + $1.00 to eliminate arbitrage.
+    #
+    # EXCEPTION: If current buy price is negative or very low (< $0.05/kWh), allow charging
+    # because getting paid to consume electricity is always profitable.
+    if spike_protection_enabled and current_actual_interval:
+        spike_status = current_actual_interval.get("general", {}).get("spikeStatus", "none")
+        if spike_status in ["potential", "spike"]:
+            # Check current actual buy price - if negative/very low, skip protection
+            # (we want to charge when import prices are negative - free electricity!)
+            current_buy_cents = current_actual_interval.get("general", {}).get("perKwh", 0)
+            current_buy_dollars = current_buy_cents / 100
+
+            # Threshold: Only apply spike protection if current price > $0.05/kWh
+            # Below this, charging is essentially free or profitable
+            NEGATIVE_PRICE_THRESHOLD = 0.05
+
+            if current_buy_dollars < NEGATIVE_PRICE_THRESHOLD:
+                _LOGGER.info(
+                    "SPIKE DETECTED (status=%s) but current buy price is $%.4f/kWh "
+                    "(below $%.2f) - ALLOWING charging (negative/low price opportunity)",
+                    spike_status, current_buy_dollars, NEGATIVE_PRICE_THRESHOLD
+                )
+            else:
+                # Find maximum sell price across all periods
+                max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
+
+                # Override buy prices to max(sell) + $1.00
+                # Only override positive prices - keep negative prices as-is for free charging
+                override_buy = max_sell_price + 1.00
+                periods_overridden = 0
+                periods_skipped = 0
+
+                for period_key, buy_price in list(general_prices.items()):
+                    # Skip negative/very low prices - we want to allow charging during those
+                    if buy_price < NEGATIVE_PRICE_THRESHOLD:
+                        periods_skipped += 1
+                        continue
+
+                    if override_buy > buy_price:
+                        _LOGGER.info(
+                            "%s: SPIKE OVERRIDE - BUY $%.4f -> $%.4f (max_sell=$%.4f)",
+                            period_key, buy_price, override_buy, max_sell_price
+                        )
+                        general_prices[period_key] = override_buy
+                        periods_overridden += 1
+
+                skip_msg = f" (skipped {periods_skipped} negative/low price periods)" if periods_skipped else ""
+                _LOGGER.warning(
+                    "SPIKE PROTECTION ACTIVE (status=%s): Overriding %d buy prices to $%.4f/kWh "
+                    "(max_sell=$%.4f + $1.00 margin) to prevent grid charging%s",
+                    spike_status, periods_overridden, override_buy, max_sell_price, skip_msg
+                )
 
     return general_prices, feedin_prices
 
