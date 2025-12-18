@@ -479,21 +479,31 @@
                 <fieldset>
                     <legend>Tesla Fleet API</legend>
 
+                    <!-- Connection Status & Actions -->
                     {% if current_user.fleet_api_access_token_encrypted %}
                     <div style="padding: 0.8em; background: rgba(0, 255, 0, 0.1); border-radius: 0.5em; margin-bottom: 1em;">
-                        <p style="margin: 0; color: #51cf66; font-size: 0.9em;">✅ <strong>Connected</strong></p>
-                        <p style="font-size: 0.8em; margin: 0.3em 0 0 0;">
+                        <p style="margin: 0; color: #51cf66; font-size: 0.9em;">✅ <strong>Connected to Tesla</strong></p>
+                        <p style="font-size: 0.8em; margin: 0.3em 0 0 0; color: var(--muted-color);">
                             {% if current_user.fleet_api_token_expires_at %}
                             Token expires: {{ current_user.fleet_api_token_expires_at.strftime('%Y-%m-%d %H:%M UTC') }}
                             {% endif %}
                         </p>
+                        <div style="display: flex; gap: 0.5em; margin-top: 0.8em;">
+                            <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;">Reconnect</a>
+                            <form action="{{ url_for('main.fleet_api_disconnect') }}" method="post" style="flex: 1; margin: 0;">
+                                <button type="submit" class="outline secondary" style="width: 100%; font-size: 0.85em;" onclick="return confirm('Disconnect Tesla Fleet API?')">Disconnect</button>
+                            </form>
+                        </div>
                     </div>
-
-                    <div style="display: flex; gap: 0.5em; margin-bottom: 1em;">
-                        <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;">Reconnect</a>
-                        <form action="{{ url_for('main.fleet_api_disconnect') }}" method="post" style="flex: 1; margin: 0;">
-                            <button type="submit" class="outline secondary" style="width: 100%; font-size: 0.85em;" onclick="return confirm('Disconnect Tesla Fleet API?')">Disconnect</button>
-                        </form>
+                    {% else %}
+                    <div style="padding: 0.8em; background: rgba(255, 150, 100, 0.15); border-radius: 0.5em; margin-bottom: 1em;">
+                        <p style="margin: 0; color: #ff922b; font-size: 0.9em;">⚠️ <strong>Not Connected</strong></p>
+                        <p style="font-size: 0.8em; margin: 0.3em 0 0 0; color: var(--muted-color);">
+                            Complete setup below, then click "Connect to Tesla"
+                        </p>
+                        <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="primary" style="display: block; text-align: center; width: 100%; margin-top: 0.8em;">
+                            Connect to Tesla
+                        </a>
                     </div>
                     {% endif %}
 
@@ -529,14 +539,27 @@
                     {{ form.fleet_api_redirect_uri(size=64, style='width: 100%;', placeholder='http://localhost:5001/fleet-api/callback') }}
                 </fieldset>
 
-                <!-- Fleet API Setup Tools (collapsible) -->
-                <details style="margin-top: 1em;" {% if not current_user.fleet_api_access_token_encrypted %}open{% endif %}>
-                    <summary style="font-weight: bold;">Setup Tools (Tunnel, Keys, Registration)</summary>
-                    <div style="padding: 0.5em; margin-top: 0.5em; background: rgba(100, 150, 255, 0.05); border-radius: 0.3em;">
+                <!-- Fleet API Setup Tools -->
+                <details style="margin-top: 1em; border: 2px solid {% if not current_user.fleet_api_access_token_encrypted %}rgba(255, 150, 100, 0.5){% else %}rgba(100, 150, 255, 0.3){% endif %}; border-radius: 0.5em; padding: 0.5em;">
+                    <summary style="font-weight: bold; cursor: pointer; padding: 0.3em; {% if not current_user.fleet_api_access_token_encrypted %}color: #ff922b;{% endif %}">
+                        {% if not current_user.fleet_api_access_token_encrypted %}
+                        ⚙️ First-Time Setup (click to expand)
+                        {% else %}
+                        ⚙️ Setup Tools (Tunnel, Keys, Registration)
+                        {% endif %}
+                    </summary>
+                    <div style="padding: 0.5em; margin-top: 0.5em;">
+                        <p style="font-size: 0.8em; margin: 0 0 0.8em 0; color: var(--muted-color);">
+                            {% if not current_user.fleet_api_access_token_encrypted %}
+                            Complete these steps in order before connecting to Tesla.
+                            {% else %}
+                            Use these tools if you need to reconfigure your Fleet API setup.
+                            {% endif %}
+                        </p>
 
-                        <!-- Tunnel Section -->
+                        <!-- Step 1: Tunnel Section -->
                         <div style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>1. Public Tunnel (Cloudflare)</strong></p>
+                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 1: Start Public Tunnel</strong></p>
                             <p id="cloudflaredStatus" style="font-size: 0.8em; margin: 0 0 0.3em 0;">
                                 <span style="color: #999;">Checking cloudflared...</span>
                             </p>
@@ -554,7 +577,7 @@
 
                             <!-- Named Tunnel -->
                             <details style="margin-top: 0.5em;">
-                                <summary style="font-size: 0.8em;">Named Tunnel (stable URL)</summary>
+                                <summary style="font-size: 0.8em; color: var(--muted-color);">Advanced: Named Tunnel (stable URL)</summary>
                                 <div style="padding: 0.4em; margin-top: 0.3em; background: rgba(100, 200, 100, 0.1); border-radius: 0.3em;">
                                     <input type="password" id="tunnelToken" placeholder="Tunnel Token" style="font-size: 0.8em; width: 100%; margin-bottom: 0.2em;">
                                     <input type="text" id="tunnelDomain" placeholder="tesla.mydomain.com" value="{{ current_user.cloudflare_tunnel_domain or '' }}" style="font-size: 0.8em; width: 100%; margin-bottom: 0.2em;">
@@ -571,18 +594,19 @@
                             </details>
                         </div>
 
-                        <!-- Tesla Developer Portal Hints -->
+                        <!-- Step 2: Tesla Developer Portal -->
                         <div style="padding: 0.6em; background: rgba(255, 200, 100, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>2. <a href="https://developer.tesla.com" target="_blank">Tesla Developer Portal</a></strong></p>
+                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 2: Configure <a href="https://developer.tesla.com" target="_blank">Tesla Developer Portal</a></strong></p>
+                            <p style="font-size: 0.75em; margin: 0 0 0.3em 0; color: var(--muted-color);">Copy these values to your Tesla app settings:</p>
                             <div style="font-size: 0.8em; background: rgba(0,0,0,0.2); padding: 0.4em; border-radius: 0.3em;">
-                                <div style="margin-bottom: 0.2em;"><strong>Allowed Origins:</strong> <code id="allowedOriginHint">[start tunnel]</code></div>
-                                <div><strong>Redirect URI:</strong> <code id="redirectUriHint">[start tunnel]</code></div>
+                                <div style="margin-bottom: 0.2em;"><strong>Allowed Origins:</strong> <code id="allowedOriginHint">[start tunnel first]</code></div>
+                                <div><strong>Redirect URI:</strong> <code id="redirectUriHint">[start tunnel first]</code></div>
                             </div>
                         </div>
 
-                        <!-- Keys & Registration -->
-                        <div style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>3. Domain Keys & Registration</strong></p>
+                        <!-- Step 3: Keys & Registration -->
+                        <div style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em;">
+                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 3: Generate Keys & Register Domain</strong></p>
                             <p style="margin: 0 0 0.3em 0; font-size: 0.8em;">
                                 Keys: <span id="keyStatusText">Checking...</span>
                             </p>
@@ -593,22 +617,17 @@
                             <p id="generateKeysStatus" style="font-size: 0.75em; margin-top: 0.3em; display: none;"></p>
                             <p id="registerDomainStatus" style="font-size: 0.75em; margin-top: 0.3em; display: none;"></p>
                         </div>
-
-                        <!-- OAuth -->
-                        <div style="padding: 0.6em; background: rgba(0, 200, 100, 0.1); border-radius: 0.5em;">
-                            <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>4. Connect to Tesla</strong></p>
-                            <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em;">Authorize with Tesla</a>
-                        </div>
                     </div>
                 </details>
 
                 <details style="margin-top: 0.5em;">
-                    <summary style="font-size: 0.85em;">Troubleshooting: 412 Precondition Failed</summary>
+                    <summary style="font-size: 0.85em; color: var(--muted-color);">Troubleshooting: 412 Precondition Failed</summary>
                     <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(255, 200, 100, 0.1); border-radius: 0.3em;">
                         <ol style="margin: 0 0 0 1.2em; padding: 0;">
-                            <li>Click "Generate Keys" above</li>
-                            <li>Verify key at: <code>/.well-known/appspecific/com.tesla.3p.public-key.pem</code></li>
+                            <li>Expand "Setup Tools" above</li>
+                            <li>Click "Generate Keys"</li>
                             <li>Click "Register Domain"</li>
+                            <li>Try connecting again</li>
                         </ol>
                     </div>
                 </details>
