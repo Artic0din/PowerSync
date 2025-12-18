@@ -373,6 +373,15 @@ SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
 
 # Switch types
 SWITCH_TYPE_AUTO_SYNC = "auto_sync"
+SWITCH_TYPE_FORCE_DISCHARGE = "force_discharge"
+
+# Services for manual discharge control
+SERVICE_FORCE_DISCHARGE = "force_discharge"
+SERVICE_RESTORE_NORMAL = "restore_normal"
+
+# Manual discharge duration options (minutes)
+DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120]
+DEFAULT_DISCHARGE_DURATION = 30
 
 # AEMO Spike sensors
 SENSOR_TYPE_AEMO_PRICE = "aemo_price"

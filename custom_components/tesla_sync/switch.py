@@ -1,18 +1,23 @@
 """Switch platform for Tesla Sync integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     DOMAIN,
     CONF_AUTO_SYNC_ENABLED,
     SWITCH_TYPE_AUTO_SYNC,
+    SWITCH_TYPE_FORCE_DISCHARGE,
+    DEFAULT_DISCHARGE_DURATION,
     ATTR_LAST_SYNC,
     ATTR_SYNC_STATUS,
 )
@@ -28,13 +33,23 @@ async def async_setup_entry(
     """Set up Tesla Sync switch entities."""
     entities = [
         AutoSyncSwitch(
+            hass=hass,
             entry=entry,
             description=SwitchEntityDescription(
                 key=SWITCH_TYPE_AUTO_SYNC,
                 name="Auto-Sync TOU Schedule",
                 icon="mdi:sync",
             ),
-        )
+        ),
+        ForceDischargeSwitch(
+            hass=hass,
+            entry=entry,
+            description=SwitchEntityDescription(
+                key=SWITCH_TYPE_FORCE_DISCHARGE,
+                name="Force Discharge",
+                icon="mdi:battery-arrow-up",
+            ),
+        ),
     ]
 
     async_add_entities(entities)
@@ -43,16 +58,19 @@ async def async_setup_entry(
 class AutoSyncSwitch(SwitchEntity):
     """Switch to enable/disable automatic TOU schedule syncing."""
 
+    _attr_has_entity_name = True
+
     def __init__(
         self,
+        hass: HomeAssistant,
         entry: ConfigEntry,
         description: SwitchEntityDescription,
     ) -> None:
         """Initialize the switch."""
+        self.hass = hass
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_has_entity_name = True
 
         # Initialize state from config
         self._attr_is_on = entry.options.get(
@@ -115,3 +133,130 @@ class AutoSyncSwitch(SwitchEntity):
             attrs[ATTR_SYNC_STATUS] = "enabled" if self.is_on else "disabled"
 
         return attrs
+
+
+class ForceDischargeSwitch(SwitchEntity):
+    """Switch to manually force battery discharge mode."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        description: SwitchEntityDescription,
+    ) -> None:
+        """Initialize the switch."""
+        self.hass = hass
+        self.entity_description = description
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_is_on = False
+        self._discharge_expires_at: datetime | None = None
+        self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION
+        self._cancel_expiry_timer = None
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if force discharge is active."""
+        return self._attr_is_on
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on force discharge mode."""
+        _LOGGER.info("Activating force discharge mode for %d minutes", self._duration_minutes)
+
+        # Get the duration from service call data if provided
+        duration = kwargs.get("duration", self._duration_minutes)
+
+        # Call the force discharge service
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "force_discharge",
+                {"duration": duration},
+                blocking=True,
+            )
+
+            self._attr_is_on = True
+            self._discharge_expires_at = datetime.now() + timedelta(minutes=duration)
+            self._duration_minutes = duration
+
+            # Set up expiry timer
+            self._schedule_expiry_check()
+
+            self.async_write_ha_state()
+
+        except Exception as err:
+            _LOGGER.error("Failed to activate force discharge: %s", err)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off force discharge mode (restore normal operation)."""
+        _LOGGER.info("Deactivating force discharge mode, restoring normal operation")
+
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "restore_normal",
+                {},
+                blocking=True,
+            )
+
+            self._attr_is_on = False
+            self._discharge_expires_at = None
+
+            # Cancel any pending expiry timer
+            if self._cancel_expiry_timer:
+                self._cancel_expiry_timer()
+                self._cancel_expiry_timer = None
+
+            self.async_write_ha_state()
+
+        except Exception as err:
+            _LOGGER.error("Failed to restore normal operation: %s", err)
+
+    def _schedule_expiry_check(self) -> None:
+        """Schedule periodic check for discharge expiry."""
+        # Cancel any existing timer
+        if self._cancel_expiry_timer:
+            self._cancel_expiry_timer()
+
+        @callback
+        def _check_expiry(now: datetime) -> None:
+            """Check if discharge has expired."""
+            if self._discharge_expires_at and datetime.now() >= self._discharge_expires_at:
+                _LOGGER.info("Force discharge expired, restoring normal operation")
+                self._attr_is_on = False
+                self._discharge_expires_at = None
+                self._cancel_expiry_timer = None
+                self.async_write_ha_state()
+            elif self._attr_is_on:
+                # Schedule next check
+                self._schedule_expiry_check()
+
+        # Check every 30 seconds
+        self._cancel_expiry_timer = async_track_time_interval(
+            self.hass, _check_expiry, timedelta(seconds=30)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        attrs = {
+            "duration_minutes": self._duration_minutes,
+        }
+
+        if self._discharge_expires_at:
+            attrs["expires_at"] = self._discharge_expires_at.isoformat()
+            remaining = self._discharge_expires_at - datetime.now()
+            if remaining.total_seconds() > 0:
+                attrs["remaining_minutes"] = int(remaining.total_seconds() / 60)
+            else:
+                attrs["remaining_minutes"] = 0
+
+        return attrs
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Clean up when entity is removed."""
+        if self._cancel_expiry_timer:
+            self._cancel_expiry_timer()
+            self._cancel_expiry_timer = None

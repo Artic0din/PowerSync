@@ -433,7 +433,7 @@ def create_app(config_class=Config):
         scheduler = BackgroundScheduler()
 
         # Add jobs for smart TOU sync (3-stage approach)
-        from app.tasks import sync_initial_forecast, sync_rest_api_check, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check
+        from app.tasks import sync_initial_forecast, sync_rest_api_check, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check, check_manual_discharge_expiry
 
         # Wrapper functions to run tasks within app context
         def run_sync_initial_forecast():
@@ -474,6 +474,10 @@ def create_app(config_class=Config):
         def run_demand_period_grid_charging_check():
             with app.app_context():
                 demand_period_grid_charging_check()
+
+        def run_check_manual_discharge_expiry():
+            with app.app_context():
+                check_manual_discharge_expiry()
 
         # STAGE 1: Initial forecast sync at start of each 5-min period (0s)
         # Gets predicted price to Tesla ASAP
@@ -540,6 +544,15 @@ def create_app(config_class=Config):
             trigger=CronTrigger(minute='1-59/5', second='0'),  # Run at :01, :06, :11, etc. (same as TOU sync)
             id='solar_curtailment_check',
             name='Check Amber export prices for solar curtailment',
+            replace_existing=True
+        )
+
+        # Add job to check for expired manual discharge modes every minute
+        scheduler.add_job(
+            func=run_check_manual_discharge_expiry,
+            trigger=CronTrigger(minute='*', second='15'),  # Every minute at :15 seconds
+            id='check_manual_discharge_expiry',
+            name='Check for expired manual discharge modes',
             replace_existing=True
         )
 

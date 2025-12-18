@@ -20,7 +20,7 @@ import requests
 import time
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
@@ -2940,6 +2940,295 @@ def test_aemo_restore():
         flash('Error restoring from spike mode. Please check logs.')
         db.session.rollback()
         return redirect(url_for('main.settings'))
+
+
+# ============================================
+# MANUAL DISCHARGE CONTROL
+# ============================================
+
+@bp.route('/api/force-discharge', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_force_discharge(tesla_client):
+    """
+    Force discharge mode - switches to autonomous mode with high export tariff.
+
+    Request JSON:
+    {
+        "duration_minutes": 30  // Optional: 15, 30, 45, 60, 75, 90, 105, 120. Default: 30
+    }
+
+    Returns JSON:
+    {
+        "success": true,
+        "message": "Force discharge activated for 30 minutes",
+        "expires_at": "2024-01-01T12:30:00Z"
+    }
+    """
+    from app.tasks import create_spike_tariff
+    from app.models import SavedTOUProfile
+    import json
+
+    try:
+        # Get duration from request (default 30 minutes)
+        data = request.get_json() or {}
+        duration_minutes = data.get('duration_minutes', 30)
+
+        # Validate duration (must be in 15-minute intervals, max 2 hours)
+        valid_durations = [15, 30, 45, 60, 75, 90, 105, 120]
+        if duration_minutes not in valid_durations:
+            return jsonify({
+                'success': False,
+                'error': f'Invalid duration. Must be one of: {valid_durations}'
+            }), 400
+
+        logger.info(f"Force discharge requested by {current_user.email} for {duration_minutes} minutes")
+
+        # Check if already in discharge mode
+        if current_user.manual_discharge_active:
+            # Extend the duration
+            new_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            current_user.manual_discharge_expires_at = new_expires_at
+            db.session.commit()
+            logger.info(f"Extended discharge mode to {new_expires_at}")
+            return jsonify({
+                'success': True,
+                'message': f'Discharge mode extended for {duration_minutes} minutes',
+                'expires_at': new_expires_at.isoformat() + 'Z',
+                'already_active': True
+            })
+
+        # Save current tariff as backup (if not already saved)
+        default_profile = SavedTOUProfile.query.filter_by(
+            user_id=current_user.id,
+            is_default=True
+        ).first()
+
+        if default_profile:
+            current_user.manual_discharge_saved_tariff_id = default_profile.id
+            logger.info(f"Using existing default tariff ID {default_profile.id} as backup")
+        else:
+            # Save current tariff
+            current_tariff = tesla_client.get_current_tariff(current_user.tesla_energy_site_id)
+            if current_tariff:
+                backup_profile = SavedTOUProfile(
+                    user_id=current_user.id,
+                    name=f"Auto-saved before discharge ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})",
+                    description="Automatically saved before manual discharge mode",
+                    source_type='tesla',
+                    tariff_name=current_tariff.get('name', 'Unknown'),
+                    utility=current_tariff.get('utility', 'Unknown'),
+                    tariff_json=json.dumps(current_tariff),
+                    created_at=datetime.utcnow(),
+                    fetched_from_tesla_at=datetime.utcnow(),
+                    is_default=True
+                )
+                db.session.add(backup_profile)
+                db.session.flush()
+                current_user.manual_discharge_saved_tariff_id = backup_profile.id
+                logger.info(f"Saved current tariff as backup with ID {backup_profile.id}")
+
+        # Create discharge tariff (high sell rate to encourage export)
+        # Uses $10/kWh sell rate, 30c/kWh buy rate
+        from app.tasks import create_discharge_tariff
+        discharge_tariff = create_discharge_tariff(duration_minutes)
+
+        # Upload tariff to Tesla
+        result = tesla_client.set_tariff_rate(current_user.tesla_energy_site_id, discharge_tariff)
+
+        if result:
+            # Calculate expiry time
+            expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+
+            # Update user state
+            current_user.manual_discharge_active = True
+            current_user.manual_discharge_expires_at = expires_at
+            db.session.commit()
+
+            # Force Powerwall to apply the tariff immediately
+            from app.tasks import force_tariff_refresh
+            force_tariff_refresh(tesla_client, current_user.tesla_energy_site_id)
+
+            logger.info(f"Force discharge activated for {current_user.email} until {expires_at}")
+
+            return jsonify({
+                'success': True,
+                'message': f'Force discharge activated for {duration_minutes} minutes',
+                'expires_at': expires_at.isoformat() + 'Z',
+                'duration_minutes': duration_minutes
+            })
+        else:
+            logger.error(f"Failed to upload discharge tariff for {current_user.email}")
+            return jsonify({
+                'success': False,
+                'error': 'Failed to upload discharge tariff to Tesla'
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error in force discharge: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/restore-normal', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_restore_normal(tesla_client):
+    """
+    Restore normal operation - restores saved tariff or triggers Amber sync.
+
+    Returns JSON:
+    {
+        "success": true,
+        "message": "Normal operation restored",
+        "method": "tariff_restore" | "amber_sync"
+    }
+    """
+    import json
+
+    try:
+        logger.info(f"Restore normal requested by {current_user.email}")
+
+        # Check what mode we're in
+        was_in_discharge = current_user.manual_discharge_active
+        was_in_spike = current_user.aemo_in_spike_mode
+
+        if not was_in_discharge and not was_in_spike:
+            return jsonify({
+                'success': True,
+                'message': 'Already in normal operation',
+                'method': 'none'
+            })
+
+        restore_method = 'none'
+
+        # Check if user has Amber configured (should sync instead of restore static tariff)
+        use_amber_sync = bool(current_user.amber_api_token_encrypted and current_user.auto_sync_enabled)
+
+        if use_amber_sync:
+            # For Amber users, trigger a sync to get fresh prices
+            logger.info(f"Amber user - triggering price sync for {current_user.email}")
+            from app.tasks import _sync_all_users_internal
+            # Run sync in background
+            _sync_all_users_internal(None, sync_mode='initial_forecast')
+            restore_method = 'amber_sync'
+        else:
+            # Restore saved tariff
+            backup_profile = None
+
+            # Check manual discharge backup first
+            if was_in_discharge and current_user.manual_discharge_saved_tariff_id:
+                backup_profile = SavedTOUProfile.query.get(current_user.manual_discharge_saved_tariff_id)
+            # Fall back to AEMO backup
+            elif was_in_spike and current_user.aemo_saved_tariff_id:
+                backup_profile = SavedTOUProfile.query.get(current_user.aemo_saved_tariff_id)
+            # Fall back to default profile
+            else:
+                backup_profile = SavedTOUProfile.query.filter_by(
+                    user_id=current_user.id,
+                    is_default=True
+                ).first()
+
+            if backup_profile:
+                tariff = json.loads(backup_profile.tariff_json)
+                result = tesla_client.set_tariff_rate(current_user.tesla_energy_site_id, tariff)
+
+                if result:
+                    # Force Powerwall to apply
+                    from app.tasks import force_tariff_refresh
+                    force_tariff_refresh(tesla_client, current_user.tesla_energy_site_id)
+                    restore_method = 'tariff_restore'
+                    logger.info(f"Restored tariff from profile {backup_profile.id}")
+                else:
+                    logger.error(f"Failed to restore tariff for {current_user.email}")
+                    return jsonify({
+                        'success': False,
+                        'error': 'Failed to upload restored tariff to Tesla'
+                    }), 500
+            else:
+                logger.warning(f"No backup tariff found for {current_user.email}")
+                restore_method = 'no_backup'
+
+        # Clear all discharge/spike states
+        current_user.manual_discharge_active = False
+        current_user.manual_discharge_expires_at = None
+        current_user.aemo_in_spike_mode = False
+        current_user.aemo_spike_test_mode = False
+        current_user.aemo_spike_start_time = None
+        db.session.commit()
+
+        message = 'Normal operation restored'
+        if restore_method == 'amber_sync':
+            message = 'Normal operation restored via Amber sync'
+        elif restore_method == 'tariff_restore':
+            message = 'Normal operation restored from saved tariff'
+        elif restore_method == 'no_backup':
+            message = 'Discharge mode cleared (no backup tariff to restore)'
+
+        logger.info(f"Restore complete for {current_user.email}: {message}")
+
+        return jsonify({
+            'success': True,
+            'message': message,
+            'method': restore_method,
+            'was_in_discharge': was_in_discharge,
+            'was_in_spike': was_in_spike
+        })
+
+    except Exception as e:
+        logger.error(f"Error in restore normal: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/discharge-status')
+@login_required
+def api_discharge_status():
+    """
+    Get current discharge mode status.
+
+    Returns JSON:
+    {
+        "active": true,
+        "expires_at": "2024-01-01T12:30:00Z",
+        "remaining_minutes": 15,
+        "in_spike_mode": false
+    }
+    """
+    now = datetime.utcnow()
+
+    # Check if discharge has expired
+    if current_user.manual_discharge_active and current_user.manual_discharge_expires_at:
+        if now >= current_user.manual_discharge_expires_at:
+            # Auto-expire the discharge mode
+            logger.info(f"Manual discharge expired for {current_user.email}")
+            current_user.manual_discharge_active = False
+            current_user.manual_discharge_expires_at = None
+            db.session.commit()
+
+    remaining_minutes = 0
+    if current_user.manual_discharge_active and current_user.manual_discharge_expires_at:
+        remaining_seconds = (current_user.manual_discharge_expires_at - now).total_seconds()
+        remaining_minutes = max(0, int(remaining_seconds / 60))
+
+    return jsonify({
+        'active': current_user.manual_discharge_active,
+        'expires_at': current_user.manual_discharge_expires_at.isoformat() + 'Z' if current_user.manual_discharge_expires_at else None,
+        'remaining_minutes': remaining_minutes,
+        'in_spike_mode': current_user.aemo_in_spike_mode
+    })
 
 
 # ============================================

@@ -102,6 +102,11 @@ class User(UserMixin, db.Model):
     aemo_saved_tariff_id = db.Column(db.Integer, db.ForeignKey('saved_tou_profile.id'))  # Tariff to restore after spike
     aemo_pre_spike_operation_mode = db.Column(db.String(20))  # Operation mode before spike (self_consumption, autonomous, backup)
 
+    # Manual Discharge Mode (Force Discharge button)
+    manual_discharge_active = db.Column(db.Boolean, default=False)  # Currently in manual discharge mode
+    manual_discharge_expires_at = db.Column(db.DateTime, nullable=True)  # When to auto-restore normal operation
+    manual_discharge_saved_tariff_id = db.Column(db.Integer, db.ForeignKey('saved_tou_profile.id', use_alter=True), nullable=True)
+
     # Electricity Provider Configuration
     electricity_provider = db.Column(db.String(20), default='amber')  # 'amber', 'flow_power', 'globird'
     flow_power_state = db.Column(db.String(10))  # NEM region: NSW1, VIC1, QLD1, SA1
@@ -146,6 +151,7 @@ class User(UserMixin, db.Model):
     energy_records = db.relationship('EnergyRecord', backref='user', lazy='dynamic')
     saved_tou_profiles = db.relationship('SavedTOUProfile', backref='user', lazy='dynamic', cascade='all, delete-orphan', foreign_keys='SavedTOUProfile.user_id')
     aemo_saved_tariff = db.relationship('SavedTOUProfile', foreign_keys=[aemo_saved_tariff_id], post_update=True)
+    manual_discharge_saved_tariff = db.relationship('SavedTOUProfile', foreign_keys=[manual_discharge_saved_tariff_id], post_update=True)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)

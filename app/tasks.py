@@ -631,6 +631,80 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
     return success_count, error_count
 
 
+def check_manual_discharge_expiry():
+    """
+    Check for expired manual discharge modes and auto-restore normal operation.
+
+    This should run every minute to catch expired discharge timers.
+    """
+    from app import db
+    from app.models import User, SavedTOUProfile
+    from app.api_clients import get_tesla_client
+    import json
+
+    logger.debug("Checking for expired manual discharge modes...")
+
+    now = datetime.now(timezone.utc)
+
+    # Find users with active discharge that has expired
+    expired_users = User.query.filter(
+        User.manual_discharge_active == True,
+        User.manual_discharge_expires_at <= now
+    ).all()
+
+    for user in expired_users:
+        logger.info(f"Manual discharge expired for {user.email} - auto-restoring normal operation")
+
+        try:
+            # Get Tesla client
+            tesla_client = get_tesla_client(user)
+            if not tesla_client:
+                logger.error(f"No Tesla client available for {user.email} - cannot auto-restore")
+                continue
+
+            # Check if user has Amber configured (should sync instead of restore static tariff)
+            use_amber_sync = bool(user.amber_api_token_encrypted and user.auto_sync_enabled)
+
+            if use_amber_sync:
+                # For Amber users, trigger a sync to get fresh prices
+                logger.info(f"Amber user {user.email} - triggering price sync for restore")
+                # The sync will happen on the next scheduled sync
+            else:
+                # Restore saved tariff
+                backup_profile = None
+                if user.manual_discharge_saved_tariff_id:
+                    backup_profile = SavedTOUProfile.query.get(user.manual_discharge_saved_tariff_id)
+                else:
+                    backup_profile = SavedTOUProfile.query.filter_by(
+                        user_id=user.id,
+                        is_default=True
+                    ).first()
+
+                if backup_profile:
+                    tariff = json.loads(backup_profile.tariff_json)
+                    result = tesla_client.set_tariff_rate(user.tesla_energy_site_id, tariff)
+
+                    if result:
+                        force_tariff_refresh(tesla_client, user.tesla_energy_site_id)
+                        logger.info(f"Restored tariff from profile {backup_profile.id} for {user.email}")
+                    else:
+                        logger.error(f"Failed to restore tariff for {user.email}")
+
+            # Clear discharge state
+            user.manual_discharge_active = False
+            user.manual_discharge_expires_at = None
+            db.session.commit()
+            logger.info(f"Manual discharge cleared for {user.email}")
+
+        except Exception as e:
+            logger.error(f"Error auto-restoring discharge for {user.email}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    if expired_users:
+        logger.info(f"Processed {len(expired_users)} expired discharge modes")
+
+
 def save_price_history_with_websocket_data(websocket_data):
     """
     EVENT-DRIVEN: Save price history with pre-fetched WebSocket data.
@@ -1418,6 +1492,153 @@ def create_spike_tariff(current_aemo_price_mwh):
         "sell_tariff": {
             "name": f"AEMO Spike Feed-in - ${current_aemo_price_mwh}/MWh",
             "utility": "AEMO",
+            "daily_charges": [{"name": "Charge"}],
+            "demand_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "Summer": {},
+                "Winter": {}
+            },
+            "energy_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "Summer": {"rates": sell_rates},
+                "Winter": {}
+            },
+            "seasons": {
+                "Summer": {
+                    "fromMonth": 1,
+                    "toMonth": 12,
+                    "fromDay": 1,
+                    "toDay": 31,
+                    "tou_periods": tou_periods
+                },
+                "Winter": {
+                    "fromDay": 0,
+                    "toDay": 0,
+                    "fromMonth": 0,
+                    "toMonth": 0,
+                    "tou_periods": {}
+                }
+            }
+        }
+    }
+
+    return tariff
+
+
+def create_discharge_tariff(duration_minutes=30):
+    """
+    Create a Tesla tariff optimized for forced battery discharge.
+
+    Uses very high sell rates ($10/kWh) to encourage maximum battery export
+    and moderate buy rates (30c/kWh) to discourage import.
+
+    Args:
+        duration_minutes: Duration of discharge window in minutes
+
+    Returns:
+        dict: Tesla tariff JSON with high sell rates for discharge
+    """
+    # Very high sell rate to encourage Powerwall to export all energy
+    sell_rate_discharge = 10.00  # $10/kWh - huge incentive to discharge
+    sell_rate_normal = 0.08      # 8c/kWh normal feed-in
+
+    # Buy rate to discourage import during discharge
+    buy_rate = 0.30  # 30c/kWh
+
+    logger.info(f"Creating discharge tariff: sell=${sell_rate_discharge}/kWh, buy=${buy_rate}/kWh for {duration_minutes} min")
+
+    # Build rates dictionaries for all 48 x 30-minute periods (24 hours)
+    buy_rates = {}
+    sell_rates = {}
+    tou_periods = {}
+
+    # Get current time to determine discharge window
+    now = datetime.now()
+    current_period_index = (now.hour * 2) + (1 if now.minute >= 30 else 0)
+
+    # Calculate how many 30-min periods the discharge covers
+    discharge_periods = (duration_minutes + 29) // 30  # Round up
+    discharge_start = current_period_index
+    discharge_end = (current_period_index + discharge_periods) % 48
+
+    logger.info(f"Discharge window: periods {discharge_start} to {discharge_end} (current time: {now.hour:02d}:{now.minute:02d})")
+
+    for i in range(48):
+        hour = i // 2
+        minute = 30 if i % 2 else 0
+        period_name = f"{hour:02d}:{minute:02d}"
+
+        # Check if this period is in the discharge window
+        is_discharge_period = False
+        if discharge_start < discharge_end:
+            is_discharge_period = discharge_start <= i < discharge_end
+        else:  # Wrap around midnight
+            is_discharge_period = i >= discharge_start or i < discharge_end
+
+        # Set rates based on whether we're in discharge window
+        if is_discharge_period:
+            buy_rates[period_name] = buy_rate
+            sell_rates[period_name] = sell_rate_discharge
+        else:
+            buy_rates[period_name] = buy_rate
+            sell_rates[period_name] = sell_rate_normal
+
+        # Calculate end time (30 minutes later)
+        if minute == 0:
+            to_hour = hour
+            to_minute = 30
+        else:  # minute == 30
+            to_hour = (hour + 1) % 24  # Wrap around at midnight
+            to_minute = 0
+
+        # TOU period definition for seasons
+        tou_periods[period_name] = {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": hour,
+                "fromMinute": minute,
+                "toHour": to_hour,
+                "toMinute": to_minute
+            }]
+        }
+
+    # Create Tesla tariff structure
+    tariff = {
+        "name": f"Force Discharge ({duration_minutes}min)",
+        "utility": "Tesla Sync",
+        "code": f"DISCHARGE_{duration_minutes}",
+        "currency": "AUD",
+        "daily_charges": [{"name": "Supply Charge"}],
+        "demand_charges": {
+            "ALL": {"rates": {"ALL": 0}},
+            "Summer": {},
+            "Winter": {}
+        },
+        "energy_charges": {
+            "ALL": {"rates": {"ALL": 0}},
+            "Summer": {"rates": buy_rates},
+            "Winter": {}
+        },
+        "seasons": {
+            "Summer": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "fromDay": 1,
+                "toDay": 31,
+                "tou_periods": tou_periods
+            },
+            "Winter": {
+                "fromDay": 0,
+                "toDay": 0,
+                "fromMonth": 0,
+                "toMonth": 0,
+                "tou_periods": {}
+            }
+        },
+        "sell_tariff": {
+            "name": f"Force Discharge Export ({duration_minutes}min)",
+            "utility": "Tesla Sync",
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},

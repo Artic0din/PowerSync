@@ -8,3 +8,38 @@ sync_now:
   name: Sync Now
   description: Immediately refresh data from Amber and Tesla
   fields: {}
+
+force_discharge:
+  name: Force Discharge
+  description: Force battery discharge mode - switches to autonomous with high export tariff to maximise export
+  fields:
+    duration:
+      name: Duration
+      description: Duration in minutes (15, 30, 45, 60, 75, 90, 105, or 120)
+      required: false
+      default: 30
+      example: 60
+      selector:
+        select:
+          options:
+            - label: "15 minutes"
+              value: 15
+            - label: "30 minutes"
+              value: 30
+            - label: "45 minutes"
+              value: 45
+            - label: "1 hour"
+              value: 60
+            - label: "1 hour 15 min"
+              value: 75
+            - label: "1 hour 30 min"
+              value: 90
+            - label: "1 hour 45 min"
+              value: 105
+            - label: "2 hours"
+              value: 120
+
+restore_normal:
+  name: Restore Normal
+  description: Restore normal operation - restores saved tariff or triggers Amber sync for Amber users
+  fields: {}
