@@ -587,6 +587,7 @@ class AmberTariffConverter:
         """
         Validate that the tariff complies with Tesla's restrictions:
         1. No negative prices
+        2. No gaps or overlaps in periods (must be exactly 24 hours)
 
         Note: The buy >= sell restriction has been removed by Tesla.
 
