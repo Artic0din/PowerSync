@@ -517,7 +517,8 @@ automation:
 A pre-built Lovelace dashboard is included for visualizing all Tesla Sync data.
 
 **Required HACS Frontend Cards:**
-- `mushroom` - Compact chips for gauges and controls
+- `mushroom` - Compact chips for controls
+- `card-mod` - Custom card styling
 - `power-flow-card-plus` - Real-time energy flow visualization
 - `apexcharts-card` - Advanced charting for price/energy history
 

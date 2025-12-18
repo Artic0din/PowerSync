@@ -4,50 +4,74 @@ views:
     path: energy
     icon: mdi:lightning-bolt
     cards:
-      # Gauges and Controls Row
-      # NOTE: Force discharge requires input_select helper. Create via Settings > Devices > Helpers > Dropdown
+      # Compact Gauges
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.amber_general_price
+            name: Import
+            unit: ¢/kWh
+            min: 0
+            max: 60
+            needle: true
+            severity:
+              green: 0
+              yellow: 25
+              red: 40
+            card_mod:
+              style: |
+                ha-card {
+                  height: 140px;
+                }
+          - type: gauge
+            entity: sensor.amber_feed_in_price
+            name: Feed-in
+            unit: ¢/kWh
+            min: -10
+            max: 30
+            needle: true
+            severity:
+              red: -10
+              yellow: 0
+              green: 5
+            card_mod:
+              style: |
+                ha-card {
+                  height: 140px;
+                }
+          - type: gauge
+            entity: sensor.battery_level
+            name: Battery
+            unit: '%'
+            min: 0
+            max: 100
+            needle: true
+            severity:
+              red: 0
+              yellow: 30
+              green: 60
+            card_mod:
+              style: |
+                ha-card {
+                  height: 140px;
+                }
+      # Force Discharge Controls
+      # NOTE: Requires input_select helper. Create via Settings > Devices > Helpers > Dropdown
       #       Name: force_discharge_duration | Options: 15, 30, 45, 60, 90, 120
       - type: custom:mushroom-chips-card
+        alignment: center
         chips:
-          - type: template
-            icon: mdi:cash-minus
-            icon_color: |-
-              {% set price = states('sensor.amber_general_price') | float %}
-              {% if price < 15 %}green{% elif price < 30 %}orange{% else %}red{% endif %}
-            content: "{{ states('sensor.amber_general_price') | round(1) }}¢"
-            tap_action:
-              action: more-info
-              entity: sensor.amber_general_price
-          - type: template
-            icon: mdi:cash-plus
-            icon_color: |-
-              {% set price = states('sensor.amber_feed_in_price') | float %}
-              {% if price < 0 %}red{% elif price < 10 %}orange{% else %}green{% endif %}
-            content: "{{ states('sensor.amber_feed_in_price') | round(1) }}¢"
-            tap_action:
-              action: more-info
-              entity: sensor.amber_feed_in_price
-          - type: template
-            icon: mdi:battery
-            icon_color: |-
-              {% set level = states('sensor.battery_level') | float %}
-              {% if level < 20 %}red{% elif level < 50 %}orange{% else %}green{% endif %}
-            content: "{{ states('sensor.battery_level') | round(0) }}%"
-            tap_action:
-              action: more-info
-              entity: sensor.battery_level
-          - type: spacer
           - type: template
             icon: mdi:timer-outline
             icon_color: orange
-            content: "{{ states('input_select.force_discharge_duration') }}m"
+            content: "{{ states('input_select.force_discharge_duration') }} min"
             tap_action:
               action: more-info
               entity: input_select.force_discharge_duration
           - type: template
             icon: mdi:battery-arrow-down
             icon_color: orange
-            content: Discharge
+            content: Force Discharge
             tap_action:
               action: call-service
               service: tesla_sync.force_discharge
@@ -58,7 +82,7 @@ views:
           - type: template
             icon: mdi:battery-sync
             icon_color: green
-            content: Restore
+            content: Restore Normal
             tap_action:
               action: call-service
               service: tesla_sync.restore_normal
