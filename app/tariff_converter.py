@@ -495,18 +495,13 @@ class AmberTariffConverter:
         # When Amber reports spikeStatus='potential' or 'spike' for a period, the Powerwall may see an
         # arbitrage opportunity (cheap now, expensive later) and charge from grid.
         # Solution: Override buy prices to max(all_sell_prices) + $1.00 for periods Amber marks as spikes.
-        #
-        # EXCEPTION: If a period's buy price is negative or very low (< $0.05/kWh), allow charging
-        # because getting paid to consume electricity is always profitable.
+        # Note: spikeStatus only applies to HIGH price events. Low/negative prices use descriptor='extremelyLow'.
         spike_protection_enabled = getattr(user, 'spike_protection_enabled', False) if user else False
         if spike_protection_enabled and spike_lookup:
             # Find maximum sell price across all periods (for override calculation)
             max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
             override_buy = max_sell_price + 1.00
-
-            NEGATIVE_PRICE_THRESHOLD = 0.05
             periods_overridden = 0
-            periods_skipped_low_price = 0
 
             # Build set of period keys that have spike status
             # spike_lookup keys are (date, hour, minute), we need to map to PERIOD_HH_MM
@@ -522,12 +517,6 @@ class AmberTariffConverter:
                 if period_key not in spike_period_keys:
                     continue
 
-                # Skip negative/very low prices - we want to allow charging during those
-                if buy_price < NEGATIVE_PRICE_THRESHOLD:
-                    periods_skipped_low_price += 1
-                    logger.info(f"{period_key}: Spike period but price ${buy_price:.4f} is low - allowing charging")
-                    continue
-
                 if override_buy > buy_price:
                     logger.info(f"{period_key}: SPIKE OVERRIDE - BUY ${buy_price:.4f} -> ${override_buy:.4f} (max_sell=${max_sell_price:.4f})")
                     general_prices[period_key] = override_buy
@@ -537,7 +526,6 @@ class AmberTariffConverter:
                 logger.warning(
                     f"⚡ SPIKE PROTECTION ACTIVE: Overriding {periods_overridden} spike periods to ${override_buy:.4f}/kWh "
                     f"(max_sell=${max_sell_price:.4f} + $1.00 margin)"
-                    f"{f' (skipped {periods_skipped_low_price} low-price periods)' if periods_skipped_low_price else ''}"
                 )
 
         # Apply artificial price increase during demand periods if enabled (ALPHA feature)

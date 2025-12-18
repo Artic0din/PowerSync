@@ -767,21 +767,14 @@ def _build_rolling_24h_tariff(
     #
     # Uses Amber's per-period spikeStatus from the API - only protects periods that
     # Amber identifies as having spike potential, not arbitrary time windows.
-    #
-    # EXCEPTION: If buy price is negative or very low (< $0.05/kWh), allow charging
-    # because getting paid to consume electricity is always profitable.
+    # Note: spikeStatus only applies to HIGH price events. Low/negative prices use descriptor='extremelyLow'.
     if spike_protection_enabled and spike_lookup:
-        # Threshold: Only apply spike protection if price > $0.05/kWh
-        # Below this, charging is essentially free or profitable
-        NEGATIVE_PRICE_THRESHOLD = 0.05
-
         # Find maximum sell price across all periods (for override calculation)
         max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
 
         # Override buy prices to max(sell) + $1.00
         override_buy = max_sell_price + 1.00
         periods_overridden = 0
-        periods_skipped_low_price = 0
 
         # Build set of period keys that have spike status
         # spike_lookup maps (date_str, hour, minute) -> spikeStatus
@@ -800,15 +793,6 @@ def _build_rolling_24h_tariff(
             if period_key not in spike_period_keys:
                 continue
 
-            # Skip negative/very low prices - we want to allow charging during those
-            if buy_price < NEGATIVE_PRICE_THRESHOLD:
-                periods_skipped_low_price += 1
-                _LOGGER.debug(
-                    "%s: Spike protection skipped - buy price $%.4f below threshold $%.2f",
-                    period_key, buy_price, NEGATIVE_PRICE_THRESHOLD
-                )
-                continue
-
             if override_buy > buy_price:
                 _LOGGER.info(
                     "%s: SPIKE OVERRIDE - BUY $%.4f -> $%.4f (max_sell=$%.4f)",
@@ -817,11 +801,10 @@ def _build_rolling_24h_tariff(
                 general_prices[period_key] = override_buy
                 periods_overridden += 1
 
-        skip_msg = f" (skipped {periods_skipped_low_price} low-price periods)" if periods_skipped_low_price else ""
         _LOGGER.warning(
             "SPIKE PROTECTION ACTIVE: Overriding %d buy prices to $%.4f/kWh "
-            "(max_sell=$%.4f + $1.00 margin)%s",
-            periods_overridden, override_buy, max_sell_price, skip_msg
+            "(max_sell=$%.4f + $1.00 margin)",
+            periods_overridden, override_buy, max_sell_price
         )
 
     return general_prices, feedin_prices

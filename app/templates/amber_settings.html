@@ -90,7 +90,6 @@
                         <p style="margin: 0.3em 0;">When Amber detects a price spike, the Powerwall may see an arbitrage opportunity and charge from grid. This defeats the purpose of avoiding high prices.</p>
                         <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
                             <li style="margin: 0.5em 0;"><strong>How it works:</strong> When Amber reports 'potential' or 'spike' status for a period, buy prices are overridden to max(sell) + $1/kWh - eliminating any arbitrage profit.</li>
-                            <li style="margin: 0.5em 0;"><strong>Exception:</strong> If import price is negative or very low (&lt;5c/kWh), charging is still allowed since you're being paid to consume.</li>
                             <li style="margin: 0.5em 0;"><strong>Per-period:</strong> Only affects periods that Amber identifies as having spike status, not a fixed time window.</li>
                         </ul>
                     </div>
