@@ -5,7 +5,8 @@ A pre-built Lovelace dashboard for visualizing your Tesla Powerwall and Amber El
 ## Preview
 
 The dashboard includes:
-- **Price Gauges** - Import price, feed-in price, and battery level
+- **Price Gauges** - Compact gauges for import price, feed-in price, and battery level
+- **Force Discharge Controls** - Duration selector, force discharge, and restore buttons
 - **Power Flow Card** - Real-time energy flow visualization
 - **Price Charts** - Amber prices and TOU schedule sent to Tesla
 - **Energy Charts** - Solar, Battery, Grid, and Home load graphs
@@ -15,14 +16,25 @@ The dashboard includes:
 
 ### Required HACS Integrations
 
-Install these from HACS before setting up the dashboard:
+Install these from HACS (Frontend) before setting up the dashboard:
 
-1. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all the price and energy charts
-2. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For the real-time energy flow visualization
+1. **[mushroom](https://github.com/piitaya/lovelace-mushroom)** - For the force discharge control chips
+2. **[card-mod](https://github.com/thomasloven/lovelace-card-mod)** - For compact gauge styling
+3. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For the real-time energy flow visualization
+4. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all the price and energy charts
 
-### Optional HACS Integrations
+### Required Helper Entity
 
-3. **[card-mod](https://github.com/thomasloven/lovelace-card-mod)** - For enhanced styling on the curtailment card (colored borders and backgrounds)
+The Force Discharge controls require an `input_select` helper:
+
+1. Go to **Settings → Devices & Services → Helpers**
+2. Click **+ Create Helper → Dropdown**
+3. Configure:
+   - Name: `force_discharge_duration`
+   - Options: `15`, `30`, `45`, `60`, `90`, `120`
+4. Click **Create**
+
+This creates entity `input_select.force_discharge_duration` used by the duration selector chip.
 
 ## Installation
 
@@ -81,12 +93,17 @@ Adjust the `min` and `max` values if your prices differ.
 ### Cards showing "Custom element doesn't exist"
 
 This means a required HACS card isn't installed. Install the missing integration from HACS:
+- `custom:mushroom-chips-card` → Install mushroom
 - `custom:apexcharts-card` → Install apexcharts-card
 - `custom:power-flow-card-plus` → Install power-flow-card-plus
 
-### Curtailment card not showing styled borders
+### Gauges or curtailment card not styled correctly
 
 Install the **card-mod** HACS integration for full styling support.
+
+### Force Discharge controls not working
+
+Ensure you've created the `input_select.force_discharge_duration` helper entity (see Requirements above).
 
 ### Charts showing no data
 
