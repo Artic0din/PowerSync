@@ -400,6 +400,18 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 logger.debug(f"Skipping user {user.email} - syncing disabled")
                 continue
 
+            # Skip users who have force discharge active - don't overwrite the discharge tariff
+            if getattr(user, 'manual_discharge_active', False):
+                expires_at = getattr(user, 'manual_discharge_expires_at', None)
+                if expires_at:
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    remaining = (expires_at - now).total_seconds() / 60
+                    logger.info(f"⏭️  Skipping user {user.email} - Force discharge active ({remaining:.1f} min remaining)")
+                else:
+                    logger.info(f"⏭️  Skipping user {user.email} - Force discharge active")
+                continue
+
             # Determine if user is using AEMO-only mode
             use_aemo = (
                 user.electricity_provider == 'flow_power' and

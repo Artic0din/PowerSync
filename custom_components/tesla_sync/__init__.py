@@ -1440,6 +1440,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 - 'websocket_update': Re-sync only if price differs (Stage 2)
                 - 'rest_api_check': Check REST API and re-sync if differs (Stage 3/4)
         """
+        # Skip TOU sync if force discharge is active - don't overwrite the discharge tariff
+        if force_discharge_state.get("active"):
+            expires_at = force_discharge_state.get("expires_at")
+            if expires_at:
+                from homeassistant.util import dt as dt_util
+                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
+                _LOGGER.info(f"⏭️  TOU sync skipped - Force discharge active ({remaining:.1f} min remaining)")
+            else:
+                _LOGGER.info("⏭️  TOU sync skipped - Force discharge active")
+            return
 
         _LOGGER.info("=== Starting TOU sync ===")
 
