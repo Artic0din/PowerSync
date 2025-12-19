@@ -1472,10 +1472,11 @@ def apply_export_boost(
     skipped_count = 0
     boosted_prices = []
 
-    # Process each season in the tariff
-    for season, season_data in tariff.get("energy_charges", {}).items():
-        sell_prices = season_data.get("sell_prices", {})
-        buy_prices = season_data.get("rates", {})
+    # Process sell prices in the sell_tariff structure
+    # Tesla tariff structure: sell prices are in sell_tariff.energy_charges.{season}.rates
+    sell_tariff = tariff.get("sell_tariff", {})
+    for season, season_data in sell_tariff.get("energy_charges", {}).items():
+        sell_prices = season_data.get("rates", {})
 
         for period in boost_periods:
             if period not in sell_prices:
