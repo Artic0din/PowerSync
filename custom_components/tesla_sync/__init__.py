@@ -89,6 +89,8 @@ from .const import (
     CONF_EXPORT_BOOST_THRESHOLD,
     # Spike protection configuration
     CONF_SPIKE_PROTECTION_ENABLED,
+    # Settled prices only mode
+    CONF_SETTLED_PRICES_ONLY,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
     DEFAULT_EXPORT_BOOST_THRESHOLD,
@@ -2773,10 +2775,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
         )
 
-        if auto_sync_enabled:
-            await handle_sync_initial_forecast()
-        else:
+        # Check if settled prices only mode is enabled (skip forecast sync)
+        settled_prices_only = entry.options.get(
+            CONF_SETTLED_PRICES_ONLY,
+            entry.data.get(CONF_SETTLED_PRICES_ONLY, False)
+        )
+
+        if not auto_sync_enabled:
             _LOGGER.debug("Auto-sync disabled, skipping initial forecast sync")
+        elif settled_prices_only:
+            _LOGGER.info("⏭️ Settled prices only mode - skipping initial forecast sync (waiting for actual prices at :35/:60)")
+        else:
+            await handle_sync_initial_forecast()
 
     # Stage 3 (35s): REST API fallback check if no WebSocket
     async def auto_sync_rest_api_35s(now):
@@ -2809,8 +2819,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_AUTO_SYNC_ENABLED,
         entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
     )
+    settled_prices_only = entry.options.get(
+        CONF_SETTLED_PRICES_ONLY,
+        entry.data.get(CONF_SETTLED_PRICES_ONLY, False)
+    )
 
-    if auto_sync_enabled and (amber_coordinator or aemo_sensor_coordinator):
+    if not auto_sync_enabled:
+        _LOGGER.info("Skipping initial TOU sync - auto-sync disabled")
+    elif settled_prices_only:
+        _LOGGER.info("Skipping initial TOU sync - settled prices only mode (will sync at :35/:60)")
+    elif amber_coordinator or aemo_sensor_coordinator:
         _LOGGER.info("Performing initial TOU sync")
         await handle_sync_initial_forecast()
     elif not amber_coordinator and not aemo_sensor_coordinator:

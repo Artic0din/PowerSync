@@ -72,6 +72,8 @@ from .const import (
     DEFAULT_EXPORT_BOOST_THRESHOLD,
     # Spike protection configuration
     CONF_SPIKE_PROTECTION_ENABLED,
+    # Settled prices only mode
+    CONF_SETTLED_PRICES_ONLY,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -910,6 +912,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SPIKE_PROTECTION_ENABLED,
                         default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_SETTLED_PRICES_ONLY,
+                        default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
                     ): bool,
                     vol.Optional(
                         CONF_EXPORT_BOOST_ENABLED,

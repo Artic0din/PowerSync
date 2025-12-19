@@ -419,6 +419,11 @@ DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0  # c/kWh (0 = always apply boost)
 # to max(sell_prices) + $1.00 to eliminate arbitrage opportunities
 CONF_SPIKE_PROTECTION_ENABLED = "spike_protection_enabled"
 
+# Settled Prices Only mode
+# Skips the initial forecast sync at :00 and only syncs when actual/settled prices
+# arrive via the Amber API at :35/:60 seconds into each 5-minute period
+CONF_SETTLED_PRICES_ONLY = "settled_prices_only"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"
