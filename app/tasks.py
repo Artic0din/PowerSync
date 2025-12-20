@@ -404,7 +404,9 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
             if getattr(user, 'manual_discharge_active', False):
                 expires_at = getattr(user, 'manual_discharge_expires_at', None)
                 if expires_at:
-                    from datetime import datetime, timezone
+                    # Make expires_at timezone-aware if it's naive (SQLite stores naive datetimes)
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
                     now = datetime.now(timezone.utc)
                     remaining = (expires_at - now).total_seconds() / 60
                     logger.info(f"⏭️  Skipping user {user.email} - Force discharge active ({remaining:.1f} min remaining)")
@@ -416,7 +418,9 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
             if getattr(user, 'manual_charge_active', False):
                 expires_at = getattr(user, 'manual_charge_expires_at', None)
                 if expires_at:
-                    from datetime import datetime, timezone
+                    # Make expires_at timezone-aware if it's naive (SQLite stores naive datetimes)
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
                     now = datetime.now(timezone.utc)
                     remaining = (expires_at - now).total_seconds() / 60
                     logger.info(f"⏭️  Skipping user {user.email} - Force charge active ({remaining:.1f} min remaining)")
@@ -674,7 +678,8 @@ def check_manual_discharge_expiry():
 
     logger.debug("Checking for expired manual discharge modes...")
 
-    now = datetime.now(timezone.utc)
+    # Use naive UTC for SQLite compatibility (SQLite stores naive datetimes)
+    now = datetime.utcnow()
 
     # Find users with active discharge that has expired
     expired_users = User.query.filter(
@@ -748,7 +753,8 @@ def check_manual_charge_expiry():
 
     logger.debug("Checking for expired manual charge modes...")
 
-    now = datetime.now(timezone.utc)
+    # Use naive UTC for SQLite compatibility (SQLite stores naive datetimes)
+    now = datetime.utcnow()
 
     # Find users with active charge that has expired
     expired_users = User.query.filter(
