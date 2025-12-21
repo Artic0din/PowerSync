@@ -202,6 +202,31 @@
                 </details>
             </fieldset>
 
+            <fieldset>
+                <legend>🧪 Alpha Options</legend>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Experimental features that may improve Powerwall responsiveness.
+                </p>
+
+                <label for="force_tariff_mode_toggle" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                    <input type="checkbox" id="force_tariff_mode_toggle" name="force_tariff_mode_toggle"
+                           {% if current_user.force_tariff_mode_toggle %}checked{% endif %}>
+                    <span>Force mode toggle after tariff sync</span>
+                </label>
+
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;">How does this work?</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(255, 193, 7, 0.1); border-radius: 0.3em; border-left: 3px solid #ffc107;">
+                        <p style="margin: 0.3em 0;">After uploading a new tariff, this briefly switches the Powerwall to self-consumption mode then back to Time-Based Control.</p>
+                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.5em 0;"><strong>Why:</strong> Forces the Powerwall to immediately recalculate its behavior based on the new tariff prices.</li>
+                            <li style="margin: 0.5em 0;"><strong>Without this:</strong> The Powerwall may take several minutes to recognize tariff changes.</li>
+                            <li style="margin: 0.5em 0;"><strong>Trade-off:</strong> May cause brief interruption (~5 seconds) to battery behavior during mode switch.</li>
+                        </ul>
+                    </div>
+                </details>
+            </fieldset>
+
             <div style="margin-top: 1.5em;">
                 {{ form.submit(style="width: 100%;") }}
             </div>

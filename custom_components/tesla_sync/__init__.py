@@ -92,6 +92,8 @@ from .const import (
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
     CONF_SETTLED_PRICES_ONLY,
+    # Alpha: Force tariff mode toggle
+    CONF_FORCE_TARIFF_MODE_TOGGLE,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
     DEFAULT_EXPORT_BOOST_THRESHOLD,
@@ -1804,6 +1806,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if success:
             _LOGGER.info(f"TOU schedule synced successfully ({sync_mode})")
+
+            # Alpha: Force mode toggle for faster Powerwall response
+            force_mode_toggle = entry.options.get(
+                CONF_FORCE_TARIFF_MODE_TOGGLE,
+                entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
+            )
+            if force_mode_toggle:
+                _LOGGER.info("🔄 Force mode toggle enabled - switching modes for faster PW response")
+                try:
+                    site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
+                    api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                    headers = {"Authorization": f"Bearer {current_token}", "Content-Type": "application/json"}
+                    session = async_get_clientsession(hass)
+
+                    # Switch to self_consumption
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "self_consumption"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.debug("Switched to self_consumption mode")
+
+                    # Wait briefly
+                    await asyncio.sleep(5)
+
+                    # Switch back to autonomous
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "autonomous"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("🔄 Force mode toggle complete - switched back to autonomous")
+                        else:
+                            _LOGGER.warning(f"Could not switch back to autonomous: {response.status}")
+                except Exception as e:
+                    _LOGGER.warning(f"Force mode toggle failed: {e}")
 
             # Record the synced price for smart price-change detection
             if general_price is not None or feedin_price is not None:

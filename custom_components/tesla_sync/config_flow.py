@@ -74,6 +74,8 @@ from .const import (
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
     CONF_SETTLED_PRICES_ONLY,
+    # Alpha: Force tariff mode toggle
+    CONF_FORCE_TARIFF_MODE_TOGGLE,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -916,6 +918,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SETTLED_PRICES_ONLY,
                         default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_FORCE_TARIFF_MODE_TOGGLE,
+                        default=self._get_option(CONF_FORCE_TARIFF_MODE_TOGGLE, False),
                     ): bool,
                     vol.Optional(
                         CONF_EXPORT_BOOST_ENABLED,

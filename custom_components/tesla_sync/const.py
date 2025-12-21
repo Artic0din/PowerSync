@@ -426,6 +426,11 @@ CONF_SPIKE_PROTECTION_ENABLED = "spike_protection_enabled"
 # arrive via the Amber API at :35/:60 seconds into each 5-minute period
 CONF_SETTLED_PRICES_ONLY = "settled_prices_only"
 
+# Alpha: Force tariff mode toggle
+# After uploading a tariff, briefly switch to self_consumption then back to autonomous
+# to force Powerwall to immediately recalculate behavior based on new prices
+CONF_FORCE_TARIFF_MODE_TOGGLE = "force_tariff_mode_toggle"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"
