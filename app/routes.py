@@ -1609,7 +1609,7 @@ def validate_token():
     return jsonify({
         'valid': True,
         'email': user.email,
-        'has_tesla_credentials': bool(user.teslemetry_api_token or user.fleet_api_refresh_token),
+        'has_tesla_credentials': bool(user.teslemetry_api_key_encrypted or user.fleet_api_refresh_token_encrypted),
         'has_site_id': bool(user.tesla_energy_site_id)
     })
 
