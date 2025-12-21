@@ -1589,6 +1589,31 @@ def amber_debug_forecast():
     return jsonify(summary)
 
 
+@bp.route('/api/validate-token')
+def validate_token():
+    """Validate API token without requiring Tesla credentials.
+
+    This endpoint only checks if the Bearer token is valid,
+    allowing mobile apps to verify authentication before making
+    other API calls that require Tesla credentials.
+    """
+    from app.route_helpers import get_api_user
+
+    user = get_api_user()
+    if not user:
+        return jsonify({
+            'valid': False,
+            'error': 'Invalid or missing API token'
+        }), 401
+
+    return jsonify({
+        'valid': True,
+        'email': user.email,
+        'has_tesla_credentials': bool(user.teslemetry_api_token or user.fleet_api_refresh_token),
+        'has_site_id': bool(user.tesla_energy_site_id)
+    })
+
+
 @bp.route('/api/tesla/status')
 @require_tesla_client
 @require_tesla_site_id
