@@ -1808,11 +1808,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"TOU schedule synced successfully ({sync_mode})")
 
             # Alpha: Force mode toggle for faster Powerwall response
+            # Only toggle on settled prices, not forecast (reduces unnecessary toggles)
             force_mode_toggle = entry.options.get(
                 CONF_FORCE_TARIFF_MODE_TOGGLE,
                 entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
             )
-            if force_mode_toggle:
+            if force_mode_toggle and sync_mode != 'initial_forecast':
                 _LOGGER.info("🔄 Force mode toggle enabled - switching modes for faster PW response")
                 try:
                     site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
