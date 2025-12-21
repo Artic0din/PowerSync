@@ -238,6 +238,9 @@
                         <button id="save-install-date-btn" class="secondary" style="font-size: 0.85em; padding: 0.4em 0.8em;">Save</button>
                         <span id="install-date-status" style="font-size: 0.85em;"></span>
                     </div>
+                    <p id="install-date-source" style="font-size: 0.75em; margin: 0.5em 0 0 0; color: var(--muted-color); display: none;">
+                        Auto-fetched from Tesla API
+                    </p>
                 </div>
                 <!-- Degradation Graph -->
                 <details id="degradation-graph-details" open>
@@ -2619,6 +2622,8 @@
                 // Set install date if available
                 if (data.installDate) {
                     document.getElementById('install-date-input').value = data.installDate;
+                    // Show "Auto-fetched" indicator
+                    document.getElementById('install-date-source').style.display = 'block';
                 }
 
                 // Update last updated timestamp

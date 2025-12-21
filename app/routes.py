@@ -4896,6 +4896,28 @@ def api_battery_health_get(api_user=None, **kwargs):
             'message': 'No battery health data available'
         })
 
+    # Auto-fetch install date from Tesla API if not already set
+    install_date = user.powerwall_install_date
+    if not install_date and user.tesla_energy_site_id:
+        try:
+            tesla_client = get_tesla_client(user)
+            if tesla_client:
+                history = tesla_client.get_calendar_history(
+                    user.tesla_energy_site_id,
+                    kind='energy',
+                    period='day'
+                )
+                if history and history.get('installation_date'):
+                    from datetime import date
+                    install_date_str = history['installation_date']
+                    # Parse ISO date format (e.g., "2024-01-15T00:00:00+10:00")
+                    install_date = date.fromisoformat(install_date_str[:10])
+                    user.powerwall_install_date = install_date
+                    db.session.commit()
+                    logger.info(f"Auto-fetched install date for {user.email}: {install_date}")
+        except Exception as e:
+            logger.warning(f"Could not auto-fetch install date: {e}")
+
     return jsonify({
         'has_data': True,
         'originalCapacityWh': user.battery_original_capacity_wh,
@@ -4903,7 +4925,7 @@ def api_battery_health_get(api_user=None, **kwargs):
         'degradationPercent': user.battery_degradation_percent,
         'batteryCount': user.battery_count,
         'updatedAt': user.battery_health_updated.isoformat() if user.battery_health_updated else None,
-        'installDate': user.powerwall_install_date.isoformat() if user.powerwall_install_date else None
+        'installDate': install_date.isoformat() if install_date else None
     })
 
 
