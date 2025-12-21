@@ -218,6 +218,32 @@ Amber export price: -3c/kWh
 - Enable/disable during Home Assistant integration options flow
 - Default: Disabled (opt-in feature)
 
+### Force Mode Toggle (Alpha)
+
+An experimental feature that forces the Powerwall to immediately recalculate its behavior after receiving new tariff prices.
+
+**The Problem:**
+After Tesla Sync uploads a new tariff, the Powerwall may take several minutes to recognize the price changes and adjust its charging/discharging behavior accordingly.
+
+**How It Works:**
+After a successful tariff sync, this feature briefly switches the Powerwall to self-consumption mode, waits 5 seconds, then switches back to Time-Based Control (autonomous mode). This mode toggle forces the Powerwall to immediately recalculate its optimal behavior based on the new prices.
+
+**Smart Timing:**
+The toggle only triggers when **settled/actual prices** are synced (at :35/:60 seconds), not on the initial forecast sync (at :00 seconds). This ensures:
+- Only one toggle per 5-minute interval (not two)
+- Powerwall recalculates using actual prices, not potentially different forecast prices
+- Reduced unnecessary mode switches
+
+**Trade-offs:**
+- May cause a brief interruption (~5 seconds) to battery behavior during the mode switch
+- Some users report faster Powerwall response; others see no difference
+- Experimental feature - results may vary
+
+**Configuration:**
+- Enable/disable in Amber Settings → Alpha Options (Flask web interface)
+- Enable/disable during Home Assistant integration options flow
+- Default: Disabled (opt-in feature)
+
 ### Flow Power + AEMO Wholesale Pricing
 
 Full support for **Flow Power** and other wholesale electricity retailers that pass through AEMO NEM spot prices.
