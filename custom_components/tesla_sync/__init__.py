@@ -2412,6 +2412,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
 
         duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
+        # Convert to int if string (from HA service selector)
+        try:
+            duration = int(duration)
+        except (ValueError, TypeError):
+            duration = DEFAULT_DISCHARGE_DURATION
         if duration not in DISCHARGE_DURATIONS:
             duration = DEFAULT_DISCHARGE_DURATION
 
@@ -2665,6 +2670,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
 
         duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
+        # Convert to int if string (from HA service selector)
+        try:
+            duration = int(duration)
+        except (ValueError, TypeError):
+            duration = DEFAULT_DISCHARGE_DURATION
         if duration not in DISCHARGE_DURATIONS:
             duration = DEFAULT_DISCHARGE_DURATION
 
