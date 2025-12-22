@@ -764,8 +764,6 @@ def create_app(config_class=Config):
         with app.app_context():
             try:
                 from app.models import User
-                import os
-                import time
 
                 tunnel_lock_file = '/tmp/cloudflared_tunnel.lock'
                 tunnel_started_recently = False
