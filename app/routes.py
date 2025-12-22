@@ -3082,6 +3082,12 @@ def api_force_discharge(tesla_client):
         data = request.get_json() or {}
         duration_minutes = data.get('duration_minutes', 30)
 
+        # Convert to int if string (for API compatibility)
+        try:
+            duration_minutes = int(duration_minutes)
+        except (ValueError, TypeError):
+            duration_minutes = 30
+
         # Validate duration (must be in 15-minute intervals, max 2 hours)
         valid_durations = [15, 30, 45, 60, 75, 90, 105, 120]
         if duration_minutes not in valid_durations:
@@ -3213,6 +3219,12 @@ def api_force_charge(tesla_client):
         # Get duration from request (default 30 minutes)
         data = request.get_json() or {}
         duration_minutes = data.get('duration_minutes', 30)
+
+        # Convert to int if string (for API compatibility)
+        try:
+            duration_minutes = int(duration_minutes)
+        except (ValueError, TypeError):
+            duration_minutes = 30
 
         # Validate duration (must be in 15-minute intervals, max 2 hours)
         valid_durations = [15, 30, 45, 60, 75, 90, 105, 120]
