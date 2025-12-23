@@ -8,32 +8,32 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.amber_general_price
+            entity: sensor.current_import_price
             name: Import
-            unit: ¢/kWh
+            unit: $/kWh
             min: 0
-            max: 60
+            max: 0.60
             needle: true
             severity:
               green: 0
-              yellow: 25
-              red: 40
+              yellow: 0.25
+              red: 0.40
             card_mod:
               style: |
                 ha-card {
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.amber_feed_in_price
-            name: Feed-in
-            unit: ¢/kWh
-            min: -10
-            max: 30
+            entity: sensor.current_export_price
+            name: Export
+            unit: $/kWh
+            min: -0.10
+            max: 0.30
             needle: true
             severity:
-              red: -10
+              red: -0.10
               yellow: 0
-              green: 5
+              green: 0.05
             card_mod:
               style: |
                 ha-card {
@@ -142,7 +142,7 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Amber Prices - 24 Hours
+          title: Electricity Prices - 24 Hours
           show_states: false
         graph_span: 24h
         span:
@@ -158,7 +158,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.amber_general_price
+          - entity: sensor.current_import_price
             name: Import
             type: line
             color: '#FF9800'
@@ -167,8 +167,8 @@ views:
             group_by:
               func: avg
               duration: 5min
-          - entity: sensor.amber_feed_in_price
-            name: Feed-in
+          - entity: sensor.current_export_price
+            name: Export
             type: line
             color: '#4CAF50'
             yaxis_id: price
