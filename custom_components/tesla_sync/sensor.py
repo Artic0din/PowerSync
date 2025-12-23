@@ -895,15 +895,15 @@ class BatteryHealthSensor(SensorEntity):
     This sensor receives data from the sync_battery_health service call
     made by the mobile app after scanning the Powerwall via TEDAPI.
 
-    Shows battery degradation percentage as the main state, with full
-    capacity data available in attributes.
+    Shows battery health as a percentage of original capacity.
+    Can be > 100% if batteries have more capacity than rated spec.
+    Individual battery data is available in attributes.
     """
 
     _attr_has_entity_name = True
     _attr_name = "Battery Health"
     _attr_icon = "mdi:battery-heart-variant"
     _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
@@ -920,6 +920,7 @@ class BatteryHealthSensor(SensorEntity):
         self._degradation_percent: float | None = None
         self._battery_count: int | None = None
         self._scanned_at: str | None = None
+        self._individual_batteries: list | None = None
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to battery health updates when added to hass."""
@@ -941,7 +942,8 @@ class BatteryHealthSensor(SensorEntity):
             self._degradation_percent = stored_health.get("degradation_percent")
             self._battery_count = stored_health.get("battery_count")
             self._scanned_at = stored_health.get("scanned_at")
-            _LOGGER.info(f"Restored battery health from storage: {self._degradation_percent}% degradation")
+            self._individual_batteries = stored_health.get("individual_batteries")
+            _LOGGER.info(f"Restored battery health from storage: {self._calculate_health_percent()}% health")
 
     @callback
     def _handle_battery_health_update(self, data: dict[str, Any]) -> None:
@@ -951,20 +953,27 @@ class BatteryHealthSensor(SensorEntity):
         self._degradation_percent = data.get("degradation_percent")
         self._battery_count = data.get("battery_count")
         self._scanned_at = data.get("scanned_at")
+        self._individual_batteries = data.get("individual_batteries")
 
         _LOGGER.info(
-            f"Battery health updated: {self._degradation_percent}% degradation, "
+            f"Battery health updated: {self._calculate_health_percent()}% health, "
             f"{self._current_capacity_wh}Wh / {self._original_capacity_wh}Wh"
         )
         self.async_write_ha_state()
 
+    def _calculate_health_percent(self) -> float | None:
+        """Calculate health as percentage of original capacity."""
+        if self._current_capacity_wh is not None and self._original_capacity_wh is not None and self._original_capacity_wh > 0:
+            return round((self._current_capacity_wh / self._original_capacity_wh) * 100, 1)
+        return None
+
     @property
     def native_value(self) -> float | None:
-        """Return the battery health as remaining capacity percentage."""
-        if self._degradation_percent is not None:
-            # Return health as 100% - degradation (e.g., 5% degradation = 95% health)
-            return round(100 - self._degradation_percent, 1)
-        return None
+        """Return the battery health as percentage of original capacity.
+
+        Can be > 100% if batteries have more capacity than rated spec.
+        """
+        return self._calculate_health_percent()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -984,13 +993,32 @@ class BatteryHealthSensor(SensorEntity):
 
         if self._battery_count is not None:
             attributes["battery_count"] = self._battery_count
-            # Calculate per-unit capacity
-            if self._original_capacity_wh is not None and self._battery_count > 0:
-                per_unit_wh = self._original_capacity_wh / self._battery_count
-                attributes["per_unit_capacity_kwh"] = round(per_unit_wh / 1000, 2)
 
         if self._scanned_at is not None:
             attributes["last_scan"] = self._scanned_at
+
+        # Add individual battery data if available
+        if self._individual_batteries:
+            for i, battery in enumerate(self._individual_batteries):
+                prefix = f"battery_{i + 1}"
+                if isinstance(battery, dict):
+                    if battery.get("din"):
+                        attributes[f"{prefix}_din"] = battery.get("din")
+                    if battery.get("serialNumber"):
+                        attributes[f"{prefix}_serial"] = battery.get("serialNumber")
+                    if battery.get("nominalFullPackEnergyWh") is not None:
+                        orig_wh = battery.get("nominalFullPackEnergyWh")
+                        attributes[f"{prefix}_original_kwh"] = round(orig_wh / 1000, 2)
+                    if battery.get("nominalEnergyRemainingWh") is not None:
+                        curr_wh = battery.get("nominalEnergyRemainingWh")
+                        attributes[f"{prefix}_current_kwh"] = round(curr_wh / 1000, 2)
+                        # Calculate individual battery health
+                        orig_wh = battery.get("nominalFullPackEnergyWh", 0)
+                        if orig_wh > 0:
+                            health = round((curr_wh / orig_wh) * 100, 1)
+                            attributes[f"{prefix}_health_percent"] = health
+                    if battery.get("isExpansion") is not None:
+                        attributes[f"{prefix}_is_expansion"] = battery.get("isExpansion")
 
         attributes["source"] = "mobile_app_tedapi"
 

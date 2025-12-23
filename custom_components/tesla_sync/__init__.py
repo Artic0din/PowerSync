@@ -3203,15 +3203,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         degradation_percent = call.data.get("degradation_percent")
         battery_count = call.data.get("battery_count", 1)
         scanned_at = call.data.get("scanned_at", datetime.now().isoformat())
+        individual_batteries = call.data.get("individual_batteries")  # Optional per-battery data
 
         # Validate required fields
         if original_capacity_wh is None or current_capacity_wh is None or degradation_percent is None:
             _LOGGER.error("Missing required battery health fields")
             return {"success": False, "error": "Missing required fields: original_capacity_wh, current_capacity_wh, degradation_percent"}
 
+        # Calculate health percentage (can be > 100% if batteries have more capacity than spec)
+        health_percent = round((current_capacity_wh / original_capacity_wh) * 100, 1) if original_capacity_wh > 0 else 0
+
         _LOGGER.info(
-            f"🔋 Battery health received: {degradation_percent}% degradation, "
-            f"{current_capacity_wh}Wh / {original_capacity_wh}Wh ({battery_count} units)"
+            f"🔋 Battery health received: {health_percent}% health ({current_capacity_wh}Wh / {original_capacity_wh}Wh, {battery_count} units)"
         )
 
         # Build battery health data
@@ -3222,6 +3225,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "battery_count": battery_count,
             "scanned_at": scanned_at,
         }
+
+        # Include individual battery data if provided
+        if individual_batteries:
+            battery_health_data["individual_batteries"] = individual_batteries
+            _LOGGER.info(f"  → Individual batteries: {len(individual_batteries)} units")
 
         # Store in hass.data for sensor to read on startup
         hass.data[DOMAIN][entry.entry_id]["battery_health"] = battery_health_data
@@ -3243,7 +3251,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return {
             "success": True,
-            "message": f"Battery health synced: {degradation_percent}% degradation",
+            "message": f"Battery health synced: {health_percent}% health",
             "data": battery_health_data,
         }
 
