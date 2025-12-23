@@ -16,6 +16,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.components.http import HomeAssistantView
+from aiohttp import web
 
 from .const import (
     DOMAIN,
@@ -1092,6 +1094,88 @@ def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | 
         return entry.data[CONF_TESLEMETRY_API_TOKEN], TESLA_PROVIDER_TESLEMETRY
 
     return None, TESLA_PROVIDER_TESLEMETRY
+
+
+class CalendarHistoryView(HomeAssistantView):
+    """HTTP view to get calendar history for mobile app."""
+
+    url = "/api/tesla_sync/calendar_history"
+    name = "api:tesla_sync:calendar_history"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for calendar history."""
+        # Get period from query params (default: day)
+        period = request.query.get("period", "day")
+
+        # Validate period
+        valid_periods = ["day", "week", "month", "year"]
+        if period not in valid_periods:
+            return web.json_response(
+                {"success": False, "error": f"Invalid period. Must be one of: {valid_periods}"},
+                status=400
+            )
+
+        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}")
+
+        # Find the tesla_sync entry and coordinator
+        tesla_coordinator = None
+        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict) and "tesla_coordinator" in data:
+                tesla_coordinator = data["tesla_coordinator"]
+                break
+
+        if not tesla_coordinator:
+            _LOGGER.error("Tesla coordinator not available for HTTP endpoint")
+            return web.json_response(
+                {"success": False, "error": "Tesla coordinator not available"},
+                status=503
+            )
+
+        # Fetch calendar history
+        try:
+            history = await tesla_coordinator.async_get_calendar_history(period=period)
+        except Exception as e:
+            _LOGGER.error(f"Error fetching calendar history: {e}")
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+        if not history:
+            _LOGGER.error("Failed to fetch calendar history")
+            return web.json_response(
+                {"success": False, "error": "Failed to fetch calendar history from Tesla API"},
+                status=500
+            )
+
+        # Transform time_series to match mobile app format
+        time_series = []
+        for entry_data in history.get("time_series", []):
+            time_series.append({
+                "timestamp": entry_data.get("timestamp", ""),
+                "solar_generation": entry_data.get("solar_energy_exported", 0),
+                "battery_discharge": entry_data.get("battery_energy_exported", 0),
+                "battery_charge": entry_data.get("battery_energy_imported", 0),
+                "grid_import": entry_data.get("grid_energy_imported", 0),
+                "grid_export": entry_data.get("grid_energy_exported_from_solar", 0) + entry_data.get("grid_energy_exported_from_battery", 0),
+                "home_consumption": entry_data.get("consumer_energy_imported_from_grid", 0) + entry_data.get("consumer_energy_imported_from_solar", 0) + entry_data.get("consumer_energy_imported_from_battery", 0),
+            })
+
+        result = {
+            "success": True,
+            "period": period,
+            "time_series": time_series,
+            "serial_number": history.get("serial_number"),
+            "installation_date": history.get("installation_date"),
+        }
+
+        _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
+        return web.json_response(result)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -3191,6 +3275,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     _LOGGER.info("📊 Calendar history service registered")
+
+    # Register HTTP endpoint for calendar history (REST API alternative)
+    hass.http.register_view(CalendarHistoryView(hass))
+    _LOGGER.info("📊 Calendar history HTTP endpoint registered at /api/tesla_sync/calendar_history")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
