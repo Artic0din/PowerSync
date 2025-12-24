@@ -1008,15 +1008,20 @@ class BatteryHealthSensor(SensorEntity):
                         attributes[f"{prefix}_serial"] = battery.get("serialNumber")
                     if battery.get("nominalFullPackEnergyWh") is not None:
                         orig_wh = battery.get("nominalFullPackEnergyWh")
+                        # Actual measured usable capacity of the battery
                         attributes[f"{prefix}_original_kwh"] = round(orig_wh / 1000, 2)
                     if battery.get("nominalEnergyRemainingWh") is not None:
                         curr_wh = battery.get("nominalEnergyRemainingWh")
+                        # Current charge level (SOC)
                         attributes[f"{prefix}_current_kwh"] = round(curr_wh / 1000, 2)
-                        # Calculate individual battery health
-                        orig_wh = battery.get("nominalFullPackEnergyWh", 0)
-                        if orig_wh > 0:
-                            health = round((curr_wh / orig_wh) * 100, 1)
-                            attributes[f"{prefix}_health_percent"] = health
+                    # Calculate individual battery health as % of rated 13.5 kWh capacity
+                    # nominalFullPackEnergyWh = actual measured capacity (can be > rated for new batteries)
+                    # Health = actual_capacity / rated_capacity * 100
+                    orig_wh = battery.get("nominalFullPackEnergyWh", 0)
+                    if orig_wh > 0:
+                        RATED_CAPACITY_WH = 13500  # 13.5 kWh per Powerwall
+                        health = round((orig_wh / RATED_CAPACITY_WH) * 100, 1)
+                        attributes[f"{prefix}_health_percent"] = health
                     if battery.get("isExpansion") is not None:
                         attributes[f"{prefix}_is_expansion"] = battery.get("isExpansion")
 
