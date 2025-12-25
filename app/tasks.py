@@ -641,21 +641,30 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 # Only toggle on settled prices, not forecast (reduces unnecessary toggles)
                 if getattr(user, 'force_tariff_mode_toggle', False):
                     if sync_mode != 'initial_forecast':
-                        # Check if Powerwall is already exporting or charging - if so, skip the toggle
-                        # (no need to force refresh if already doing what we want for this 5-min block)
-                        site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
-                        grid_power = site_status.get('grid_power', 0) if site_status else 0
-                        battery_power = site_status.get('battery_power', 0) if site_status else 0
+                        # First check current operation mode - respect user's manual self_consumption setting
+                        current_mode = tesla_client.get_operation_mode(user.tesla_energy_site_id)
 
-                        if grid_power < 0:
-                            # Negative grid_power means exporting - already doing what we want
-                            logger.info(f"⏭️  Skipping force toggle for {user.email} - already exporting ({abs(grid_power):.0f}W to grid)")
-                        elif battery_power < 0:
-                            # Negative battery_power means charging - already doing what we want
-                            logger.info(f"⏭️  Skipping force toggle for {user.email} - battery already charging ({abs(battery_power):.0f}W)")
+                        if current_mode == 'self_consumption':
+                            # User has manually set self_consumption mode - don't override their choice
+                            logger.info(f"⏭️  Skipping force toggle for {user.email} - already in self_consumption mode (respecting user setting)")
+                        elif current_mode != 'autonomous':
+                            # Not in TOU mode (e.g., backup mode) - don't toggle
+                            logger.info(f"⏭️  Skipping force toggle for {user.email} - not in TOU mode (current: {current_mode})")
                         else:
-                            logger.info(f"🔄 Force mode toggle for {user.email} - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
-                            force_tariff_refresh(tesla_client, user.tesla_energy_site_id, wait_seconds=5)
+                            # In autonomous (TOU) mode - check if already optimizing before toggling
+                            site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
+                            grid_power = site_status.get('grid_power', 0) if site_status else 0
+                            battery_power = site_status.get('battery_power', 0) if site_status else 0
+
+                            if grid_power < 0:
+                                # Negative grid_power means exporting - already doing what we want
+                                logger.info(f"⏭️  Skipping force toggle for {user.email} - already exporting ({abs(grid_power):.0f}W to grid)")
+                            elif battery_power < 0:
+                                # Negative battery_power means charging - already doing what we want
+                                logger.info(f"⏭️  Skipping force toggle for {user.email} - battery already charging ({abs(battery_power):.0f}W)")
+                            else:
+                                logger.info(f"🔄 Force mode toggle for {user.email} - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+                                force_tariff_refresh(tesla_client, user.tesla_energy_site_id, wait_seconds=5)
                     else:
                         logger.debug(f"Skipping force toggle on forecast sync for {user.email} (waiting for settled prices)")
 
