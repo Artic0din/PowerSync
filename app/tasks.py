@@ -51,6 +51,7 @@ class SyncCoordinator:
         self._initial_sync_done = False  # Has initial forecast sync happened this period?
         self._last_synced_prices = {}  # {user_id: {'general': price, 'feedIn': price}}
         self._websocket_received = False  # Has WebSocket delivered this period?
+        self._baseline_operation_modes = {}  # {user_id: 'autonomous'|'self_consumption'|etc} - mode at interval start
 
     def _get_current_period(self):
         """Get the current 5-minute period timestamp."""
@@ -67,6 +68,7 @@ class SyncCoordinator:
             self._initial_sync_done = False
             self._websocket_received = False
             self._last_synced_prices = {}
+            self._baseline_operation_modes = {}  # Clear baseline modes for new period
             self._websocket_event.clear()
             self._websocket_data = None
             return True
@@ -194,6 +196,36 @@ class SyncCoordinator:
         with self._lock:
             self._reset_if_new_period()
             return self._initial_sync_done
+
+    def set_baseline_mode(self, user_id, mode):
+        """
+        Store the operation mode at the start of this interval for a user.
+
+        This is used to determine if the user manually set self_consumption mode
+        (detected at interval start) vs a failed toggle leaving it in self_consumption.
+
+        Args:
+            user_id: The user's ID
+            mode: The operation mode ('autonomous', 'self_consumption', 'backup', etc.)
+        """
+        with self._lock:
+            self._reset_if_new_period()
+            self._baseline_operation_modes[user_id] = mode
+            logger.debug(f"Stored baseline operation mode for user {user_id}: {mode}")
+
+    def get_baseline_mode(self, user_id):
+        """
+        Get the operation mode that was recorded at the start of this interval.
+
+        Args:
+            user_id: The user's ID
+
+        Returns:
+            str: The baseline mode, or None if not recorded
+        """
+        with self._lock:
+            self._reset_if_new_period()
+            return self._baseline_operation_modes.get(user_id)
 
 
 # Global sync coordinator
@@ -473,6 +505,17 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 error_count += 1
                 continue
 
+            # Capture baseline operation mode at start of interval (Stage 1 only)
+            # This is used to detect if user manually set self_consumption vs failed toggle
+            if sync_mode == 'initial_forecast' and getattr(user, 'force_tariff_mode_toggle', False):
+                try:
+                    baseline_mode = tesla_client.get_operation_mode(user.tesla_energy_site_id)
+                    if baseline_mode:
+                        _sync_coordinator.set_baseline_mode(user.id, baseline_mode)
+                        logger.info(f"📍 Captured baseline operation mode for {user.email}: {baseline_mode}")
+                except Exception as e:
+                    logger.warning(f"Failed to capture baseline mode for {user.email}: {e}")
+
             # Step 1: Get current interval price from WebSocket (real-time) or REST API fallback
             # WebSocket is PRIMARY source for current price, REST API is fallback if timeout
             # Note: AEMO mode doesn't have WebSocket - uses forecast data only
@@ -641,30 +684,39 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 # Only toggle on settled prices, not forecast (reduces unnecessary toggles)
                 if getattr(user, 'force_tariff_mode_toggle', False):
                     if sync_mode != 'initial_forecast':
-                        # First check current operation mode - respect user's manual self_consumption setting
-                        current_mode = tesla_client.get_operation_mode(user.tesla_energy_site_id)
+                        # Check BASELINE mode (captured at interval start) to respect user's manual self_consumption
+                        # This distinguishes user-set self_consumption from failed-toggle self_consumption
+                        baseline_mode = _sync_coordinator.get_baseline_mode(user.id)
 
-                        if current_mode == 'self_consumption':
-                            # User has manually set self_consumption mode - don't override their choice
-                            logger.info(f"⏭️  Skipping force toggle for {user.email} - already in self_consumption mode (respecting user setting)")
-                        elif current_mode != 'autonomous':
-                            # Not in TOU mode (e.g., backup mode) - don't toggle
-                            logger.info(f"⏭️  Skipping force toggle for {user.email} - not in TOU mode (current: {current_mode})")
+                        if baseline_mode == 'self_consumption':
+                            # User had self_consumption at interval start - respect their manual setting
+                            logger.info(f"⏭️  Skipping force toggle for {user.email} - baseline was self_consumption (respecting user setting)")
+                        elif baseline_mode and baseline_mode != 'autonomous':
+                            # Not in TOU mode at interval start (e.g., backup mode) - don't toggle
+                            logger.info(f"⏭️  Skipping force toggle for {user.email} - baseline not TOU mode (was: {baseline_mode})")
                         else:
-                            # In autonomous (TOU) mode - check if already optimizing before toggling
-                            site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
-                            grid_power = site_status.get('grid_power', 0) if site_status else 0
-                            battery_power = site_status.get('battery_power', 0) if site_status else 0
+                            # Baseline was autonomous (TOU) or unknown - proceed with toggle
+                            # Get current mode to verify we're still in a good state
+                            current_mode = tesla_client.get_operation_mode(user.tesla_energy_site_id)
 
-                            if grid_power < 0:
-                                # Negative grid_power means exporting - already doing what we want
-                                logger.info(f"⏭️  Skipping force toggle for {user.email} - already exporting ({abs(grid_power):.0f}W to grid)")
-                            elif battery_power < 0:
-                                # Negative battery_power means charging - already doing what we want
-                                logger.info(f"⏭️  Skipping force toggle for {user.email} - battery already charging ({abs(battery_power):.0f}W)")
+                            if current_mode and current_mode not in ['autonomous', 'self_consumption']:
+                                # Currently in backup or other mode - don't toggle
+                                logger.info(f"⏭️  Skipping force toggle for {user.email} - current mode is {current_mode}")
                             else:
-                                logger.info(f"🔄 Force mode toggle for {user.email} - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
-                                force_tariff_refresh(tesla_client, user.tesla_energy_site_id, wait_seconds=5)
+                                # Check if already optimizing before toggling
+                                site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
+                                grid_power = site_status.get('grid_power', 0) if site_status else 0
+                                battery_power = site_status.get('battery_power', 0) if site_status else 0
+
+                                if grid_power < 0:
+                                    # Negative grid_power means exporting - already doing what we want
+                                    logger.info(f"⏭️  Skipping force toggle for {user.email} - already exporting ({abs(grid_power):.0f}W to grid)")
+                                elif battery_power < 0:
+                                    # Negative battery_power means charging - already doing what we want
+                                    logger.info(f"⏭️  Skipping force toggle for {user.email} - battery already charging ({abs(battery_power):.0f}W)")
+                                else:
+                                    logger.info(f"🔄 Force mode toggle for {user.email} - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+                                    force_tariff_refresh(tesla_client, user.tesla_energy_site_id, wait_seconds=5)
                     else:
                         logger.debug(f"Skipping force toggle on forecast sync for {user.email} (waiting for settled prices)")
 
@@ -1488,7 +1540,7 @@ def monitor_aemo_prices():
     return success_count, error_count
 
 
-def force_tariff_refresh(tesla_client, site_id, wait_seconds=30):
+def force_tariff_refresh(tesla_client, site_id, wait_seconds=30, max_retries=2):
     """
     Force Powerwall to immediately apply new tariff by toggling operation mode
 
@@ -1500,6 +1552,7 @@ def force_tariff_refresh(tesla_client, site_id, wait_seconds=30):
         site_id: Energy site ID
         wait_seconds: Seconds to wait in self_consumption mode (default: 30)
                      Use 60 for restore operations, 30 for spike activation
+        max_retries: Number of retry attempts if mode switch verification fails (default: 2)
 
     Returns:
         bool: True if successful, False otherwise
@@ -1522,16 +1575,32 @@ def force_tariff_refresh(tesla_client, site_id, wait_seconds=30):
         logger.info(f"Waiting {wait_seconds} seconds for Tesla to detect mode change...")
         time.sleep(wait_seconds)
 
-        # Step 3: Switch back to autonomous mode (TOU optimization)
-        logger.info("Switching back to autonomous mode...")
-        result2 = tesla_client.set_operation_mode(site_id, 'autonomous')
+        # Step 3: Switch back to autonomous mode with verification and retry
+        for attempt in range(max_retries + 1):
+            logger.info(f"Switching back to autonomous mode... (attempt {attempt + 1}/{max_retries + 1})")
+            result2 = tesla_client.set_operation_mode(site_id, 'autonomous')
 
-        if not result2:
-            logger.warning("Failed to switch back to autonomous mode")
-            return False
+            if not result2:
+                logger.warning(f"Failed to switch back to autonomous mode (attempt {attempt + 1})")
+                if attempt < max_retries:
+                    time.sleep(2)  # Short wait before retry
+                continue
 
-        logger.info("✅ Successfully toggled operation mode - tariff should apply immediately")
-        return True
+            # Step 4: Verify the mode actually changed
+            time.sleep(2)  # Give Tesla a moment to process
+            current_mode = tesla_client.get_operation_mode(site_id)
+
+            if current_mode == 'autonomous':
+                logger.info("✅ Successfully toggled operation mode - verified autonomous")
+                return True
+            else:
+                logger.warning(f"⚠️ Mode verification failed: expected 'autonomous', got '{current_mode}' (attempt {attempt + 1})")
+                if attempt < max_retries:
+                    time.sleep(2)  # Short wait before retry
+
+        # All retries exhausted
+        logger.error(f"❌ Failed to switch back to autonomous mode after {max_retries + 1} attempts - PW may be stuck in self_consumption!")
+        return False
 
     except Exception as e:
         logger.error(f"Error forcing tariff refresh: {e}")
