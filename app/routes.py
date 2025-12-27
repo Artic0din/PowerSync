@@ -3566,7 +3566,8 @@ def api_discharge_status():
         charge_remaining_minutes = max(0, int(charge_remaining_seconds / 60))
 
     return jsonify({
-        'active': user.manual_discharge_active,
+        'active': user.manual_discharge_active,  # Legacy key for backwards compatibility
+        'discharge_active': user.manual_discharge_active,  # New key matching mobile app expectation
         'expires_at': user.manual_discharge_expires_at.isoformat() + 'Z' if user.manual_discharge_expires_at else None,
         'remaining_minutes': remaining_minutes,
         'in_spike_mode': user.aemo_in_spike_mode,
