@@ -384,6 +384,10 @@ SERVICE_FORCE_CHARGE = "force_charge"
 SERVICE_RESTORE_NORMAL = "restore_normal"
 SERVICE_GET_CALENDAR_HISTORY = "get_calendar_history"
 SERVICE_SYNC_BATTERY_HEALTH = "sync_battery_health"
+SERVICE_SET_BACKUP_RESERVE = "set_backup_reserve"
+SERVICE_SET_OPERATION_MODE = "set_operation_mode"
+SERVICE_SET_GRID_EXPORT = "set_grid_export"
+SERVICE_SET_GRID_CHARGING = "set_grid_charging"
 
 # Manual discharge/charge duration options (minutes)
 DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120]

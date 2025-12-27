@@ -48,6 +48,10 @@ from .const import (
     SERVICE_RESTORE_NORMAL,
     SERVICE_GET_CALENDAR_HISTORY,
     SERVICE_SYNC_BATTERY_HEALTH,
+    SERVICE_SET_BACKUP_RESERVE,
+    SERVICE_SET_OPERATION_MODE,
+    SERVICE_SET_GRID_EXPORT,
+    SERVICE_SET_GRID_CHARGING,
     DISCHARGE_DURATIONS,
     DEFAULT_DISCHARGE_DURATION,
     TESLEMETRY_API_BASE_URL,
@@ -3226,12 +3230,189 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
 
+    # ======================================================================
+    # POWERWALL SETTINGS SERVICES (for mobile app Controls)
+    # ======================================================================
+
+    async def handle_set_backup_reserve(call: ServiceCall) -> None:
+        """Set the Powerwall backup reserve percentage."""
+        percent = call.data.get("percent")
+        if percent is None:
+            _LOGGER.error("Missing 'percent' parameter for set_backup_reserve")
+            return
+
+        try:
+            percent = int(percent)
+            if percent < 0 or percent > 100:
+                _LOGGER.error(f"Invalid backup reserve percent: {percent}. Must be 0-100.")
+                return
+        except (ValueError, TypeError):
+            _LOGGER.error(f"Invalid backup reserve percent: {percent}")
+            return
+
+        _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
+
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                headers=headers,
+                json={"backup_reserve_percent": percent},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ Backup reserve set to {percent}%")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set backup reserve: {response.status} - {text}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting backup reserve: {e}", exc_info=True)
+
+    async def handle_set_operation_mode(call: ServiceCall) -> None:
+        """Set the Powerwall operation mode."""
+        mode = call.data.get("mode")
+        if mode not in ("autonomous", "self_consumption"):
+            _LOGGER.error(f"Invalid operation mode: {mode}. Must be 'autonomous' or 'self_consumption'.")
+            return
+
+        _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
+
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for set_operation_mode")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": mode},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ Operation mode set to {mode}")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set operation mode: {response.status} - {text}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
+
+    async def handle_set_grid_export(call: ServiceCall) -> None:
+        """Set the grid export rule."""
+        rule = call.data.get("rule")
+        if rule not in ("never", "pv_only", "battery_ok"):
+            _LOGGER.error(f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'.")
+            return
+
+        _LOGGER.info(f"📤 Setting grid export rule to {rule}")
+
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for set_grid_export")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                headers=headers,
+                json={"customer_preferred_export_rule": rule},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ Grid export rule set to {rule}")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set grid export rule: {response.status} - {text}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting grid export rule: {e}", exc_info=True)
+
+    async def handle_set_grid_charging(call: ServiceCall) -> None:
+        """Enable or disable grid charging."""
+        enabled = call.data.get("enabled")
+        if enabled is None:
+            _LOGGER.error("Missing 'enabled' parameter for set_grid_charging")
+            return
+
+        # Convert to bool (HA may pass True/False or "true"/"false")
+        if isinstance(enabled, str):
+            enabled = enabled.lower() == "true"
+        enabled = bool(enabled)
+
+        _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
+
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for set_grid_charging")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Note: Tesla API uses inverted logic - disallow_charge_from_grid_with_solar_installed
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                headers=headers,
+                json={"disallow_charge_from_grid_with_solar_installed": not enabled},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'}")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set grid charging: {response.status} - {text}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting grid charging: {e}", exc_info=True)
+
     # Register force discharge, force charge, and restore normal services
     hass.services.async_register(DOMAIN, SERVICE_FORCE_DISCHARGE, handle_force_discharge)
     hass.services.async_register(DOMAIN, SERVICE_FORCE_CHARGE, handle_force_charge)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
 
-    _LOGGER.info("🔋 Force discharge, force charge, and restore services registered")
+    # Register Powerwall settings services
+    hass.services.async_register(DOMAIN, SERVICE_SET_BACKUP_RESERVE, handle_set_backup_reserve)
+    hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
+    hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
+    hass.services.async_register(DOMAIN, SERVICE_SET_GRID_CHARGING, handle_set_grid_charging)
+
+    _LOGGER.info("🔋 Force charge/discharge, restore, and Powerwall settings services registered")
 
     # ======================================================================
     # CALENDAR HISTORY SERVICE (for mobile app energy summaries)

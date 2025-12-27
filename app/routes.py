@@ -3561,6 +3561,178 @@ def api_discharge_status():
 
 
 # ============================================
+# POWERWALL SETTINGS API (for mobile app Controls)
+# ============================================
+
+@bp.route('/api/powerwall-settings')
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_powerwall_settings(tesla_client, api_user=None):
+    """
+    Get current Powerwall settings for mobile app Controls.
+
+    Returns JSON:
+    {
+        "backup_reserve": 20,
+        "operation_mode": "autonomous",
+        "grid_export_rule": "pv_only",
+        "grid_charging_enabled": true
+    }
+    """
+    try:
+        site_id = current_user.tesla_energy_site_id
+
+        # Get site info for backup reserve and operation mode
+        site_info = tesla_client.get_site_info(site_id)
+        if not site_info:
+            return jsonify({'success': False, 'error': 'Failed to get site info'}), 500
+
+        # Get grid import/export settings
+        grid_settings = tesla_client.get_grid_import_export(site_id)
+
+        return jsonify({
+            'success': True,
+            'backup_reserve': site_info.get('backup_reserve_percent', 0),
+            'operation_mode': site_info.get('default_real_mode', 'autonomous'),
+            'grid_export_rule': grid_settings.get('customer_preferred_export_rule', 'pv_only') if grid_settings else 'pv_only',
+            'grid_charging_enabled': not grid_settings.get('disallow_charge_from_grid_with_solar_installed', False) if grid_settings else True
+        })
+    except Exception as e:
+        logger.error(f"Error getting Powerwall settings: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/backup-reserve', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_set_backup_reserve(tesla_client, api_user=None):
+    """
+    Set the Powerwall backup reserve percentage.
+
+    Request JSON: {"percent": 20}
+    Returns JSON: {"success": true, "backup_reserve": 20}
+    """
+    try:
+        data = request.get_json() or {}
+        percent = data.get('percent', 20)
+
+        # Validate range
+        percent = max(0, min(100, int(percent)))
+
+        site_id = current_user.tesla_energy_site_id
+        result = tesla_client.set_backup_reserve(site_id, percent)
+
+        if result:
+            logger.info(f"Set backup reserve to {percent}% for {current_user.email}")
+            return jsonify({'success': True, 'backup_reserve': percent})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to set backup reserve'}), 500
+    except Exception as e:
+        logger.error(f"Error setting backup reserve: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/operation-mode', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_set_operation_mode(tesla_client, api_user=None):
+    """
+    Set the Powerwall operation mode.
+
+    Request JSON: {"mode": "autonomous"} or {"mode": "self_consumption"}
+    Returns JSON: {"success": true, "operation_mode": "autonomous"}
+    """
+    try:
+        data = request.get_json() or {}
+        mode = data.get('mode', 'autonomous')
+
+        # Validate mode
+        valid_modes = ['autonomous', 'self_consumption', 'backup']
+        if mode not in valid_modes:
+            return jsonify({'success': False, 'error': f'Invalid mode. Must be one of: {valid_modes}'}), 400
+
+        site_id = current_user.tesla_energy_site_id
+        result = tesla_client.set_operation_mode(site_id, mode)
+
+        if result:
+            logger.info(f"Set operation mode to '{mode}' for {current_user.email}")
+            return jsonify({'success': True, 'operation_mode': mode})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to set operation mode'}), 500
+    except Exception as e:
+        logger.error(f"Error setting operation mode: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/grid-export', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_set_grid_export(tesla_client, api_user=None):
+    """
+    Set the grid export rule.
+
+    Request JSON: {"rule": "pv_only"}
+    Valid rules: "never", "pv_only", "battery_ok"
+    Returns JSON: {"success": true, "grid_export_rule": "pv_only"}
+    """
+    try:
+        data = request.get_json() or {}
+        rule = data.get('rule', 'pv_only')
+
+        # Validate rule
+        valid_rules = ['never', 'pv_only', 'battery_ok']
+        if rule not in valid_rules:
+            return jsonify({'success': False, 'error': f'Invalid rule. Must be one of: {valid_rules}'}), 400
+
+        site_id = current_user.tesla_energy_site_id
+        result = tesla_client.set_grid_export_rule(site_id, rule)
+
+        if result:
+            logger.info(f"Set grid export rule to '{rule}' for {current_user.email}")
+            return jsonify({'success': True, 'grid_export_rule': rule})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to set grid export rule'}), 500
+    except Exception as e:
+        logger.error(f"Error setting grid export rule: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/grid-charging', methods=['POST'])
+@login_required
+@require_tesla_client
+@require_tesla_site_id
+def api_set_grid_charging(tesla_client, api_user=None):
+    """
+    Enable or disable grid charging.
+
+    Request JSON: {"enabled": true}
+    Returns JSON: {"success": true, "grid_charging_enabled": true}
+    """
+    try:
+        data = request.get_json() or {}
+        enabled = data.get('enabled', True)
+
+        # Ensure boolean
+        enabled = bool(enabled)
+
+        site_id = current_user.tesla_energy_site_id
+        result = tesla_client.set_grid_charging_enabled(site_id, enabled)
+
+        if result:
+            logger.info(f"Set grid charging to {'enabled' if enabled else 'disabled'} for {current_user.email}")
+            return jsonify({'success': True, 'grid_charging_enabled': enabled})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to set grid charging'}), 500
+    except Exception as e:
+        logger.error(f"Error setting grid charging: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
 # CURRENT TOU RATE MANAGEMENT
 # ============================================
 

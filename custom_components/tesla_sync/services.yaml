@@ -74,6 +74,70 @@ restore_normal:
   description: Restore normal operation - restores saved tariff or triggers Amber sync for Amber users
   fields: {}
 
+set_backup_reserve:
+  name: Set Backup Reserve
+  description: Set the Powerwall backup reserve percentage (0-100%)
+  fields:
+    percent:
+      name: Percent
+      description: Backup reserve percentage
+      required: true
+      example: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+set_operation_mode:
+  name: Set Operation Mode
+  description: Set Powerwall operation mode (Time-Based Control or Self-Consumption)
+  fields:
+    mode:
+      name: Mode
+      description: Operation mode
+      required: true
+      example: "autonomous"
+      selector:
+        select:
+          options:
+            - label: "Time-Based Control (TOU)"
+              value: "autonomous"
+            - label: "Self-Consumption"
+              value: "self_consumption"
+
+set_grid_export:
+  name: Set Grid Export
+  description: Set grid export rule (controls when battery can export to grid)
+  fields:
+    rule:
+      name: Export Rule
+      description: Grid export rule
+      required: true
+      example: "pv_only"
+      selector:
+        select:
+          options:
+            - label: "Never"
+              value: "never"
+            - label: "Solar Only"
+              value: "pv_only"
+            - label: "Solar + Battery"
+              value: "battery_ok"
+
+set_grid_charging:
+  name: Set Grid Charging
+  description: Enable or disable grid charging (allow battery to charge from grid)
+  fields:
+    enabled:
+      name: Enabled
+      description: Enable grid charging
+      required: true
+      example: true
+      selector:
+        boolean:
+
 get_calendar_history:
   name: Get Calendar History
   description: Fetch energy history from Tesla API for mobile app energy summaries
