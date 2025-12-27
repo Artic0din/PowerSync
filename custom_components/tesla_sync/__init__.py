@@ -1182,6 +1182,99 @@ class CalendarHistoryView(HomeAssistantView):
         return web.json_response(result)
 
 
+class PowerwallSettingsView(HomeAssistantView):
+    """HTTP view to get Powerwall settings for mobile app Controls."""
+
+    url = "/api/tesla_sync/powerwall_settings"
+    name = "api:tesla_sync:powerwall_settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for Powerwall settings."""
+        _LOGGER.info("⚙️ Powerwall settings HTTP request")
+
+        # Find the tesla_sync entry and get token/site_id
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "Tesla Sync not configured"},
+                status=503
+            )
+
+        try:
+            current_token, provider = get_tesla_api_token(self._hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                return web.json_response(
+                    {"success": False, "error": "Missing Tesla site ID or token"},
+                    status=503
+                )
+
+            session = async_get_clientsession(self._hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Fetch site info
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to get site info: {response.status} - {text}")
+                    return web.json_response(
+                        {"success": False, "error": f"Failed to get site info: {response.status}"},
+                        status=500
+                    )
+                data = await response.json()
+                site_info = data.get("response", {})
+
+            # Extract settings from site_info
+            backup_reserve = site_info.get("backup_reserve_percent", 20)
+            operation_mode = site_info.get("default_real_mode", "autonomous")
+
+            # Get grid settings from components
+            components = site_info.get("components", {})
+            grid_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule", "pv_only")
+            disallow_charge = components.get("disallow_charge_from_grid_with_solar_installed", False)
+
+            # Handle VPP users where export rule might not be set
+            if grid_export_rule is None:
+                non_export = components.get("non_export_configured", False)
+                grid_export_rule = "never" if non_export else "battery_ok"
+
+            result = {
+                "success": True,
+                "backup_reserve": backup_reserve,
+                "operation_mode": operation_mode,
+                "grid_export_rule": grid_export_rule,
+                "grid_charging_enabled": not disallow_charge,
+            }
+
+            _LOGGER.info(f"✅ Powerwall settings: reserve={backup_reserve}%, mode={operation_mode}, export={grid_export_rule}")
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching Powerwall settings: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla Sync from a config entry."""
     _LOGGER.info("Setting up Tesla Sync integration")
@@ -3480,6 +3573,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for calendar history (REST API alternative)
     hass.http.register_view(CalendarHistoryView(hass))
     _LOGGER.info("📊 Calendar history HTTP endpoint registered at /api/tesla_sync/calendar_history")
+
+    # Register HTTP endpoint for Powerwall settings (for mobile app Controls)
+    hass.http.register_view(PowerwallSettingsView(hass))
+    _LOGGER.info("⚙️ Powerwall settings HTTP endpoint registered at /api/tesla_sync/powerwall_settings")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
