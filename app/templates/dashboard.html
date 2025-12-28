@@ -2720,6 +2720,7 @@
                             x: {
                                 type: 'time',
                                 bounds: 'data',
+                                offset: false,
                                 min: chartData.length > 0 ? chartData[0].x.getTime() : undefined,
                                 time: {
                                     unit: 'month',
@@ -2732,7 +2733,11 @@
                                     text: 'Date'
                                 },
                                 ticks: {
-                                    source: 'data'
+                                    source: 'data',
+                                    maxRotation: 0
+                                },
+                                grid: {
+                                    offset: false
                                 }
                             },
                             y: {
