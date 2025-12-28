@@ -13,8 +13,8 @@ on:
 
 env:
   DOCKER_HUB_USERNAME: bolagnaise
-  IMAGE_NAME: tesla-sync
-  IMAGE_NAME_LEGACY: tesla-amber-sync  # Keep old name for backward compatibility
+  IMAGE_NAME: power-sync
+  IMAGE_NAME_LEGACY: tesla-sync  # Keep old name for backward compatibility
 
 jobs:
   build-and-push:
@@ -86,7 +86,7 @@ jobs:
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
           repository: ${{ env.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME_LEGACY }}
           readme-filepath: ./README.md
-          short-description: "⚠️ DEPRECATED: Please use bolagnaise/tesla-sync instead"
+          short-description: "⚠️ DEPRECATED: Please use bolagnaise/power-sync instead"
 
       - name: Notify Discord
         if: github.event_name != 'pull_request'
@@ -99,7 +99,7 @@ jobs:
           curl -H "Content-Type: application/json" \
             -d "{
               \"embeds\": [{
-                \"title\": \"🚀 Tesla Sync Update\",
+                \"title\": \"🚀 PowerSync Update\",
                 \"description\": \"${TITLE}\",
                 \"color\": 5025616,
                 \"fields\": [

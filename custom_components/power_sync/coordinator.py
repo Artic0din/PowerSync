@@ -1,4 +1,4 @@
-"""Data update coordinators for Tesla Sync with improved error handling."""
+"""Data update coordinators for PowerSync with improved error handling."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -23,7 +23,7 @@ from .const import (
     FLEET_API_BASE_URL,
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
-    TESLA_SYNC_USER_AGENT,
+    POWER_SYNC_USER_AGENT,
 )
 
 
@@ -485,7 +485,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
 
         try:
@@ -538,7 +538,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
 
         try:
@@ -590,7 +590,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
 
         try:
@@ -647,7 +647,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
 
         try:

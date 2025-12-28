@@ -1,22 +1,22 @@
-"""Constants for the Tesla Sync integration."""
+"""Constants for the PowerSync integration."""
 from datetime import timedelta
 import json
 from pathlib import Path
 
 # Integration domain
-DOMAIN = "tesla_sync"
+DOMAIN = "power_sync"
 
 # Version from manifest.json (single source of truth)
 _MANIFEST_PATH = Path(__file__).parent / "manifest.json"
 try:
     with open(_MANIFEST_PATH) as f:
         _manifest = json.load(f)
-    TESLA_SYNC_VERSION = _manifest.get("version", "0.0.0")
+    POWER_SYNC_VERSION = _manifest.get("version", "0.0.0")
 except (FileNotFoundError, json.JSONDecodeError):
-    TESLA_SYNC_VERSION = "0.0.0"
+    POWER_SYNC_VERSION = "0.0.0"
 
 # User-Agent for API identification
-TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION} HomeAssistant"
+POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
 
 # Configuration keys
 CONF_AMBER_API_TOKEN = "amber_api_token"

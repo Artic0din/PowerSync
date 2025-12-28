@@ -314,7 +314,7 @@ class TOUScheduler:
                 "optimization_strategy": "economics",  # or "balanced"
                 "schedule": tou_periods
             },
-            "name": "TESLA SYNC (DO NOT EDIT)"
+            "name": "POWER SYNC (DO NOT EDIT)"
         }
 
         logger.info(f"Converted to Tesla schedule with {len(tou_periods)} periods")

@@ -670,8 +670,8 @@ class AmberTariffConverter:
         electricity_provider = getattr(user, 'electricity_provider', 'amber') if user else 'amber'
         provider_name = provider_names.get(electricity_provider, "Amber Electric")
 
-        code = f"TESLA_SYNC:{electricity_provider.upper()}"
-        name = f"{provider_name} (Tesla Sync)"
+        code = f"POWER_SYNC:{electricity_provider.upper()}"
+        name = f"{provider_name} (PowerSync)"
         utility = provider_name
 
         # Build daily charges list
@@ -732,7 +732,7 @@ class AmberTariffConverter:
                 }
             },
             "sell_tariff": {
-                "name": f"{provider_name} (managed by Tesla Sync)",
+                "name": f"{provider_name} (managed by PowerSync)",
                 "utility": provider_name,
                 "daily_charges": daily_charges_list,
                 "demand_charges": {

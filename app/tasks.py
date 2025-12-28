@@ -1840,7 +1840,7 @@ def create_discharge_tariff(duration_minutes=30):
     # Create Tesla tariff structure
     tariff = {
         "name": f"Force Discharge ({duration_minutes}min)",
-        "utility": "Tesla Sync",
+        "utility": "PowerSync",
         "code": f"DISCHARGE_{duration_minutes}",
         "currency": "AUD",
         "daily_charges": [{"name": "Supply Charge"}],
@@ -1872,7 +1872,7 @@ def create_discharge_tariff(duration_minutes=30):
         },
         "sell_tariff": {
             "name": f"Force Discharge Export ({duration_minutes}min)",
-            "utility": "Tesla Sync",
+            "utility": "PowerSync",
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},
@@ -1989,7 +1989,7 @@ def create_charge_tariff(duration_minutes=30):
     # Create Tesla tariff structure
     tariff = {
         "name": f"Force Charge ({duration_minutes}min)",
-        "utility": "Tesla Sync",
+        "utility": "PowerSync",
         "code": f"CHARGE_{duration_minutes}",
         "currency": "AUD",
         "daily_charges": [{"name": "Supply Charge"}],
@@ -2021,7 +2021,7 @@ def create_charge_tariff(duration_minutes=30):
         },
         "sell_tariff": {
             "name": f"Force Charge Export ({duration_minutes}min)",
-            "utility": "Tesla Sync",
+            "utility": "PowerSync",
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},

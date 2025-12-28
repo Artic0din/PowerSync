@@ -1,4 +1,4 @@
-"""Sensor platform for Tesla Sync integration."""
+"""Sensor platform for PowerSync integration."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -84,8 +84,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class TeslaSyncSensorEntityDescription(SensorEntityDescription):
-    """Describes Tesla Sync sensor entity."""
+class PowerSyncSensorEntityDescription(SensorEntityDescription):
+    """Describes PowerSync sensor entity."""
 
     value_fn: Callable[[Any], Any] | None = None
     attr_fn: Callable[[Any], dict[str, Any]] | None = None
@@ -113,8 +113,8 @@ def _get_export_price(data):
     return None
 
 
-PRICE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
-    TeslaSyncSensorEntityDescription(
+PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_IMPORT_PRICE,
         name="Current Import Price",
         native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
@@ -133,7 +133,7 @@ PRICE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
             else 0,
         },
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_EXPORT_PRICE,
         name="Current Export Price",
         native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
@@ -147,8 +147,8 @@ PRICE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
     ),
 )
 
-ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
-    TeslaSyncSensorEntityDescription(
+ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLAR_POWER,
         name="Solar Power",
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
@@ -157,7 +157,7 @@ ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         value_fn=lambda data: data.get("solar_power") if data else None,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_GRID_POWER,
         name="Grid Power",
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
@@ -166,7 +166,7 @@ ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         value_fn=lambda data: data.get("grid_power") if data else None,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_POWER,
         name="Battery Power",
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
@@ -175,7 +175,7 @@ ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         value_fn=lambda data: data.get("battery_power") if data else None,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_HOME_LOAD,
         name="Home Load",
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
@@ -184,7 +184,7 @@ ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         value_fn=lambda data: data.get("load_power") if data else None,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_LEVEL,
         name="Battery Level",
         native_unit_of_measurement=PERCENTAGE,
@@ -195,13 +195,13 @@ ENERGY_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
     ),
 )
 
-DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
-    TeslaSyncSensorEntityDescription(
+DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD,
         name="In Demand Charge Period",
         value_fn=lambda data: data.get("in_peak_period", False) if data else False,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE,
         name="Peak Demand This Cycle",
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
@@ -210,7 +210,7 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         value_fn=lambda data: data.get("peak_demand_kw", 0.0) if data else 0.0,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DEMAND_CHARGE_COST,
         name="Estimated Demand Charge Cost",
         native_unit_of_measurement=CURRENCY_DOLLAR,
@@ -218,7 +218,7 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=2,
         value_fn=lambda data: data.get("estimated_cost", 0.0) if data else 0.0,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,
         name="Daily Supply Charge Cost This Month",
         native_unit_of_measurement=CURRENCY_DOLLAR,
@@ -227,7 +227,7 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=2,
         value_fn=lambda data: data.get("daily_supply_charge_cost", 0.0) if data else 0.0,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
         name="Monthly Supply Charge",
         native_unit_of_measurement=CURRENCY_DOLLAR,
@@ -235,7 +235,7 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
         suggested_display_precision=2,
         value_fn=lambda data: data.get("monthly_supply_charge", 0.0) if data else 0.0,
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_TOTAL_MONTHLY_COST,
         name="Total Estimated Monthly Cost",
         native_unit_of_measurement=CURRENCY_DOLLAR,
@@ -248,8 +248,8 @@ DEMAND_CHARGE_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
 
 
 # AEMO Spike Detection Sensors
-AEMO_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
-    TeslaSyncSensorEntityDescription(
+AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_AEMO_PRICE,
         name="AEMO Wholesale Price",
         native_unit_of_measurement="$/MWh",
@@ -262,7 +262,7 @@ AEMO_SENSORS: tuple[TeslaSyncSensorEntityDescription, ...] = (
             "last_check": data.get("last_check") if data else None,
         },
     ),
-    TeslaSyncSensorEntityDescription(
+    PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_AEMO_SPIKE_STATUS,
         name="AEMO Spike Status",
         icon="mdi:alert-decagram",
@@ -282,7 +282,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Tesla Sync sensor entities."""
+    """Set up PowerSync sensor entities."""
     domain_data = hass.data[DOMAIN][entry.entry_id]
     amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
     tesla_coordinator: TeslaEnergyCoordinator = domain_data["tesla_coordinator"]
@@ -396,12 +396,12 @@ async def async_setup_entry(
 class AmberPriceSensor(CoordinatorEntity, SensorEntity):
     """Sensor for Amber electricity prices."""
 
-    entity_description: TeslaSyncSensorEntityDescription
+    entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
         self,
         coordinator: AmberPriceCoordinator,
-        description: TeslaSyncSensorEntityDescription,
+        description: PowerSyncSensorEntityDescription,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the sensor."""
@@ -428,12 +428,12 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
 class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
     """Sensor for Tesla energy data."""
 
-    entity_description: TeslaSyncSensorEntityDescription
+    entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
         self,
         coordinator: TeslaEnergyCoordinator,
-        description: TeslaSyncSensorEntityDescription,
+        description: PowerSyncSensorEntityDescription,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the sensor."""
@@ -453,12 +453,12 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
 class DemandChargeSensor(CoordinatorEntity, SensorEntity):
     """Sensor for demand charge tracking (simplified - uses coordinator data)."""
 
-    entity_description: TeslaSyncSensorEntityDescription
+    entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
         self,
         coordinator: DemandChargeCoordinator,
-        description: TeslaSyncSensorEntityDescription,
+        description: PowerSyncSensorEntityDescription,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the sensor."""
@@ -505,12 +505,12 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
 class AEMOSpikeSensor(SensorEntity):
     """Sensor for AEMO spike detection status."""
 
-    entity_description: TeslaSyncSensorEntityDescription
+    entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
         self,
         spike_manager,  # AEMOSpikeManager from __init__.py
-        description: TeslaSyncSensorEntityDescription,
+        description: PowerSyncSensorEntityDescription,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the sensor."""
@@ -534,7 +534,7 @@ class AEMOSpikeSensor(SensorEntity):
         return {}
 
 
-SIGNAL_TARIFF_UPDATED = "tesla_sync_tariff_updated_{}"
+SIGNAL_TARIFF_UPDATED = "power_sync_tariff_updated_{}"
 
 
 class TariffScheduleSensor(SensorEntity):
@@ -628,7 +628,7 @@ class TariffScheduleSensor(SensorEntity):
         return attributes
 
 
-SIGNAL_CURTAILMENT_UPDATED = "tesla_sync_curtailment_updated_{}"
+SIGNAL_CURTAILMENT_UPDATED = "power_sync_curtailment_updated_{}"
 
 
 class SolarCurtailmentSensor(SensorEntity):

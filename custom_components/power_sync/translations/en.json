@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Tesla Sync Setup",
-        "description": "Configure Tesla Sync to automatically sync electricity pricing to your Tesla Powerwall."
+        "title": "PowerSync Setup",
+        "description": "Configure PowerSync to automatically sync electricity pricing to your Powerwall."
       },
       "provider_selection": {
         "title": "Select Electricity Provider",
@@ -66,22 +66,6 @@
           "export_boost_threshold": "Boost only applies if actual price is at or above this value (0 = always apply)"
         }
       },
-      "aemo_config": {
-        "title": "AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, the Powerwall will be configured to export energy to the grid.\n\n{threshold_hint}",
-        "data": {
-          "aemo_spike_enabled": "Enable AEMO Spike Detection",
-          "aemo_region": "NEM Region",
-          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
-        }
-      },
-      "tesla_provider": {
-        "title": "Choose Tesla API Provider",
-        "description": "{fleet_detected}\n\nSelect how you want to access your Tesla Powerwall. Tesla Fleet API is free but requires the Tesla Fleet integration to be installed. Teslemetry is a paid proxy service (~$4/month) that's easier to set up.",
-        "data": {
-          "tesla_api_provider": "Tesla API Provider"
-        }
-      },
       "teslemetry": {
         "title": "Teslemetry Configuration",
         "description": "Enter your Teslemetry API token. You can get this from {teslemetry_url}",
@@ -102,12 +86,16 @@
       },
       "demand_charges": {
         "title": "Demand Charge Configuration (Optional)",
-        "description": "Configure demand charge tracking for electricity plans with capacity-based fees. Demand charges are applied during peak periods based on your maximum power draw. Leave 'Enable Demand Charge Tracking' unchecked to skip this step.",
+        "description": "Configure demand charge tracking for electricity plans with capacity-based fees. Leave 'Enable Demand Charge Tracking' unchecked to skip this step.",
         "data": {
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
-          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)"
+          "demand_charge_start_time": "Demand Period Start Time (HH:MM:SS)",
+          "demand_charge_end_time": "Demand Period End Time (HH:MM:SS)",
+          "demand_charge_days": "Active Days",
+          "demand_charge_billing_day": "Billing Cycle Day (1-28)",
+          "demand_charge_apply_to": "Apply Demand Charge To",
+          "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)"
         }
       }
     },
@@ -115,14 +103,11 @@
       "invalid_auth": "Invalid API token. Please check your token and try again.",
       "cannot_connect": "Unable to connect to API. Please check your internet connection.",
       "no_sites": "No Amber Electric sites found for this account.",
-      "no_energy_sites": "No Tesla energy sites found in your account.",
-      "no_token_provided": "Please provide a Teslemetry API token.",
-      "aemo_region_required": "Please select an AEMO NEM region when spike detection is enabled.",
-      "aemo_required_in_aemo_mode": "AEMO spike detection must be enabled in AEMO-only mode.",
+      "no_energy_sites": "No Tesla energy sites found in your Teslemetry account.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
-      "already_configured": "Tesla Sync is already configured.",
+      "already_configured": "PowerSync is already configured.",
       "no_energy_sites": "No Tesla energy sites found in your Teslemetry account. Please ensure you have a Powerwall or Solar system configured."
     }
   },
@@ -144,7 +129,6 @@
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
           "spike_protection_enabled": "Enable Spike Protection (prevent grid charging during spikes)",
           "settled_prices_only": "Settled Prices Only (skip forecast sync)",
-          "force_tariff_mode_toggle": "Force Mode Toggle (ALPHA) - faster PW response",
           "export_boost_enabled": "Enable Export Price Boost",
           "export_price_offset": "Export Price Offset (c/kWh)",
           "export_min_price": "Minimum Export Price (c/kWh)",
@@ -165,7 +149,6 @@
         "data_description": {
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid (stops arbitrage behavior)",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly switch Powerwall to self-consumption mode then back to Time-Based Control. This forces immediate recalculation of battery behavior (~5 second interruption).",
           "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
           "export_boost_threshold": "Boost will only apply if actual export price is at or above this value (0 = always apply)"
         }
@@ -181,6 +164,17 @@
           "pea_enabled": "Enable PEA Pricing (Recommended)",
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
+          "network_tariff_type": "Network Tariff Type (for AEMO)",
+          "network_flat_rate": "Network Flat Rate (c/kWh)",
+          "network_peak_rate": "Network Peak Rate (c/kWh)",
+          "network_shoulder_rate": "Network Shoulder Rate (c/kWh)",
+          "network_offpeak_rate": "Network Off-Peak Rate (c/kWh)",
+          "network_peak_start": "Peak Period Start (HH:MM)",
+          "network_peak_end": "Peak Period End (HH:MM)",
+          "network_offpeak_start": "Off-Peak Start (HH:MM)",
+          "network_offpeak_end": "Off-Peak End (HH:MM)",
+          "network_other_fees": "Other Fees (c/kWh)",
+          "network_include_gst": "Include GST (10%)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
@@ -238,12 +232,6 @@
       },
       "days_until_demand_reset": {
         "name": "Days Until Demand Reset"
-      },
-      "aemo_price": {
-        "name": "AEMO Wholesale Price"
-      },
-      "aemo_spike_status": {
-        "name": "AEMO Spike Status"
       },
       "tariff_schedule": {
         "name": "Tariff Schedule"

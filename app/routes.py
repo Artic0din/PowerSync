@@ -2296,7 +2296,7 @@ def sync_tesla_schedule(tesla_client, api_user=None):
             tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
         num_periods = len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))
-        logger.info(f"Applying TESLA SYNC tariff with {num_periods} rate periods")
+        logger.info(f"Applying POWER SYNC tariff with {num_periods} rate periods")
 
         # Apply tariff to Tesla
         result = tesla_client.set_tariff_rate(site_id, tariff)
@@ -2309,7 +2309,7 @@ def sync_tesla_schedule(tesla_client, api_user=None):
 
         return jsonify({
             'success': True,
-            'message': 'TESLA SYNC tariff applied successfully',
+            'message': 'POWER SYNC tariff applied successfully',
             'rate_periods': num_periods,
             'tariff_name': tariff.get('name', 'Unknown')
         })
@@ -5810,6 +5810,6 @@ def api_health():
     """
     return jsonify({
         'status': 'ok',
-        'service': 'Tesla Sync',
+        'service': 'PowerSync',
         'timestamp': datetime.utcnow().isoformat()
     })

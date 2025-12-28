@@ -11,8 +11,8 @@ from abc import ABC, abstractmethod
 logger = logging.getLogger(__name__)
 
 # Version and User-Agent for API identification
-TESLA_SYNC_VERSION = "2.2.0"
-TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION}"
+POWER_SYNC_VERSION = "2.2.0"
+POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION}"
 
 # Transient HTTP errors that should trigger retry
 TRANSIENT_STATUS_CODES = {502, 503, 504}
@@ -426,7 +426,7 @@ class FleetAPIClient(TeslaAPIClientBase):
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
         logger.info("FleetAPIClient initialized (direct Tesla Fleet API)")
 
@@ -1171,7 +1171,7 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": TESLA_SYNC_USER_AGENT,
+            "User-Agent": POWER_SYNC_USER_AGENT,
         }
         logger.info("TeslemetryAPIClient initialized")
 

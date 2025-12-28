@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/logo.png" alt="Tesla Sync Logo" width="400"/>
+  <img src="https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/logo.png" alt="PowerSync Logo" width="400"/>
 
-  # Tesla Sync
+  # PowerSync
 
   Intelligent Tesla Powerwall energy management for Australia. Automatically sync with Amber Electric or Flow Power (AEMO wholesale) dynamic pricing, create custom TOU schedules for any provider, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
 
@@ -9,8 +9,8 @@
 
   [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/eaWDWxEWE3)
 
-  [![Docker Hub](https://img.shields.io/docker/v/bolagnaise/tesla-sync?label=docker%20hub&logo=docker)](https://hub.docker.com/r/bolagnaise/tesla-sync)
-  [![Docker Pulls](https://img.shields.io/docker/pulls/bolagnaise/tesla-sync)](https://hub.docker.com/r/bolagnaise/tesla-sync)
+  [![Docker Hub](https://img.shields.io/docker/v/bolagnaise/power-sync?label=docker%20hub&logo=docker)](https://hub.docker.com/r/bolagnaise/power-sync)
+  [![Docker Pulls](https://img.shields.io/docker/pulls/bolagnaise/power-sync)](https://hub.docker.com/r/bolagnaise/power-sync)
   [![Build Status](https://github.com/bolagnaise/tesla-sync/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/bolagnaise/tesla-sync/actions)
 </div>
 
@@ -25,12 +25,12 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ### Dashboard Overview
 <img src="https://i.imgur.com/E500MNw.jpeg" alt="Tesla Sync Dashboard" width="80%"/>
 
-*Complete dashboard showing real-time energy monitoring, Amber Electric pricing, Tesla Powerwall status, and 24-hour tariff schedule*
+*Complete dashboard showing real-time energy monitoring, Amber Electric pricing, Powerwall status, and 24-hour tariff schedule*
 
-### Tesla Powerwall Status
-<img src="https://i.imgur.com/I7F6C7Z.png" alt="Tesla Powerwall Status" width="80%"/>
+### Powerwall Status
+<img src="https://i.imgur.com/I7F6C7Z.png" alt="Powerwall Status" width="80%"/>
 
-*Real-time Tesla Powerwall monitoring showing battery level, solar generation, battery power, grid power, and firmware version*
+*Real-time Powerwall monitoring showing battery level, solar generation, battery power, grid power, and firmware version*
 
 ### Electricity Tariff Schedule (24H)
 <img src="https://i.imgur.com/wEsczbz.png" alt="Electricity Tariff Schedule" width="80%"/>

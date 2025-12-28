@@ -1,4 +1,4 @@
-"""Switch platform for Tesla Sync integration."""
+"""Switch platform for PowerSync integration."""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +30,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Tesla Sync switch entities."""
+    """Set up PowerSync switch entities."""
     entities = [
         AutoSyncSwitch(
             hass=hass,

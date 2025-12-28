@@ -1,4 +1,4 @@
-"""The Tesla Sync integration."""
+"""The PowerSync integration."""
 from __future__ import annotations
 
 import aiohttp
@@ -1103,8 +1103,8 @@ def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | 
 class CalendarHistoryView(HomeAssistantView):
     """HTTP view to get calendar history for mobile app."""
 
-    url = "/api/tesla_sync/calendar_history"
-    name = "api:tesla_sync:calendar_history"
+    url = "/api/power_sync/calendar_history"
+    name = "api:power_sync:calendar_history"
     requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
@@ -1126,7 +1126,7 @@ class CalendarHistoryView(HomeAssistantView):
 
         _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}")
 
-        # Find the tesla_sync entry and coordinator
+        # Find the power_sync entry and coordinator
         tesla_coordinator = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict) and "tesla_coordinator" in data:
@@ -1185,8 +1185,8 @@ class CalendarHistoryView(HomeAssistantView):
 class PowerwallSettingsView(HomeAssistantView):
     """HTTP view to get Powerwall settings for mobile app Controls."""
 
-    url = "/api/tesla_sync/powerwall_settings"
-    name = "api:tesla_sync:powerwall_settings"
+    url = "/api/power_sync/powerwall_settings"
+    name = "api:power_sync:powerwall_settings"
     requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
@@ -1197,7 +1197,7 @@ class PowerwallSettingsView(HomeAssistantView):
         """Handle GET request for Powerwall settings."""
         _LOGGER.info("⚙️ Powerwall settings HTTP request")
 
-        # Find the tesla_sync entry and get token/site_id
+        # Find the power_sync entry and get token/site_id
         entry = None
         for config_entry in self._hass.config_entries.async_entries(DOMAIN):
             entry = config_entry
@@ -1205,7 +1205,7 @@ class PowerwallSettingsView(HomeAssistantView):
 
         if not entry:
             return web.json_response(
-                {"success": False, "error": "Tesla Sync not configured"},
+                {"success": False, "error": "PowerSync not configured"},
                 status=503
             )
 
@@ -1296,8 +1296,8 @@ class PowerwallSettingsView(HomeAssistantView):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Tesla Sync from a config entry."""
-    _LOGGER.info("Setting up Tesla Sync integration")
+    """Set up PowerSync from a config entry."""
+    _LOGGER.info("Setting up PowerSync integration")
 
     # Check pricing source configuration
     has_amber = bool(entry.data.get(CONF_AMBER_API_TOKEN))
@@ -1579,7 +1579,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await store.async_save(stored_data)
         _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
         # Signal sensor to update
-        async_dispatcher_send(hass, f"tesla_sync_curtailment_updated_{entry.entry_id}")
+        async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -1999,7 +1999,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("No buy prices in tariff schedule!")
 
         # Signal the tariff schedule sensor to update
-        async_dispatcher_send(hass, f"tesla_sync_tariff_updated_{entry.entry_id}")
+        async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
 
         # Send tariff to Tesla via Teslemetry or Fleet API
         # Get fresh token in case it was refreshed by tesla_fleet integration
@@ -2854,7 +2854,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Create Tesla tariff structure (matching Flask implementation)
         tariff = {
             "name": f"Force Discharge ({duration_minutes}min)",
-            "utility": "Tesla Sync",
+            "utility": "PowerSync",
             "code": f"DISCHARGE_{duration_minutes}",
             "currency": "AUD",
             "daily_charges": [{"name": "Supply Charge"}],
@@ -2886,7 +2886,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
             "sell_tariff": {
                 "name": f"Force Discharge Export ({duration_minutes}min)",
-                "utility": "Tesla Sync",
+                "utility": "PowerSync",
                 "daily_charges": [{"name": "Charge"}],
                 "demand_charges": {
                     "ALL": {"rates": {"ALL": 0}},
@@ -3139,7 +3139,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Create Tesla tariff structure (matching Flask implementation)
         tariff = {
             "name": f"Force Charge ({duration_minutes}min)",
-            "utility": "Tesla Sync",
+            "utility": "PowerSync",
             "code": f"CHARGE_{duration_minutes}",
             "currency": "AUD",
             "daily_charges": [{"name": "Supply Charge"}],
@@ -3171,7 +3171,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
             "sell_tariff": {
                 "name": f"Force Charge Export ({duration_minutes}min)",
-                "utility": "Tesla Sync",
+                "utility": "PowerSync",
                 "daily_charges": [{"name": "Charge"}],
                 "demand_charges": {
                     "ALL": {"rates": {"ALL": 0}},
@@ -3592,11 +3592,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register HTTP endpoint for calendar history (REST API alternative)
     hass.http.register_view(CalendarHistoryView(hass))
-    _LOGGER.info("📊 Calendar history HTTP endpoint registered at /api/tesla_sync/calendar_history")
+    _LOGGER.info("📊 Calendar history HTTP endpoint registered at /api/power_sync/calendar_history")
 
     # Register HTTP endpoint for Powerwall settings (for mobile app Controls)
     hass.http.register_view(PowerwallSettingsView(hass))
-    _LOGGER.info("⚙️ Powerwall settings HTTP endpoint registered at /api/tesla_sync/powerwall_settings")
+    _LOGGER.info("⚙️ Powerwall settings HTTP endpoint registered at /api/power_sync/powerwall_settings")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
@@ -3955,13 +3955,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
         await auto_demand_charging_check(dt_util.now())
 
-    _LOGGER.info("Tesla Sync integration setup complete")
+    _LOGGER.info("PowerSync integration setup complete")
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    _LOGGER.info("Unloading Tesla Sync integration")
+    _LOGGER.info("Unloading PowerSync integration")
 
     # Cancel the auto-sync timers if they exist (4-stage smart sync)
     entry_data = hass.data[DOMAIN].get(entry.entry_id, {})

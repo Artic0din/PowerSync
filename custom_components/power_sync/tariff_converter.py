@@ -881,8 +881,8 @@ def _build_tariff_structure(
 
     tariff = {
         "version": 1,
-        "code": f"TESLA_SYNC:{electricity_provider.upper()}",
-        "name": f"{provider_name} (Tesla Sync)",
+        "code": f"POWER_SYNC:{electricity_provider.upper()}",
+        "name": f"{provider_name} (PowerSync)",
         "utility": provider_name,
         "currency": "AUD",
         "daily_charges": [{"name": "Charge"}],
@@ -913,7 +913,7 @@ def _build_tariff_structure(
             },
         },
         "sell_tariff": {
-            "name": f"{provider_name} (managed by Tesla Sync)",
+            "name": f"{provider_name} (managed by PowerSync)",
             "utility": provider_name,
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {

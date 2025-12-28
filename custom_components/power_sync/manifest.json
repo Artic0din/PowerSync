@@ -1,6 +1,6 @@
 {
-  "domain": "tesla_sync",
-  "name": "Tesla Sync",
+  "domain": "power_sync",
+  "name": "PowerSync",
   "codeowners": ["@benboller"],
   "config_flow": true,
   "dependencies": [],

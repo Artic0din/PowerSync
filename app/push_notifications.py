@@ -1,6 +1,6 @@
 # app/push_notifications.py
 """
-Push notification service for Tesla Sync mobile app.
+Push notification service for PowerSync mobile app.
 Supports iOS APNs notifications.
 """
 
@@ -18,7 +18,7 @@ logger = logging.getLogger('app.push_notifications')
 APNS_KEY_ID = os.environ.get('APNS_KEY_ID')
 APNS_TEAM_ID = os.environ.get('APNS_TEAM_ID')
 APNS_AUTH_KEY_PATH = os.environ.get('APNS_AUTH_KEY_PATH')
-APNS_BUNDLE_ID = 'com.teslasync.health'
+APNS_BUNDLE_ID = 'com.powersync.mobile'
 
 # Use sandbox for development, production for release
 APNS_USE_SANDBOX = os.environ.get('APNS_USE_SANDBOX', 'true').lower() == 'true'

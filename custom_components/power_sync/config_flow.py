@@ -1,4 +1,4 @@
-"""Config flow for Tesla Sync integration."""
+"""Config flow for PowerSync integration."""
 from __future__ import annotations
 
 import logging
@@ -228,7 +228,7 @@ async def validate_fleet_api_token(
 
 
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Tesla Sync."""
+    """Handle a config flow for PowerSync."""
 
     VERSION = 2
 
@@ -813,11 +813,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Set appropriate title based on provider
             if self._aemo_only_mode:
-                title = "Tesla AEMO Spike"
+                title = "PowerSync AEMO Spike"
             elif self._selected_electricity_provider == "flow_power":
-                title = "Tesla Sync (Flow Power)"
+                title = "PowerSync (Flow Power)"
             else:
-                title = "Tesla Sync"
+                title = "PowerSync"
             return self.async_create_entry(title=title, data=data)
 
         # Build the form schema
@@ -863,7 +863,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
-    """Handle options flow for Tesla Sync."""
+    """Handle options flow for PowerSync."""
 
     async def _restore_export_rule(self) -> None:
         """Restore Tesla export rule to battery_ok when curtailment is disabled."""

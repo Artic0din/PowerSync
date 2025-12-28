@@ -7,7 +7,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    container_name: tesla-sync
+    container_name: power-sync
     restart: unless-stopped
     ports:
       - "5001:5001"
@@ -29,12 +29,12 @@ services:
     volumes:
       # ⚠️ IMPORTANT: This directory persists your database across container restarts
       # Before first run: mkdir -p ./data
-      # For Unraid: Use /mnt/user/appdata/tesla-sync/data:/app/data
+      # For Unraid: Use /mnt/user/appdata/power-sync/data:/app/data
       # See DATABASE.md for backup and restore instructions
       - ./data:/app/data
 
     networks:
-      - tesla-sync-network
+      - power-sync-network
 
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/', timeout=5)"]
@@ -44,7 +44,7 @@ services:
       start_period: 10s
 
 networks:
-  tesla-sync-network:
+  power-sync-network:
     driver: bridge
 
 volumes:
