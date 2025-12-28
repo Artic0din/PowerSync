@@ -18,41 +18,6 @@
 
 This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc. or Amber Electric. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
 
-## Screenshots
-
-<div align="center">
-
-### Dashboard Overview
-<img src="https://i.imgur.com/E500MNw.jpeg" alt="PowerSync Dashboard" width="80%"/>
-
-*Complete dashboard showing real-time energy monitoring, Amber Electric pricing, Powerwall status, and 24-hour tariff schedule*
-
-### Powerwall Status
-<img src="https://i.imgur.com/I7F6C7Z.png" alt="Powerwall Status" width="80%"/>
-
-*Real-time Powerwall monitoring showing battery level, solar generation, battery power, grid power, and firmware version*
-
-### Electricity Tariff Schedule (24H)
-<img src="https://i.imgur.com/wEsczbz.png" alt="Electricity Tariff Schedule" width="80%"/>
-
-*Rolling 24-hour tariff schedule with 30-minute intervals, buy/sell rates, and auto-sync to Tesla Powerwall*
-
-### Price History
-<img src="https://i.imgur.com/LtylkNH.png" alt="Price History Chart" width="80%"/>
-
-*Historical electricity price chart showing import and export prices with day selector*
-
-### Energy Usage History
-<img src="https://i.imgur.com/cOlnp2D.png" alt="Energy Usage History" width="80%"/>
-
-*Comprehensive energy usage charts tracking solar generation, grid power, battery power, and home consumption with real-time updates*
-
----
-
-**[View Full Screenshot Gallery →](https://imgur.com/a/zjyTqsE)**
-
-</div>
-
 ## Features
 
 ### Core Functionality
