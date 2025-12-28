@@ -1,4 +1,4 @@
-# Tesla Sync - Home Assistant Integration
+# PowerSync - Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 
@@ -34,7 +34,7 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 1. Open HACS in Home Assistant
 2. Click "Integrations" → three dots → "Custom repositories"
 3. Add: `https://github.com/bolagnaise/tesla-sync` (Category: Integration)
-4. Find "Tesla Sync" and click "Install"
+4. Find "PowerSync" and click "Install"
 5. Restart Home Assistant
 
 ### Manual
@@ -45,7 +45,7 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 ## Configuration
 
 1. Go to **Settings** → **Devices & Services**
-2. Click **Add Integration** → search "Tesla Sync"
+2. Click **Add Integration** → search "PowerSync"
 3. Follow the setup wizard:
    - Enter Amber Electric API token
    - Enter Teslemetry token OR leave blank to use Tesla Fleet

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tesla Sync is a Flask web application and Home Assistant integration that synchronizes Tesla Powerwall energy management with dynamic electricity pricing (Amber Electric). It automatically updates Tesla's Time-of-Use tariffs based on real-time prices, enables AEMO spike detection for VPP participation, and provides solar curtailment during negative pricing periods.
+PowerSync is a Flask web application and Home Assistant integration that synchronizes Tesla Powerwall energy management with dynamic electricity pricing (Amber Electric). It automatically updates Tesla's Time-of-Use tariffs based on real-time prices, enables AEMO spike detection for VPP participation, and provides solar curtailment during negative pricing periods.
 
 ## Architecture
 

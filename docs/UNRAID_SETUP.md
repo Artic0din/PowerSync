@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/assets/images/logo.png" alt="Tesla Sync Logo" width="400"/>
+  <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/assets/images/logo.png" alt="PowerSync Logo" width="400"/>
 
-  # Tesla Sync on Unraid
+  # PowerSync on Unraid
 
-  Complete guide to deploy Tesla Sync on Unraid using Docker.
+  Complete guide to deploy PowerSync on Unraid using Docker.
 </div>
 
 ## Method 1: Pre-built Docker Image (Recommended)
@@ -25,8 +25,8 @@ cd /mnt/user/appdata/tesla-sync
 
 2. Download the docker-compose file:
 ```bash
-curl -O https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/docker-compose.hub.yml
-curl -O https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/.env.example
+curl -O https://raw.githubusercontent.com/bolagnaise/PowerSync/main/docker-compose.hub.yml
+curl -O https://raw.githubusercontent.com/bolagnaise/PowerSync/main/.env.example
 mv .env.example .env
 ```
 
@@ -60,7 +60,7 @@ docker run -d \
   -v /mnt/user/appdata/tesla-sync/data:/app/data \
   -e SECRET_KEY=your-secret-key-here \
   --restart unless-stopped \
-  bolagnaise/tesla-sync:latest
+  bolagnaise/PowerSync:latest
 
 # Note: Encryption key is auto-generated and saved to /mnt/user/appdata/tesla-sync/data/.fernet_key
 # Tesla OAuth credentials can be configured via the Environment Settings page in the web UI
@@ -75,7 +75,7 @@ docker run -d \
 | Setting | Value |
 |---------|-------|
 | **Name** | `tesla-sync` |
-| **Repository** | `bolagnaise/tesla-sync:latest` |
+| **Repository** | `bolagnaise/PowerSync:latest` |
 | **Network Type** | `bridge` |
 | **Port** | `5001:5001` (TCP) |
 | **Path** | `/mnt/user/appdata/tesla-sync/data` → `/app/data` |
@@ -113,7 +113,7 @@ cd /mnt/user/appdata/tesla-sync
 
 ```bash
 # Clone the repository
-git clone https://github.com/bolagnaise/tesla-sync.git .
+git clone https://github.com/bolagnaise/PowerSync.git .
 
 # Or manually download files using wget/curl
 ```
@@ -235,7 +235,7 @@ docker-compose restart
 **If using Pre-built Image (Method 1):**
 ```bash
 # Pull latest image
-docker pull bolagnaise/tesla-sync:latest
+docker pull bolagnaise/PowerSync:latest
 
 # Restart container
 docker restart tesla-sync
@@ -432,7 +432,7 @@ Set up Unraid User Scripts to notify on sync failures.
 
 ## Support
 
-- **GitHub Issues:** https://github.com/bolagnaise/tesla-sync/issues
+- **GitHub Issues:** https://github.com/bolagnaise/PowerSync/issues
 - **Unraid Forums:** Post in Docker Containers section
 - **Documentation:** See main README.md
 
@@ -450,8 +450,8 @@ Set up Unraid User Scripts to notify on sync failures.
 
 **Restart:** `docker restart tesla-sync`
 
-**Update (Pre-built):** `docker pull bolagnaise/tesla-sync:latest && docker restart tesla-sync`
+**Update (Pre-built):** `docker pull bolagnaise/PowerSync:latest && docker restart tesla-sync`
 
 **Update (Source):** `cd /mnt/user/appdata/tesla-sync && git pull && docker-compose up -d --build`
 
-**Docker Hub:** `https://hub.docker.com/r/bolagnaise/tesla-sync`
+**Docker Hub:** `https://hub.docker.com/r/bolagnaise/PowerSync`

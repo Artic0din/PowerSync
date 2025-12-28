@@ -1,8 +1,8 @@
-# Tesla Sync - Deployment Options
+# PowerSync - Deployment Options
 
 ## Overview
 
-Tesla Sync is available in two deployment options:
+PowerSync is available in two deployment options:
 
 1. **Flask Web App** (Docker/Unraid) - Standalone web application with dashboard
 2. **Home Assistant Integration** (HACS) - Native HA integration
@@ -75,7 +75,7 @@ See [UNRAID_SETUP.md](UNRAID_SETUP.md) for detailed instructions.
 
 #### HACS Installation (Recommended)
 1. Add custom repository to HACS: `https://github.com/bolagnaise/tesla-sync`
-2. Install "Tesla Sync"
+2. Install "PowerSync"
 3. Restart Home Assistant
 4. Configure via UI
 
@@ -101,7 +101,7 @@ See [UNRAID_SETUP.md](UNRAID_SETUP.md) for detailed instructions.
 - You want to avoid running a separate service
 
 ### Access
-- Settings → Devices & Services → Tesla Sync
+- Settings → Devices & Services → PowerSync
 - View entities in HA UI
 - Use in Lovelace dashboards
 

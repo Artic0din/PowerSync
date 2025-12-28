@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated build script for Tesla Sync
+# Automated build script for PowerSync
 # Automatically captures git commit hash and passes it to Docker build
 
 # Navigate to the repository root
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.." || exit 1
 # Get current git commit hash
 GIT_COMMIT=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 
-echo "Building Tesla Sync Docker image..."
+echo "Building PowerSync Docker image..."
 echo "Git commit: $GIT_COMMIT"
 echo ""
 

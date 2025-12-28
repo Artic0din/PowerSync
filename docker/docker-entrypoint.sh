@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Starting Tesla Sync..."
+echo "Starting PowerSync..."
 
 # Wait a moment for the filesystem to be ready
 sleep 2

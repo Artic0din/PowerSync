@@ -1,6 +1,6 @@
 # Branding Assets
 
-This document explains how to use the Tesla Sync logo across different platforms.
+This document explains how to use the PowerSync logo across different platforms.
 
 ## Available Assets
 

@@ -910,7 +910,7 @@ class AEMOSpikeManager:
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Migrate old entry to new format."""
-    _LOGGER.info("Migrating Tesla Sync config entry from version %s", config_entry.version)
+    _LOGGER.info("Migrating PowerSync config entry from version %s", config_entry.version)
 
     if config_entry.version == 1:
         # Migrate from version 1 to version 2

@@ -1,4 +1,4 @@
-# Home Assistant Dashboard for Tesla Sync
+# Home Assistant Dashboard for PowerSync
 
 A pre-built Lovelace dashboard for visualizing your Tesla Powerwall and Amber Electric data.
 
@@ -52,7 +52,7 @@ The entity IDs are automatically derived from the names (`input_select.force_dis
 1. In Home Assistant, go to **Settings → Dashboards**
 2. Click **+ Add Dashboard**
 3. Choose **New dashboard from scratch**
-4. Give it a name (e.g., "Tesla Sync")
+4. Give it a name (e.g., "PowerSync")
 5. Click **Create**
 6. Open the new dashboard and click the three dots menu → **Edit Dashboard**
 7. Click the three dots menu again → **Raw configuration editor**
@@ -119,7 +119,7 @@ Ensure you've created both helper entities (see Requirements above):
 
 ### Charts showing no data
 
-- Ensure the Tesla Sync integration is properly configured
+- Ensure the PowerSync integration is properly configured
 - Check that entity names match your actual entities (see below)
 - Wait for the integration to collect some data (may take 5-10 minutes)
 - Trigger a sync via the "Sync Now" service or wait for automatic sync

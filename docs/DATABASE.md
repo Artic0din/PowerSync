@@ -2,7 +2,7 @@
 
 ## Understanding Database Storage
 
-Tesla Sync uses SQLite to store:
+PowerSync uses SQLite to store:
 - User accounts and encrypted credentials
 - Tesla and Amber API tokens
 - Configuration settings
