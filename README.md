@@ -1007,7 +1007,7 @@ tail -f flask.log
 |-------|-------------|
 | [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) | Tesla Fleet API setup guide |
 | [UNRAID_SETUP.md](docs/UNRAID_SETUP.md) | Unraid deployment guide |
-| [Docker Hub](https://hub.docker.com/r/bolagnaise/tesla-sync) | Pre-built images |
+| [Docker Hub](https://hub.docker.com/r/bolagnaise/power-sync) | Pre-built images |
 
 **External Docs:** [Tesla Fleet API](https://developer.tesla.com/docs/fleet-api) · [Amber API](https://api.amber.com.au/docs)
 
