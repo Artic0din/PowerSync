@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/logo.png" alt="PowerSync Logo" width="400"/>
+  <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/logo.png" alt="PowerSync Logo" width="400"/>
 
   # PowerSync
 
@@ -11,7 +11,7 @@
 
   [![Docker Hub](https://img.shields.io/docker/v/bolagnaise/power-sync?label=docker%20hub&logo=docker)](https://hub.docker.com/r/bolagnaise/power-sync)
   [![Docker Pulls](https://img.shields.io/docker/pulls/bolagnaise/power-sync)](https://hub.docker.com/r/bolagnaise/power-sync)
-  [![Build Status](https://github.com/bolagnaise/tesla-sync/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/bolagnaise/tesla-sync/actions)
+  [![Build Status](https://github.com/bolagnaise/PowerSync/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/bolagnaise/PowerSync/actions)
 </div>
 
 ## Disclaimer
@@ -23,7 +23,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 <div align="center">
 
 ### Dashboard Overview
-<img src="https://i.imgur.com/E500MNw.jpeg" alt="Tesla Sync Dashboard" width="80%"/>
+<img src="https://i.imgur.com/E500MNw.jpeg" alt="PowerSync Dashboard" width="80%"/>
 
 *Complete dashboard showing real-time energy monitoring, Amber Electric pricing, Powerwall status, and 24-hour tariff schedule*
 
@@ -223,7 +223,7 @@ Amber export price: -3c/kWh
 An experimental feature that forces the Powerwall to immediately recalculate its behavior after receiving new tariff prices.
 
 **The Problem:**
-After Tesla Sync uploads a new tariff, the Powerwall may take several minutes to recognize the price changes and adjust its charging/discharging behavior accordingly.
+After PowerSync uploads a new tariff, the Powerwall may take several minutes to recognize the price changes and adjust its charging/discharging behavior accordingly.
 
 **How It Works:**
 After a successful tariff sync, this feature briefly switches the Powerwall to self-consumption mode, waits 5 seconds, then switches back to Time-Based Control (autonomous mode). This mode toggle forces the Powerwall to immediately recalculate its optimal behavior based on the new prices.
@@ -249,7 +249,7 @@ The toggle only triggers when **settled/actual prices** are synced (at :35/:60 s
 Full support for **Flow Power** and other wholesale electricity retailers that pass through AEMO NEM spot prices.
 
 **How It Works:**
-AEMO wholesale prices only include the energy cost - they don't include network (DNSP) charges, environmental fees, or GST. Tesla Sync automatically calculates your total retail price using the [aemo_to_tariff](https://github.com/powston/aemo_to_tariff) library.
+AEMO wholesale prices only include the energy cost - they don't include network (DNSP) charges, environmental fees, or GST. PowerSync automatically calculates your total retail price using the [aemo_to_tariff](https://github.com/powston/aemo_to_tariff) library.
 
 **Configuration:**
 1. Select **Flow Power** as your electricity provider
@@ -313,19 +313,19 @@ Backup and restore your tariff configurations:
 
 ### Intelligent Price Conversion
 
-Tesla Sync uses sophisticated algorithms to convert Amber Electric's dynamic pricing into Tesla-compatible TOU (Time-of-Use) tariffs:
+PowerSync uses sophisticated algorithms to convert Amber Electric's dynamic pricing into Tesla-compatible TOU (Time-of-Use) tariffs:
 
 #### 1. **Smart Period Mapping**
-Amber Electric labels their forecasts using **END time** convention (e.g., "18:00 forecast" = 17:30-18:00 period), while Tesla uses **START time** labels (e.g., PERIOD_17_30 = 17:30-18:00). Tesla Sync automatically aligns these conventions so prices match exactly what you see in the Amber app.
+Amber Electric labels their forecasts using **END time** convention (e.g., "18:00 forecast" = 17:30-18:00 period), while Tesla uses **START time** labels (e.g., PERIOD_17_30 = 17:30-18:00). PowerSync automatically aligns these conventions so prices match exactly what you see in the Amber app.
 
 #### 2. **5-Minute Averaging**
 - **Recent/Current Prices:** Amber provides 5-minute actual intervals with high precision
-- **Conversion:** Tesla Sync averages six 5-minute intervals into each 30-minute Tesla period
+- **Conversion:** PowerSync averages six 5-minute intervals into each 30-minute Tesla period
 - **Result:** More accurate pricing that captures real market volatility
 - **Example:** Period 20:00-20:30 averages prices from 20:05, 20:10, 20:15, 20:20, 20:25, 20:30
 
 #### 3. **Rolling 24-Hour Window**
-Tesla requires a static 24-hour tariff structure, but Tesla Sync makes it "roll" forward:
+Tesla requires a static 24-hour tariff structure, but PowerSync makes it "roll" forward:
 - **Future periods** (not yet reached today): Use today's forecast prices
 - **Past periods** (already passed today): Use tomorrow's forecast prices
 - **Benefit:** Tesla always has 9-24 hours of lookahead for every period, enabling optimal battery decisions
@@ -358,7 +358,7 @@ Prices are rounded to **4 decimal places** with trailing zeros automatically rem
 
 ## Installation Options
 
-Tesla Sync is available in two deployment options:
+PowerSync is available in two deployment options:
 
 1. **[Home Assistant Integration](#home-assistant-integration)** - Native HA custom integration (Recommended for HA users)
 2. **[Docker Application](#docker-deployment)** - Standalone web app with dashboard
@@ -369,7 +369,7 @@ Both options require **Tesla API access** - see [Tesla API Options](#tesla-api-o
 
 ## Tesla API Options
 
-Tesla Sync supports two methods for accessing your Tesla Powerwall. **Choose one** - you don't need both.
+PowerSync supports two methods for accessing your Tesla Powerwall. **Choose one** - you don't need both.
 
 ### Option 1: Teslemetry (Recommended - ~$4/month)
 
@@ -386,7 +386,7 @@ The easiest setup option. Teslemetry is a third-party proxy service for Tesla AP
 1. Sign up at https://teslemetry.com
 2. Connect your Tesla account
 3. Copy your API key
-4. Paste into Tesla Sync settings
+4. Paste into PowerSync settings
 
 ### Option 2: Tesla Fleet API (Free)
 
@@ -403,12 +403,12 @@ Direct OAuth access to Tesla's Fleet API. Completely free but requires more setu
 1. Install the official **Tesla Fleet** integration in Home Assistant
    - Settings → Devices & Services → Add Integration → "Tesla Fleet"
    - Follow the OAuth login flow
-2. Tesla Sync automatically detects your Tesla Fleet credentials
-3. Leave the Teslemetry field empty during Tesla Sync setup
+2. PowerSync automatically detects your Tesla Fleet credentials
+3. Leave the Teslemetry field empty during PowerSync setup
 
 **Setup for Docker:**
 1. Register an OAuth app at https://developer.tesla.com
-2. In Tesla Sync Settings, select "Tesla Fleet API (Direct, Free)"
+2. In PowerSync Settings, select "Tesla Fleet API (Direct, Free)"
 3. Enter Client ID, Client Secret, and Redirect URI
 4. Click "Connect to Tesla Fleet API" to authorize
 5. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for detailed instructions
@@ -417,7 +417,7 @@ Direct OAuth access to Tesla's Fleet API. Completely free but requires more setu
 
 ## Home Assistant Integration
 
-The easiest way to use Tesla Sync if you're already running Home Assistant.
+The easiest way to use PowerSync if you're already running Home Assistant.
 
 ### Features
 
@@ -441,16 +441,16 @@ The easiest way to use Tesla Sync if you're already running Home Assistant.
    - Open HACS in Home Assistant
    - Click the three dots in the top right
    - Select "Custom repositories"
-   - Add repository URL: `https://github.com/bolagnaise/tesla-sync`
+   - Add repository URL: `https://github.com/bolagnaise/PowerSync`
    - Category: `Integration`
    - Click "Add"
-   - Click "Download" on the Tesla Sync integration
+   - Click "Download" on the PowerSync integration
    - Restart Home Assistant
 
 2. **Add Integration**
    - Go to Settings → Devices & Services
    - Click "+ Add Integration"
-   - Search for "Tesla Sync"
+   - Search for "PowerSync"
    - Click to add
 
 3. **Configure**
@@ -491,10 +491,10 @@ You can disable automatic syncing by turning off the switch, and re-enable it an
 
 ```yaml
 # Manually sync TOU schedule
-service: tesla_sync.sync_tou_schedule
+service: power_sync.sync_tou_schedule
 
 # Refresh data from Amber and Teslemetry
-service: tesla_sync.sync_now
+service: power_sync.sync_now
 ```
 
 ### Example Automations (Optional)
@@ -513,7 +513,7 @@ automation:
         entity_id: sensor.current_electricity_price
         above: 0.30
     action:
-      - service: tesla_sync.sync_tou_schedule
+      - service: power_sync.sync_tou_schedule
 ```
 
 **Disable auto-sync during off-peak hours:**
@@ -526,7 +526,7 @@ automation:
     action:
       - service: switch.turn_off
         target:
-          entity_id: switch.tesla_sync_auto_sync
+          entity_id: switch.power_sync_auto_sync
 
   - alias: "Enable Auto-Sync in Morning"
     trigger:
@@ -535,12 +535,12 @@ automation:
     action:
       - service: switch.turn_on
         target:
-          entity_id: switch.tesla_sync_auto_sync
+          entity_id: switch.power_sync_auto_sync
 ```
 
 ### Pre-built Dashboard (Optional)
 
-A pre-built Lovelace dashboard is included for visualizing all Tesla Sync data.
+A pre-built Lovelace dashboard is included for visualizing all PowerSync data.
 
 **Required HACS Frontend Cards:**
 - `mushroom` - Compact chips for controls
@@ -550,7 +550,7 @@ A pre-built Lovelace dashboard is included for visualizing all Tesla Sync data.
 
 **Installation:**
 1. Install the required HACS cards (HACS → Frontend → search for each card)
-2. Copy the dashboard YAML from `custom_components/tesla_sync/dashboard/tesla_sync_dashboard.yaml`
+2. Copy the dashboard YAML from `custom_components/power_sync/dashboard/power_sync_dashboard.yaml`
 3. In Home Assistant: Settings → Dashboards → Add Dashboard → "New dashboard from scratch"
 4. Edit the new dashboard → 3 dots menu → "Raw configuration editor"
 5. Paste the YAML content and save
@@ -608,8 +608,8 @@ The easiest way to deploy is using the official pre-built image from Docker Hub.
 
 ```bash
 # Download the docker-compose file
-curl -O https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/docker/docker-compose.hub.yml
-curl -O https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/.env.example
+curl -O https://raw.githubusercontent.com/bolagnaise/PowerSync/main/docker/docker-compose.hub.yml
+curl -O https://raw.githubusercontent.com/bolagnaise/PowerSync/main/.env.example
 mv .env.example .env
 
 # Edit .env with your Tesla credentials (encryption key auto-generated on first run)
@@ -671,8 +671,8 @@ For development or customization:
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/bolagnaise/tesla-sync.git
-cd tesla-sync
+git clone https://github.com/bolagnaise/PowerSync.git
+cd PowerSync
 ```
 
 2. **Create `.env` file**
@@ -801,7 +801,7 @@ docker restart tesla-sync
 
 ## Configuration
 
-After starting Tesla Sync, open the web interface at `http://localhost:5001` and go to **Settings**:
+After starting PowerSync, open the web interface at `http://localhost:5001` and go to **Settings**:
 
 1. **Amber Electric** - Enter your API token ([get one here](https://app.amber.com.au/developers))
 2. **Tesla API** - Choose Teslemetry or Fleet API ([see options](#tesla-api-options))
@@ -1013,7 +1013,7 @@ tail -f flask.log
 
 ## Support
 
-For issues: Check logs first, then [open a GitHub issue](https://github.com/bolagnaise/tesla-sync/issues) or join [Discord](https://discord.gg/eaWDWxEWE3).
+For issues: Check logs first, then [open a GitHub issue](https://github.com/bolagnaise/PowerSync/issues) or join [Discord](https://discord.gg/eaWDWxEWE3).
 
 ## License
 
