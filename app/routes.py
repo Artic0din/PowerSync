@@ -94,10 +94,14 @@ def get_powerwall_timezone(user, default='Australia/Brisbane'):
     Returns:
         IANA timezone string (e.g., 'Australia/Sydney')
     """
-    # Check if we have a cached timezone in the session
+    # Check if we have a cached timezone in the session (only for web requests with session)
     cache_key = f'powerwall_tz_{user.id}'
-    if cache_key in session:
-        return session[cache_key]
+    try:
+        if cache_key in session:
+            return session[cache_key]
+    except RuntimeError:
+        # No session context (API token auth) - skip cache check
+        pass
 
     # Try to fetch from Tesla API
     tesla_client = get_tesla_client(user)
@@ -108,8 +112,11 @@ def get_powerwall_timezone(user, default='Australia/Brisbane'):
                 tz = site_info.get('installation_time_zone')
                 if tz:
                     logger.info(f"Fetched Powerwall timezone from Tesla API: {tz}")
-                    # Cache in session for this login session
-                    session[cache_key] = tz
+                    # Cache in session for this login session (only if session available)
+                    try:
+                        session[cache_key] = tz
+                    except RuntimeError:
+                        pass  # No session context
                     return tz
         except Exception as e:
             logger.warning(f"Failed to fetch Powerwall timezone from Tesla API: {e}")
@@ -1797,7 +1804,7 @@ def energy_history(api_user=None, **kwargs):
         if date_param:
             try:
                 target_date = datetime.strptime(date_param, '%Y-%m-%d')
-                start_of_day_local = user_tz.localize(target_date.replace(hour=0, minute=0, second=0, microsecond=0))
+                start_of_day_local = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=user_tz)
             except ValueError:
                 return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
         else:
@@ -1874,7 +1881,7 @@ def energy_history(api_user=None, **kwargs):
         if date_param:
             try:
                 target_date = datetime.strptime(date_param, '%Y-%m-%d')
-                start_of_day = user_tz.localize(target_date.replace(hour=0, minute=0, second=0, microsecond=0))
+                start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=user_tz)
             except ValueError:
                 start_of_day = datetime.now(user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
         else:
