@@ -16,29 +16,71 @@ INVERTER_BRANDS = {
     "sungrow": "Sungrow",
 }
 
-# Sungrow SG series (string inverters)
+# Sungrow SG series (string inverters) - single phase residential
 SUNGROW_SG_MODELS = {
-    "sg5": "SG5.0RS",
-    "sg8": "SG8.0RS",
-    "sg10": "SG10RS",
-    "sg12": "SG12RS",
-    "sg15": "SG15RS",
-    "sg20": "SG20RS",
+    "sg2.5rs": "SG2.5RS",
+    "sg3.0rs": "SG3.0RS",
+    "sg3.6rs": "SG3.6RS",
+    "sg4.0rs": "SG4.0RS",
+    "sg5.0rs": "SG5.0RS",
+    "sg6.0rs": "SG6.0RS",
+    "sg7.0rs": "SG7.0RS",
+    "sg8.0rs": "SG8.0RS",
+    "sg10rs": "SG10RS",
+    "sg12rs": "SG12RS",
+    "sg15rs": "SG15RS",
+    "sg17rs": "SG17RS",
+    "sg20rs": "SG20RS",
 }
 
 # Sungrow SH series (hybrid inverters with battery)
 # Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
-SUNGROW_SH_MODELS = {
+# Single phase RS series
+SUNGROW_SH_RS_MODELS = {
+    "sh3.0rs": "SH3.0RS",
     "sh3.6rs": "SH3.6RS",
+    "sh4.0rs": "SH4.0RS",
     "sh4.6rs": "SH4.6RS",
     "sh5.0rs": "SH5.0RS",
-    "sh5.0rt": "SH5.0RT",
     "sh6.0rs": "SH6.0RS",
+}
+
+# Three phase RT series (residential)
+SUNGROW_SH_RT_MODELS = {
+    "sh5.0rt": "SH5.0RT",
     "sh6.0rt": "SH6.0RT",
     "sh8.0rt": "SH8.0RT",
     "sh10rt": "SH10RT",
-    "sh5k20": "SH5K-20",
-    "sh5k30": "SH5K-30",
+    "sh5.0rt-20": "SH5.0RT-20",
+    "sh6.0rt-20": "SH6.0RT-20",
+    "sh8.0rt-20": "SH8.0RT-20",
+    "sh10rt-20": "SH10RT-20",
+    "sh8.0rt-v112": "SH8.0RT-V112",
+    "sh10rt-v112": "SH10RT-V112",
+}
+
+# Three phase T series (commercial/C&I)
+SUNGROW_SH_T_MODELS = {
+    "sh15t": "SH15T",
+    "sh20t": "SH20T",
+    "sh25t": "SH25T",
+}
+
+# Legacy SH models
+SUNGROW_SH_LEGACY_MODELS = {
+    "sh3k6": "SH3K6",
+    "sh4k6": "SH4K6",
+    "sh5k-20": "SH5K-20",
+    "sh5k-30": "SH5K-30",
+    "sh5k-v13": "SH5K-V13",
+}
+
+# Combined SH models
+SUNGROW_SH_MODELS = {
+    **SUNGROW_SH_RS_MODELS,
+    **SUNGROW_SH_RT_MODELS,
+    **SUNGROW_SH_T_MODELS,
+    **SUNGROW_SH_LEGACY_MODELS,
 }
 
 # Combined model list for UI dropdowns
