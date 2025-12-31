@@ -1119,10 +1119,26 @@ For issues: Check logs first, then [open a GitHub issue](https://github.com/bola
 
 PowerSync builds on the work of these excellent open-source projects:
 
+**Sigenergy Support:**
 | Project | Author | Used For |
 |---------|--------|----------|
 | [amber2sigen](https://github.com/Talie5in/amber2sigen) | [@Talie5in](https://github.com/Talie5in) | Sigenergy Cloud API authentication and tariff sync |
 | [Sigenergy-Local-Modbus](https://github.com/TypQxQ/Sigenergy-Local-Modbus) | [@TypQxQ](https://github.com/TypQxQ) | Sigenergy Modbus register documentation for DC curtailment |
+
+**AC-Coupled Inverter Support:**
+| Project | Author | Used For |
+|---------|--------|----------|
+| [Sungrow-SHx-Inverter-Modbus-Home-Assistant](https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant) | [@mkaiser](https://github.com/mkaiser) | Sungrow SH series Modbus registers |
+| [sungrow-sg5-price-curtailment](https://github.com/Artic0din/sungrow-sg5-price-curtailment) | [@Artic0din](https://github.com/Artic0din) | Sungrow SG series curtailment logic |
+| [goodwe](https://github.com/marcelblijleven/goodwe) | [@marcelblijleven](https://github.com/marcelblijleven) | GoodWe inverter Modbus protocol |
+| [huawei-solar-lib](https://github.com/wlcrs/huawei-solar-lib) | [@wlcrs](https://github.com/wlcrs) | Huawei SUN2000 Modbus registers |
+| [pyenphase](https://github.com/pyenphase/pyenphase) | [@pyenphase](https://github.com/pyenphase) | Enphase IQ Gateway API |
+| [Enphase-API](https://github.com/Matthew1471/Enphase-API) | [@Matthew1471](https://github.com/Matthew1471) | Enphase API documentation |
+| [Fronius Curtailment Guide](https://www.smartmotion.life/2023/09/12/amber-electric-curtailment-with-home-assistant/) | smartmotion.life | Fronius SunSpec Modbus curtailment |
+
+**Pricing & Tariffs:**
+| Project | Author | Used For |
+|---------|--------|----------|
 | [aemo_to_tariff](https://github.com/powston/aemo_to_tariff) | [@powston](https://github.com/powston) | AEMO wholesale to retail price conversion with network tariffs |
 
 Thank you to all contributors and the Australian energy automation community!
