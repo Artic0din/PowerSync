@@ -59,9 +59,7 @@ class SettingsForm(FlaskForm):
     sigenergy_station_id = StringField('Sigenergy Station ID',
         description='Station ID (auto-populated after credential validation)')
 
-    # Sigenergy DC Curtailment via Modbus TCP
-    sigenergy_dc_curtailment_enabled = BooleanField('Enable DC Solar Curtailment',
-        description='Control solar export via Modbus TCP during negative pricing')
+    # Sigenergy Modbus settings (used in Amber Settings for DC curtailment)
     sigenergy_modbus_host = StringField('Sigenergy IP Address',
         validators=[Optional()],
         description='Local IP address of your Sigenergy system (e.g., 192.168.1.100)')

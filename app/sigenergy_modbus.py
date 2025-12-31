@@ -139,6 +139,98 @@ class SigenergyModbusClient:
             logger.debug(f"Error reading holding register {address}: {e}")
             return None
 
+    def _write_holding_registers(self, address: int, values: list) -> bool:
+        """Write values to holding registers."""
+        if not self._client or not self._client.connected:
+            if not self.connect():
+                return False
+
+        try:
+            result = self._client.write_registers(
+                address=address,
+                values=values,
+                slave=self.slave_id,
+            )
+
+            if result.isError():
+                logger.error(f"Modbus write error at holding register {address}: {result}")
+                return False
+
+            return True
+
+        except ModbusException as e:
+            logger.error(f"Modbus exception writing holding register {address}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error writing holding register {address}: {e}")
+            return False
+
+    def set_export_limit(self, limit_kw: float) -> bool:
+        """Set the grid export limit.
+
+        Args:
+            limit_kw: Export limit in kW. Use 0 to disable export (curtailment).
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            if not self.connect():
+                return False
+
+            # Convert kW to scaled value (gain 1000)
+            limit_scaled = int(limit_kw * self.GAIN_POWER)
+
+            # U32 requires 2 registers (high word, low word)
+            high_word = (limit_scaled >> 16) & 0xFFFF
+            low_word = limit_scaled & 0xFFFF
+
+            success = self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, [high_word, low_word])
+
+            if success:
+                logger.info(f"Set Sigenergy export limit to {limit_kw} kW (scaled: {limit_scaled})")
+            else:
+                logger.error(f"Failed to set Sigenergy export limit")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error setting export limit: {e}")
+            return False
+
+        finally:
+            self.disconnect()
+
+    def restore_export_limit(self) -> bool:
+        """Restore the export limit to unlimited (normal operation).
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            if not self.connect():
+                return False
+
+            # Set to unlimited value (0xFFFFFFFE)
+            high_word = (self.EXPORT_LIMIT_UNLIMITED >> 16) & 0xFFFF
+            low_word = self.EXPORT_LIMIT_UNLIMITED & 0xFFFF
+
+            success = self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, [high_word, low_word])
+
+            if success:
+                logger.info(f"Restored Sigenergy export limit to unlimited")
+            else:
+                logger.error(f"Failed to restore Sigenergy export limit")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error restoring export limit: {e}")
+            return False
+
+        finally:
+            self.disconnect()
+
     def get_live_status(self) -> dict:
         """Get current power status from Sigenergy system.
 
@@ -252,7 +344,7 @@ def get_sigenergy_modbus_client(user) -> Optional[SigenergyModbusClient]:
     Returns:
         SigenergyModbusClient instance or None if not configured
     """
-    if not user.sigenergy_dc_curtailment_enabled or not user.sigenergy_modbus_host:
+    if not user.sigenergy_modbus_host:
         return None
 
     return SigenergyModbusClient(

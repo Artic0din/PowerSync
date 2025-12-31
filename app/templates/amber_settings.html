@@ -79,19 +79,79 @@
 
             <fieldset>
                 <legend>DC Solar Curtailment</legend>
-                <label for="solar_curtailment_enabled">
-                    {{ form.solar_curtailment_enabled() }}
-                    {{ form.solar_curtailment_enabled.label }}
-                    <small>{{ form.solar_curtailment_enabled.description }}</small>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Automatically curtail solar export during negative feed-in prices. Works with both Tesla Powerwall and Sigenergy systems.
+                </p>
+
+                <label for="solar_curtailment_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                    <input type="checkbox" id="solar_curtailment_enabled" name="solar_curtailment_enabled"
+                           {% if current_user.solar_curtailment_enabled %}checked{% endif %}
+                           onchange="toggleSigenergyModbusConfig()">
+                    <span>Enable DC Solar Curtailment</span>
                 </label>
+
+                {% if current_user.battery_system == 'sigenergy' %}
+                <!-- Sigenergy Modbus Configuration -->
+                <div id="sigenergyModbusConfig" style="margin-top: 1em; {% if not current_user.solar_curtailment_enabled %}display: none;{% endif %}">
+                    <div style="padding: 0.8em; background: rgba(100, 150, 200, 0.1); border-radius: 0.5em; margin-bottom: 1em;">
+                        <p style="margin: 0 0 0.5em 0; font-size: 0.85em;"><strong>Sigenergy Modbus TCP Settings</strong></p>
+                        <p style="font-size: 0.8em; margin: 0; color: var(--muted-color);">
+                            Configure Modbus connection to set export limit to 0kW during negative prices.
+                        </p>
+                    </div>
+
+                    <label for="sigenergy_modbus_host">
+                        Sigenergy IP Address
+                        <input type="text" id="sigenergy_modbus_host" name="sigenergy_modbus_host"
+                               value="{{ current_user.sigenergy_modbus_host or '' }}"
+                               placeholder="192.168.1.100" style="width: 100%;">
+                    </label>
+                    <small style="display: block; margin-top: -0.5em; margin-bottom: 1em; color: var(--muted-color);">
+                        Local IP address of your Sigenergy inverter
+                    </small>
+
+                    <div style="display: flex; gap: 1em;">
+                        <div style="flex: 1;">
+                            <label for="sigenergy_modbus_port">
+                                Modbus Port
+                                <input type="number" id="sigenergy_modbus_port" name="sigenergy_modbus_port"
+                                       value="{{ current_user.sigenergy_modbus_port or 502 }}"
+                                       min="1" max="65535" style="width: 100%;">
+                            </label>
+                            <small style="display: block; margin-top: -0.5em; color: var(--muted-color);">
+                                Default: 502
+                            </small>
+                        </div>
+                        <div style="flex: 1;">
+                            <label for="sigenergy_modbus_slave_id">
+                                Slave ID
+                                <input type="number" id="sigenergy_modbus_slave_id" name="sigenergy_modbus_slave_id"
+                                       value="{{ current_user.sigenergy_modbus_slave_id or 1 }}"
+                                       min="1" max="247" style="width: 100%;">
+                            </label>
+                            <small style="display: block; margin-top: -0.5em; color: var(--muted-color);">
+                                Default: 1
+                            </small>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <details style="margin-top: 0.5em;">
                     <summary style="font-size: 0.85em;">How does solar curtailment work?</summary>
                     <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.05); border-radius: 0.3em;">
                         <p style="margin: 0.3em 0;">When enabled, this feature monitors Amber feed-in prices every minute and automatically:</p>
+                        {% if current_user.battery_system == 'sigenergy' %}
+                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.5em 0;"><strong>During negative prices (≤0c/kWh):</strong> Sets Sigenergy export limit to 0kW via Modbus (load-following mode). Solar continues to power your home but won't export.</li>
+                            <li style="margin: 0.5em 0;"><strong>During positive prices (>0c/kWh):</strong> Restores normal export limit to allow solar export to grid.</li>
+                        </ul>
+                        {% else %}
                         <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
                             <li style="margin: 0.5em 0;"><strong>During negative prices (≤0c/kWh):</strong> Sets Powerwall export to "never" to prevent paying to export your solar to the grid.</li>
                             <li style="margin: 0.5em 0;"><strong>During positive prices (>0c/kWh):</strong> Restores export to "battery_ok" to allow both solar and battery export.</li>
                         </ul>
+                        {% endif %}
                         <p style="margin: 0.5em 0 0 0; font-style: italic;">This is particularly useful with Amber's wholesale pricing to avoid financial penalties during negative price events.</p>
                     </div>
                 </details>
@@ -411,6 +471,14 @@
             const details = document.getElementById('inverterDetails');
             if (details) {
                 details.style.display = enabled ? 'block' : 'none';
+            }
+        }
+
+        function toggleSigenergyModbusConfig() {
+            const enabled = document.getElementById('solar_curtailment_enabled').checked;
+            const config = document.getElementById('sigenergyModbusConfig');
+            if (config) {
+                config.style.display = enabled ? 'block' : 'none';
             }
         }
 

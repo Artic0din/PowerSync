@@ -2230,6 +2230,72 @@ def _apply_inverter_curtailment(user, curtail: bool = True):
         logger.error(f"❌ INVERTER ERROR: Failed to {action[:-3]} inverter for {user.email}: {e}", exc_info=True)
 
 
+def _apply_sigenergy_curtailment(user, export_earnings: float, db) -> bool:
+    """
+    Apply or remove Sigenergy curtailment via Modbus TCP.
+
+    Sets export limit to 0kW when export_earnings < 1c/kWh (curtail)
+    Restores normal export limit when export_earnings >= 1c/kWh (restore)
+
+    Returns True on success, False on error.
+    """
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            logger.error(f"Failed to create Sigenergy Modbus client for {user.email}")
+            return False
+
+        # Get current curtailment state from user record
+        current_state = getattr(user, 'sigenergy_curtailment_state', None)
+
+        # CURTAILMENT: export_earnings < 1c/kWh
+        if export_earnings < 1:
+            logger.info(f"🚫 SIGENERGY CURTAILMENT: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
+
+            if current_state == 'curtailed':
+                logger.info(f"✅ Already curtailed - no action needed for {user.email}")
+                return True
+
+            # Set export limit to 0kW
+            success = client.set_export_limit(0)
+            if success:
+                user.sigenergy_curtailment_state = 'curtailed'
+                user.sigenergy_curtailment_updated = datetime.utcnow()
+                db.session.commit()
+                logger.info(f"✅ SIGENERGY CURTAILMENT APPLIED: Export limit set to 0kW for {user.email}")
+                return True
+            else:
+                logger.error(f"❌ Failed to apply Sigenergy curtailment for {user.email}")
+                return False
+
+        # RESTORE: export_earnings >= 1c/kWh
+        else:
+            logger.info(f"✅ SIGENERGY NORMAL: Export earnings {export_earnings:.2f}c/kWh (>=1c) for {user.email}")
+
+            if current_state != 'curtailed':
+                logger.debug(f"Already in normal mode - no action needed for {user.email}")
+                return True
+
+            # Restore normal export limit (use -1 or high value to indicate unlimited)
+            # Sigenergy typically uses 0xFFFF or a high value for unlimited
+            success = client.restore_export_limit()
+            if success:
+                user.sigenergy_curtailment_state = 'normal'
+                user.sigenergy_curtailment_updated = datetime.utcnow()
+                db.session.commit()
+                logger.info(f"✅ SIGENERGY CURTAILMENT REMOVED: Export limit restored for {user.email}")
+                return True
+            else:
+                logger.error(f"❌ Failed to restore Sigenergy export limit for {user.email}")
+                return False
+
+    except Exception as e:
+        logger.error(f"❌ SIGENERGY CURTAILMENT ERROR for {user.email}: {e}", exc_info=True)
+        return False
+
+
 def solar_curtailment_check():
     """
     Monitor Amber export prices and curtail solar export when price is below 1c/kWh
@@ -2263,11 +2329,21 @@ def solar_curtailment_check():
                 logger.warning(f"User {user.email} has curtailment enabled but no Amber API token")
                 continue
 
-            if not user.tesla_energy_site_id or not user.teslemetry_api_key_encrypted:
-                logger.warning(f"User {user.email} has curtailment enabled but missing Tesla configuration")
-                continue
+            # Determine battery system type
+            battery_system = getattr(user, 'battery_system', 'tesla') or 'tesla'
 
-            logger.info(f"Checking export price for user: {user.email}")
+            # Validate battery-system-specific configuration
+            if battery_system == 'sigenergy':
+                if not user.sigenergy_modbus_host:
+                    logger.warning(f"User {user.email} has Sigenergy curtailment enabled but no Modbus host configured")
+                    continue
+            else:
+                # Tesla system
+                if not user.tesla_energy_site_id or not user.teslemetry_api_key_encrypted:
+                    logger.warning(f"User {user.email} has curtailment enabled but missing Tesla configuration")
+                    continue
+
+            logger.info(f"Checking export price for user: {user.email} (battery_system: {battery_system})")
 
             # Get Amber client and fetch current prices
             amber_client = get_amber_client(user)
@@ -2301,7 +2377,16 @@ def solar_curtailment_check():
             export_earnings = -feedin_price  # Convert to positive = earnings per kWh
             logger.info(f"Current feed-in price for {user.email}: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
 
-            # Get Tesla client
+            # Handle Sigenergy systems via Modbus
+            if battery_system == 'sigenergy':
+                result = _apply_sigenergy_curtailment(user, export_earnings, db)
+                if result:
+                    success_count += 1
+                else:
+                    error_count += 1
+                continue
+
+            # Tesla system - get Tesla client
             tesla_client = get_tesla_client(user)
             if not tesla_client:
                 logger.error(f"Failed to get Tesla client for {user.email}")

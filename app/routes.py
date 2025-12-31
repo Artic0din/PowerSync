@@ -1329,6 +1329,25 @@ def amber_settings():
         current_user.force_tariff_mode_toggle = 'force_tariff_mode_toggle' in request.form
         logger.info(f"Saving force tariff mode toggle: {current_user.force_tariff_mode_toggle}")
 
+        # Sigenergy Modbus settings (for DC curtailment when battery_system is sigenergy)
+        if current_user.battery_system == 'sigenergy':
+            if 'sigenergy_modbus_host' in request.form:
+                current_user.sigenergy_modbus_host = request.form.get('sigenergy_modbus_host', '') or None
+
+            if 'sigenergy_modbus_port' in request.form:
+                try:
+                    current_user.sigenergy_modbus_port = int(request.form.get('sigenergy_modbus_port', 502))
+                except (ValueError, TypeError):
+                    current_user.sigenergy_modbus_port = 502
+
+            if 'sigenergy_modbus_slave_id' in request.form:
+                try:
+                    current_user.sigenergy_modbus_slave_id = int(request.form.get('sigenergy_modbus_slave_id', 1))
+                except (ValueError, TypeError):
+                    current_user.sigenergy_modbus_slave_id = 1
+
+            logger.info(f"Saving Sigenergy Modbus: host={current_user.sigenergy_modbus_host}, port={current_user.sigenergy_modbus_port}")
+
         try:
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
