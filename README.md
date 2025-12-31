@@ -12,6 +12,14 @@
   [![Docker Hub](https://img.shields.io/docker/v/bolagnaise/power-sync?label=docker%20hub&logo=docker)](https://hub.docker.com/r/bolagnaise/power-sync)
   [![Docker Pulls](https://img.shields.io/docker/pulls/bolagnaise/power-sync)](https://hub.docker.com/r/bolagnaise/power-sync)
   [![Build Status](https://github.com/bolagnaise/PowerSync/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/bolagnaise/PowerSync/actions)
+
+  ### 📱 Mobile App (Beta)
+
+  <a href="https://testflight.apple.com/join/FhnUtSFy"><img src="https://img.shields.io/badge/iOS-TestFlight-blue?logo=apple&logoColor=white" alt="iOS TestFlight"></a>
+  <a href="https://play.google.com/apps/internaltest/4701190520579978532-"><img src="https://img.shields.io/badge/Android-Beta-3DDC84?logo=android&logoColor=white" alt="Android Beta"></a>
+
+  Monitor your battery, view live pricing, and fetch battery health data from your phone.
+
 </div>
 
 ## Disclaimer
@@ -21,8 +29,22 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ## Features
 
 ### Supported Battery Systems
-- 🔋 **Tesla Powerwall** - Full support via Fleet API or Teslemetry proxy
-- ⚡ **Sigenergy** - Full support via Sigenergy Cloud API with DC solar curtailment via Modbus TCP
+
+| Feature | Tesla Powerwall | Sigenergy |
+|---------|:---------------:|:---------:|
+| Automatic TOU Tariff Sync | ✅ | ✅ |
+| Spike Protection | ✅ | ✅ |
+| Export Price Boost | ✅ | ✅ |
+| Chip Mode | ✅ | ✅ |
+| DC Solar Curtailment | ✅ Export rules | ✅ Modbus TCP |
+| AC-Coupled Inverter Curtailment | ✅ | ✅ |
+| AEMO Spike Detection | ✅ | ⏳ Coming soon |
+| Force Mode Toggle | ✅ | ➖ N/A |
+| Custom TOU Schedules | ✅ | ➖ N/A |
+
+**Connection Methods:**
+- 🔋 **Tesla Powerwall** - Fleet API or Teslemetry proxy
+- ⚡ **Sigenergy** - Sigenergy Cloud API + optional Modbus TCP for DC curtailment
 
 ### Core Functionality
 - 🔋 **Automatic TOU Tariff Sync** - Updates your battery system with Amber Electric pricing every 5 minutes
@@ -56,7 +78,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 ## Key Features Explained
 
-### AEMO Spike Detection
+### AEMO Spike Detection 🔋 *Tesla only*
 This option is disabled by default and is primarily intended for use with VPPs that offer AEMO Spike exports (GLOBIRD,AGL,ENGIE) and where Tesla Batteries are not natively supported.
 Automatically monitors AEMO NEM wholesale electricity prices for your region (NSW1, QLD1, VIC1, SA1, TAS1). When prices exceed your configured threshold (e.g., $300/MWh), the system:
 - Saves your current tariff configuration
@@ -72,30 +94,30 @@ Perfect for maximizing revenue during extreme price events! Works seamlessly reg
 **Monitoring Frequency:** Checks AEMO prices every 1 minute for responsive spike detection.
 
 ### Solar Curtailment
-Prevents paying to export solar during negative pricing periods common with Amber Electric. The system monitors feed-in prices every minute and:
+Prevents paying to export solar during negative pricing periods (≤0c/kWh). Works with both battery systems:
 
-**During Negative Prices (≤0c/kWh):**
-- Sets Powerwall export rule to "never" to prevent grid export
-- Implements Tesla API bug workaround: if already set to "never", toggles to "pv_only" then back to "never" to force the setting to apply
-- Protects you from financial penalties during negative price events
+| Battery System | Method | Behavior |
+|----------------|--------|----------|
+| **Tesla** | Export rules API | Sets export to "never", restores to "battery_ok" when positive |
+| **Sigenergy** | Modbus TCP | Sets export limit to 0kW (load-following mode) |
 
-**During Positive Prices (>0c/kWh):**
-- Restores export rule to "battery_ok" to allow both solar and battery export
-- Enables normal revenue generation from grid export
+**Sigenergy Load-Following Mode:**
+Unlike full solar shutdown, Sigenergy uses zero-export mode:
+- ✅ Solar continues powering the house
+- ✅ Battery still charges from solar
+- ✅ Only grid export is blocked during negative prices
 
 **Configuration:**
 - Enable/disable in Amber Settings (Flask web interface)
 - Enable/disable during Home Assistant integration setup
 - Default: Disabled (opt-in feature)
 
-This feature is particularly useful with Amber's wholesale pricing to avoid paying to export your solar during oversupply periods.
-
 ### Spike Protection (Amber Only)
 
-Prevents your Powerwall from charging from the grid during Amber price spikes. When wholesale prices spike, Tesla may see an arbitrage opportunity and charge from grid - this feature stops that behavior.
+Prevents your battery from charging from the grid during Amber price spikes. When wholesale prices spike, your battery may see an arbitrage opportunity and charge from grid - this feature stops that behavior.
 
 **The Problem:**
-During price spikes, the Powerwall receives 30-minute averaged forecast prices (~$0.85/kWh) rather than the real-time spike prices ($10-$20/kWh). It doesn't "see" the spike and may decide to charge from grid for later arbitrage.
+During price spikes, your battery receives 30-minute averaged forecast prices (~$0.85/kWh) rather than the real-time spike prices ($10-$20/kWh). It doesn't "see" the spike and may decide to charge from grid for later arbitrage.
 
 **How It Works:**
 When Amber reports `spikeStatus: 'potential'` or `'spike'` for a period, buy prices are overridden:
@@ -114,13 +136,13 @@ During a spike event:
   Max export in forecast: $21.29/kWh
 
 Without spike protection:
-  Tesla sees forecast: ~$0.85/kWh buy
-  Powerwall thinks: "Charge now, sell later!"
+  Battery sees forecast: ~$0.85/kWh buy
+  Battery thinks: "Charge now, sell later!"
   Result: Grid charging during $16/kWh spike
 
 With spike protection:
   Override buy: $21.29 + $1.00 = $22.29/kWh
-  Powerwall calculates: $22.29 buy - $21.29 sell = $1.00 LOSS
+  Battery calculates: $22.29 buy - $21.29 sell = $1.00 LOSS
   Result: No grid charging
 ```
 
@@ -313,7 +335,7 @@ AC-coupled solar inverters export directly to the grid, bypassing your battery. 
 - Sigenergy battery with DC solar → Use Sigenergy DC curtailment
 - AC-coupled inverter (any brand) → Use AC-coupled inverter curtailment
 
-### Force Mode Toggle (Alpha)
+### Force Mode Toggle (Alpha) 🔋 *Tesla only*
 
 An experimental feature that forces the Powerwall to immediately recalculate its behavior after receiving new tariff prices.
 
@@ -390,7 +412,7 @@ Total = AEMO Wholesale + Network Charges + Market Fees + Environmental Levies + 
 
 **Note:** When using manual rates, enter all values in **cents/kWh**. If your tariff shows $0.19367/kWh, enter `19.367`.
 
-### Custom TOU Schedules
+### Custom TOU Schedules 🔋 *Tesla only*
 Not using Amber Electric? No problem! Create custom time-of-use schedules for any Australian electricity provider:
 - Define multiple seasonal periods (e.g., Summer, Winter)
 - Set different rates for peak, shoulder, and off-peak periods
@@ -1157,4 +1179,4 @@ Contributions welcome! Please:
 
 ---
 
-**Made with ⚡ by combining Tesla Powerwall optimization with Amber Electric dynamic pricing**
+**Made with ⚡ for Australian battery owners - Tesla Powerwall & Sigenergy**
