@@ -1115,6 +1115,18 @@ tail -f flask.log
 
 For issues: Check logs first, then [open a GitHub issue](https://github.com/bolagnaise/PowerSync/issues) or join [Discord](https://discord.gg/eaWDWxEWE3).
 
+## Acknowledgments
+
+PowerSync builds on the work of these excellent open-source projects:
+
+| Project | Author | Used For |
+|---------|--------|----------|
+| [amber2sigen](https://github.com/Talie5in/amber2sigen) | [@Talie5in](https://github.com/Talie5in) | Sigenergy Cloud API authentication and tariff sync |
+| [Sigenergy-Local-Modbus](https://github.com/TypQxQ/Sigenergy-Local-Modbus) | [@TypQxQ](https://github.com/TypQxQ) | Sigenergy Modbus register documentation for DC curtailment |
+| [aemo_to_tariff](https://github.com/powston/aemo_to_tariff) | [@powston](https://github.com/powston) | AEMO wholesale to retail price conversion with network tariffs |
+
+Thank you to all contributors and the Australian energy automation community!
+
 ## License
 
 MIT
