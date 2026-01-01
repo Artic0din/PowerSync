@@ -181,6 +181,7 @@
                                 <option value="goodwe" {% if current_user.inverter_brand == 'goodwe' %}selected{% endif %}>GoodWe</option>
                                 <option value="huawei" {% if current_user.inverter_brand == 'huawei' %}selected{% endif %}>Huawei</option>
                                 <option value="enphase" {% if current_user.inverter_brand == 'enphase' %}selected{% endif %}>Enphase</option>
+                                <option value="zeversolar" {% if current_user.inverter_brand == 'zeversolar' %}selected{% endif %}>Zeversolar</option>
                             </select>
                         </label>
                         <label for="inverter_model">
@@ -518,6 +519,12 @@
                 "envoy": "Envoy (Legacy)", "envoy-s": "Envoy-S",
                 "envoy-s-metered": "Envoy-S Metered",
                 "iq-gateway": "IQ Gateway", "iq-gateway-metered": "IQ Gateway Metered"
+            },
+            zeversolar: {
+                "tlc5000": "TLC5000", "tlc6000": "TLC6000",
+                "zevershine-5000tl": "Zevershine 5000TL", "zevershine-6000tl": "Zevershine 6000TL",
+                "evershine-tlc5000": "Evershine TLC5000", "evershine-tlc6000": "Evershine TLC6000",
+                "other": "Other Zeversolar"
             }
         };
 
@@ -527,7 +534,8 @@
             fronius: { port: 502, slaveId: 1, protocol: 'Modbus TCP (SunSpec)' },
             goodwe: { port: 502, slaveId: 247, protocol: 'Modbus TCP' },
             huawei: { port: 502, slaveId: 1, protocol: 'Modbus TCP' },
-            enphase: { port: 443, slaveId: 1, protocol: 'HTTPS REST API' }
+            enphase: { port: 443, slaveId: 1, protocol: 'HTTPS REST API' },
+            zeversolar: { port: 80, slaveId: 1, protocol: 'HTTP API' }
         };
 
         function updateInverterModels() {

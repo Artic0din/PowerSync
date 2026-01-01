@@ -17,6 +17,7 @@ INVERTER_BRANDS = {
     "goodwe": "GoodWe",
     "huawei": "Huawei",
     "enphase": "Enphase",
+    "zeversolar": "Zeversolar",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -111,6 +112,18 @@ ENPHASE_MICROINVERTER_MODELS = {
 # Combined Enphase models (show gateway models in dropdown)
 ENPHASE_MODELS = {
     **ENPHASE_GATEWAY_MODELS,
+}
+
+# Zeversolar models (HTTP API for power limiting)
+# Reference: Zeversolar WiFi module web interface
+ZEVERSOLAR_MODELS = {
+    "tlc5000": "TLC5000",
+    "tlc6000": "TLC6000",
+    "zevershine-5000tl": "Zevershine 5000TL",
+    "zevershine-6000tl": "Zevershine 6000TL",
+    "evershine-tlc5000": "Evershine TLC5000",
+    "evershine-tlc6000": "Evershine TLC6000",
+    "other": "Other Zeversolar",
 }
 
 # Sungrow SG series (string inverters) - single phase residential
@@ -266,6 +279,18 @@ def get_inverter_controller(
         if port == 502:
             port = 443
         return EnphaseController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+        )
+
+    if brand_lower == "zeversolar":
+        from .zeversolar import ZeversolarController
+        # Zeversolar uses HTTP on port 80, not Modbus
+        if port == 502:
+            port = 80
+        return ZeversolarController(
             host=host,
             port=port,
             slave_id=slave_id,
