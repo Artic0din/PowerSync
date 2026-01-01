@@ -2531,6 +2531,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # If using cache, always apply curtailment to be safe (cache may be stale)
                 if current_export_rule == "never" and not using_cached_rule:
                     _LOGGER.info(f"✅ Already curtailed (export='never', verified from API) - no action needed")
+
+                    # Still need to ensure AC-coupled inverter is curtailed (independent of Tesla state)
+                    await apply_inverter_curtailment(curtail=True, import_price=import_price, export_earnings=export_earnings)
+
                     _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
                     # Apply curtailment (either not 'never' or using unverified cache)
@@ -2670,6 +2674,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         return
                 else:
                     _LOGGER.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed")
+
+                    # Still need to ensure AC-coupled inverter is restored (independent of Tesla state)
+                    await apply_inverter_curtailment(curtail=False)
+
                     _LOGGER.info(f"📊 Action summary: No change needed (earnings: {export_earnings:.2f}c/kWh, export: '{current_export_rule}')")
 
         except Exception as e:
@@ -2780,6 +2788,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # If using cache, always apply curtailment to be safe (cache may be stale)
                 if current_export_rule == "never" and not using_cached_rule:
                     _LOGGER.info(f"✅ Already curtailed (export='never', verified from API) - no action needed")
+
+                    # Still need to ensure AC-coupled inverter is curtailed (independent of Tesla state)
+                    await apply_inverter_curtailment(curtail=True, import_price=import_price, export_earnings=export_earnings)
+
                     _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
                     # Apply curtailment (either not 'never' or using unverified cache)
@@ -2918,6 +2930,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         return
                 else:
                     _LOGGER.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed")
+
+                    # Still need to ensure AC-coupled inverter is restored (independent of Tesla state)
+                    await apply_inverter_curtailment(curtail=False)
+
                     _LOGGER.info(f"📊 Action summary: No change needed (earnings: {export_earnings:.2f}c/kWh, export: '{current_export_rule}')")
 
         except Exception as e:

@@ -2737,7 +2737,6 @@ def solar_curtailment_with_websocket_data(prices_data):
 
                 if current_export_rule == 'never':
                     logger.info(f"✅ Already curtailed (export='never') - no action needed for {user.email}")
-                    success_count += 1
                 else:
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if result:
@@ -2757,10 +2756,20 @@ def solar_curtailment_with_websocket_data(prices_data):
                         user.current_export_rule = 'never'
                         user.current_export_rule_updated = datetime.utcnow()
                         db.session.commit()
-                        success_count += 1
                     else:
                         logger.error(f"Failed to apply curtailment for {user.email}")
                         error_count += 1
+                        continue
+
+                # AC-coupled inverter curtailment (independent of Tesla state)
+                if getattr(user, 'inverter_curtailment_enabled', False):
+                    should_curtail = _check_ac_coupled_curtailment(user, import_price, export_earnings)
+                    if should_curtail:
+                        _apply_inverter_curtailment(user, curtail=True)
+                    else:
+                        logger.info(f"🔌 AC-COUPLED: Skipping inverter curtailment (battery can absorb solar) for {user.email}")
+
+                success_count += 1
 
             # NORMAL MODE: Export price is positive
             else:
@@ -2783,13 +2792,19 @@ def solar_curtailment_with_websocket_data(prices_data):
                         user.current_export_rule = 'battery_ok'
                         user.current_export_rule_updated = datetime.utcnow()
                         db.session.commit()
-                        success_count += 1
                     else:
                         logger.error(f"Failed to restore from curtailment for {user.email}")
                         error_count += 1
+                        continue
                 else:
                     logger.debug(f"Normal mode, no action needed for {user.email}")
-                    success_count += 1
+
+                # AC-coupled inverter restore (independent of Tesla state)
+                if getattr(user, 'inverter_curtailment_enabled', False):
+                    if getattr(user, 'inverter_last_state', None) == 'curtailed':
+                        _apply_inverter_curtailment(user, curtail=False)
+
+                success_count += 1
 
         except Exception as e:
             logger.error(f"Error in curtailment check for {user.email}: {e}", exc_info=True)
