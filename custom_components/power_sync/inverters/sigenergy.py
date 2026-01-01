@@ -252,18 +252,21 @@ class SigenergyController(InverterController):
             return self._to_unsigned32(regs[0], regs[1])
         return None
 
-    async def curtail(self) -> bool:
-        """Curtail solar export using load-following (zero export) mode.
+    async def curtail(self, home_load_w: int = None) -> bool:
+        """Curtail solar export using load-following mode.
 
-        Sets grid export limit to 0 kW to prevent grid export while still
-        allowing solar to power the house and charge the battery.
-        This is better than full PV shutdown as it maintains self-consumption.
+        If home_load_w is provided, sets export limit to match home load.
+        Otherwise sets export limit to 0 kW (zero export mode).
+
+        Both modes allow solar to power the house and charge the battery,
+        which is better than full PV shutdown.
+
+        Args:
+            home_load_w: Optional home load in watts for load-following mode
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Sigenergy export at {self.host} (zero export / load-following mode)")
-
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to Sigenergy")
@@ -276,17 +279,31 @@ class SigenergyController(InverterController):
                     limit_str = f"{self._original_pv_limit / self.GAIN_POWER} kW" if self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
                     _LOGGER.info(f"Stored original export limit: {limit_str}")
 
-            # Set export limit to 0 (load-following / zero export)
-            values = self._from_unsigned32(self.EXPORT_LIMIT_ZERO)
+            # Determine export limit
+            if home_load_w is not None and home_load_w > 0:
+                # Load-following mode: limit export to home load
+                export_limit_kw = max(0.1, home_load_w / 1000)  # Minimum 0.1 kW
+                _LOGGER.info(f"Curtailing Sigenergy at {self.host} (load-following: {export_limit_kw:.1f}kW = {home_load_w}W home load)")
+            else:
+                # Zero export mode
+                export_limit_kw = 0
+                _LOGGER.info(f"Curtailing Sigenergy at {self.host} (zero export mode)")
+
+            # Set the export limit
+            scaled_value = int(export_limit_kw * self.GAIN_POWER)
+            values = self._from_unsigned32(scaled_value)
             success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
 
             if success:
-                _LOGGER.info(f"Successfully set zero export mode on Sigenergy at {self.host}")
+                if export_limit_kw > 0:
+                    _LOGGER.info(f"Successfully set load-following mode ({export_limit_kw:.1f}kW) on Sigenergy")
+                else:
+                    _LOGGER.info(f"Successfully set zero export mode on Sigenergy")
                 # Brief delay then verify
                 await asyncio.sleep(1)
                 state = await self.get_status()
                 if state.is_curtailed:
-                    _LOGGER.info("Curtailment verified - export limit set to 0 (load-following active)")
+                    _LOGGER.info("Curtailment verified - load-following active")
                 else:
                     _LOGGER.warning("Curtailment command sent but verification pending")
             else:

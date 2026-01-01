@@ -40,6 +40,7 @@ class User(UserMixin, db.Model):
     sigenergy_modbus_slave_id = db.Column(db.Integer, default=1)  # Modbus slave/unit ID
     sigenergy_curtailment_state = db.Column(db.String(20))  # 'curtailed' or 'normal'
     sigenergy_curtailment_updated = db.Column(db.DateTime)  # When curtailment state last changed
+    sigenergy_export_limit_kw = db.Column(db.Float)  # Current export limit in kW (for load-following)
 
     # Fleet API Credentials (for direct Tesla Fleet API)
     fleet_api_client_id_encrypted = db.Column(db.LargeBinary)

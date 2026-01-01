@@ -2348,12 +2348,14 @@ def _apply_inverter_curtailment(user, curtail: bool = True):
         logger.error(f"❌ INVERTER ERROR: Failed to {action[:-3]} inverter for {user.email}: {e}", exc_info=True)
 
 
-def _apply_sigenergy_curtailment(user, export_earnings: float, db) -> bool:
+def _apply_sigenergy_curtailment(user, export_earnings: float, import_price: float, db) -> bool:
     """
-    Apply or remove Sigenergy curtailment via Modbus TCP.
+    Apply or remove Sigenergy curtailment via Modbus TCP with SMART logic.
 
-    Sets export limit to 0kW when export_earnings < 1c/kWh (curtail)
-    Restores normal export limit when export_earnings >= 1c/kWh (restore)
+    Smart curtailment logic (same as Tesla+AC-coupled):
+    - Only curtail when battery is full (99%+) OR import price is negative
+    - If battery can still absorb solar, don't curtail (let it charge)
+    - Use load-following: set export limit = home load (not 0kW)
 
     Returns True on success, False on error.
     """
@@ -2370,19 +2372,68 @@ def _apply_sigenergy_curtailment(user, export_earnings: float, db) -> bool:
 
         # CURTAILMENT: export_earnings < 1c/kWh
         if export_earnings < 1:
-            logger.info(f"🚫 SIGENERGY CURTAILMENT: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
+            logger.info(f"🚫 SIGENERGY: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
-            if current_state == 'curtailed':
-                logger.info(f"✅ Already curtailed - no action needed for {user.email}")
+            # Get live status to check battery SOC and home load
+            live_status = client.get_live_status()
+            if 'error' in live_status:
+                logger.warning(f"Failed to get Sigenergy live status: {live_status.get('error')}")
+                # Fall back to basic curtailment if we can't read status
+                battery_soc = 100  # Assume full to be safe
+                home_load_kw = 0
+            else:
+                battery_soc = live_status.get('percentage_charged', 0)
+                home_load_w = live_status.get('load_power', 0)
+                home_load_kw = max(0, home_load_w / 1000)  # Convert to kW
+                solar_power_w = live_status.get('solar_power', 0)
+                logger.info(f"📊 SIGENERGY STATUS: SOC={battery_soc}%, Load={home_load_w}W, Solar={solar_power_w}W")
+
+            # SMART LOGIC: Should we actually curtail?
+            # Only curtail if: battery is full (99%+) OR import price is negative
+            should_curtail = False
+
+            if import_price is not None and import_price < 0:
+                # Import price is negative - definitely curtail (cheaper to buy than generate)
+                logger.info(f"🔌 SIGENERGY: Import price negative ({import_price:.2f}c/kWh) - curtailing")
+                should_curtail = True
+            elif battery_soc >= 99:
+                # Battery is full - curtail (can't absorb more solar)
+                logger.info(f"🔋 SIGENERGY: Battery full ({battery_soc}%) - curtailing with load-following")
+                should_curtail = True
+            else:
+                # Battery can still absorb solar - don't curtail
+                logger.info(f"🔋 SIGENERGY: Battery not full ({battery_soc}%) - letting solar charge battery")
+                should_curtail = False
+
+            if not should_curtail:
+                # Battery can absorb solar - restore normal operation
+                if current_state == 'curtailed':
+                    success = client.restore_export_limit()
+                    if success:
+                        user.sigenergy_curtailment_state = 'normal'
+                        user.sigenergy_curtailment_updated = datetime.utcnow()
+                        db.session.commit()
+                        logger.info(f"✅ SIGENERGY: Export restored (battery can absorb solar)")
                 return True
 
-            # Set export limit to 0kW
-            success = client.set_export_limit(0)
+            # LOAD-FOLLOWING CURTAILMENT: Set export limit = home load
+            # This powers the home while preventing grid export
+            export_limit_kw = max(0.1, home_load_kw)  # Minimum 0.1kW to avoid complete shutdown
+
+            if current_state == 'curtailed':
+                # Already curtailed - update limit if home load changed significantly
+                current_limit = getattr(user, 'sigenergy_export_limit_kw', 0)
+                if abs(current_limit - export_limit_kw) < 0.5:
+                    logger.debug(f"Export limit unchanged ({export_limit_kw:.1f}kW) for {user.email}")
+                    return True
+
+            success = client.set_export_limit(export_limit_kw)
             if success:
                 user.sigenergy_curtailment_state = 'curtailed'
+                user.sigenergy_export_limit_kw = export_limit_kw
                 user.sigenergy_curtailment_updated = datetime.utcnow()
                 db.session.commit()
-                logger.info(f"✅ SIGENERGY CURTAILMENT APPLIED: Export limit set to 0kW for {user.email}")
+                logger.info(f"✅ SIGENERGY LOAD-FOLLOWING: Export limit set to {export_limit_kw:.1f}kW (home load) for {user.email}")
                 return True
             else:
                 logger.error(f"❌ Failed to apply Sigenergy curtailment for {user.email}")
@@ -2396,14 +2447,14 @@ def _apply_sigenergy_curtailment(user, export_earnings: float, db) -> bool:
                 logger.debug(f"Already in normal mode - no action needed for {user.email}")
                 return True
 
-            # Restore normal export limit (use -1 or high value to indicate unlimited)
-            # Sigenergy typically uses 0xFFFF or a high value for unlimited
+            # Restore unlimited export
             success = client.restore_export_limit()
             if success:
                 user.sigenergy_curtailment_state = 'normal'
+                user.sigenergy_export_limit_kw = None
                 user.sigenergy_curtailment_updated = datetime.utcnow()
                 db.session.commit()
-                logger.info(f"✅ SIGENERGY CURTAILMENT REMOVED: Export limit restored for {user.email}")
+                logger.info(f"✅ SIGENERGY: Export limit restored to unlimited for {user.email}")
                 return True
             else:
                 logger.error(f"❌ Failed to restore Sigenergy export limit for {user.email}")
@@ -2499,9 +2550,9 @@ def solar_curtailment_check():
             if import_price is not None:
                 logger.debug(f"Current import price for {user.email}: {import_price}c/kWh")
 
-            # Handle Sigenergy systems via Modbus
+            # Handle Sigenergy systems via Modbus (smart curtailment with load-following)
             if battery_system == 'sigenergy':
-                result = _apply_sigenergy_curtailment(user, export_earnings, db)
+                result = _apply_sigenergy_curtailment(user, export_earnings, import_price, db)
                 if result:
                     success_count += 1
                 else:

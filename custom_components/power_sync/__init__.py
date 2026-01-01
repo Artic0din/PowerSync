@@ -1785,9 +1785,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"⚡ AC-COUPLED: Skipping inverter curtailment (battery can absorb solar)")
                     return True  # Success - intentionally not curtailing
 
-                # For Zeversolar, use load-following curtailment (limit to home load)
+                # For Zeversolar and Sigenergy, use load-following curtailment (limit to home load)
                 home_load_w = None
-                if inverter_brand == "zeversolar":
+                if inverter_brand in ("zeversolar", "sigenergy"):
                     live_status = await get_live_status()
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
