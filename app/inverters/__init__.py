@@ -299,3 +299,38 @@ def get_inverter_controller(
 
     _LOGGER.error(f"Unsupported inverter brand: {brand}")
     return None
+
+
+def get_inverter_controller_from_user(user) -> Optional[InverterController]:
+    """Get inverter controller from user's saved settings.
+
+    Args:
+        user: User object with inverter configuration attributes
+
+    Returns:
+        InverterController instance or None if not configured
+    """
+    # Check if inverter curtailment is enabled
+    if not getattr(user, 'inverter_curtailment_enabled', False):
+        _LOGGER.debug("Inverter curtailment not enabled for user")
+        return None
+
+    # Get inverter settings from user
+    brand = getattr(user, 'inverter_brand', None)
+    host = getattr(user, 'inverter_host', None)
+    port = getattr(user, 'inverter_port', 502) or 502
+    slave_id = getattr(user, 'inverter_slave_id', 1) or 1
+    model = getattr(user, 'inverter_model', None)
+
+    if not brand or not host:
+        _LOGGER.warning("Inverter brand or host not configured")
+        return None
+
+    _LOGGER.debug(f"Creating controller for {brand} at {host}:{port}")
+    return get_inverter_controller(
+        brand=brand,
+        host=host,
+        port=port,
+        slave_id=slave_id,
+        model=model,
+    )
