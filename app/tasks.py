@@ -2175,9 +2175,8 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
     For AC-coupled systems, we only curtail the inverter when:
     1. Import price is negative (cheaper to buy power than generate it), OR
     2. Actually exporting (grid_power < 0) AND export earnings are negative, OR
-    3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
-
-    If the battery can still absorb power, let the solar charge it even if export price is low.
+    3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable, OR
+    4. Solar producing but battery NOT charging AND exporting at negative price
 
     Args:
         user: User model instance
@@ -2197,9 +2196,12 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
         logger.info(f"🔌 AC-COUPLED: Import price negative ({import_price:.2f}c/kWh) - should curtail for {user.email}")
         return True
 
-    # Get live site data for grid_power and battery_soc
+    # Get live site data for grid_power, battery_soc, solar_power, battery_power
     battery_soc = None
     grid_power = None
+    solar_power = 0
+    battery_power = 0
+    load_power = 0
     battery_system = getattr(user, 'battery_system', 'tesla') or 'tesla'
 
     try:
@@ -2211,7 +2213,13 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
                     if site_status:
                         battery_soc = site_status.get('percentage_charged', 0)
                         grid_power = site_status.get('grid_power', 0)  # Negative = exporting
-                        logger.debug(f"Tesla live status: SOC={battery_soc}%, grid={grid_power}W for {user.email}")
+                        solar_power = site_status.get('solar_power', 0) or 0
+                        battery_power = site_status.get('battery_power', 0) or 0  # Negative = charging
+                        load_power = site_status.get('load_power', 0) or 0
+                        logger.debug(
+                            f"AC-Coupled check: solar={solar_power:.0f}W, battery={battery_power:.0f}W (neg=charging), "
+                            f"grid={grid_power}W (neg=export), load={load_power:.0f}W, SOC={battery_soc}% for {user.email}"
+                        )
 
         elif battery_system == 'sigenergy':
             # For Sigenergy, we could get SOC via Modbus if needed
@@ -2239,7 +2247,7 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
     else:
         logger.debug(f"Not exporting (grid={grid_power}W) - no need to curtail for negative export for {user.email}")
 
-    # Check 3: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
+    # Check 3: Battery full (99%+) AND export is unprofitable (< 1c/kWh)
     if battery_soc >= 99:
         if export_earnings is not None and export_earnings < 1:
             logger.info(f"🔌 AC-COUPLED: Battery full ({battery_soc}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail for {user.email}")
@@ -2247,9 +2255,39 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
         else:
             logger.debug(f"Battery full ({battery_soc}%) but export still profitable ({export_earnings:.2f}c/kWh) - not curtailing for {user.email}")
             return False
+
+    # Check 4: Solar producing but battery NOT absorbing it
+    # battery_power < 0 means charging, >= 0 means discharging or idle
+    if solar_power > 100:  # Meaningful solar production
+        battery_is_charging = battery_power < -50  # At least 50W charging
+        if not battery_is_charging:
+            # Solar is producing but battery isn't absorbing - check if we're exporting at bad prices
+            if grid_power is not None and grid_power < -100:  # Exporting more than 100W
+                if export_earnings is not None and export_earnings < 0:
+                    logger.info(
+                        f"🔌 AC-COUPLED: Solar producing {solar_power:.0f}W but battery NOT charging "
+                        f"(battery_power={battery_power:.0f}W), exporting {abs(grid_power):.0f}W at negative price "
+                        f"({export_earnings:.2f}c/kWh) - should curtail for {user.email}"
+                    )
+                    return True
+                else:
+                    logger.debug(
+                        f"Solar producing but battery not charging, however export price OK ({export_earnings:.2f}c/kWh) for {user.email}"
+                    )
+            else:
+                logger.debug(
+                    f"Solar producing {solar_power:.0f}W, battery not charging, but not exporting significantly (grid={grid_power}W) for {user.email}"
+                )
+        else:
+            logger.debug(f"Battery is charging ({abs(battery_power):.0f}W) - solar being absorbed, not curtailing for {user.email}")
+            return False
     else:
-        logger.debug(f"Battery not full ({battery_soc}%) - solar can charge battery, not curtailing for {user.email}")
+        logger.debug(f"Low/no solar production ({solar_power:.0f}W) - not curtailing for {user.email}")
         return False
+
+    # Default: don't curtail
+    logger.debug(f"No curtailment conditions met - allowing solar production for {user.email}")
+    return False
 
 
 def _apply_inverter_curtailment(user, curtail: bool = True):
