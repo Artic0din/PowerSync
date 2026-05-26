@@ -1,0 +1,50 @@
+Git history baseline — V0.2, V0.3, V0.4
+========================================
+Run date: 2026-05-27
+Repo state: chore/audit-v0-baseline branch off eb2616a1 (upstream main)
+
+
+V0.2 — Fix-of-fix commits (subject contains 'fix' twice, case-insensitive)
+--------------------------------------------------------------------------
+Command: git log --format='%s' | grep -ciE 'fix.*fix'
+Result: 22
+
+VERIFIED — matches scanner output. Pattern catches subjects like
+"Fix X and fix Y" where the same commit references multiple fixes,
+suggesting incomplete prior remediation.
+
+
+V0.3 — Conventional-commits compliance ratio
+---------------------------------------------
+Command:
+  TOTAL=$(git log --format='%s' | wc -l)
+  COMPLIANT=$(git log --format='%s' | grep -cE \
+    '^(feat|fix|test|refactor|perf|docs|style|chore|ci|build|revert)(\([^)]+\))?(\!)?: ')
+Result:
+  total commits: 3269
+  compliant:     952
+  ratio:         29.1%
+
+VERIFIED.
+
+
+V0.4 — Top 10 commits by line delta (insertions + deletions)
+-------------------------------------------------------------
+  52070  c27ade7e  Remove Flask web app - Home Assistant integration only
+   9064  94f42552  Replace PowerSync optimizer with external optimizer integration
+   7923  9ee06e57  feat(config-flow): UX overhaul — menu-based options, HA selectors, design standards
+   7653  d20d1b38  Fix API auth for Powerwall control endpoints
+   7637  df217bf0  Fix iCloud duplicate files - restore original filenames
+   5479  1013da7d  Refactor EV charging ownership and status
+   5193  4780a67d  Add solar surplus EV charging with dual vehicle support
+   5083  39cb4dc8  Initial commit: Tesla-Amber-Sync with Docker support
+   5035  14f69971  Add ML optimization settings to Electricity Provider screen
+   3511  ed168b1f  Add Custom TOU Scheduler with Utility Provider section
+
+VERIFIED. Two large "Fix" commits stand out:
+  - d20d1b38 (7,653 lines) "Fix API auth..." — likely architectural change
+    mislabelled as a fix
+  - df217bf0 (7,637 lines) "Fix iCloud duplicate files..." — same pattern
+
+Both violate constitution #5 (production standards — commit hygiene) and
+#1 (no half-fixes — large rework should not be labelled as a fix).

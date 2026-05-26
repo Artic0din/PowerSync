@@ -1,0 +1,36 @@
+Blocking asyncio.sleep ≥ 60s — V0.6
+====================================
+Run date: 2026-05-27
+Command: grep -rn 'asyncio\.sleep(6[0-9]|asyncio\.sleep([1-9][0-9][0-9]' \
+           custom_components/power_sync/
+
+Findings (4 sites, not 1 as v2 audit M3 stated):
+
+  custom_components/power_sync/__init__.py:16814
+    await asyncio.sleep(60)
+
+  custom_components/power_sync/optimization/ev_coordinator.py:218
+    await asyncio.sleep(300)  # 5 minutes
+
+  custom_components/power_sync/optimization/ev_coordinator.py:224
+    await asyncio.sleep(60)
+
+  custom_components/power_sync/optimization/coordinator.py:2025
+    await asyncio.sleep(60)
+
+Constitution principle: #18 (performance — no blocking main-thread work),
+#19 (platform conventions — HA event loop discipline).
+
+asyncio.sleep is not literally blocking (it yields to the event loop),
+but a 60s+ sleep inside a coordinator/handler still:
+  - holds the coroutine task alive for that duration
+  - delays shutdown if HA restarts during the sleep
+  - may indicate a missing event-driven pattern (callback registration
+    via async_call_later, time_pattern triggers, or coordinator
+    update_interval)
+
+Recommendation per-site:
+  __init__.py:16814 — read context; likely a retry backoff. Consider
+    capping to <30s or moving to call_later.
+  optimization/ev_coordinator.py:218,224 — replace with scheduled callback.
+  optimization/coordinator.py:2025 — same.

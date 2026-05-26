@@ -1,0 +1,41 @@
+pip-audit baseline — V0.1
+==========================
+Run date: 2026-05-27
+Tool: pip-audit 2.10.0 (via uvx)
+Input: custom_components/power_sync/manifest.json requirements
+
+Requirements extracted:
+  aiohttp>=3.9.0
+  aemo-to-tariff>=0.7.15
+  cryptography>=42.0.0
+  goodwe>=0.4.9
+  protobuf>=4.25.0
+  scipy>=1.11.0
+
+Command:
+  jq -r '.requirements[]' custom_components/power_sync/manifest.json | \
+    uvx --from pip-audit pip-audit -r /dev/stdin
+
+Result:
+  No known vulnerabilities found
+
+Interpretation:
+  pip-audit resolves each `>=` floor to the latest available version that
+  satisfies the constraint, then queries the OSV / PyPA advisory databases.
+  All current resolved versions (aiohttp ~3.13.x, cryptography ~48.x,
+  protobuf ~7.x, etc.) are advisory-clean.
+
+  The audit's C2 finding ("CVEs reachable under current minimum bounds")
+  was based on WebSearch results listing historical CVEs for each package.
+  Those CVEs exist for OLD versions of the packages but the `>=` resolver
+  picks current versions on fresh install, not the minimum-bound version.
+
+  C2 is therefore largely REFUTED as a #15 security finding.
+
+  It remains a #5 dependency-management concern: loose minimum-bound pins
+  do not enforce upgrades for existing installations. A user who installed
+  18 months ago and never updated would have an old aiohttp. The risk is
+  drift, not exposure.
+
+  Recommendation: tighten to a range like aiohttp>=3.13.3,<4.0 to enforce
+  patched-version floors without admitting future major-version breakage.
