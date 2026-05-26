@@ -115,7 +115,14 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 ```bash
 # 1.8 — non-allowlist action SHA-pin check
 # allow-list = anthropics/*, github/*, actions/*, codecov/*, astral-sh/*, pnpm/*
-grep -rhnE "^\s*uses:\s*[^/]+/[^@]+@(main|master|v[0-9]+)\s*$" .github/workflows/ \
+# A SHA ref = exactly 40 hex chars after @. Anything else (main, master, v1,
+# v1.2.3, release, latest, named tag) is non-compliant for non-allowlist actions.
+grep -rhnE "uses:\s*[^/]+/[^@]+@" .github/workflows/ \
+  | awk -F'@' '{
+      ref = $NF
+      sub(/[[:space:]]*$/, "", ref)
+      if (ref !~ /^[a-f0-9]{40}$/) print
+    }' \
   | grep -vE "uses:\s*(anthropics|github|actions|codecov|astral-sh|pnpm)/"
 
 # 1.6 — pip-audit (no built-in severity gate; --strict turns warnings into failures)
