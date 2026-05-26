@@ -31,9 +31,9 @@ I re-ran direct greps on every numeric claim, every absence claim, and spot-chec
 | **H11**: "CI runs no tests/lint/typecheck" | Zero workflows reference pytest/coverage/ruff/pyright/mypy ✓ | Verified. |
 | **H17/H18/H19/M9**: CHANGELOG.md absent, SECURITY.md absent, ISSUE_TEMPLATE absent, diagnostics.py absent | All four confirmed absent ✓ | Verified. |
 | **H21**: workflow actions floating (`hacs/action@main`, `hassfest@master`) | `validate.yml` uses `hacs/action@main` and `home-assistant/actions/hassfest@master` ✓ | Verified. |
-| **C2**: CVE-vulnerable dep bounds (aiohttp ≥3.9.0, cryptography ≥42.0.0, protobuf ≥4.25.0) | **Not re-verified.** Inherited from WebSearch results, no `pip-audit` run. CVE IDs not cross-checked against NVD. | **UNVERIFIED.** Treat as plausible but provisional until `pip-audit` is run against the actual installed resolution. |
-| **H14**: "22 fix-of-fix commits, 31 deferred TODOs in commit bodies, 20 WIP/hack subjects" | Not re-verified. | Unverified. |
-| **H15**: "29% conventional-commits compliance (952 of 3,269)" | Not re-verified. | Unverified. |
+| **C2**: CVE-vulnerable dep bounds (aiohttp ≥3.9.0, cryptography ≥42.0.0, protobuf ≥4.25.0) | At meta-audit time: not re-verified. **Subsequently (V0.1):** `pip-audit` resolves the `>=` floors to current versions and reports **no vulnerabilities**. CVEs the audit cited exist for old versions but the resolver picks current. | **REFUTED for #15** (no current CVE exposure). Loose `>=` pins remain a #5 dependency-management concern (drift risk). See `docs/audits/v0-baseline/pip-audit.txt`. |
+| **H14**: "22 fix-of-fix commits, 31 deferred TODOs in commit bodies, 20 WIP/hack subjects" | At meta-audit time: not re-verified. **Subsequently (V0.2):** `git log --format='%s' \| grep -ciE 'fix.*fix'` returns 22. | **VERIFIED** (subject-level fix-of-fix count). The "31 deferred TODOs in commit bodies" and "20 WIP/hack subjects" sub-claims remain unverified pending separate `git log -G` runs. |
+| **H15**: "29% conventional-commits compliance (952 of 3,269)" | At meta-audit time: not re-verified. **Subsequently (V0.3):** `grep -cE '^(feat\|fix\|test\|...)' ` returns **952 / 3,269 = 29.1%**. | **VERIFIED**. |
 
 ### Net summary
 
@@ -164,7 +164,7 @@ For honesty (per #3 No Silent Scope Reduction):
 - Did not re-run the WebSearch CVE checks against NVD directly.
 - Did not run `pip-audit`.
 - Did not re-execute `git log` commands from the git-history finding set.
-- Did not check whether the supplemental file `python-exhaustive-data.md` exists or whether its claims are exhaustive. (Should: a future iteration must.)
+- Did not check the supplemental file `python-exhaustive-data.md` exhaustively at the time of writing this meta-audit. (V0.5 subsequently spot-checked 5 of its numeric claims — see `docs/audits/v0-baseline/supplemental-spotcheck.md` — and found 2–4× inflation. Full regeneration of the supplemental is still required.)
 - Did not audit this meta-audit. Recursion stops here. Reader can decide whether that itself is a #1 / #3 violation.
 
 ---

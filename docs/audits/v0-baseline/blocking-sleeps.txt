@@ -1,8 +1,17 @@
 Blocking asyncio.sleep ≥ 60s — V0.6
 ====================================
 Run date: 2026-05-27
-Command: grep -rn 'asyncio\.sleep(6[0-9]|asyncio\.sleep([1-9][0-9][0-9]' \
-           custom_components/power_sync/
+
+Command (extended-regex mode required; basic regex does not support
+alternation, and the threshold must exclude 10-59):
+
+  grep -rnE "asyncio\.sleep\(([6-9][0-9]|[1-9][0-9]{2,})\)" \
+       custom_components/power_sync/
+
+Pattern explanation:
+  [6-9][0-9]      — matches 60-99
+  [1-9][0-9]{2,}  — matches 100, 1000, etc. (3+ digit positive)
+  Combined: any sleep ≥ 60 (and ≤ 99) OR ≥ 100.
 
 Findings (4 sites, not 1 as v2 audit M3 stated):
 

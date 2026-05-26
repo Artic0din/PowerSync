@@ -16,7 +16,7 @@
 
 ## Headline corrections to main audit
 
-These were applied to `docs/audits/engineering-constitution-audit.md` and `docs/audits/meta-audit.md` in the same commit:
+These were applied to `docs/audits/engineering-constitution-audit.md` (and acknowledged in `docs/audits/meta-audit.md`'s correction table) in the same commit. The meta-audit retains its original narrative about what was unverified at the time of writing — the V0 baseline supersedes those unverified statuses without rewriting the meta-audit's history.
 
 1. **C2** (dep CVEs) — downgraded from CRITICAL #15 finding to MED #5 dependency-management finding. `pip-audit` confirms no CVE exposure under current resolution. Loose minimum-bound pins remain a policy concern (existing installs that never updated could drift), but the audit's "CVEs reachable" framing was wrong.
 2. **M3** (5-minute blocking sleep) — undercount. There are **4** `asyncio.sleep ≥ 60s` sites, not 1: `__init__.py:16814`, `optimization/ev_coordinator.py:218,224`, `optimization/coordinator.py:2025`.
@@ -34,7 +34,7 @@ Per constitution #3 (no silent scope reduction):
 - Did not re-verify the `Any` count, return-type count, or `ClientTimeout` count (the previous direct-grep verification was sufficient).
 - Did not regenerate `python-exhaustive-data.md` from scratch — flagged as required follow-up.
 - Did not run a runtime check (HA test instance) — static analysis only.
-- Did not check transitive deps for CVEs — `pip-audit -r` checks direct deps only. Run `pip-audit` against the actual resolved environment for transitive coverage.
+- Did not check against a live HA installation. `pip-audit -r reqs.txt` resolves the `>=` floors against PyPI and audits the resolved tree (including transitives once resolved), so transitive coverage is partial: it depends on the resolver picking the same versions as a real install. For maximum fidelity, run `pip-audit` inside the actual HA venv after install.
 
 ## Reproducibility
 

@@ -6,13 +6,23 @@
 
 ## Results
 
-| Claim in supplemental | Method | Verified result | Verdict |
-|---|---|---|---|
-| `__init__.py` silent `except Exception: pass` count = **82** | `re.findall(r'except\s+Exception[^:]*:\s*\n\s+pass\s*(?:\n\|$)', src)` | **21** | **REFUTED** — supplemental inflated by ~4× |
-| `automations/actions.py` silent swallows = **22** | same | **11** | **REFUTED** — inflated by ~2× |
-| `async_register` calls in `__init__.py` = **30** (with 0 schema, "30 of 30") | `grep -c "async_register(" __init__.py` | **30** | VERIFIED |
-| `requires_auth = True` grep count = supplemental said "9 missing of 74" | `grep -rn "requires_auth\s*=\s*True" custom_components/` | **76 matches** across **75 view classes** | **REFUTED** — all views have `requires_auth = True`, not 9 missing |
-| `HomeAssistantView` subclass count | `grep -rn "class .*HomeAssistantView" custom_components/` | **75** | Close to supplemental's 74 (off by 1) |
+Method (Python `re.findall`, alternation expressed with real `|` —
+table-cell pipe is escaped as `&#124;` for rendering):
+
+```python
+import re
+src = open('custom_components/power_sync/__init__.py').read()
+matches = re.findall(r'except\s+Exception[^:]*:\s*\n\s+pass\s*(?:\n|$)', src)
+print(len(matches))
+```
+
+| Claim in supplemental | Verified result | Verdict |
+|---|---|---|
+| `__init__.py` silent `except Exception: pass` count = **82** | **21** | **REFUTED** — supplemental inflated by ~4× |
+| `automations/actions.py` silent swallows = **22** | **11** | **REFUTED** — inflated by ~2× |
+| `async_register` calls in `__init__.py` = **30** (with 0 schema) | **30** (`grep -c "async_register(" __init__.py`) | VERIFIED |
+| `requires_auth = True` count — supplemental said "9 of 74 missing" | **76 matches across 75 view classes** (`grep -rn "requires_auth\s*=\s*True" custom_components/`) | **REFUTED** — all views have `requires_auth = True` |
+| `HomeAssistantView` subclass count | **75** (`grep -rn "class .*HomeAssistantView" custom_components/`) | Close to supplemental's 74 (off by 1) |
 
 ## Interpretation
 

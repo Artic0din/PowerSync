@@ -189,11 +189,11 @@ The codebase ships a working integration with substantial domain value, but viol
 
 | # | Principle | Status | Why |
 |---|---|---|---|
-| 1 | No Half-Fixes | **FAIL** | 178 broad excepts, 76 silent swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies |
+| 1 | No Half-Fixes | **FAIL** | 938 broad + 4 bare excepts, 74 silent swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies (last sub-claim scanner-derived, pending re-verification) |
 | 2 | No Workarounds as Final | **FAIL** | 20 WIP/hack/workaround commit subjects; 3 explicit comment workarounds; large "Fix" commits (7k+ lines) are structural rework mislabelled |
 | 3 | No Silent Scope Reduction | n/a (no comparison baseline available) |
 | 4 | Maintainability | **FAIL** | God files, magic values (122× `ClientTimeout(30)`, 34× `asyncio.sleep(1)`), scattered entity IDs |
-| 5 | Production Standards | **FAIL** | CVE-vulnerable dep bounds; no CI tests/lint/typecheck; 29% conventional-commits; floating workflow action refs; semver scheme is a build counter |
+| 5 | Production Standards | **FAIL** | No CI tests/lint/typecheck; 29.1% conventional-commits; floating workflow action refs; semver scheme is a build counter; loose `>=` dep pins (no current CVE exposure per V0.1, but no upgrade discipline either) |
 | 6 | Real Engineering Tradeoffs | n/a |
 | 7 | Beyond Immediate Task | n/a |
 | 8 | Professional Delivery | **FAIL** | `__init__.py` at 28,864 LOC; 926 functions without return annotation |
@@ -203,7 +203,7 @@ The codebase ships a working integration with substantial domain value, but viol
 | 12 | Root-Cause First | **PARTIAL FAIL** | 22 fix-of-fix commits signal root cause often missed |
 | 13 | No Regression by Design | **PARTIAL FAIL** | "Regression tests" exist by name but assert on source text not behaviour |
 | 14 | Systemic Fixes Over Local | **FAIL** | `inverters/base.py` aspirational not enforced; duplicated API-error semantics |
-| 15 | Security Non-Negotiable | **FAIL** | 9 unauthenticated HTTP views; CVE-vulnerable dep bounds; partial token logging; 30/33 services unschema'd; MD5 in FoxESS |
+| 15 | Security Non-Negotiable | **FAIL** | Partial token logging (verified, 4 sites); 30/30 services unschema'd; MD5 in FoxESS (upstream protocol limitation); loose `>=` dep pins (no current CVE exposure per V0.1 pip-audit, but drift risk on stale installs) |
 | 16 | Data Integrity | **PASS** | `Store` correct; migrations present and documented |
 | 17 | Tests Part of Fix | **FAIL** | Core modules untested; source-text "tests"; no CI gate |
 | 18 | Performance | **PARTIAL FAIL** | Sync I/O in async; 1Hz AEMO polling; 5-min blocking sleep in event loop |
@@ -219,10 +219,7 @@ The codebase ships a working integration with substantial domain value, but viol
 ### P0 — Security (now)
 
 1. ~~Audit and add `requires_auth = True` to unauthenticated views.~~ **RETRACTED 2026-05-27** — verified all 75 views already require auth.
-2. **Tighten dep bounds to clear known CVEs.** In `manifest.json` (after confirming via `pip-audit`):
-   - `aiohttp >= 3.13.3` (or `>= 3.9.4` minimum to clear high-severity)
-   - `cryptography >= 44.0.1`
-   - `protobuf >= 5.29.5`
+2. ~~Tighten dep bounds to clear known CVEs.~~ **DOWNGRADED 2026-05-27** — `pip-audit` confirms no current CVE exposure (see `v0-baseline/pip-audit.txt`). The remaining concern (loose `>=` pins admit drift on stale installs) is a #5 dependency-management item; addressed in Phase 2.3 with `>=X.Y.Z,<MAJOR+1` ranges, not P0 urgency.
 3. **Verify `aemo-to-tariff >= 0.7.15` resolves on clean install.** If unresolvable, fix the spec.
 4. **Strip `token[:N]` partial logging** from `inverters/enphase.py:405`, `automations/actions.py:1861,1875`, `automations/__init__.py:885`. Replace with `[redacted]` or token-length-only.
 5. **Document TLS-bypass risk** in `powerwall_local/transport.py` and `inverters/enphase.py` with explicit comment + scope guard.
@@ -269,7 +266,7 @@ The codebase ships a working integration with substantial domain value, but viol
 31. Convert 82 hot-path `_LOGGER.info` calls in `coordinator.py` to `_LOGGER.debug`.
 32. Define constants in `const.py` for the 122× `ClientTimeout(30)`, 34× `asyncio.sleep(1)`, `max_retries`, and 100 hardcoded `sensor.*` entity-ID strings.
 33. Normalize API error semantics: pick raise-or-return-None for all `*_api.py`; refactor offenders.
-34. Reduce 178 broad `except Exception` to <50. Replace with specific exception types or document rationale.
+34. Reduce **938** broad `except Exception` + **4** bare `except:` (V0-verified totals) to <100. Replace with specific exception types or document rationale.
 35. Add Store schema migration scaffolding before bumping any `version=1`.
 36. Bump HA minimum to `2025.x` floor.
 37. Add `category: integration` to `hacs.json`.
@@ -305,19 +302,59 @@ Bolagnaise is shipping fast (3,269 commits in 7 months, 86% from him). Expect on
 ```bash
 cd /Users/ryanfoyle/Development/energy/powersync
 
+# commit metadata
 git log --oneline | wc -l
 git log --format='%an' | sort | uniq -c | sort -rn
 git log --format='%s' | grep -cE '^(feat|fix|test|refactor|perf|docs|style|chore|ci|build|revert)(\([^)]+\))?(\!)?: '
-git log --oneline | grep -iE 'wip|tmp|temp|hack|workaround|hotfix'
-git log -p --all -S 'BEGIN PRIVATE KEY' | head
-git log --shortstat --no-merges --format='%h %s' | awk '/files? changed/ {print $1, $4}' | sort -rn | head
+git log --oneline | grep -ciE 'wip|tmp|temp|hack|workaround|hotfix'
+git log -p --all -S 'BEGIN PRIVATE KEY' | wc -l
 
-grep -rn 'requires_auth' custom_components/power_sync/ | grep -v True
+# top-10 commits by line delta — preserves hash + subject
+git log --shortstat --no-merges --format='COMMIT::%h::%s' | awk '
+  /^COMMIT::/ { split($0, a, "::"); hash=a[2]; subj=a[3]; next }
+  /files? changed/ {
+    ins=0; del=0
+    for (i=1; i<=NF; i++) {
+      if ($i ~ /insertion/) ins=$(i-1)
+      if ($i ~ /deletion/)  del=$(i-1)
+    }
+    print ins+del, hash, subj
+  }' | sort -rn | head -10
+
+# auth coverage on HomeAssistantView subclasses
+python3 -c "
+import re, pathlib
+total=missing=0
+for p in pathlib.Path('custom_components/power_sync').rglob('*.py'):
+    src=p.read_text()
+    for m in re.finditer(r'class\s+(\w+)\s*\([^)]*HomeAssistantView[^)]*\):', src):
+        total += 1
+        s=m.start(); n=re.search(r'\nclass\s+\w+', src[s+1:])
+        block=src[s:s+1+n.start() if n else len(src)]
+        if not re.search(r'requires_auth\s*=\s*True', block):
+            missing += 1
+print(f'total: {total}, missing requires_auth=True: {missing}')
+"
+
+# exception handling (broad + bare; silent swallows via Python AST since basic grep \s is unreliable)
 grep -rn 'except Exception' custom_components/power_sync/ | wc -l
-grep -rn 'except Exception' custom_components/power_sync/ -A1 | grep -B1 '^\s*pass\s*$' | wc -l
+grep -rnE '^[[:space:]]*except[[:space:]]*:' custom_components/power_sync/ | wc -l
+python3 -c "
+import re, pathlib
+silent=0
+for p in pathlib.Path('custom_components/power_sync').rglob('*.py'):
+    src=p.read_text()
+    for m in re.finditer(r'except\s+Exception[^:]*:\s*\n(\s+)pass\s*(?:\n|$)', src):
+        silent += 1
+print(f'silent (pass body) swallows: {silent}')
+"
+
+# magic constants
 grep -rn 'from typing import.*Any' custom_components/power_sync/ | wc -l
 grep -rn 'ClientTimeout(total' custom_components/power_sync/ | wc -l
-grep -rn 'asyncio.sleep' custom_components/power_sync/ | sort | uniq -c | sort -rn
+grep -rhn 'asyncio.sleep(' custom_components/power_sync/ | grep -oE 'asyncio\.sleep\([^)]+\)' | sort | uniq -c | sort -rn
 
-uv run pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)
+# CVE check
+jq -r '.requirements[]' custom_components/power_sync/manifest.json > /tmp/reqs.txt
+uvx --from pip-audit pip-audit -r /tmp/reqs.txt
 ```

@@ -2,9 +2,23 @@
 Generated: 2026-05-26
 Scope: `custom_components/power_sync/` (88 files) + `tests/` (63 files)
 
+> ⚠ **STALE — DO NOT TRUST RAW COUNTS IN THIS FILE.**
+>
+> V0.5 spot-check (2026-05-27) found this file's silent-swallow counts
+> inflated by 2–4×. The header total of "178 broad excepts" disagrees with
+> the direct-grep total of **938 broad + 4 bare = 942** (see V0 baseline
+> at `docs/audits/v0-baseline/git-history.txt` and the corrections table
+> in `docs/audits/engineering-constitution-audit.md`).
+>
+> This file is retained for shape/pattern reference (per-file breakdown,
+> method-coverage tables, line-number lists) but **all per-file numeric
+> counts in this document are unreliable until the file is regenerated
+> from direct grep / AST scans**. See remediation plan Phase 7 for
+> regeneration as part of the verification gate.
+
 ---
 
-## CAT1: `except Exception:` / `except:` — 178 total (102 broad, 76 silent)
+## CAT1: `except Exception:` / `except:` — STALE: header claimed 178, actual 942
 
 36 files affected. Format: `file: N broad / M silent`
 

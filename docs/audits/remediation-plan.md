@@ -32,15 +32,49 @@ Per constitution #6, surface tradeoffs before committing.
 
 Per constitution #11 (Define Done) and the meta-audit's root cause. The audit has unverified findings; planning around them risks executing wrong work.
 
-| V0 task | Command | Done when |
-|---|---|---|
-| V0.1 Verify C2 dep CVEs | `uv run pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)` | Output captured to `docs/audits/pip-audit-baseline.txt`. Confirmed/refuted CVE list updated in main audit. |
-| V0.2 Verify H14 fix-of-fix count | `git log --oneline \| awk 'tolower($0) ~ /^[a-f0-9]+ fix\b.*fix\b/'` | Actual count captured. |
-| V0.3 Verify H15 conventional-commits ratio | `git log --format='%s' \| grep -cE '^(feat\|fix\|test\|refactor\|perf\|docs\|style\|chore\|ci\|build\|revert)(\([^)]+\))?(\!)?: '` vs total | Ratio in `pip-audit-baseline.txt`. |
-| V0.4 Verify M17 large-diff "Fix" commits | `git log --shortstat --no-merges --format='%h %s' \| awk ...` top 10 by line delta | Confirmed list. |
-| V0.5 Verify supplemental file claims | `wc -l docs/audits/python-exhaustive-data.md`; spot-check 5 random claims | Either confirmed or flagged with corrections. |
-| V0.6 Re-verify M3 — every `asyncio.sleep` ≥ 60 seconds | `grep -rn 'asyncio\.sleep([0-9]\{2,\}' custom_components/power_sync/` | Comprehensive list of blocking-sleep candidates. |
-| V0.7 Verify M14 — confirm `esy_sunhome` is custom not core | `python -c "import esy_sunhome"` against bare HA env | Confirmed/refuted. |
+| V0 task | Done when |
+|---|---|
+| V0.1 Verify C2 dep CVEs | Output captured to `docs/audits/v0-baseline/pip-audit.txt`. Confirmed/refuted CVE list updated in main audit. |
+| V0.2 Verify H14 fix-of-fix count | Count captured to `docs/audits/v0-baseline/git-history.txt`. |
+| V0.3 Verify H15 conventional-commits ratio | Ratio in `docs/audits/v0-baseline/git-history.txt`. |
+| V0.4 Verify M17 large-diff "Fix" commits | Top-10 list with hashes + subjects in `docs/audits/v0-baseline/git-history.txt`. |
+| V0.5 Verify supplemental file claims | Spot-check 5 numeric claims; either confirm or flag in `docs/audits/v0-baseline/supplemental-spotcheck.md`. |
+| V0.6 Re-verify M3 — every `asyncio.sleep` ≥ 60 seconds | Comprehensive list in `docs/audits/v0-baseline/blocking-sleeps.txt`. |
+| V0.7 Verify M14 — confirm `esy_sunhome` is custom not core | PyPI + GitHub + HACS lookup; confirmed/refuted in V0 README. |
+
+**V0 commands (run from repo root):**
+
+```bash
+# V0.1 — pip-audit (resolves the >= floors and audits resolved versions, not just direct deps)
+jq -r '.requirements[]' custom_components/power_sync/manifest.json > /tmp/powersync-reqs.txt
+uvx --from pip-audit pip-audit -r /tmp/powersync-reqs.txt
+
+# V0.2 — fix-of-fix commits (subject contains 'fix' twice)
+git log --format='%s' | grep -ciE 'fix.*fix'
+
+# V0.3 — conventional-commits ratio
+TOTAL=$(git log --format='%s' | wc -l)
+COMPLIANT=$(git log --format='%s' | grep -cE '^(feat|fix|test|refactor|perf|docs|style|chore|ci|build|revert)(\([^)]+\))?(\!)?: ')
+echo "compliant: $COMPLIANT / $TOTAL"
+
+# V0.4 — top 10 commits by line delta (preserves hash + subject)
+git log --shortstat --no-merges --format='COMMIT::%h::%s' | awk '
+  /^COMMIT::/ { split($0, a, "::"); hash=a[2]; subj=a[3]; next }
+  /files? changed/ {
+    ins=0; del=0
+    for (i=1; i<=NF; i++) {
+      if ($i ~ /insertion/) ins=$(i-1)
+      if ($i ~ /deletion/)  del=$(i-1)
+    }
+    print ins+del, hash, subj
+  }' | sort -rn | head -10
+
+# V0.6 — asyncio.sleep >= 60s (regex requires extended mode)
+grep -rnE "asyncio\.sleep\(([6-9][0-9]|[1-9][0-9]{2,})\)" custom_components/power_sync/
+
+# V0.7 — esy_sunhome on PyPI (404 if not published)
+curl -sIL https://pypi.org/pypi/esy_sunhome/json | head -1
+```
 
 **Effort:** ~2 hours.
 **Gate:** No phase below executes until V0 is committed.
@@ -67,9 +101,9 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 | 1.3 Wire `pytest` to CI via the reusable workflow | `pytest` runs on every PR | CI green on dummy PR |
 | 1.4 Wire `ruff check` + `ruff format --check` | Lint runs and reports | CI green |
 | 1.5 Wire `pyright` (strict for new code, lenient for legacy) | Type check runs | CI green |
-| 1.6 Wire `pip-audit` step | CVE scan runs; fails on HIGH+ severity | CI red if vuln introduced |
+| 1.6 Wire `pip-audit` step | CVE scan runs; CI red on any vulnerability (`pip-audit` exits non-zero on any finding — has no built-in severity gate, so introduce gating via `--format=json` + `jq` parse if HIGH-only is desired) | CI red if vuln introduced |
 | 1.7 Pin `pytest.ini` with `addopts = --strict-markers --cov=custom_components/power_sync --cov-report=xml`, `asyncio_mode = auto` | pytest config explicit | `pytest --collect-only` exits 0 |
-| 1.8 SHA-pin `hacs/action`, `home-assistant/actions/hassfest`, `JamesIves/github-sponsors-readme-action`, `stefanzweifel/git-auto-commit-action` in fork's workflows | All non-allowlist actions are SHA refs | `grep -E 'uses:.*@(main\|master\|v[0-9]+)$' .github/workflows/` returns 0 lines for non-allowlist |
+| 1.8 SHA-pin `hacs/action`, `home-assistant/actions/hassfest`, `JamesIves/github-sponsors-readme-action`, `stefanzweifel/git-auto-commit-action` in fork's workflows | All non-allowlist actions are SHA refs | `grep -rE 'uses:.*@(main&#124;master&#124;v[0-9]+)$' .github/workflows/` returns 0 lines for non-allowlist (note: `&#124;` rendered `\|` for table-safe display; actual shell uses raw `\|`) |
 | 1.9 Add `.github/dependabot.yml` for `pip` + `github-actions` | Bot opens PRs weekly | First Dependabot PR exists |
 | 1.10 Add `SECURITY.md` — disclosure path + supported versions | File exists, linked from README | `gh repo view` shows security policy detected |
 | 1.11 Add `CHANGELOG.md` with `[Unreleased]` section | File exists | Linked from README |
@@ -79,7 +113,7 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 **PR strategy:** fork-only. `Artic0din/PowerSync` only. Already in `chore/scaffold-discipline-stack` direction.
 **Effort:** ~8 hours.
 **Rollback:** all changes in one feature branch; revert merge if catastrophic.
-**Done when:** CI green on a no-op PR; `pip-audit` reports zero HIGH+; Dependabot has opened its first PR.
+**Done when:** CI green on a no-op PR; `pip-audit` exits zero (or jq-parsed result confirms zero HIGH-severity findings if severity gating is configured); Dependabot has opened its first PR.
 
 ---
 
@@ -94,8 +128,8 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 | Task | Approach | Done when | Verification |
 |---|---|---|---|
 | 2.1 Strip `token[:N]` partial logging — `inverters/enphase.py:405`, `automations/actions.py:1861,1875`, `automations/__init__.py:885` | Replace with `"[redacted]"` or token-length-only. Add unit test asserting no token chars in log. | `grep -rn 'token\[:' custom_components/` returns 0 | Upstream PR (single focused, ~30 lines); fork-merge regardless |
-| 2.2 Add `vol.Schema` to all 30 services in `__init__.py` | Define schemas in a `_SCHEMAS = {...}` dict; pass `schema=` on `async_register`. Reject malformed inputs at boundary, not in handlers. | All 30 `async_register` calls have `schema=` arg; `grep -A8 async_register __init__.py \| grep -c 'schema='` = 30 | Upstream PR (may need to split — high-impact services first: `force_discharge`, `force_charge`, `set_backup_reserve`, `set_operation_mode`, `set_grid_charging`) |
-| 2.3 Bump dep minimums per V0.1 `pip-audit` results | After V0.1, set conservative floors clearing reported HIGH+. Test against HA min `2024.8.0` + latest. | `pip-audit` clean on `manifest.json` | Upstream PR (single line per dep) |
+| 2.2 Add `vol.Schema` to all 30 services in `__init__.py` | Define schemas in a `_SCHEMAS = {...}` dict; pass `schema=` on `async_register`. Reject malformed inputs at boundary, not in handlers. | All 30 `async_register` calls have `schema=`. Verify: `grep -c 'async_register(' __init__.py` returns 30; `grep -A8 'async_register(' __init__.py &#124; grep -c 'schema='` returns 30 | Upstream PR (may need to split — high-impact services first: `force_discharge`, `force_charge`, `set_backup_reserve`, `set_operation_mode`, `set_grid_charging`) |
+| 2.3 Tighten loose `>=` dep pins to enforce upgrade floor | V0.1 confirmed no current CVEs, but `>=X.Y.Z` pins admit drift. Set conservative `>=` floors at latest patched + `<MAJOR+1` ceilings to enforce upgrade discipline without major-break risk. | `pip-audit -r manifest.json` clean (per V0.1 baseline) AND minimum bounds reflect latest patched releases | Upstream PR (single line per dep) |
 | 2.4 Document TLS-bypass risk | `powerwall_local/transport.py:59-60`, `inverters/enphase.py:491-492`: add explicit block comment: rationale, scope (LAN only), risk (MITM in adversarial LAN), why no alternative (no Tesla/Enphase CA). | Comment block present + scope assertion that target is RFC1918 | Upstream PR |
 | 2.5 Scope `_SSL_CONTEXT` singleton | `__init__.py:4836` — refactor `get_insecure_ssl_context` to require explicit per-host opt-in. | Function signature requires `host` param + asserts it's RFC1918 | Upstream PR or fork-only if upstream pushes back |
 | 2.6 Replace `ast.literal_eval` fallback at `__init__.py:650` with `json.loads` + plain coercion | Lower attack surface | `grep -n ast.literal_eval __init__.py` returns 0 in that path | Upstream PR (small) |
@@ -104,7 +138,7 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 **PR strategy per task above.**
 **Effort:** ~12 hours.
 **Rollback per task:** each task = one commit / one PR. Revert single commit if regression.
-**Done when:** all 7 tasks closed; `pip-audit` HIGH+ count is 0; `grep -rn 'token\[:' custom_components/` is 0; all 30 `async_register` calls have `schema=`.
+**Done when:** all 7 tasks closed; `pip-audit -r manifest.json` exits 0; `grep -rn 'token\[:' custom_components/` returns 0; all 30 `async_register` calls have `schema=`.
 
 ---
 
