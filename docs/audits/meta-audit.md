@@ -22,7 +22,7 @@ I re-ran direct greps on every numeric claim, every absence claim, and spot-chec
 | Claim in v2 audit | Verified result | Verdict |
 |---|---|---|
 | **C1**: "9 of 74 `HomeAssistantView` subclasses missing `requires_auth = True`" — incl. `AutoScheduleSettingsView`, `PriceLevelChargingSettingsView`, `ScheduledChargingSettingsView`, `HomePowerSettingsView`, plus 5 in `powerwall_local/views.py` | **75 of 75 views explicitly set `requires_auth = True`.** Direct read of all 4 named views in `__init__.py` confirms `requires_auth = True` is present. | **FALSE POSITIVE. RETRACT C1.** |
-| **H9**: "178 `except Exception:`, 76 silent (`pass`) swallows" | At meta-audit time: 938 broad + 4 bare = 942 total; 74 silent via regex. **Subsequently corrected (Codex feedback):** AST count gives **84 silent** — regex missed `pass # comment` variants. | Number wrong by ~5×; the prior v1 figure (940) was almost exact. v2 trusted scanner correction and got farther from truth. |
+| **H9**: "178 `except Exception:`, 76 silent (`pass`) swallows" | At meta-audit time: 940 broad + 4 bare = 944 total; 74 silent via regex. **Subsequently corrected (Codex feedback):** AST count gives **84 silent** — regex missed `pass # comment` variants. | Number wrong by ~5×; the prior v1 figure (940) was almost exact. v2 trusted scanner correction and got farther from truth. |
 | **H10**: "1,001 `Any` usages, 926 missing return annotations, 59 files import `Any`" | 59 files import `Any` ✓. Raw `Any` occurrences ≈ 955 (counted via `: Any`, `-> Any`, `[Any`, `Any,`). Missing-return claim not re-verified. | Approximate; 1,001 vs 955 depends on counting method. Acceptable magnitude. |
 | **M2**: "122× `ClientTimeout(total=…)`" | 122 ✓ | Verified. |
 | **M3**: "asyncio.sleep(1) scattered 34 times; asyncio.sleep(300) at `optimization/ev_coordinator.py:218` — 5-min blocking sleep" | `asyncio.sleep(1)` actual: **28** (close, not 34). `asyncio.sleep(300)` at `optimization/ev_coordinator.py:218` ✓ | Sleep(1) count mildly off. Sleep(300) location verified. |
@@ -60,7 +60,7 @@ Contributing factors:
 - Four parallel scanners produced independent outputs in different formats with no cross-reconciliation.
 - No "validate before declare" gate in the audit synthesis step.
 - Trust in subagent output was unconditional — no spot-check of the most consequential finding (CRITICAL severity = security implication = the exact category that needs ground truth).
-- The supplemental file `python-exhaustive-data.md` was promised to be "exhaustive" but its counts were also wrong (178 vs actual 938), suggesting the scanner's own enumeration was sampled or filtered incorrectly.
+- The supplemental file `python-exhaustive-data.md` was promised to be "exhaustive" but its counts were also wrong (178 vs actual 940), suggesting the scanner's own enumeration was sampled or filtered incorrectly.
 
 The pattern is identical to the v1→v2 correction: every iteration is one trust-without-verify cycle away from another false claim.
 
@@ -106,7 +106,7 @@ These must be applied to `docs/audits/engineering-constitution-audit.md`:
 
 ### CORRECT (numeric)
 
-- **H9** — `except Exception` count: ~~178 broad, 76 silent~~ → **938 broad + 4 bare = 942 total; 84 silent (AST-counted; the earlier 74 number used a regex that missed `pass # comment` variants)**. The qualitative finding stands; the magnitude was understated.
+- **H9** — `except Exception` count: ~~178 broad, 76 silent~~ → **940 broad + 4 bare = 944 total; 84 silent (AST-counted; the earlier 74 number used a regex that missed `pass # comment` variants)**. The qualitative finding stands; the magnitude was understated.
 - **C3** — Service schema gap: ~~30 of 33~~ → **30 of 30 services in `__init__.py` lack `vol.Schema`**. The qualitative finding stands; failure rate was understated (100%, not 91%).
 - **M3** — `asyncio.sleep(1)` count: ~~34~~ → **28**. Qualitative finding stands.
 - **H10** — `Any` count: 1,001 → **~955** (counting method-dependent). 59 files importing `Any` verified.

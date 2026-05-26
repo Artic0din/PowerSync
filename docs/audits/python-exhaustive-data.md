@@ -6,9 +6,16 @@ Scope: `custom_components/power_sync/` (88 files) + `tests/` (63 files)
 >
 > V0.5 spot-check (2026-05-27) found this file's silent-swallow counts
 > inflated by 2–4×. The header total of "178 broad excepts" disagrees with
-> the direct-grep total of **938 broad + 4 bare = 942** (see V0 baseline
-> at `docs/audits/v0-baseline/git-history.txt` and the corrections table
-> in `docs/audits/engineering-constitution-audit.md`).
+> the AST-verified total of **940 broad + 4 bare = 944**; the silent-swallow
+> total via AST is **84** (regex-based methods give 74; the regex misses
+> `pass # comment` variants). See the corrections table in
+> `docs/audits/engineering-constitution-audit.md` and the V0.5 spot-check
+> at `docs/audits/v0-baseline/supplemental-spotcheck.md`.
+>
+> All retracted/superseded findings in this document (notably the
+> "9 of 74 `HomeAssistantView` missing `requires_auth`" claim — RETRACTED,
+> all 75 views explicitly set `requires_auth = True`) should be ignored;
+> the main audit holds the current truth.
 >
 > This file is retained for shape/pattern reference (per-file breakdown,
 > method-coverage tables, line-number lists) but **all per-file numeric
@@ -18,7 +25,7 @@ Scope: `custom_components/power_sync/` (88 files) + `tests/` (63 files)
 
 ---
 
-## CAT1: `except Exception:` / `except:` — STALE: header claimed 178, actual 942
+## CAT1: `except Exception:` / `except:` — STALE: header claimed 178, actual 940/4/84 (broad/bare/silent)
 
 36 files affected. Format: `file: N broad / M silent`
 
@@ -87,7 +94,7 @@ Scope: `custom_components/power_sync/` (88 files) + `tests/` (63 files)
 | `websocket_client.py` | 6 | 0 | — |
 | `zaptec_api.py` | 1 | 0 | — |
 
-> Note: prior count of 940 was inflated. Actual scan: **178 broad+silent** across 88 production files (scanner counts lines matching `except Exception`/`except:` per distinct `except` clause). The 940 figure likely double-counted or included test files.
+> ⚠ HISTORICAL NOTE — STALE: this section originally claimed "178 broad+silent" and asserted that the 940 grep count was inflated. The opposite is true: V0.5 + Codex spot-checks confirmed **940 broad + 4 bare via AST walk over `custom_components/power_sync/**/*.py`** (production only — test files excluded). The 178 figure was the scanner's own undercount. Treat per-file numbers in the table above as approximate until regenerated.
 
 ---
 
@@ -536,18 +543,11 @@ Notable gaps: `coordinator.py`, `optimization/coordinator.py`, `powerwall_local/
 
 ---
 
-## CAT18: `HomeAssistantView` subclasses — 74 total
+## CAT18: `HomeAssistantView` subclasses — RETRACTED (was: 74; actual 75 / 0 missing `requires_auth`)
 
-**MISSING `requires_auth`** (6 views — security gap):
-- `__init__.py:14128` — `AutoScheduleSettingsView`
-- `__init__.py:14363` — `PriceLevelChargingSettingsView`
-- `__init__.py:14508` — `ScheduledChargingSettingsView`
-- `__init__.py:14696` — `HomePowerSettingsView`
-- `powerwall_local/views.py:476` — `PowerwallSetGatewayIpView`
-- `powerwall_local/views.py:819` — `PowerwallGatewayInfoView`
-- `powerwall_local/views.py:946` — `PowerwallDiscoverView`
-- `powerwall_local/views.py:1053` — `PowerwallSafetyConfigView`
-- `powerwall_local/views.py:1129` — `PowerwallCurtailmentFallbackView`
+**RETRACTED 2026-05-27 — this section's "MISSING `requires_auth`" claim is a FALSE POSITIVE.**
+
+Direct re-verification (`grep -rn 'requires_auth\s*=\s*True' custom_components/`) + a Python AST walk over every `class … (HomeAssistantView)` confirms all **75** view subclasses explicitly set `requires_auth = True`, including the 9 names this section originally flagged. The scanner that produced this section was wrong; the v2 audit's C1 finding was also wrong; both have been retracted in the main audit. Do not treat this section as a security gap.
 
 All others: `requires_auth = True`. Prior count of 61 was wrong — actual: **74**.
 

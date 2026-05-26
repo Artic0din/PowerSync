@@ -128,9 +128,15 @@ grep -rhnE "uses:\s*[^/]+/[^@]+@" .github/workflows/ \
 # 1.6 — pip-audit (no built-in severity gate; --strict turns warnings into failures)
 uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json) --strict
 
-# 1.6b — HIGH-only gate (requires jq parse of JSON output)
-uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json) \
-  --format=json | jq -e '[.dependencies[].vulns[]?.aliases[]? | select(test("CVE"))] | length == 0'
+# 1.6b — HIGH-only gate
+# pip-audit's JSON does not expose OSV severity directly. To gate by severity
+# we use osv-scanner (which calls OSV.dev and returns severity per vuln) and
+# fail only if any HIGH or CRITICAL is found.
+osv-scanner --lockfile=requirements.txt:<(jq -r '.requirements[]' \
+    custom_components/power_sync/manifest.json) --format=json \
+  | jq -e '[.results[].packages[].vulnerabilities[].severity[]? \
+            | select(.score >= "7.0" or .type == "HIGH" or .type == "CRITICAL") \
+          ] | length == 0'
 ```
 
 **PR strategy:** fork-only. `Artic0din/PowerSync` only. Already in `chore/scaffold-discipline-stack` direction.
@@ -152,7 +158,7 @@ uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/po
 |---|---|---|---|
 | 2.1 Strip `token[:N]` partial logging — `inverters/enphase.py:405`, `automations/actions.py:1861,1875`, `automations/__init__.py:885` | Replace with `"[redacted]"` or token-length-only. Add unit test asserting no token chars in log. | `grep -rn 'token\[:' custom_components/` returns 0 | Upstream PR (single focused, ~30 lines); fork-merge regardless |
 | 2.2 Add `vol.Schema` to all 30 services in `__init__.py` | Define schemas in a `_SCHEMAS = {...}` dict; pass `schema=` on `async_register`. Reject malformed inputs at boundary, not in handlers. | All 30 `async_register` calls have `schema=` — see "Phase 2 verification commands" below | Upstream PR (may need to split — high-impact services first: `force_discharge`, `force_charge`, `set_backup_reserve`, `set_operation_mode`, `set_grid_charging`) |
-| 2.3 Tighten loose `>=` dep pins to enforce upgrade floor | V0.1 confirmed no current CVEs, but `>=X.Y.Z` pins admit drift. Set conservative `>=` floors at latest patched + `<MAJOR+1` ceilings to enforce upgrade discipline without major-break risk. | `pip-audit -r manifest.json` clean (per V0.1 baseline) AND minimum bounds reflect latest patched releases | Upstream PR (single line per dep) |
+| 2.3 Tighten loose `>=` dep pins to enforce upgrade floor | V0.1 confirmed no current CVEs, but `>=X.Y.Z` pins admit drift. Set conservative `>=` floors at latest patched + `<MAJOR+1` ceilings to enforce upgrade discipline without major-break risk. | `uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)` clean (per V0.1 baseline) AND minimum bounds reflect latest patched releases | Upstream PR (single line per dep) |
 | 2.4 Document TLS-bypass risk | `powerwall_local/transport.py:59-60`, `inverters/enphase.py:491-492`: add explicit block comment: rationale, scope (LAN only), risk (MITM in adversarial LAN), why no alternative (no Tesla/Enphase CA). | Comment block present + scope assertion that target is RFC1918 | Upstream PR |
 | 2.5 Scope `_SSL_CONTEXT` singleton | `__init__.py:4836` — refactor `get_insecure_ssl_context` to require explicit per-host opt-in. | Function signature requires `host` param + asserts it's RFC1918 | Upstream PR or fork-only if upstream pushes back |
 | 2.6 Replace `ast.literal_eval` fallback at `__init__.py:650` with `json.loads` + plain coercion | Lower attack surface | `grep -n ast.literal_eval __init__.py` returns 0 in that path | Upstream PR (small) |
@@ -192,7 +198,7 @@ uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/po
 **PR strategy per task above.**
 **Effort:** ~12 hours.
 **Rollback per task:** each task = one commit / one PR. Revert single commit if regression.
-**Done when:** all 7 tasks closed; `pip-audit -r manifest.json` exits 0; `grep -rn 'token\[:' custom_components/` returns 0; all 30 `async_register` calls have `schema=`.
+**Done when:** all 7 tasks closed; `uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)` exits 0; `grep -rn 'token\[:' custom_components/` returns 0; all 30 `async_register` calls have `schema=`.
 
 ---
 
@@ -206,12 +212,12 @@ uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/po
 |---|---|---|---|
 | 3.1 Add `diagnostics.py` per HA convention | Implement `async_get_config_entry_diagnostics` + `async_get_device_diagnostics`. Redact tokens. | File exists; HACS Hassfest passes; "Download diagnostics" UI button works on a real install | Upstream PR (uncontroversial — HA quality scale requirement) |
 | 3.2 Centralize magic timeouts: 122× `ClientTimeout(total=30)` → `_DEFAULT_HTTP_TIMEOUT = ClientTimeout(total=30)` in `const.py` | One constant, all sites reference it. | `grep -rn 'ClientTimeout(total=30)' custom_components/` returns 1 (the definition) | Upstream PR (single-file refactor) |
-| 3.3 Centralize `asyncio.sleep(1)` cluster (28 sites) → `_POST_WRITE_SETTLE_SEC = 1.0` constant in `const.py` | Named semantic constant | `grep -rn 'asyncio.sleep(1)' custom_components/inverters/` returns 0; replaced with constant | Upstream PR |
+| 3.3 Centralize `asyncio.sleep(1)` cluster (28 sites) → `_POST_WRITE_SETTLE_SEC = 1.0` constant in `const.py` | Named semantic constant | `grep -rn 'asyncio\.sleep(1)' custom_components/power_sync/` returns 0; replaced with constant | Upstream PR |
 | 3.4 Centralize `max_retries` (4 redefinitions) → `_DEFAULT_MAX_RETRIES = 3` | Single definition | All 4 sites import constant | Upstream PR |
 | 3.5 Centralize the 100 hardcoded `sensor.*` entity-ID strings | Group by domain: `_SOLCAST_ENTITY_IDS = (...)` in `const.py`; cluster at `coordinator.py:6601-6698` is the priority | Cluster reduced; constants pulled out | Upstream PR (medium — large diff but mechanical) |
 | 3.6 Convert hot-path `_LOGGER.info` → `_LOGGER.debug` in `coordinator.py` (82 of 88 calls) | Manual audit per call: one-shot setup keeps info; per-cycle moves to debug | `python` script counts info-calls in update methods → 0; setup-paths preserved | Upstream PR |
 | 3.7 Same for `sensor.py` (37 info-level) | Same rule | Hot-path info → debug | Upstream PR |
-| 3.8 Reduce broad `except Exception:` from 938 to <100 | Targeted refactor: replace with specific types where the actual exception is knowable; document the swallow with `# noqa: BLE001 — reason` per remaining case | Count <100; remaining cases have rationale comments | Fork-only refactor over multiple PRs; upstream as small per-file PRs |
+| 3.8 Reduce broad `except Exception:` from 940 to <100 | Targeted refactor: replace with specific types where the actual exception is knowable; document the swallow with `# noqa: BLE001 — reason` per remaining case | Count <100; remaining cases have rationale comments | Fork-only refactor over multiple PRs; upstream as small per-file PRs |
 | 3.9 Eliminate 84 silent `pass` swallows (V0-AST-counted, includes `pass # comment` variants) | Convert to `_LOGGER.debug` + structured handling; or re-raise | Python AST check finds 0 `try/except Exception: handler.body == [Pass]` patterns | Upstream PRs per file |
 | 3.10 Normalize API error semantics (`localvolts_api` returns None vs `octopus_api`/`aemo_api` raise) | Pick raise-or-return-None; document the contract; refactor offenders | All `*_api.py` use same convention; documented in `*_api.py` module docstring | Upstream PR |
 | 3.11 Add `_LOGGER` to 18 modules missing it (5 with business logic priority) | Standard declaration | `_LOGGER = logging.getLogger(__name__)` in every business-logic module | Upstream PR |

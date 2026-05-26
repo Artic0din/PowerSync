@@ -24,7 +24,7 @@ These were applied to `docs/audits/engineering-constitution-audit.md` (and ackno
 4. **H15** (conventional-commits ratio) — **VERIFIED at 29.1%** (952 of 3,269).
 5. **M17** (large-diff Fix commits) — **VERIFIED**. `d20d1b38 Fix API auth for Powerwall control endpoints` is 7,653 lines; `df217bf0 Fix iCloud duplicate files` is 7,637 lines.
 6. **M14** (`esy_sunhome` custom not core) — **VERIFIED**. Not on PyPI. `branko-lazarevic/esy_sunhome_modbus` is a HACS-installable custom integration. Listing it in `manifest.json` `after_dependencies` will cause "dependency not found" warnings on installs without it.
-7. **Supplemental file (`python-exhaustive-data.md`)** — silent-swallow counts inflated 2–4×. Total broad-except count in supplemental (178) disagrees with direct grep (938). File needs regeneration before reuse.
+7. **Supplemental file (`python-exhaustive-data.md`)** — silent-swallow counts inflated 2–4×. Total broad-except count in supplemental (178) disagrees with direct grep (940). File needs regeneration before reuse.
 
 ## What this run did NOT verify
 

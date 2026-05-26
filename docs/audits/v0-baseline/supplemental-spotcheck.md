@@ -40,7 +40,7 @@ print(counts)
 The supplemental file (`python-exhaustive-data.md`, 551 lines, claimed
 "exhaustive enumeration") inflated silent-swallow counts by roughly 2–4×.
 
-The total broad `except Exception` count of **938** (verified earlier by
+The total broad `except Exception` count of **940** (verified earlier by
 direct grep) is also at odds with the supplemental's claim of **178**.
 
 This means the meta-audit's verification step was itself incomplete: the

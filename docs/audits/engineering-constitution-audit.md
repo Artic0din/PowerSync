@@ -14,7 +14,7 @@ Direct re-verification against source — see `docs/audits/v0-baseline/` for raw
 |---|---|---|---|
 | **C1** "9 unauthenticated `HomeAssistantView`" | 9 of 74 missing `requires_auth` | All 75 views explicitly set `requires_auth = True`; 76 `=True` matches across the file set | **RETRACTED — false positive** |
 | **C2** dep CVE claims | "CVEs reachable under current minimum bounds" | **`pip-audit` clean — no vulnerabilities found** under current resolution | **DOWNGRADED** from CRITICAL #15 to MED #5 — loose `>=` pins remain a policy concern (drift risk), but no current CVE exposure |
-| **H9** broad-except count | 178 broad / 76 silent | 938 broad + 4 bare / **84 silent** (AST-counted, includes `pass # comment` variants) | Numbers corrected; qualitative finding stands |
+| **H9** broad-except count | 178 broad / 76 silent | 940 broad + 4 bare / **84 silent** (AST-counted, includes `pass # comment` variants) | Numbers corrected; qualitative finding stands |
 | **C3** services without schema | 30 of 33 | 30 of 30 (100%) | Failure rate corrected upward |
 | **M3** blocking sleep | 1 site (`ev_coordinator.py:218` @ 300s) | **4 sites ≥ 60s**: `__init__.py:16814` (60s), `optimization/ev_coordinator.py:218` (300s), `:224` (60s), `optimization/coordinator.py:2025` (60s); `asyncio.sleep(1)` count 28 not 34 | UNDERCOUNT corrected upward |
 | **H10** `Any` count | 1,001 | ~955 (method-dep) | Magnitude unchanged |
@@ -22,7 +22,7 @@ Direct re-verification against source — see `docs/audits/v0-baseline/` for raw
 | **H15** conventional-commits ratio | 29% | **29.1% VERIFIED** (952 of 3,269) | Stands |
 | **M14** `esy_sunhome` custom not core | inferred | VERIFIED — not on PyPI; `branko-lazarevic/esy_sunhome_modbus` is HACS-only | Stands |
 | **M17** large-diff "Fix" commits | listed | VERIFIED — `d20d1b38` 7,653 lines, `df217bf0` 7,637 lines | Stands |
-| **Supplemental file** `python-exhaustive-data.md` | "exhaustive" | INFLATED — silent-swallow counts 2–4× too high; total broad-except 178 vs actual 938 | Regenerate before reuse |
+| **Supplemental file** `python-exhaustive-data.md` | "exhaustive" | INFLATED — silent-swallow counts 2–4× too high; total broad-except 178 vs actual 940 | Regenerate before reuse |
 | **H5–H8, H11, H17–H21, M2, M9** | absence/LOC/workflow claims | VERIFIED | Stand |
 
 Read the meta-audit (`docs/audits/meta-audit.md`) and the V0 baseline README (`docs/audits/v0-baseline/README.md`) before acting on findings below.
@@ -61,7 +61,7 @@ This table records the v1→v2 self-correction at meta-audit time. Several "Actu
 
 | Category | Prior (v1) | v2 self-correction (stale) | V0-verified |
 |---|---|---|---|
-| `except Exception` total | 940 | 178 (102 broad + 76 silent) | 938 broad + 4 bare = 942 total; 84 silent via AST |
+| `except Exception` total | 940 | 178 (102 broad + 76 silent) | 940 broad + 4 bare = 942 total; 84 silent via AST |
 | `Any` usages | 989 | 1,001 | ~955 (counting-method dependent) |
 | Missing return annotations | 921 | 926 | not re-verified |
 | `ClientTimeout(total=…)` | 87 | 122 | 122 (V0 confirms) |
@@ -104,7 +104,7 @@ The codebase ships a working integration with substantial domain value, but viol
 | H6 | `config_flow.py` = **10,479 LOC** — contains validation + API calls + business rules instead of being a thin UI wrapper | #4, #8 | `config_flow.py` |
 | H7 | `coordinator.py` = **8,461 LOC** with 20+ coordinator subclasses in one file | #4, #14 | `coordinator.py` |
 | H8 | `optimization/coordinator.py` = **6,492 LOC** | #4 | `optimization/coordinator.py` |
-| H9 | **938** `except Exception:` + **4** bare `except:` catches across codebase; **74** swallow silently with `pass` body. (Corrected 2026-05-27 — v2 stated 178/76; direct verification gives 938/74.) | #1, #11, #14 | repo-wide |
+| H9 | **940** `except Exception:` + **4** bare `except:` catches across codebase; **84** swallow silently with `pass` body (AST-counted; earlier regex 74 missed `pass # comment` variants). (Corrected 2026-05-27 — v2 stated 178/76; AST verification gives 940/4/84.) | #1, #11, #14 | repo-wide |
 | H10 | **~955** uses of `Any` across **59** files (counting method-dependent; scanner reported 1,001). Worst per scanner: `config_flow.py` (150), `sensor.py` (83), `automations/actions.py` (72). ~926 function signatures without return annotation per scanner (not re-verified). Type discipline is not enforced. | #8, #4 | repo-wide |
 | H11 | **CI does not run tests.** `validate.yml` runs only HACS + Hassfest validation. No `pytest`, no coverage gate, no `ruff`, no `pyright`/`mypy`. No `pip-audit`. No SBOM. | #5, #11, #17 | `.github/workflows/validate.yml` |
 | H12 | `sensor.py`, `coordinator.py`, and all `*_api.py` files have **no dedicated test files**. Coverage only exists indirectly via inverter-controller tests. | #11, #17 | `tests/` |
@@ -191,10 +191,10 @@ The codebase ships a working integration with substantial domain value, but viol
 
 | # | Principle | Status | Why |
 |---|---|---|---|
-| 1 | No Half-Fixes | **FAIL** | 938 broad + 4 bare excepts, 84 silent (AST-counted) swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies (last sub-claim scanner-derived, pending re-verification) |
+| 1 | No Half-Fixes | **FAIL** | 940 broad + 4 bare excepts, 84 silent (AST-counted) swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies (last sub-claim scanner-derived, pending re-verification) |
 | 2 | No Workarounds as Final | **FAIL** | 20 WIP/hack/workaround commit subjects; 3 explicit comment workarounds; large "Fix" commits (7k+ lines) are structural rework mislabelled |
 | 3 | No Silent Scope Reduction | n/a (no comparison baseline available) |
-| 4 | Maintainability | **FAIL** | God files, magic values (122× `ClientTimeout(30)`, 34× `asyncio.sleep(1)`), scattered entity IDs |
+| 4 | Maintainability | **FAIL** | God files, magic values (122× `ClientTimeout(30)`, 28× `asyncio.sleep(1)`), scattered entity IDs |
 | 5 | Production Standards | **FAIL** | No CI tests/lint/typecheck; 29.1% conventional-commits; floating workflow action refs; semver scheme is a build counter; loose `>=` dep pins (no current CVE exposure per V0.1, but no upgrade discipline either) |
 | 6 | Real Engineering Tradeoffs | n/a |
 | 7 | Beyond Immediate Task | n/a |
@@ -266,9 +266,9 @@ The codebase ships a working integration with substantial domain value, but viol
 ### P5 — Hygiene (ongoing)
 
 31. Convert 82 hot-path `_LOGGER.info` calls in `coordinator.py` to `_LOGGER.debug`.
-32. Define constants in `const.py` for the 122× `ClientTimeout(30)`, 34× `asyncio.sleep(1)`, `max_retries`, and 100 hardcoded `sensor.*` entity-ID strings.
+32. Define constants in `const.py` for the 122× `ClientTimeout(30)`, 28× `asyncio.sleep(1)`, `max_retries`, and 100 hardcoded `sensor.*` entity-ID strings.
 33. Normalize API error semantics: pick raise-or-return-None for all `*_api.py`; refactor offenders.
-34. Reduce **938** broad `except Exception` + **4** bare `except:` (V0-verified totals) to <100. Replace with specific exception types or document rationale.
+34. Reduce **940** broad `except Exception` + **4** bare `except:` (V0-verified totals) to <100. Replace with specific exception types or document rationale.
 35. Add Store schema migration scaffolding before bumping any `version=1`.
 36. Bump HA minimum to `2025.x` floor.
 37. Add `category: integration` to `hacs.json`.
@@ -301,8 +301,9 @@ Bolagnaise is shipping fast (3,269 commits in 7 months, 86% from him). Expect on
 
 ## How to regenerate this audit
 
+Run from the repo root (works on any machine — no absolute paths).
+
 ```bash
-cd /Users/ryanfoyle/Development/energy/powersync
 
 # commit metadata
 git log --oneline | wc -l
