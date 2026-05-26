@@ -103,12 +103,28 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 | 1.5 Wire `pyright` (strict for new code, lenient for legacy) | Type check runs | CI green |
 | 1.6 Wire `pip-audit` step | CVE scan runs; CI red on any vulnerability (`pip-audit` exits non-zero on any finding — has no built-in severity gate, so introduce gating via `--format=json` + `jq` parse if HIGH-only is desired) | CI red if vuln introduced |
 | 1.7 Pin `pytest.ini` with `addopts = --strict-markers --cov=custom_components/power_sync --cov-report=xml`, `asyncio_mode = auto` | pytest config explicit | `pytest --collect-only` exits 0 |
-| 1.8 SHA-pin `hacs/action`, `home-assistant/actions/hassfest`, `JamesIves/github-sponsors-readme-action`, `stefanzweifel/git-auto-commit-action` in fork's workflows | All non-allowlist actions are SHA refs | `grep -rE 'uses:.*@(main&#124;master&#124;v[0-9]+)$' .github/workflows/` returns 0 lines for non-allowlist (note: `&#124;` rendered `\|` for table-safe display; actual shell uses raw `\|`) |
+| 1.8 SHA-pin `hacs/action`, `home-assistant/actions/hassfest`, `JamesIves/github-sponsors-readme-action`, `stefanzweifel/git-auto-commit-action` in fork's workflows | All non-allowlist actions are SHA refs | See "Phase 1 verification commands" code block below |
 | 1.9 Add `.github/dependabot.yml` for `pip` + `github-actions` | Bot opens PRs weekly | First Dependabot PR exists |
 | 1.10 Add `SECURITY.md` — disclosure path + supported versions | File exists, linked from README | `gh repo view` shows security policy detected |
 | 1.11 Add `CHANGELOG.md` with `[Unreleased]` section | File exists | Linked from README |
 | 1.12 Add `.github/ISSUE_TEMPLATE/{bug,feature,question}.yml` + `PULL_REQUEST_TEMPLATE.md` + `CONTRIBUTING.md` + `CODEOWNERS` | Templates render on new-issue/PR pages | Manual check on `gh issue create` form |
 | 1.13 Add `.gitignore` HA-specific patterns: `.HA_VERSION`, `.storage/`, `secrets.yaml` | Patterns present | `git check-ignore .HA_VERSION` returns 0 |
+
+**Phase 1 verification commands:**
+
+```bash
+# 1.8 — non-allowlist action SHA-pin check
+# allow-list = anthropics/*, github/*, actions/*, codecov/*, astral-sh/*, pnpm/*
+grep -rhnE "^\s*uses:\s*[^/]+/[^@]+@(main|master|v[0-9]+)\s*$" .github/workflows/ \
+  | grep -vE "uses:\s*(anthropics|github|actions|codecov|astral-sh|pnpm)/"
+
+# 1.6 — pip-audit (no built-in severity gate; --strict turns warnings into failures)
+uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json) --strict
+
+# 1.6b — HIGH-only gate (requires jq parse of JSON output)
+uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json) \
+  --format=json | jq -e '[.dependencies[].vulns[]?.aliases[]? | select(test("CVE"))] | length == 0'
+```
 
 **PR strategy:** fork-only. `Artic0din/PowerSync` only. Already in `chore/scaffold-discipline-stack` direction.
 **Effort:** ~8 hours.
@@ -128,12 +144,43 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 | Task | Approach | Done when | Verification |
 |---|---|---|---|
 | 2.1 Strip `token[:N]` partial logging — `inverters/enphase.py:405`, `automations/actions.py:1861,1875`, `automations/__init__.py:885` | Replace with `"[redacted]"` or token-length-only. Add unit test asserting no token chars in log. | `grep -rn 'token\[:' custom_components/` returns 0 | Upstream PR (single focused, ~30 lines); fork-merge regardless |
-| 2.2 Add `vol.Schema` to all 30 services in `__init__.py` | Define schemas in a `_SCHEMAS = {...}` dict; pass `schema=` on `async_register`. Reject malformed inputs at boundary, not in handlers. | All 30 `async_register` calls have `schema=`. Verify: `grep -c 'async_register(' __init__.py` returns 30; `grep -A8 'async_register(' __init__.py &#124; grep -c 'schema='` returns 30 | Upstream PR (may need to split — high-impact services first: `force_discharge`, `force_charge`, `set_backup_reserve`, `set_operation_mode`, `set_grid_charging`) |
+| 2.2 Add `vol.Schema` to all 30 services in `__init__.py` | Define schemas in a `_SCHEMAS = {...}` dict; pass `schema=` on `async_register`. Reject malformed inputs at boundary, not in handlers. | All 30 `async_register` calls have `schema=` — see "Phase 2 verification commands" below | Upstream PR (may need to split — high-impact services first: `force_discharge`, `force_charge`, `set_backup_reserve`, `set_operation_mode`, `set_grid_charging`) |
 | 2.3 Tighten loose `>=` dep pins to enforce upgrade floor | V0.1 confirmed no current CVEs, but `>=X.Y.Z` pins admit drift. Set conservative `>=` floors at latest patched + `<MAJOR+1` ceilings to enforce upgrade discipline without major-break risk. | `pip-audit -r manifest.json` clean (per V0.1 baseline) AND minimum bounds reflect latest patched releases | Upstream PR (single line per dep) |
 | 2.4 Document TLS-bypass risk | `powerwall_local/transport.py:59-60`, `inverters/enphase.py:491-492`: add explicit block comment: rationale, scope (LAN only), risk (MITM in adversarial LAN), why no alternative (no Tesla/Enphase CA). | Comment block present + scope assertion that target is RFC1918 | Upstream PR |
 | 2.5 Scope `_SSL_CONTEXT` singleton | `__init__.py:4836` — refactor `get_insecure_ssl_context` to require explicit per-host opt-in. | Function signature requires `host` param + asserts it's RFC1918 | Upstream PR or fork-only if upstream pushes back |
 | 2.6 Replace `ast.literal_eval` fallback at `__init__.py:650` with `json.loads` + plain coercion | Lower attack surface | `grep -n ast.literal_eval __init__.py` returns 0 in that path | Upstream PR (small) |
 | 2.7 FoxESS MD5 + raw api_key | Upstream protocol limitation. Open upstream issue documenting risk; no code change. | Issue filed; comment block in `foxess_api.py` referencing upstream limitation | Fork-only doc + upstream issue |
+
+**Phase 2 verification commands:**
+
+```bash
+# 2.2 — service schema coverage
+TOTAL=$(grep -c 'async_register(' custom_components/power_sync/__init__.py)
+WITH_SCHEMA=$(python3 - <<'PY'
+import re, pathlib
+src = pathlib.Path('custom_components/power_sync/__init__.py').read_text()
+n = 0
+for m in re.finditer(r'(?:hass|self\.hass)\.services\.async_register\s*\(', src):
+    # walk to the matching close-paren
+    depth = 0; end = None
+    for i, ch in enumerate(src[m.start():m.start()+4000]):
+        if ch == '(': depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0: end = i; break
+    if end and ('schema=' in src[m.start():m.start()+end]):
+        n += 1
+print(n)
+PY
+)
+echo "with schema: $WITH_SCHEMA / $TOTAL"
+
+# 2.1 — token-fragment logging check
+grep -rn 'token\[:' custom_components/power_sync/
+
+# 2.3 — dep pin audit
+uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)
+```
 
 **PR strategy per task above.**
 **Effort:** ~12 hours.
@@ -158,7 +205,7 @@ Each phase has: **goal**, **principles closed**, **tasks with done-criteria + ve
 | 3.6 Convert hot-path `_LOGGER.info` → `_LOGGER.debug` in `coordinator.py` (82 of 88 calls) | Manual audit per call: one-shot setup keeps info; per-cycle moves to debug | `python` script counts info-calls in update methods → 0; setup-paths preserved | Upstream PR |
 | 3.7 Same for `sensor.py` (37 info-level) | Same rule | Hot-path info → debug | Upstream PR |
 | 3.8 Reduce broad `except Exception:` from 938 to <100 | Targeted refactor: replace with specific types where the actual exception is knowable; document the swallow with `# noqa: BLE001 — reason` per remaining case | Count <100; remaining cases have rationale comments | Fork-only refactor over multiple PRs; upstream as small per-file PRs |
-| 3.9 Eliminate 74 silent `pass` swallows | Convert to `_LOGGER.debug` + structured handling; or re-raise | `python3` AST check finds 0 `except Exception: pass` patterns | Upstream PRs per file |
+| 3.9 Eliminate 84 silent `pass` swallows (V0-AST-counted, includes `pass # comment` variants) | Convert to `_LOGGER.debug` + structured handling; or re-raise | Python AST check finds 0 `try/except Exception: handler.body == [Pass]` patterns | Upstream PRs per file |
 | 3.10 Normalize API error semantics (`localvolts_api` returns None vs `octopus_api`/`aemo_api` raise) | Pick raise-or-return-None; document the contract; refactor offenders | All `*_api.py` use same convention; documented in `*_api.py` module docstring | Upstream PR |
 | 3.11 Add `_LOGGER` to 18 modules missing it (5 with business logic priority) | Standard declaration | `_LOGGER = logging.getLogger(__name__)` in every business-logic module | Upstream PR |
 | 3.12 Move 5-min blocking sleep at `optimization/ev_coordinator.py:218` | Convert to scheduled callback via `async_call_later` or coordinator update-interval | `grep -n 'asyncio.sleep(300)' custom_components/` returns 0 | Upstream PR |

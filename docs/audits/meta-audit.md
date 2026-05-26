@@ -22,7 +22,7 @@ I re-ran direct greps on every numeric claim, every absence claim, and spot-chec
 | Claim in v2 audit | Verified result | Verdict |
 |---|---|---|
 | **C1**: "9 of 74 `HomeAssistantView` subclasses missing `requires_auth = True`" — incl. `AutoScheduleSettingsView`, `PriceLevelChargingSettingsView`, `ScheduledChargingSettingsView`, `HomePowerSettingsView`, plus 5 in `powerwall_local/views.py` | **75 of 75 views explicitly set `requires_auth = True`.** Direct read of all 4 named views in `__init__.py` confirms `requires_auth = True` is present. | **FALSE POSITIVE. RETRACT C1.** |
-| **H9**: "178 `except Exception:`, 76 silent (`pass`) swallows" | **938 broad `except Exception` + 4 bare `except:` = 942 total. 74 silent (`pass` body).** | Number wrong by ~5×. The prior v1 figure (940) was almost exact; v2 trusted scanner correction and got farther from truth. |
+| **H9**: "178 `except Exception:`, 76 silent (`pass`) swallows" | At meta-audit time: 938 broad + 4 bare = 942 total; 74 silent via regex. **Subsequently corrected (Codex feedback):** AST count gives **84 silent** — regex missed `pass # comment` variants. | Number wrong by ~5×; the prior v1 figure (940) was almost exact. v2 trusted scanner correction and got farther from truth. |
 | **H10**: "1,001 `Any` usages, 926 missing return annotations, 59 files import `Any`" | 59 files import `Any` ✓. Raw `Any` occurrences ≈ 955 (counted via `: Any`, `-> Any`, `[Any`, `Any,`). Missing-return claim not re-verified. | Approximate; 1,001 vs 955 depends on counting method. Acceptable magnitude. |
 | **M2**: "122× `ClientTimeout(total=…)`" | 122 ✓ | Verified. |
 | **M3**: "asyncio.sleep(1) scattered 34 times; asyncio.sleep(300) at `optimization/ev_coordinator.py:218` — 5-min blocking sleep" | `asyncio.sleep(1)` actual: **28** (close, not 34). `asyncio.sleep(300)` at `optimization/ev_coordinator.py:218` ✓ | Sleep(1) count mildly off. Sleep(300) location verified. |
@@ -32,15 +32,18 @@ I re-ran direct greps on every numeric claim, every absence claim, and spot-chec
 | **H17/H18/H19/M9**: CHANGELOG.md absent, SECURITY.md absent, ISSUE_TEMPLATE absent, diagnostics.py absent | All four confirmed absent ✓ | Verified. |
 | **H21**: workflow actions floating (`hacs/action@main`, `hassfest@master`) | `validate.yml` uses `hacs/action@main` and `home-assistant/actions/hassfest@master` ✓ | Verified. |
 | **C2**: CVE-vulnerable dep bounds (aiohttp ≥3.9.0, cryptography ≥42.0.0, protobuf ≥4.25.0) | At meta-audit time: not re-verified. **Subsequently (V0.1):** `pip-audit` resolves the `>=` floors to current versions and reports **no vulnerabilities**. CVEs the audit cited exist for old versions but the resolver picks current. | **REFUTED for #15** (no current CVE exposure). Loose `>=` pins remain a #5 dependency-management concern (drift risk). See `docs/audits/v0-baseline/pip-audit.txt`. |
-| **H14**: "22 fix-of-fix commits, 31 deferred TODOs in commit bodies, 20 WIP/hack subjects" | At meta-audit time: not re-verified. **Subsequently (V0.2):** `git log --format='%s' \| grep -ciE 'fix.*fix'` returns 22. | **VERIFIED** (subject-level fix-of-fix count). The "31 deferred TODOs in commit bodies" and "20 WIP/hack subjects" sub-claims remain unverified pending separate `git log -G` runs. |
-| **H15**: "29% conventional-commits compliance (952 of 3,269)" | At meta-audit time: not re-verified. **Subsequently (V0.3):** `grep -cE '^(feat\|fix\|test\|...)' ` returns **952 / 3,269 = 29.1%**. | **VERIFIED**. |
+| **H14**: "22 fix-of-fix commits, 31 deferred TODOs in commit bodies, 20 WIP/hack subjects" | At meta-audit time: not re-verified. **Subsequently (V0.2):** the runnable command `git log --format='%s' | grep -ciE 'fix.*fix'` returns **22**. | **VERIFIED** (subject-level fix-of-fix count). The "31 deferred TODOs" and "20 WIP/hack subjects" sub-claims remain unverified pending separate `git log -G` runs. |
+| **H15**: "29% conventional-commits compliance (952 of 3,269)" | At meta-audit time: not re-verified. **Subsequently (V0.3):** the runnable command `git log --format='%s' \| grep -cE '^(feat\|fix\|test\|refactor\|perf\|docs\|style\|chore\|ci\|build\|revert)(\([^)]+\))?(\!)?: '` returns **952** against a total of **3,269** = **29.1%**. *(In rendered markdown the table-cell pipes are escaped as `\|`; the actual shell command uses raw `|`. See `docs/audits/v0-baseline/git-history.txt` for the verbatim run.)* | **VERIFIED**. |
 
 ### Net summary
 
+*(Updated after V0 baseline run on the same day — see "Subsequently" cells in the table above.)*
+
 - **1 false-positive CRITICAL finding** (C1 — "9 unauthenticated HTTP endpoints"). This is the worst category of error: the audit invented a security incident.
-- **2 numeric findings materially wrong**: H9 (off by ~5×), C3 (off by 3, in the more-failing direction)
+- **2 numeric findings materially wrong**: H9 (off by ~5×; further corrected from 74 to **84 silent** via AST after Codex feedback), C3 (off by 3, in the more-failing direction)
 - **2 numeric findings off by <20%**: H10, M3
-- **CVE claims (C2) and git-history claims (H14, H15)** never independently verified.
+- **CVE claims (C2)** were never independently verified at meta-audit time; V0.1 `pip-audit` subsequently **refuted** C2 (no current CVE exposure).
+- **Git-history claims (H14, H15)** were never independently verified at meta-audit time; V0.2/V0.3 subsequently **verified** both.
 - **All "absence" claims (no CHANGELOG, no SECURITY.md, no diagnostics.py, no CI tests) verified true.**
 
 ---
@@ -103,7 +106,7 @@ These must be applied to `docs/audits/engineering-constitution-audit.md`:
 
 ### CORRECT (numeric)
 
-- **H9** — `except Exception` count: ~~178 broad, 76 silent~~ → **938 broad + 4 bare = 942 total, 74 silent (`pass` body)**. The qualitative finding (over-broad exception handling, silent swallows) stands; the magnitude was understated.
+- **H9** — `except Exception` count: ~~178 broad, 76 silent~~ → **938 broad + 4 bare = 942 total; 84 silent (AST-counted; the earlier 74 number used a regex that missed `pass # comment` variants)**. The qualitative finding stands; the magnitude was understated.
 - **C3** — Service schema gap: ~~30 of 33~~ → **30 of 30 services in `__init__.py` lack `vol.Schema`**. The qualitative finding stands; failure rate was understated (100%, not 91%).
 - **M3** — `asyncio.sleep(1)` count: ~~34~~ → **28**. Qualitative finding stands.
 - **H10** — `Any` count: 1,001 → **~955** (counting method-dependent). 59 files importing `Any` verified.

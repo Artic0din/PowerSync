@@ -14,7 +14,7 @@ Direct re-verification against source — see `docs/audits/v0-baseline/` for raw
 |---|---|---|---|
 | **C1** "9 unauthenticated `HomeAssistantView`" | 9 of 74 missing `requires_auth` | All 75 views explicitly set `requires_auth = True`; 76 `=True` matches across the file set | **RETRACTED — false positive** |
 | **C2** dep CVE claims | "CVEs reachable under current minimum bounds" | **`pip-audit` clean — no vulnerabilities found** under current resolution | **DOWNGRADED** from CRITICAL #15 to MED #5 — loose `>=` pins remain a policy concern (drift risk), but no current CVE exposure |
-| **H9** broad-except count | 178 broad / 76 silent | 938 broad + 4 bare / 74 silent | Numbers corrected; qualitative finding stands |
+| **H9** broad-except count | 178 broad / 76 silent | 938 broad + 4 bare / **84 silent** (AST-counted, includes `pass # comment` variants) | Numbers corrected; qualitative finding stands |
 | **C3** services without schema | 30 of 33 | 30 of 30 (100%) | Failure rate corrected upward |
 | **M3** blocking sleep | 1 site (`ev_coordinator.py:218` @ 300s) | **4 sites ≥ 60s**: `__init__.py:16814` (60s), `optimization/ev_coordinator.py:218` (300s), `:224` (60s), `optimization/coordinator.py:2025` (60s); `asyncio.sleep(1)` count 28 not 34 | UNDERCOUNT corrected upward |
 | **H10** `Any` count | 1,001 | ~955 (method-dep) | Magnitude unchanged |
@@ -55,18 +55,20 @@ Read the meta-audit (`docs/audits/meta-audit.md`) and the V0 baseline README (`d
 
 A prior pass of this audit (committed earlier this session) was incomplete — it sampled within scope ("top 10 worst"), skipped git history entirely, skipped non-Python assets, skipped dependency CVEs. That violated constitution principles #3 (silent scope reduction), #8 (no explicit assumptions), and #11 (declared done without exhaustive validation). This version supersedes it.
 
-**Numeric corrections from prior pass:**
+**Numeric corrections from prior pass (HISTORICAL — superseded by V0 baseline above):**
 
-| Category | Prior | Actual | Note |
+This table records the v1→v2 self-correction at meta-audit time. Several "Actual (v2)" cells were themselves wrong; V0 baseline holds current truth.
+
+| Category | Prior (v1) | v2 self-correction (stale) | V0-verified |
 |---|---|---|---|
-| `except Exception` total | 940 | **178** (102 broad + 76 silent) | Prior likely counted all except clauses |
-| `Any` usages | 989 | **1,001** | Close |
-| Missing return annotations | 921 | **926** | Close |
-| `ClientTimeout(total=…)` | 87 | **122** | Off by ~30% |
-| `HomeAssistantView` subclasses | 61 | **74** | Off |
-| Modules missing `_LOGGER` | 7 | **18** | Off |
-| **`HomeAssistantView` with `requires_auth=True`** | "all 61" | **65 of 74 — 9 MISSING** | **Material error. Prior said clean. Actually a security finding.** |
-| Services with `vol.Schema` in `__init__.py` | not counted | **3 of 33 have schema** | Worse than prior estimated |
+| `except Exception` total | 940 | 178 (102 broad + 76 silent) | 938 broad + 4 bare = 942 total; 84 silent via AST |
+| `Any` usages | 989 | 1,001 | ~955 (counting-method dependent) |
+| Missing return annotations | 921 | 926 | not re-verified |
+| `ClientTimeout(total=…)` | 87 | 122 | 122 (V0 confirms) |
+| `HomeAssistantView` subclasses | 61 | 74 | 75 |
+| Modules missing `_LOGGER` | 7 | 18 | not re-verified |
+| `HomeAssistantView` with `requires_auth=True` | "all 61" | "65 of 74 — 9 MISSING" | 75 of 75 — 0 MISSING (C1 retracted as false positive) |
+| Services with `vol.Schema` in `__init__.py` | not counted | "3 of 33" | 0 of 30 |
 
 ---
 
@@ -189,7 +191,7 @@ The codebase ships a working integration with substantial domain value, but viol
 
 | # | Principle | Status | Why |
 |---|---|---|---|
-| 1 | No Half-Fixes | **FAIL** | 938 broad + 4 bare excepts, 74 silent swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies (last sub-claim scanner-derived, pending re-verification) |
+| 1 | No Half-Fixes | **FAIL** | 938 broad + 4 bare excepts, 84 silent (AST-counted) swallows, 22 fix-of-fix commits, 31 deferred TODOs in commit bodies (last sub-claim scanner-derived, pending re-verification) |
 | 2 | No Workarounds as Final | **FAIL** | 20 WIP/hack/workaround commit subjects; 3 explicit comment workarounds; large "Fix" commits (7k+ lines) are structural rework mislabelled |
 | 3 | No Silent Scope Reduction | n/a (no comparison baseline available) |
 | 4 | Maintainability | **FAIL** | God files, magic values (122× `ClientTimeout(30)`, 34× `asyncio.sleep(1)`), scattered entity IDs |
@@ -336,18 +338,28 @@ for p in pathlib.Path('custom_components/power_sync').rglob('*.py'):
 print(f'total: {total}, missing requires_auth=True: {missing}')
 "
 
-# exception handling (broad + bare; silent swallows via Python AST since basic grep \s is unreliable)
+# exception handling (broad + bare). Silent swallows counted via true AST so
+# `pass # comment` variants are not missed (a regex on the source text would
+# undercount by ~10 cases on this tree).
 grep -rn 'except Exception' custom_components/power_sync/ | wc -l
 grep -rnE '^[[:space:]]*except[[:space:]]*:' custom_components/power_sync/ | wc -l
-python3 -c "
-import re, pathlib
-silent=0
+python3 - <<'PY'
+import ast, pathlib
+silent = 0
 for p in pathlib.Path('custom_components/power_sync').rglob('*.py'):
-    src=p.read_text()
-    for m in re.finditer(r'except\s+Exception[^:]*:\s*\n(\s+)pass\s*(?:\n|$)', src):
-        silent += 1
-print(f'silent (pass body) swallows: {silent}')
-"
+    try:
+        tree = ast.parse(p.read_text())
+    except SyntaxError:
+        continue
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for h in node.handlers:
+                # bare except OR except Exception
+                if h.type is None or (isinstance(h.type, ast.Name) and h.type.id == 'Exception'):
+                    if len(h.body) == 1 and isinstance(h.body[0], ast.Pass):
+                        silent += 1
+print(f'silent (pass-body) swallows (AST): {silent}')
+PY
 
 # magic constants
 grep -rn 'from typing import.*Any' custom_components/power_sync/ | wc -l

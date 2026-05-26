@@ -6,20 +6,31 @@
 
 ## Results
 
-Method (Python `re.findall`, alternation expressed with real `|` —
-table-cell pipe is escaped as `&#124;` for rendering):
+Method — true AST walk (regex on source text undercounts because it does
+not match `pass # comment` variants; Codex feedback on this PR pointed
+that out, and the AST count is now the authoritative method):
 
 ```python
-import re
-src = open('custom_components/power_sync/__init__.py').read()
-matches = re.findall(r'except\s+Exception[^:]*:\s*\n\s+pass\s*(?:\n|$)', src)
-print(len(matches))
+import ast, pathlib
+counts = {}
+for p in pathlib.Path('custom_components/power_sync').rglob('*.py'):
+    try: tree = ast.parse(p.read_text())
+    except SyntaxError: continue
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for h in node.handlers:
+                # bare except OR except Exception
+                if h.type is None or (isinstance(h.type, ast.Name) and h.type.id == 'Exception'):
+                    if len(h.body) == 1 and isinstance(h.body[0], ast.Pass):
+                        counts[str(p)] = counts.get(str(p), 0) + 1
+print(counts)
 ```
 
-| Claim in supplemental | Verified result | Verdict |
+| Claim in supplemental | AST verified | Verdict |
 |---|---|---|
-| `__init__.py` silent `except Exception: pass` count = **82** | **21** | **REFUTED** — supplemental inflated by ~4× |
-| `automations/actions.py` silent swallows = **22** | **11** | **REFUTED** — inflated by ~2× |
+| `__init__.py` silent count = **82** | **23** | REFUTED — supplemental inflated ~3.6× |
+| `automations/actions.py` silent count = **22** | **12** | REFUTED — supplemental inflated ~1.8× |
+| Total silent across tree (supplemental implied 178 broad / 76 silent) | **84 silent / 942 broad+bare** | REFUTED on broad (5×); silent within ~10% but AST > regex |
 | `async_register` calls in `__init__.py` = **30** (with 0 schema) | **30** (`grep -c "async_register(" __init__.py`) | VERIFIED |
 | `requires_auth = True` count — supplemental said "9 of 74 missing" | **76 matches across 75 view classes** (`grep -rn "requires_auth\s*=\s*True" custom_components/`) | **REFUTED** — all views have `requires_auth = True` |
 | `HomeAssistantView` subclass count | **75** (`grep -rn "class .*HomeAssistantView" custom_components/`) | Close to supplemental's 74 (off by 1) |
