@@ -30,7 +30,7 @@ print(counts)
 |---|---|---|
 | `__init__.py` silent count = **82** | **23** | REFUTED — supplemental inflated ~3.6× |
 | `automations/actions.py` silent count = **22** | **12** | REFUTED — supplemental inflated ~1.8× |
-| Total silent across tree (supplemental implied 178 broad / 76 silent) | **84 silent / 942 broad+bare** | REFUTED on broad (5×); silent within ~10% but AST > regex |
+| Total silent across tree (supplemental implied 178 broad / 76 silent) | **84 silent / 944 broad+bare** | REFUTED on broad (5×); silent within ~10% but AST > regex |
 | `async_register` calls in `__init__.py` = **30** (with 0 schema) | **30** (`grep -c "async_register(" __init__.py`) | VERIFIED |
 | `requires_auth = True` count — supplemental said "9 of 74 missing" | **76 matches across 75 view classes** (`grep -rn "requires_auth\s*=\s*True" custom_components/`) | **REFUTED** — all views have `requires_auth = True` |
 | `HomeAssistantView` subclass count | **75** (`grep -rn "class .*HomeAssistantView" custom_components/`) | Close to supplemental's 74 (off by 1) |

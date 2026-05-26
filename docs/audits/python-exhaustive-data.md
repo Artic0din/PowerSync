@@ -543,7 +543,7 @@ Notable gaps: `coordinator.py`, `optimization/coordinator.py`, `powerwall_local/
 
 ---
 
-## CAT18: `HomeAssistantView` subclasses — RETRACTED (was: 74; actual 75 / 0 missing `requires_auth`)
+## CAT18: `HomeAssistantView` subclasses — RETRACTED (actual: 75 / 0 missing `requires_auth`)
 
 **RETRACTED 2026-05-27 — this section's "MISSING `requires_auth`" claim is a FALSE POSITIVE.**
 

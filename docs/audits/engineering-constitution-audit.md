@@ -61,7 +61,7 @@ This table records the v1→v2 self-correction at meta-audit time. Several "Actu
 
 | Category | Prior (v1) | v2 self-correction (stale) | V0-verified |
 |---|---|---|---|
-| `except Exception` total | 940 | 178 (102 broad + 76 silent) | 940 broad + 4 bare = 942 total; 84 silent via AST |
+| `except Exception` total | 940 | 178 (102 broad + 76 silent) | 940 broad + 4 bare = 944 total; 84 silent via AST |
 | `Any` usages | 989 | 1,001 | ~955 (counting-method dependent) |
 | Missing return annotations | 921 | 926 | not re-verified |
 | `ClientTimeout(total=…)` | 87 | 122 | 122 (V0 confirms) |
@@ -363,8 +363,13 @@ print(f'silent (pass-body) swallows (AST): {silent}')
 PY
 
 # magic constants
-grep -rn 'from typing import.*Any' custom_components/power_sync/ | wc -l
+# (a) files that import Any
+grep -rln 'from typing import.*\bAny\b' custom_components/power_sync/ | wc -l
+# (b) actual Any usages — match annotation forms (: Any, -> Any, [Any], Any|, Any,)
+grep -rnE '(:|->)\s*Any\b|\[\s*Any\b|Any\s*[,|\]]|Any\s*$' custom_components/power_sync/ | wc -l
+# (c) ClientTimeout magic
 grep -rn 'ClientTimeout(total' custom_components/power_sync/ | wc -l
+# (d) asyncio.sleep distribution
 grep -rhn 'asyncio.sleep(' custom_components/power_sync/ | grep -oE 'asyncio\.sleep\([^)]+\)' | sort | uniq -c | sort -rn
 
 # CVE check

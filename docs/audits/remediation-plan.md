@@ -72,8 +72,18 @@ git log --shortstat --no-merges --format='COMMIT::%h::%s' | awk '
 # V0.6 — asyncio.sleep >= 60s (regex requires extended mode)
 grep -rnE "asyncio\.sleep\(([6-9][0-9]|[1-9][0-9]{2,})\)" custom_components/power_sync/
 
-# V0.7 — esy_sunhome on PyPI (404 if not published)
+# V0.7 — esy_sunhome: confirm it is NOT a HA core integration but IS a
+# HACS-installable custom one. Check three sources to mirror the V0.7
+# verdict in v0-baseline/README.md.
+echo "--- PyPI ---"
 curl -sIL https://pypi.org/pypi/esy_sunhome/json | head -1
+curl -sIL https://pypi.org/pypi/esy-sunhome/json | head -1
+echo "--- GitHub (any repo named esy_sunhome*) ---"
+curl -sf "https://api.github.com/search/repositories?q=esy_sunhome" \
+  | jq -r '.items[]?.full_name'
+echo "--- HACS default integration list ---"
+curl -sfL "https://github.com/hacs/default/raw/main/integration" \
+  | jq -r '.[]?' 2>/dev/null | grep -i esy_sunhome || echo "(not in HACS default; manually-added repo)"
 ```
 
 **Effort:** ~2 hours.
@@ -128,15 +138,24 @@ grep -rhnE "uses:\s*[^/]+/[^@]+@" .github/workflows/ \
 # 1.6 — pip-audit (no built-in severity gate; --strict turns warnings into failures)
 uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json) --strict
 
-# 1.6b — HIGH-only gate
-# pip-audit's JSON does not expose OSV severity directly. To gate by severity
-# we use osv-scanner (which calls OSV.dev and returns severity per vuln) and
-# fail only if any HIGH or CRITICAL is found.
+# 1.6b — Severity-based gate (optional; default 1.6 above already fails on
+# ANY vulnerability, which is the simplest and most conservative gate).
+#
+# If you want to fail only on HIGH/CRITICAL, use osv-scanner — but note that
+# OSV severity scores are strings in JSON and must be cast to numbers before
+# comparison (a naive `.score >= "7.0"` jq predicate is a string sort and is
+# wrong: "10.0" < "7.0" lexically).
 osv-scanner --lockfile=requirements.txt:<(jq -r '.requirements[]' \
     custom_components/power_sync/manifest.json) --format=json \
-  | jq -e '[.results[].packages[].vulnerabilities[].severity[]? \
-            | select(.score >= "7.0" or .type == "HIGH" or .type == "CRITICAL") \
-          ] | length == 0'
+  | jq -e '
+      def cvss_score(sev):
+        # OSV severity entries look like {"type": "CVSS_V3", "score": "7.5"}.
+        # Cast score string to number; non-CVSS severities (e.g. UBUNTU) skip.
+        if (sev.type | test("CVSS")) then (sev.score | tonumber) else null end;
+      [ .results[]?.packages[]?.vulnerabilities[]?.severity[]?
+        | cvss_score(.) | select(. != null and . >= 7.0)
+      ] | length == 0
+    '
 ```
 
 **PR strategy:** fork-only. `Artic0din/PowerSync` only. Already in `chore/scaffold-discipline-stack` direction.
@@ -218,7 +237,7 @@ uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/po
 | 3.6 Convert hot-path `_LOGGER.info` → `_LOGGER.debug` in `coordinator.py` (82 of 88 calls) | Manual audit per call: one-shot setup keeps info; per-cycle moves to debug | `python` script counts info-calls in update methods → 0; setup-paths preserved | Upstream PR |
 | 3.7 Same for `sensor.py` (37 info-level) | Same rule | Hot-path info → debug | Upstream PR |
 | 3.8 Reduce broad `except Exception:` from 940 to <100 | Targeted refactor: replace with specific types where the actual exception is knowable; document the swallow with `# noqa: BLE001 — reason` per remaining case | Count <100; remaining cases have rationale comments | Fork-only refactor over multiple PRs; upstream as small per-file PRs |
-| 3.9 Eliminate 84 silent `pass` swallows (V0-AST-counted, includes `pass # comment` variants) | Convert to `_LOGGER.debug` + structured handling; or re-raise | Python AST check finds 0 `try/except Exception: handler.body == [Pass]` patterns | Upstream PRs per file |
+| 3.9 Eliminate 84 silent `pass` swallows (V0-AST-counted, includes `pass # comment` variants and bare-except form) | Convert to `_LOGGER.debug` + structured handling; or re-raise | Python AST check finds 0 try/handler combos where (handler.type is None OR `Exception`) AND `handler.body == [Pass]` | Upstream PRs per file |
 | 3.10 Normalize API error semantics (`localvolts_api` returns None vs `octopus_api`/`aemo_api` raise) | Pick raise-or-return-None; document the contract; refactor offenders | All `*_api.py` use same convention; documented in `*_api.py` module docstring | Upstream PR |
 | 3.11 Add `_LOGGER` to 18 modules missing it (5 with business logic priority) | Standard declaration | `_LOGGER = logging.getLogger(__name__)` in every business-logic module | Upstream PR |
 | 3.12 Move 5-min blocking sleep at `optimization/ev_coordinator.py:218` | Convert to scheduled callback via `async_call_later` or coordinator update-interval | `grep -n 'asyncio.sleep(300)' custom_components/` returns 0 | Upstream PR |
@@ -259,7 +278,7 @@ uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/po
 
 | Task | Done when | PR strategy |
 |---|---|---|
-| 5.1 Document 13 missing services in `services.yaml` (`hold_battery_soc`, `set_autonomous`, `set_grid_export_auto`, `curtail_inverter`, `restore_inverter`, 8 automation services) | All 27 services registered in `__init__.py` have an entry in `services.yaml` with `description` + `fields` + `selector` | Upstream PR |
+| 5.1 Document the missing services in `services.yaml` (16 of 30: `hold_battery_soc`, `set_autonomous`, `set_grid_export_auto`, `curtail_inverter`, `restore_inverter`, 8 automation services, etc.; verified 30 `async_register` calls total via V0 baseline) | All 30 services registered in `__init__.py` have an entry in `services.yaml` with `description` + `fields` + `selector` | Upstream PR |
 | 5.2 Reconcile `strings.json` vs `translations/en.json` `flow_power_setup`/`flow_power_tariff` divergence | Schema diff = 0; both files load without HA UI errors | Upstream PR |
 | 5.3 Reword `manifest.json` `after_dependencies` to runtime-gated check | `esy_sunhome` removed from `after_dependencies`; code-level `try: import esy_sunhome` guard | Upstream PR |
 | 5.4 Fix `aemo-to-tariff >= 0.7.15` spec (or document the private build) | Confirmed resolvable on clean install | Upstream issue + PR |
@@ -346,8 +365,8 @@ The campaign is done when **all** of these hold simultaneously:
 1. **Verify pass:** `scripts/verify-audit.sh` exits 0 against the fork's `main`.
 2. **CI pass:** every check in `.github/workflows/ci.yml` is green.
 3. **Coverage:** custom_components/power_sync overall coverage ≥ baseline + 20 percentage points; no module below 40%.
-4. **Security:** `pip-audit` HIGH+ count = 0; `grep -rn 'token\[:' custom_components/` = 0; all 30 services in `__init__.py` have `schema=`.
-5. **Docs:** `services.yaml` documents all 27 services; CHANGELOG.md has entries; SECURITY.md present; ISSUE_TEMPLATE/ present.
+4. **Security:** `uvx --from pip-audit pip-audit -r <(jq -r '.requirements[]' custom_components/power_sync/manifest.json)` exits zero (any vulnerability fails the gate — pip-audit has no severity flag; use osv-scanner with CVSS-number jq parse from §1.6b if HIGH-only gating is required); `grep -rn 'token\[:' custom_components/` returns 0; all 30 services in `__init__.py` have `schema=`.
+5. **Docs:** `services.yaml` documents all 30 services (V0-verified count); CHANGELOG.md has entries; SECURITY.md present; ISSUE_TEMPLATE/ present.
 6. **Type discipline:** new code requires return-type annotations (ruff rule + pyright strict for new files).
 7. **Logging:** `coordinator.py` and `sensor.py` info-call counts in hot paths = 0 (per-file grep with line-context check).
 8. **Magic constants:** `ClientTimeout(total=30)` count = 1; `asyncio.sleep(1)` outside `const.py` reference = 0.
@@ -378,7 +397,7 @@ Per constitution #3 (No Silent Scope Reduction), name what's deliberately out:
 
 ## 8. Recommended first action
 
-1. **Run V0 (~2 hours).** Verify the unverified findings. Commit `docs/audits/pip-audit-baseline.txt` and any corrections back into the main audit.
+1. **Run V0 (~2 hours).** Verify the unverified findings. Commit the artifacts under `docs/audits/v0-baseline/` (`pip-audit.txt`, `git-history.txt`, `blocking-sleeps.txt`, `supplemental-spotcheck.md`) and any corrections back into the main audit.
 2. **Open Phase 1 PR on fork.** Apply scaffold. Land CI. This gives a verification gate for every subsequent fix.
 3. **Reassess.** With CI green + V0 results, re-grade the pass/fail matrix. The plan may shrink (some findings retract); it may grow (V0 surfaces new ones).
 
