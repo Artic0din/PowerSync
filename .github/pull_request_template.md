@@ -2,7 +2,7 @@
 
 <!-- What changes? Link audit finding or issue. -->
 
-Refs: <!-- audit finding ID or #issue -->
+Refs:
 
 ## Approach
 
@@ -12,6 +12,10 @@ Refs: <!-- audit finding ID or #issue -->
 
 <!-- What this PR does NOT do. -->
 
+## Size
+
+<!-- Lines added/removed. Target ≤200, ceiling 400. If >400, split. -->
+
 ## Test plan
 
 - Unit:
@@ -20,16 +24,17 @@ Refs: <!-- audit finding ID or #issue -->
 
 ## Risk
 
-- [ ] Touches `optimization/` (LP solver)?
-- [ ] Touches `HomeAssistantView` registration?
-- [ ] Touches service registration?
-- [ ] Manifest version bump?
-- [ ] Breaking change for existing users?
+- [ ] Touches `optimization/` (LP solver)
+- [ ] Touches `HomeAssistantView` (mobile API contract)
+- [ ] Touches service registration
+- [ ] Touches battery vendor write paths
+- [ ] Manifest version bump
+- [ ] Breaking change for existing users
 
 ## Upstream proposal
 
-- [ ] This change will be proposed to `bolagnaise/PowerSync`
-- [ ] Fork-only (won't go upstream)
+- [ ] Will be proposed to `bolagnaise/PowerSync`
+- [ ] Fork-only
 
 ## Constitution check
 
