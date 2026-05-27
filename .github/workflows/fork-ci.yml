@@ -1,0 +1,49 @@
+name: Fork CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: Lint, types, tests
+    if: ${{ !startsWith(github.head_ref, 'sync/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          pip install -r requirements.txt 2>/dev/null || true
+          pip install ruff pytest pytest-asyncio pytest-cov pytest-homeassistant-custom-component
+      - name: Ruff lint (advisory — report only, don't fail)
+        run: ruff check . --output-format=github || true
+      - name: Pytest
+        run: pytest --cov=custom_components/power_sync --cov-report=term-missing -x
+
+  validate:
+    name: HACS + hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@868e6cb4607727d764341a158d98872cd63fa658  # master @ 2026-05-26
+      - uses: hacs/action@d556e736723344f83838d08488c983a15381059a  # v22.5.0
+        with:
+          category: integration
+
+  security:
+    name: Secret scan
+    if: ${{ !startsWith(github.head_ref, 'sync/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
