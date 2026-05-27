@@ -1,0 +1,8 @@
+# Scoped to irreversibility, not architectural sensitivity.
+# Cost-calc and auth correctness enforced via P0 review rules in AGENTS.md.
+
+# Workflow changes can lock repo out of CI
+/.github/                                       @Artic0din
+
+# Version bumps affect all HACS users on update
+/custom_components/power_sync/manifest.json     @Artic0din
