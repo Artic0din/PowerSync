@@ -1812,12 +1812,7 @@
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Leave blank to skip plug detection.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Leave blank if unavailable.",
-          "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
-          "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",
-          "sigenergy_charger_type": "EVAC supports rate control and repeated starts. EVDC uses conservative one-shot scheduling, no dynamic amps, and native mySigen PV-surplus behavior.",
-          "sigenergy_charger_host": "IP address of the Sigenergy Modbus endpoint. Defaults to the inverter Modbus host when blank.",
-          "sigenergy_charger_port": "Modbus TCP port. Default: 502.",
-          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers."
+          "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid."
         },
         "submit": "Save"
       },
