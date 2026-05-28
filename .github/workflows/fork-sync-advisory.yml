@@ -1,0 +1,33 @@
+name: Sync Advisory
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  advisory:
+    name: Upstream sync smoke test
+    if: startsWith(github.head_ref, 'sync/')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt 2>/dev/null || true
+          pip install pytest pytest-asyncio pytest-homeassistant-custom-component
+
+      - name: Pytest (advisory)
+        run: pytest --tb=short -x || echo "::warning::Upstream sync has test failures — investigate but typically still merge"
+
+      - name: Hassfest (advisory)
+        uses: home-assistant/actions/hassfest@868e6cb4607727d764341a158d98872cd63fa658  # master @ 2026-05-26
+        continue-on-error: true
