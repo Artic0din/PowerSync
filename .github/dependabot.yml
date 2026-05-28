@@ -1,5 +1,11 @@
 version: 2
 updates:
+  # NOTE: pip updates require a dependency manifest at `directory`. This repo
+  # has no root requirements.txt/pyproject.toml — runtime deps live in
+  # custom_components/power_sync/manifest.json, which Dependabot cannot read.
+  # Until a generated manifest is wired up, this entry is effectively a no-op
+  # (tracked in issue #4). pip-audit (supply-chain.yml) covers OSV scanning of
+  # the manifest.json requirements in the meantime.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -8,6 +14,8 @@ updates:
     labels: [dependencies, ai-authored]
     commit-message:
       prefix: "chore(deps)"
+    cooldown:
+      default-days: 3
 
   - package-ecosystem: github-actions
     directory: /
@@ -17,3 +25,5 @@ updates:
     labels: [dependencies, ci]
     commit-message:
       prefix: "chore(ci)"
+    cooldown:
+      default-days: 3

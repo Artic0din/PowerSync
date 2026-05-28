@@ -96,6 +96,14 @@ When a fork PR is ready to propose upstream:
 - Token/API key in log = P0, fix immediately
 - Long-lived access tokens used by mobile app — never log, never embed in responses
 
+## Dependency & supply-chain hygiene
+
+- **Before adopting any new PyPI dependency**, run `uvx guarddog pypi scan <package>` (malware/typosquat heuristics). Treat the result as one signal, not a verdict — GuardDog has been bypassed in research, so also sanity-check the package's provenance (repo, maintainers, release history). This is a pre-install gate, not CI.
+- `pip-audit` (CI, advisory) scans the `manifest.json` runtime requirements against OSV on every PR. Triage advisories; promote to a blocking gate once the baseline is clean.
+- `zizmor` (CI, gates on high severity) audits fork-owned workflows. Upstream-owned workflows (`release.yml`, `validate.yml`, etc.) are intentionally excluded to avoid sync divergence.
+- **Pin every GitHub Action to a full commit SHA** with a trailing `# vX.Y.Z` comment. Dependabot's `github-actions` ecosystem (3-day cooldown) proposes SHA bumps.
+- A CycloneDX SBOM is generated and attached on each published release (`sbom.yml`).
+
 ## Mobile app API contract
 
 - Endpoints under `views/` are consumed by iOS/Android apps

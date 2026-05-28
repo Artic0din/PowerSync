@@ -1,0 +1,31 @@
+name: SBOM
+
+# Fork-owned: generate and attach a CycloneDX SBOM when a release is published.
+# Kept separate from upstream's release.yml to avoid diverging an upstream-owned
+# workflow (which would conflict on every upstream sync).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: CycloneDX SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # attach the SBOM as a release asset
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      # On a release trigger, sbom-action uploads the generated SBOM as a
+      # release asset automatically.
+      - name: Generate and attach SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: sbom.cyclonedx.json
