@@ -136,10 +136,6 @@ These exist in the codebase as of PR #1 baseline. Codex should NOT re-flag:
 - 22 fix-of-fix commits in history (audit finding H14)
 - `esy_sunhome` custom-only dependency (M14)
 
-### Repo-config debt (fork settings, NOT code)
-
-- `validate-hacs` red on every PR — fork repo `Artic0din/PowerSync` missing GitHub topics AND has Issues disabled (HACS requires both). Fix in repo Settings → General → Features (enable Issues) and Settings → Topics (add e.g. `hacs`, `home-assistant`, `battery`, `energy`). One-time settings change, unblocks all future PRs.
-
 ## High-risk paths
 
 CODEOWNERS gates ONLY:
