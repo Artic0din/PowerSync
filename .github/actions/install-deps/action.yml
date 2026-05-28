@@ -21,5 +21,6 @@ runs:
         # pymodbus is imported by the Sigenergy/Sungrow battery integrations but is
         # absent from manifest.json (it resolves transitively via HA's modbus
         # integration at runtime). Install it explicitly so imports resolve under
-        # pytest collection and ty's type-check.
-        pip install -r /tmp/ps-manifest-reqs.txt pymodbus
+        # pytest collection and ty's type-check. Floor at 3.x: the integrations use
+        # the `from pymodbus.client import AsyncModbusTcpClient` API (pymodbus 3.x).
+        pip install -r /tmp/ps-manifest-reqs.txt "pymodbus>=3.0.0"

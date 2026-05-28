@@ -37,7 +37,7 @@ jobs:
         run: |
           ty check custom_components/power_sync/ --python "$(which python)" \
             --output-format concise --exit-zero | tee /tmp/ty-all.txt
-          opt=$(grep -c '/optimization/' /tmp/ty-all.txt || true)
+          opt=$(grep -cE '^custom_components/power_sync/optimization/' /tmp/ty-all.txt || true)
           {
             echo "### ty type-check (advisory)"
             echo ""
