@@ -68,14 +68,20 @@ def test_offgrid_full_soc_threshold_is_defined_as_percent():
     tree = ast.parse(source)
     found = False
     for node in ast.walk(tree):
+        # Handle both plain assignment and annotated assignment (e.g. x: float = 98.0)
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
         if (
-            isinstance(node, ast.Assign)
-            and any(
+            any(
                 isinstance(t, ast.Name) and t.id == "_OFFGRID_FULL_SOC_THRESHOLD"
-                for t in node.targets
+                for t in targets
             )
-            and isinstance(node.value, ast.Constant)
+            and isinstance(value, ast.Constant)
         ):
-            assert node.value.value >= 1, "_OFFGRID_FULL_SOC_THRESHOLD should be a percent (e.g. 98.0)"
+            assert value.value >= 1, "_OFFGRID_FULL_SOC_THRESHOLD should be a percent (e.g. 98.0)"
             found = True
     assert found, "_OFFGRID_FULL_SOC_THRESHOLD class attribute not found"
