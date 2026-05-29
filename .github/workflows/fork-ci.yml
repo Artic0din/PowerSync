@@ -23,16 +23,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install
-        run: |
-          pip install -r requirements.txt 2>/dev/null || true
-          pip install ruff pytest pytest-asyncio pytest-cov pytest-homeassistant-custom-component
+      - uses: ./.github/actions/install-deps
 
       - name: Ruff lint (advisory)
         run: ruff check . --output-format=github || true
 
-      - name: Pytest (advisory until runtime deps wired in)
-        run: pytest --cov=custom_components/power_sync --cov-report=term-missing -x || echo "::warning::pytest failed — runtime deps from manifest.json not installed in CI yet"
+      - name: Pytest (advisory — promote to blocking once the baseline is green)
+        run: pytest --cov=custom_components/power_sync --cov-report=term-missing -x || echo "::warning::pytest failed — review the log before promoting this job to a blocking gate"
 
   validate:
     name: HACS + hassfest
