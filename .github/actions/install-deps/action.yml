@@ -1,0 +1,26 @@
+name: "Install PowerSync deps"
+description: >
+  Single dependency-install step shared by lint, test, and type-check jobs:
+  the Home Assistant test harness, the integration runtime deps declared in
+  manifest.json, pymodbus, and the Python tooling. Run after actions/setup-python.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Upgrade pip + install HA test harness and tooling
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff pytest pytest-asyncio pytest-cov pytest-homeassistant-custom-component
+
+    - name: Install integration runtime deps (manifest.json + pymodbus)
+      shell: bash
+      run: |
+        jq -r '.requirements[]' custom_components/power_sync/manifest.json > /tmp/ps-manifest-reqs.txt
+        echo "manifest runtime requirements:"; cat /tmp/ps-manifest-reqs.txt
+        # pymodbus is imported by the Sigenergy/Sungrow battery integrations but is
+        # absent from manifest.json (it resolves transitively via HA's modbus
+        # integration at runtime). Install it explicitly so imports resolve under
+        # pytest collection and ty's type-check. Floor at 3.x: the integrations use
+        # the `from pymodbus.client import AsyncModbusTcpClient` API (pymodbus 3.x).
+        pip install -r /tmp/ps-manifest-reqs.txt "pymodbus>=3.0.0"

@@ -1,0 +1,46 @@
+name: Type check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ty:
+    name: ty (advisory)
+    if: ${{ !startsWith(github.head_ref, 'sync/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: ./.github/actions/install-deps
+
+      - name: Install ty
+        shell: bash
+        run: pip install ty
+
+      # Advisory: full findings go to the job log; a count breakdown goes to the
+      # run summary. The job never fails (--exit-zero) and does not emit per-line
+      # annotations (the whole package currently has >1000 findings — annotating
+      # them would bury the PR). Promotion path: once optimization/ findings are
+      # cleared, add a blocking step scoped to that package (drop --exit-zero).
+      - name: ty check (advisory)
+        shell: bash
+        run: |
+          ty check custom_components/power_sync/ --python "$(which python)" \
+            --output-format concise --exit-zero | tee /tmp/ty-all.txt
+          opt=$(grep -cE '^custom_components/power_sync/optimization/' /tmp/ty-all.txt || true)
+          {
+            echo "### ty type-check (advisory)"
+            echo ""
+            echo "- $(tail -1 /tmp/ty-all.txt) across custom_components/power_sync/"
+            echo "- ${opt} in optimization/ (the path slated to become a blocking gate)"
+          } >> "$GITHUB_STEP_SUMMARY"
