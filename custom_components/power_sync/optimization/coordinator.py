@@ -5797,7 +5797,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info(
                 "Off-grid overlay: marked %d/%d slots as OFF_GRID "
                 "(export threshold=%.1fc, SOC floor=%d%%)",
-                offgrid_count, n, self._OFFGRID_EXPORT_THRESHOLD * 100, soc_floor,
+                offgrid_count, n, self._OFFGRID_EXPORT_THRESHOLD * 100, self._OFFGRID_FULL_SOC_THRESHOLD,
             )
 
         return result
