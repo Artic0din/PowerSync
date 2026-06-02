@@ -160,3 +160,58 @@ def test_foxess_serial_client_import_discards_late_vendored_framer(tmp_path: Pat
     finally:
         sys.path[:] = original_path
         _restore_modules(snapshot)
+
+
+def test_h3_smart_direct_modbus_reads_pv3_power(tmp_path: Path):
+    snapshot = _snapshot_modules()
+    original_path = list(sys.path)
+    try:
+        _clear_test_modules()
+        _write_fake_pymodbus(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        _install_power_sync_package()
+        module = importlib.import_module("power_sync.inverters.foxess")
+        controller = module.FoxESSController(
+            host="192.0.2.1",
+            model_family="H3-Smart",
+        )
+
+        reads: list[tuple[int, int]] = []
+        holding_registers = {
+            37612: [62],
+            39237: [0, 0],
+            39279: [0, 1000],
+            39281: [0, 2000],
+            39283: [0, 1500],
+            38814: [0, 0],
+            38914: [0, 0],
+            49203: [1],
+            46611: [10],
+            46607: [250],
+            46608: [250],
+            39227: [5000],
+            37611: [240],
+            37624: [100],
+            39053: [0, 15000],
+            37635: [1000],
+            39625: [0, 0],
+        }
+
+        async def fake_read_holding(address: int, count: int = 1):
+            reads.append((address, count))
+            return holding_registers.get(address, [0] * count)
+
+        controller._read_holding_registers = fake_read_holding
+
+        status = asyncio.run(controller.get_status())
+
+        assert status.status == module.InverterStatus.ONLINE
+        assert status.attributes["pv1_power_kw"] == 1.0
+        assert status.attributes["pv2_power_kw"] == 2.0
+        assert status.attributes["pv3_power_kw"] == 1.5
+        assert status.attributes["pv_power_kw"] == 4.5
+        assert status.power_output_w == 4500.0
+        assert (39283, 2) in reads
+    finally:
+        sys.path[:] = original_path
+        _restore_modules(snapshot)

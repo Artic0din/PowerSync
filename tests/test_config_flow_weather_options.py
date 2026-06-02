@@ -128,6 +128,57 @@ def _calls_vol_optional_without_default(node: ast.AST) -> bool:
     )
 
 
+def test_fronius_gen24_storage_keeps_legacy_step_ids_and_routes():
+    route = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _config_flow_method("_route_to_battery_setup"),
+    )
+    create_entry = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _config_flow_method("_create_final_entry"),
+    )
+
+    assert route is not None
+    assert create_entry is not None
+    assert "BATTERY_SYSTEM_FRONIUS_RESERVA" in route
+    assert "return await self.async_step_fronius_reserva_battery()" in route
+    assert '"_fronius_reserva_data"' in create_entry
+    assert ("fronius_reserva_battery", "fronius_reserva_connection") in CONFIG_OPTION_TEXT_STEP_PAIRS
+
+
+def test_fronius_gen24_storage_strings_are_generic():
+    strings = json.loads(STRINGS_PATH.read_text())
+    translations = json.loads(TRANSLATIONS_PATH.read_text())
+
+    for payload in (strings, translations):
+        config_steps = payload["config"]["step"]
+        options_steps = payload["options"]["step"]
+        errors = payload["config"]["error"]
+        aborts = payload["config"]["abort"]
+
+        assert config_steps["fronius_reserva_battery"]["title"] == "Fronius GEN24 storage connection"
+        assert options_steps["fronius_reserva_connection"]["title"] == "Fronius GEN24 storage connection"
+        assert "GEN24 BYD or Reserva storage" in config_steps["fronius_reserva_battery"]["description"]
+        assert "Fronius GEN24 storage entities" in errors["fronius_reserva_missing_entities"]
+        assert "Fronius GEN24 storage entities" in errors["fronius_reserva_connect_failed"]
+        assert "GEN24 BYD or Reserva storage" in aborts["fronius_reserva_not_installed"]
+
+
+def test_fronius_gen24_storage_flow_validates_fronius_modbus_entry():
+    source = CONFIG_FLOW_PATH.read_text()
+    setup = ast.get_source_segment(source, _config_flow_method("async_step_fronius_reserva_battery"))
+    options = ast.get_source_segment(source, _options_flow_method("async_step_fronius_reserva_connection"))
+
+    assert setup is not None
+    assert options is not None
+    for method_source in (setup, options):
+        assert 'async_entries("fronius_modbus")' in method_source
+        assert 'async_abort(reason="fronius_reserva_not_installed")' in method_source
+        assert "await ctrl.connect()" in method_source
+        assert 'errors["base"] = "fronius_reserva_missing_entities"' in method_source
+        assert 'errors["base"] = "fronius_reserva_connect_failed"' in method_source
+
+
 def test_optional_entity_normalizer_treats_none_as_unset():
     function = _top_level_function("_normalize_optional_entity")
     module = ast.Module(body=[function], type_ignores=[])
@@ -287,6 +338,34 @@ def test_ev_charging_fallback_generic_soc_sensor_is_translated():
             ]
 
 
+def test_ev_charging_sigenergy_charger_fields_are_translated():
+    sigenergy_keys = (
+        "sigenergy_charger_enabled",
+        "sigenergy_charger_type",
+        "sigenergy_charger_host",
+        "sigenergy_charger_port",
+        "sigenergy_charger_slave_id",
+    )
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        for step_name in ("ev_charging_setup", "ev_charging"):
+            step = data["options"]["step"][step_name]
+
+            for key in sigenergy_keys:
+                assert key in step["data"], f"{path.name}: {step_name}.data.{key}"
+                assert key in step["data_description"], (
+                    f"{path.name}: {step_name}.data_description.{key}"
+                )
+
+            assert step["data"]["sigenergy_charger_enabled"] == (
+                "Enable Sigenergy EV charger"
+            )
+            assert "EVAC/EVDC" in step["data_description"][
+                "sigenergy_charger_enabled"
+            ]
+
+
 def test_globird_initial_flow_warns_tesla_users_about_tariff_baseline():
     source = CONFIG_FLOW_PATH.read_text()
     method = _config_flow_method("async_step_aemo_config")
@@ -371,6 +450,12 @@ def test_optimization_options_exposes_enabled_toggle():
     assert method_source is not None
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled" in method_source
+    assert "CONF_OPTIMIZATION_AUTO_APPLY_RESERVE" in method_source
+    assert (
+        "new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled"
+        in method_source
+    )
+    assert "CONF_OPTIMIZATION_MANUAL_RESERVE" in method_source
     assert "CONF_OPTIMIZATION_EV_INTEGRATION" in method_source
     assert "new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled" in method_source
     assert "CONF_MONITORING_MODE" in method_source
@@ -378,6 +463,11 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
     assert "new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve" in method_source
     assert 'new_options.pop("_user_backup_reserve", None)' in method_source
+    assert (
+        method_source.index("CONF_OPTIMIZATION_ENABLED")
+        < method_source.index("CONF_OPTIMIZATION_AUTO_APPLY_RESERVE")
+        < method_source.index("CONF_OPTIMIZATION_EV_INTEGRATION")
+    )
     assert (
         method_source.index("CONF_OPTIMIZATION_BACKUP_RESERVE")
         < method_source.index("CONF_HARDWARE_BACKUP_RESERVE")
@@ -387,6 +477,9 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled" in method_source
+    assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
+    assert "new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle" in method_source
+    assert "if is_flow_power:" in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled" in method_source
     assert (
@@ -394,6 +487,100 @@ def test_optimization_options_exposes_enabled_toggle():
         < method_source.index("CONF_PROFIT_MAX_TARGET_TIME")
     )
     assert "optimization_provider != OPT_PROVIDER_POWERSYNC" in method_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        step = json.loads(path.read_text())["options"]["step"]["optimization"]
+        assert (
+            step["data"]["optimization_auto_apply_reserve"]
+            == "Auto-apply optimizer reserve"
+        )
+        assert "hardware backup reserve stays user controlled" in step[
+            "data_description"
+        ]["optimization_auto_apply_reserve"]
+        assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
+        assert "Flow Power plans" in step["data_description"][
+            "optimization_disable_idle"
+        ]
+
+
+def test_battery_init_options_do_not_mix_optimization_settings():
+    source = CONFIG_FLOW_PATH.read_text()
+
+    for method_name in (
+        "async_step_init_tesla",
+        "async_step_init_sigenergy",
+        "async_step_init_sungrow",
+        "async_step_init_foxess",
+        "async_step_init_goodwe",
+    ):
+        method = _options_flow_method(method_name)
+        method_source = ast.get_source_segment(source, method)
+
+        assert method_source is not None
+        assert "CONF_OPTIMIZATION_PROVIDER" not in method_source
+        assert "CONF_OPTIMIZATION_BACKUP_RESERVE" not in method_source
+        assert "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W" not in method_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        options_steps = json.loads(path.read_text())["options"]["step"]
+        for step_name in (
+            "init_tesla",
+            "init_sigenergy",
+            "init_sungrow",
+            "init_foxess",
+            "init_goodwe",
+        ):
+            step = options_steps[step_name]
+
+            assert "optimization_provider" not in step.get("data", {})
+            assert "optimization_backup_reserve" not in step.get("data", {})
+            assert "optimization_max_grid_import_w" not in step.get("data", {})
+            assert "optimization_provider" not in step.get("data_description", {})
+            assert "optimization_backup_reserve" not in step.get("data_description", {})
+            assert "optimization_max_grid_import_w" not in step.get("data_description", {})
+            assert "optimization" not in step["description"].lower()
+
+
+def test_optimization_options_schedules_reload_after_flow_response():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    skip_reload_index = method_source.index('entry_data["_skip_reload"] = True')
+    update_entry_index = method_source.index(
+        "self.hass.config_entries.async_update_entry"
+    )
+    schedule_reload_index = method_source.index("self.hass.async_create_task")
+    create_entry_index = method_source.index("return self.async_create_entry")
+
+    assert skip_reload_index < update_entry_index
+    assert update_entry_index < schedule_reload_index < create_entry_index
+    assert (
+        "self.hass.config_entries.async_reload(self.config_entry.entry_id)"
+        in method_source
+    )
+
+
+def test_optimization_options_applies_auto_reserve_toggle_before_reload():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    previous_state_index = method_source.index(
+        "previous_auto_apply_reserve_enabled = bool"
+    )
+    update_entry_index = method_source.index(
+        "self.hass.config_entries.async_update_entry"
+    )
+    setter_index = method_source.index(
+        "await coordinator.set_auto_apply_reserve_enabled"
+    )
+    schedule_reload_index = method_source.index("self.hass.async_create_task")
+
+    assert previous_state_index < update_entry_index
+    assert update_entry_index < setter_index < schedule_reload_index
 
 
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
@@ -422,11 +609,19 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "self._optimization_provider = optimization_provider" in method_source
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_ENABLED, True)" in method_source
+    assert "CONF_OPTIMIZATION_AUTO_APPLY_RESERVE" in method_source
+    assert "CONF_OPTIMIZATION_MANUAL_RESERVE" in method_source
     assert "CONF_OPTIMIZATION_EV_INTEGRATION" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)" in method_source
     assert "CONF_MONITORING_MODE" in method_source
     assert "user_input.get(CONF_MONITORING_MODE, False)" in method_source
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
+    schema_source = method_source[method_source.index("schema_fields") :]
+    assert (
+        schema_source.index("CONF_OPTIMIZATION_ENABLED")
+        < schema_source.index("CONF_OPTIMIZATION_AUTO_APPLY_RESERVE")
+        < schema_source.index("CONF_OPTIMIZATION_EV_INTEGRATION")
+    )
     assert (
         method_source.index("CONF_OPTIMIZATION_BACKUP_RESERVE")
         < method_source.index("CONF_HARDWARE_BACKUP_RESERVE")
@@ -436,12 +631,47 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
+    assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
+    assert "user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)" in method_source
+    assert "if is_flow_power:" in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "user_input.get(CONF_PROFIT_MAX_ENABLED, False)" in method_source
     assert (
         method_source.index("CONF_PROFIT_MAX_ENABLED")
         < method_source.index("CONF_PROFIT_MAX_TARGET_TIME")
     )
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        step = json.loads(path.read_text())["config"]["step"]["ml_options"]
+        assert (
+            step["data"]["optimization_auto_apply_reserve"]
+            == "Auto-apply optimizer reserve"
+        )
+        assert "hardware backup reserve stays user controlled" in step[
+            "data_description"
+        ]["optimization_auto_apply_reserve"]
+        assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
+        assert "Flow Power plans" in step["data_description"][
+            "optimization_disable_idle"
+        ]
+
+
+def test_flow_power_no_idle_option_is_provider_scoped():
+    source = CONFIG_FLOW_PATH.read_text()
+    initial_method = _config_flow_method("async_step_ml_options")
+    initial_source = ast.get_source_segment(source, initial_method)
+    options_method = _options_flow_method("async_step_optimization")
+    options_source = ast.get_source_segment(source, options_method)
+
+    assert initial_source is not None
+    assert options_source is not None
+    assert 'self._selected_electricity_provider == "flow_power"' in initial_source
+    assert 'current_provider == "flow_power"' in options_source
+
+    for method_source in (initial_source, options_source):
+        assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
+        assert "if is_flow_power:" in method_source
+        assert "else False" in method_source
 
 
 def test_powerwall_smart_optimization_hides_spread_options():
@@ -771,12 +1001,30 @@ def test_sungrow_curtailment_options_expose_ac_inverter_path():
     assert method_source is not None
     sungrow_branch = method_source[
         method_source.index("elif is_sungrow:") : method_source.index(
-            "else:\n                # Tesla"
+            "elif is_tesla:"
         )
     ]
 
     assert "CONF_AC_INVERTER_CURTAILMENT_ENABLED" in sungrow_branch
     assert "return await self.async_step_inverter_brand()" in sungrow_branch
+
+
+def test_custom_tariff_export_rates_allow_negative_values():
+    source = CONFIG_FLOW_PATH.read_text()
+    custom_method = _options_flow_method("async_step_custom_tariff_options")
+    period_method = _options_flow_method("async_step_tariff_period_options")
+    custom_source = ast.get_source_segment(source, custom_method)
+    period_source = ast.get_source_segment(source, period_method)
+
+    assert custom_source is not None
+    assert period_source is not None
+
+    assert 'vol.Required("fit_rate", default=default_fit)' in custom_source
+    assert "min=-100, max=100" in custom_source
+    assert 'vol.Required("export_rate", default=5)' in period_source
+    assert "min=-100, max=200" in period_source
+    assert "Default export earnings" in STRINGS_PATH.read_text()
+    assert "Use a negative value when you pay to export" in TRANSLATIONS_PATH.read_text()
 
 
 def test_tesla_curtailment_options_expose_powerwall_offgrid_fallback():
@@ -786,19 +1034,39 @@ def test_tesla_curtailment_options_expose_powerwall_offgrid_fallback():
 
     assert method_source is not None
     tesla_branch = method_source[
-        method_source.index("else:\n                # Tesla") : method_source.index(
+        method_source.index("elif is_tesla:\n                # Tesla") : method_source.index(
             "# No AC inverter - route to weather options"
         )
     ]
     tesla_schema_branch = method_source[
-        method_source.index("else:\n            # Tesla") : method_source.index(
-            "return self.async_show_form"
-        )
+        method_source.index("if is_tesla:\n            # Tesla Powerwall")
+        : method_source.index("return self.async_show_form")
     ]
 
     assert "CONF_POWERWALL_OFFGRID_AS_CURTAILMENT" in tesla_branch
     assert "CONF_POWERWALL_OFFGRID_AS_CURTAILMENT" in tesla_schema_branch
+    assert "CONF_AC_INVERTER_CURTAILMENT_ENABLED" in method_source
+    assert "battery_system = self._get_option(" in method_source
     assert "is_tesla = battery_system == BATTERY_SYSTEM_TESLA" in method_source
+
+
+def test_non_tesla_curtailment_options_do_not_expose_powerwall_controls():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_curtailment_options")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    non_tesla_submit_branch = method_source[
+        method_source.index("else:\n                ac_enabled = user_input.get(")
+        : method_source.index("# Build schema based on battery system")
+    ]
+
+    assert "CONF_POWERWALL_OFFGRID_AS_CURTAILMENT] = False" in non_tesla_submit_branch
+    assert "battery_system = self._get_option(" in method_source
+    assert "is_tesla = battery_system == BATTERY_SYSTEM_TESLA" in method_source
+    assert "if is_tesla:\n            # Tesla Powerwall" in method_source
+    assert "else:\n                ac_enabled = user_input.get(" in method_source
+    assert "else:\n            # Tesla" not in method_source
 
 
 def test_powerwall_offgrid_fallback_toggle_is_translated():
@@ -907,8 +1175,11 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
             assert "Block battery and inverter control commands" in step["data_description"]["monitoring_mode"]
             assert step["data"]["hardware_backup_reserve"] == "Hardware backup reserve"
             assert "temporary hold or force-control modes" in step["data_description"]["hardware_backup_reserve"]
+            assert step["data"]["optimization_max_grid_import_w"] == "Maximum grid import"
+            assert "no site import cap" in step["data_description"]["optimization_max_grid_import_w"]
             keys = list(step["data"])
             assert keys.index("optimization_backup_reserve") < keys.index("hardware_backup_reserve")
+            assert keys.index("optimization_max_discharge_w") < keys.index("optimization_max_grid_import_w")
             assert step["data"]["optimization_spread_export_enabled"] == "Spread export across window"
             assert "spreads planned battery export" in step["data_description"]["optimization_spread_export_enabled"]
             assert step["data"]["optimization_spread_import_enabled"] == "Spread import across window"

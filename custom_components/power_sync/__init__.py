@@ -244,6 +244,7 @@ from .const import (
     DEFAULT_SOLCAST_ESTIMATE_TYPE,
     SOLCAST_ESTIMATE_TYPES,
     AMBER_API_BASE_URL,
+    AMBER_WEBSOCKET_START_TIMEOUT_SECONDS,
     # Flow Power configuration
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
@@ -335,6 +336,8 @@ from .const import (
     DEFAULT_INVERTER_RESTORE_SOC,
     # Sigenergy configuration
     CONF_SIGENERGY_STATION_ID,
+    CONF_SIGENERGY_TARIFF_STATION_ID,
+    CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID,
     CONF_SIGENERGY_USERNAME,
     CONF_SIGENERGY_PASS_ENC,
     CONF_SIGENERGY_DEVICE_ID,
@@ -397,6 +400,12 @@ from .const import (
     DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
     DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
     BATTERY_SYSTEM_SOLAREDGE,
+    BATTERY_SYSTEM_CUSTOM,
+    CONF_CUSTOM_BATTERY_LEVEL_ENTITY,
+    CONF_CUSTOM_BATTERY_POWER_ENTITY,
+    CONF_CUSTOM_GRID_POWER_ENTITY,
+    CONF_CUSTOM_SOLAR_POWER_ENTITY,
+    CONF_CUSTOM_LOAD_POWER_ENTITY,
     CONF_SOLAREDGE_HOST,
     CONF_SOLAREDGE_PORT,
     CONF_SOLAREDGE_SLAVE_ID,
@@ -524,11 +533,14 @@ from .const import (
     OPT_PROVIDER_POWERSYNC,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
+    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+    CONF_OPTIMIZATION_MANUAL_RESERVE,
     CONF_HARDWARE_BACKUP_RESERVE,
     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_PROFIT_MAX_ENABLED,
@@ -759,7 +771,7 @@ def _apply_wall_connector_observation(
         return False
 
     def update_vehicle(vehicle: dict) -> None:
-        if wc_power_kw > (vehicle.get("ev_power_kw") or 0):
+        if wc_power_kw > 0.05:
             vehicle["ev_power_kw"] = wc_power_kw
         vehicle["is_connected"] = True
         vehicle["is_charging"] = (
@@ -798,10 +810,11 @@ def _apply_wall_connector_observation(
 
 
 def _get_ev_vehicle_status(hass, entry) -> dict:
-    """Get EV charging status from Tesla vehicle sensors (Fleet API + BLE).
+    """Get EV charging status from configured EV sensors.
 
-    Checks both Teslemetry/Fleet API sensors (e.g. sensor.tessy_charger_power)
-    and Tesla BLE sensors (e.g. sensor.teslable_charge_power, charge_level).
+    Checks generic charger SoC plus Teslemetry/Fleet API sensors
+    (e.g. sensor.tessy_charger_power) and Tesla BLE sensors
+    (e.g. sensor.teslable_charge_power, charge_level).
 
     Returns:
         Dict with ev_power_kw (float) and ev_soc (int or None).
@@ -809,8 +822,17 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     ev_power_kw = 0.0
     ev_soc = None
 
-    # Check Tesla BLE sensors (all configured prefixes)
     config = {**entry.data, **entry.options}
+    generic_ev_soc = None
+    from .const import CONF_GENERIC_CHARGER_ENABLED
+    from .automations.generic_charger_soc import resolve_generic_charger_soc
+
+    if config.get(CONF_GENERIC_CHARGER_ENABLED):
+        resolved_soc = resolve_generic_charger_soc(hass, config)
+        if resolved_soc is not None:
+            generic_ev_soc = int(resolved_soc)
+
+    # Check Tesla BLE sensors (all configured prefixes)
     for prefix in _resolve_ble_prefixes(hass, config):
         # Read SoC first so we can validate charging state
         ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
@@ -940,6 +962,9 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                         ev_soc = int(val)
                 except (ValueError, TypeError):
                     pass
+
+    if generic_ev_soc is not None:
+        ev_soc = generic_ev_soc
 
     return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
@@ -3667,7 +3692,7 @@ _CALENDAR_ENERGY_SUMMARY_COORDINATORS = (
     ("esy_sunhome_coordinator", "ESY Sunhome"),
     ("solax_coordinator", "Solax"),
     ("saj_h2_coordinator", "SAJ H2"),
-    ("fronius_reserva_coordinator", "Fronius Reserva"),
+    ("fronius_reserva_coordinator", "Fronius GEN24 storage"),
     ("neovolt_coordinator", "Neovolt"),
     ("solaredge_coordinator", "SolarEdge"),
 )
@@ -3866,6 +3891,40 @@ def _calendar_time_series_from_energy_summary(
     return [_calendar_current_entry(hass, coordinator, entry_id)]
 
 
+def _calendar_residual_entry(
+    current_entry: dict[str, Any],
+    existing_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the current live total minus recorder rows already emitted."""
+    residual = {
+        "timestamp": current_entry.get("timestamp") or dt_util.now().isoformat(),
+        "solar_generation": 0,
+        "battery_discharge": 0,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    for field in _CALENDAR_STATISTIC_FIELDS:
+        try:
+            current_wh = float(current_entry.get(field) or 0)
+        except (TypeError, ValueError):
+            current_wh = 0
+        emitted_wh = 0.0
+        for row in existing_rows:
+            try:
+                emitted_wh += float(row.get(field) or 0)
+            except (TypeError, ValueError):
+                continue
+        residual[field] = max(0, current_wh - emitted_wh)
+
+    return (
+        _calendar_entry_with_detail_aliases(residual)
+        if _calendar_entry_has_energy(residual)
+        else None
+    )
+
+
 def _calendar_period_range(period: str, end_date: str | None) -> tuple[datetime, datetime] | None:
     """Return local start/end datetimes for a calendar-history request."""
     now = dt_util.now()
@@ -3911,6 +3970,21 @@ def _calendar_range_includes_today(
     now = now or dt_util.now()
     today_start = datetime(now.year, now.month, now.day, tzinfo=now.tzinfo)
     return start_dt <= now and end_dt > today_start
+
+
+def _calendar_statistics_end_dt(
+    period: str,
+    end_dt: datetime,
+    now: datetime,
+    includes_today: bool,
+) -> datetime:
+    """Return the statistics query end while avoiding duplicated live totals."""
+    if not includes_today:
+        return end_dt
+    if period == "day":
+        return end_dt
+    today_start = datetime(now.year, now.month, now.day, tzinfo=now.tzinfo)
+    return min(end_dt, today_start)
 
 
 def _find_calendar_statistic_entity_ids(
@@ -3963,11 +4037,12 @@ async def _calendar_time_series_from_statistics(
     start_dt, end_dt = range_result
     now = dt_util.now()
     includes_today = _calendar_range_includes_today(start_dt, end_dt, now)
-
-    statistic_end_dt = end_dt
-    if includes_today:
-        today_start = datetime(now.year, now.month, now.day, tzinfo=now.tzinfo)
-        statistic_end_dt = min(statistic_end_dt, today_start)
+    statistic_end_dt = _calendar_statistics_end_dt(
+        period,
+        end_dt,
+        now,
+        includes_today,
+    )
 
     entity_ids = _find_calendar_statistic_entity_ids(hass, preferred_entry_id)
     if not entity_ids:
@@ -4036,7 +4111,12 @@ async def _calendar_time_series_from_statistics(
             hass, coordinator, preferred_entry_id
         )
         if _calendar_entry_has_energy(current_entry):
-            rows.append(current_entry)
+            if period == "day" and rows:
+                residual_entry = _calendar_residual_entry(current_entry, rows)
+                if residual_entry:
+                    rows.append(residual_entry)
+            else:
+                rows.append(current_entry)
 
     return rows
 
@@ -4966,6 +5046,7 @@ class BatteryHealthView(HomeAssistantView):
             serial_from_din,
             trim_excess_pw3_follower_placeholders,
         )
+        from .powerwall_local.client import is_loopback_host
 
         private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
         din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -4994,8 +5075,8 @@ class BatteryHealthView(HomeAssistantView):
         # gateway is unreachable (e.g. user is away from home).
         data = None
         source = "ha_local_tedapi"
-        local_ip = entry.data.get(CONF_POWERWALL_LOCAL_IP)
-        if local_ip:
+        local_ip = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
+        if local_ip and not is_loopback_host(local_ip):
             try:
                 from .powerwall_local.transport import get_insecure_ssl_context
                 from .powerwall_local import tedapi_combined_pb2 as _pb2
@@ -5035,6 +5116,11 @@ class BatteryHealthView(HomeAssistantView):
                             )
             except Exception as err:
                 _LOGGER.debug("fleet_api_bms: local gateway unreachable: %s", err)
+        elif local_ip:
+            _LOGGER.debug(
+                "fleet_api_bms: skipping loopback placeholder gateway host %s",
+                local_ip,
+            )
 
         if data is None:
             # Fleet API relay fallback.
@@ -5100,7 +5186,11 @@ class BatteryHealthView(HomeAssistantView):
             else:
                 local_client = local_runtime.get("client") or getattr(local_coordinator, "client", None)
                 local_transport = getattr(local_client, "_transport", None)
-                if local_transport is not None:
+                if (
+                    local_transport is not None
+                    and getattr(local_client, "local_access_enabled", True) is not False
+                    and not is_loopback_host(getattr(local_client, "host", None))
+                ):
                     gateway_config = await local_transport.read_config(din)
         except Exception as err:
             _LOGGER.debug("fleet_api_bms: config.json read for expansion mapping failed: %s", err)
@@ -5255,8 +5345,8 @@ class BatteryHealthView(HomeAssistantView):
                 kept_full_wh = sum(p["nominalFullPackEnergyWh"] for p in kept)
                 if kept_full_wh > 0 and abs(current_wh - kept_full_wh) / current_wh < 0.10:
                     ghost_count = len(ghost_candidates)
-                    _LOGGER.warning(
-                        "fleet_api_bms: Dropping %d ghost expansion pack(s) (no serial + near-empty) — "
+                    _LOGGER.info(
+                        "fleet_api_bms: dropping %d placeholder expansion pack(s) (no serial + near-empty) — "
                         "system %.0f Wh matches real-pack sum %.0f Wh (ratio %.3f); "
                         "expansion slots registered but not physically installed",
                         ghost_count, current_wh, kept_full_wh, kept_full_wh / current_wh,
@@ -5334,6 +5424,191 @@ class BatteryHealthView(HomeAssistantView):
         _LOGGER.info(
             "fleet_api_bms: Tesla health %.1f%% (%d Wh / %d Wh), %d module(s), %d batteryBlock(s), %d msa_bms [%s]",
             health_percent, current_wh, original_wh, batt_count, bb_count, len(individual), source,
+        )
+        return response
+
+    async def _try_fleet_api_solar_strings_fetch(self, entry) -> dict | None:
+        """Fetch Powerwall DC string diagnostics via signed TEDAPI queries."""
+        import base64 as _b64
+        import aiohttp as _aio
+
+        from .const import (
+            CONF_POWERWALL_LOCAL_PRIVATE_KEY,
+            CONF_POWERWALL_LOCAL_DIN,
+            CONF_POWERWALL_LOCAL_IP,
+        )
+        from .powerwall_local.views import _get_fleet_api_context
+        from .powerwall_local.fleet_api_bms import (
+            build_device_controller_query_envelope,
+            build_pw3_components_query_envelope,
+            build_signed_routable_message,
+            normalize_legacy_pvac_strings,
+            normalize_pw3_components_strings,
+            parse_device_controller_response,
+        )
+
+        private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
+        din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+        if not private_key_pem or not din:
+            return None
+
+        fleet_token, fleet_base, fleet_site_id = _get_fleet_api_context(self._hass, entry)
+        key_bytes = private_key_pem.encode() if isinstance(private_key_pem, str) else private_key_pem
+
+        async def _read_query(envelope_builder, log_label: str) -> tuple[dict | None, str | None]:
+            try:
+                envelope = envelope_builder(din)
+
+                def _sign_in_thread() -> bytes:
+                    return build_signed_routable_message(envelope, din, key_bytes, ttl_seconds=300)
+
+                signed = await self._hass.async_add_executor_job(_sign_in_thread)
+            except Exception as err:
+                _LOGGER.debug("fleet_api_solar_strings: %s signing failed: %s", log_label, err)
+                return None, None
+
+            local_ip = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            if local_ip:
+                try:
+                    from .powerwall_local.transport import get_insecure_ssl_context
+                    from .powerwall_local import tedapi_combined_pb2 as _pb2
+                    ssl_ctx = await get_insecure_ssl_context(self._hass)
+                    connector = _aio.TCPConnector(ssl=ssl_ctx, limit=2)
+                    async with _aio.ClientSession(
+                        connector=connector,
+                        timeout=_aio.ClientTimeout(total=12),
+                    ) as sess:
+                        async with sess.post(
+                            f"https://{local_ip}/tedapi/v1r",
+                            data=signed,
+                            headers={"Content-Type": "application/octet-stream"},
+                        ) as resp:
+                            if resp.status == 200:
+                                raw = await resp.read()
+                                resp_msg = _pb2.RoutableMessage()
+                                resp_msg.ParseFromString(raw)
+                                fault = resp_msg.signed_message_status.message_fault
+                                if fault == _pb2.MESSAGEFAULT_ERROR_NONE:
+                                    data = parse_device_controller_response(
+                                        resp_msg.protobuf_message_as_bytes
+                                    )
+                                    if data:
+                                        return data, "ha_local_tedapi"
+                                else:
+                                    _LOGGER.debug(
+                                        "fleet_api_solar_strings: local %s fault %s",
+                                        log_label,
+                                        _pb2.MessageFault_E.Name(fault),
+                                    )
+                            else:
+                                body_text = await resp.text()
+                                _LOGGER.debug(
+                                    "fleet_api_solar_strings: local %s HTTP %d - %s",
+                                    log_label, resp.status, body_text[:200],
+                                )
+                except Exception as err:
+                    _LOGGER.debug("fleet_api_solar_strings: local %s unreachable: %s", log_label, err)
+
+            if not fleet_token or not fleet_base or not fleet_site_id:
+                return None, None
+
+            fleet_url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
+            fleet_headers = {
+                "Authorization": f"Bearer {fleet_token}",
+                "Content-Type": "application/json",
+            }
+            fleet_payload = {
+                "data": {
+                    "target_id": din,
+                    "routable_message": _b64.b64encode(signed).decode(),
+                    "command_timeout_s": 10,
+                    "identifier_type": 1,
+                }
+            }
+            try:
+                async with _aio.ClientSession() as sess:
+                    async with sess.post(
+                        fleet_url,
+                        json=fleet_payload,
+                        headers=fleet_headers,
+                        timeout=_aio.ClientTimeout(total=35),
+                    ) as resp:
+                        if resp.status != 200:
+                            body_text = await resp.text()
+                            _LOGGER.debug(
+                                "fleet_api_solar_strings: %s HTTP %d - %s",
+                                log_label, resp.status, body_text[:400],
+                            )
+                            return None, None
+                        body = await resp.json()
+            except Exception as err:
+                _LOGGER.debug("fleet_api_solar_strings: %s request error: %s", log_label, err)
+                return None, None
+
+            envelope_b64 = (body.get("response") or {}).get("message_envelope_as_bytes")
+            if not envelope_b64:
+                return None, None
+            try:
+                data = parse_device_controller_response(_b64.b64decode(envelope_b64))
+            except Exception as err:
+                _LOGGER.debug("fleet_api_solar_strings: %s decode error: %s", log_label, err)
+                return None, None
+            return data, "ha_fleet_api_relay" if data else None
+
+        data, transport_source = await _read_query(
+            build_pw3_components_query_envelope,
+            "pw3_components",
+        )
+        saw_response = data is not None
+        last_transport_source = transport_source if data is not None else None
+        diagnostics = normalize_pw3_components_strings(data) if data else None
+
+        if diagnostics is None:
+            data, transport_source = await _read_query(
+                build_device_controller_query_envelope,
+                "legacy_pvac",
+            )
+            saw_response = saw_response or data is not None
+            if data is not None:
+                last_transport_source = transport_source
+            diagnostics = normalize_legacy_pvac_strings(data) if data else None
+
+        if diagnostics is None:
+            if saw_response:
+                return {
+                    "success": True,
+                    "available": False,
+                    "brand": "tesla",
+                    "source": None,
+                    "transport_source": last_transport_source,
+                    "strings": [],
+                    "groups": [],
+                    "last_scan": dt_util.now().isoformat(),
+                    "site": {
+                        "gateway_din": din,
+                        "energy_site_id": fleet_site_id,
+                    },
+                }
+            return None
+
+        response = {
+            "success": True,
+            "available": True,
+            "brand": "tesla",
+            "transport_source": transport_source,
+            "last_scan": dt_util.now().isoformat(),
+            "site": {
+                "gateway_din": din,
+                "energy_site_id": fleet_site_id,
+            },
+            **diagnostics,
+        }
+        _LOGGER.debug(
+            "fleet_api_solar_strings: fetched %d string(s), %d group(s) via %s/%s",
+            len(response.get("strings") or []),
+            len(response.get("groups") or []),
+            response.get("source"),
+            transport_source,
         )
         return response
 
@@ -5660,11 +5935,18 @@ class InverterStatusView(HomeAssistantView):
             # but the inverter is actually curtailed using soft export limit
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             inverter_last_state = entry_data.get("inverter_last_state")
-            if inverter_last_state == "curtailed":
+            sungrow_curtailment_state = entry_data.get("sungrow_curtailment_state")
+            if (
+                inverter_last_state == "curtailed"
+                or sungrow_curtailment_state == "curtailed"
+            ):
                 state_dict["is_curtailed"] = True
                 if state_dict.get("status") == "online":
                     state_dict["status"] = "curtailed"
-            elif inverter_last_state in ("normal", "running"):
+            elif (
+                inverter_last_state in ("normal", "running")
+                or sungrow_curtailment_state == "normal"
+            ):
                 state_dict["is_curtailed"] = False
 
             # Check if it's nighttime for sleep detection
@@ -6800,7 +7082,10 @@ class GoodWeSettingsView(HomeAssistantView):
             elif action == "set_backup_reserve":
                 percent = body.get("percent", 20)
                 await self._hass.services.async_call(
-                    DOMAIN, "set_backup_reserve", {"percent": percent}, blocking=True
+                    DOMAIN,
+                    "set_backup_reserve",
+                    {"percent": percent, "source": "user"},
+                    blocking=True,
                 )
                 return web.json_response({"success": True, "action": "set_backup_reserve"})
             else:
@@ -7203,7 +7488,7 @@ class ConfigView(HomeAssistantView):
                     "modbus_enabled": bool(goodwe_host),
                 }
 
-            # Add Fronius Reserva bridge info if applicable
+            # Add Fronius GEN24 storage bridge info if applicable
             fronius_reserva_config = None
             if battery_system == "fronius_reserva":
                 fronius_reserva_config = {
@@ -11897,8 +12182,8 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "ocpp_charger_id": data.get("ocpp_charger_id"),
                     "pre_charge_wake_entity": data.get("pre_charge_wake_entity"),
                     "pre_charge_wake_duration_seconds": data.get("pre_charge_wake_duration_seconds", 5),
-                    "min_amps": data.get("min_amps", 5),
-                    "max_amps": data.get("max_amps", 32),
+                    "min_amps": data.get("min_amps", data.get("min_charge_amps", 5)),
+                    "max_amps": data.get("max_amps", data.get("max_charge_amps", 32)),
                     "voltage": data.get("voltage", 240),
                     "phases": data.get("phases", 1),
                     "solar_charging_enabled": data.get("solar_charging_enabled", False),
@@ -11915,22 +12200,83 @@ class VehicleChargingConfigView(HomeAssistantView):
 
             # Sync charger params to AutoScheduleSettings so planner uses correct values
             try:
-                from .automations.ev_charging_planner import get_auto_schedule_executor
+                from .automations.ev_charging_planner import (
+                    _vehicle_config_matches,
+                    get_auto_schedule_executor,
+                )
                 executor = get_auto_schedule_executor()
                 if executor:
                     saved_config = next(
                         (c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id),
                         None,
                     )
-                    if saved_config and vehicle_id in executor._settings:
+                    synced_vehicle_ids = [
+                        vid
+                        for vid in executor._settings
+                        if _vehicle_config_matches(vid, vehicle_id)
+                    ]
+                    if saved_config and synced_vehicle_ids:
+                        for synced_vehicle_id in synced_vehicle_ids:
+                            settings = executor._settings[synced_vehicle_id]
+                            if hasattr(settings, "apply_charger_config"):
+                                settings.apply_charger_config(saved_config)
+                            else:
+                                if "max_amps" in saved_config or "max_charge_amps" in saved_config:
+                                    settings.max_charge_amps = saved_config.get(
+                                        "max_amps",
+                                        saved_config.get("max_charge_amps"),
+                                    )
+                                if "min_amps" in saved_config or "min_charge_amps" in saved_config:
+                                    settings.min_charge_amps = saved_config.get(
+                                        "min_amps",
+                                        saved_config.get("min_charge_amps"),
+                                    )
+                                if "voltage" in saved_config:
+                                    settings.voltage = saved_config["voltage"]
+                                if "phases" in saved_config:
+                                    settings.phases = saved_config["phases"]
+                                if "charger_type" in saved_config:
+                                    settings.charger_type = saved_config["charger_type"]
+                                if "charger_switch_entity" in saved_config:
+                                    settings.charger_switch_entity = saved_config["charger_switch_entity"]
+                                if "charger_amps_entity" in saved_config:
+                                    settings.charger_amps_entity = saved_config["charger_amps_entity"]
+                                if "charger_status_entity" in saved_config:
+                                    settings.charger_status_entity = saved_config["charger_status_entity"]
+                                if "charger_power_entity" in saved_config:
+                                    settings.charger_power_entity = saved_config["charger_power_entity"]
+                                if "ocpp_charger_id" in saved_config:
+                                    settings.ocpp_charger_id = saved_config["ocpp_charger_id"]
+                                if "pre_charge_wake_entity" in saved_config:
+                                    settings.pre_charge_wake_entity = saved_config["pre_charge_wake_entity"]
+                                if "pre_charge_wake_duration_seconds" in saved_config:
+                                    settings.pre_charge_wake_duration_seconds = saved_config["pre_charge_wake_duration_seconds"]
+                            state = executor.get_state(synced_vehicle_id)
+                            state.current_plan = None
+                            state.last_plan_update = None
+                            _LOGGER.debug(
+                                "Synced charger params to auto-schedule for %s: "
+                                "max=%dA, voltage=%dV, phases=%d",
+                                synced_vehicle_id,
+                                settings.max_charge_amps,
+                                settings.voltage,
+                                settings.phases,
+                            )
+                    elif saved_config and vehicle_id in executor._settings:
                         settings = executor._settings[vehicle_id]
                         if hasattr(settings, "apply_charger_config"):
                             settings.apply_charger_config(saved_config)
                         else:
-                            if "max_amps" in saved_config:
-                                settings.max_charge_amps = saved_config["max_amps"]
-                            if "min_amps" in saved_config:
-                                settings.min_charge_amps = saved_config["min_amps"]
+                            if "max_amps" in saved_config or "max_charge_amps" in saved_config:
+                                settings.max_charge_amps = saved_config.get(
+                                    "max_amps",
+                                    saved_config.get("max_charge_amps"),
+                                )
+                            if "min_amps" in saved_config or "min_charge_amps" in saved_config:
+                                settings.min_charge_amps = saved_config.get(
+                                    "min_amps",
+                                    saved_config.get("min_charge_amps"),
+                                )
                             if "voltage" in saved_config:
                                 settings.voltage = saved_config["voltage"]
                             if "phases" in saved_config:
@@ -11951,6 +12297,9 @@ class VehicleChargingConfigView(HomeAssistantView):
                                 settings.pre_charge_wake_entity = saved_config["pre_charge_wake_entity"]
                             if "pre_charge_wake_duration_seconds" in saved_config:
                                 settings.pre_charge_wake_duration_seconds = saved_config["pre_charge_wake_duration_seconds"]
+                        state = executor.get_state(vehicle_id)
+                        state.current_plan = None
+                        state.last_plan_update = None
                         _LOGGER.debug(
                             "Synced charger params to auto-schedule for %s: "
                             "max=%dA, voltage=%dV, phases=%d",
@@ -12499,7 +12848,7 @@ class ChargingScheduleView(HomeAssistantView):
                 stored_data = getattr(store, '_data', {}) or {}
                 for vc in stored_data.get("vehicle_charging_configs", []):
                     if vc.get("vehicle_id") == vehicle_id or vehicle_id == "_default":
-                        max_amps = vc.get("max_amps", 32)
+                        max_amps = vc.get("max_amps", vc.get("max_charge_amps", 32))
                         voltage = vc.get("voltage", 230)
                         phases = vc.get("phases", 1)
                         charger_power_kw = (max_amps * voltage * phases) / 1000
@@ -14607,6 +14956,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_soc": 40,
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
+                "preserve_home_battery": False,
                 "no_grid_import": False,
                 "home_battery_minimum": 20,
             }
@@ -14615,6 +14965,8 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 stored_data = getattr(store, '_data', {}) or {}
                 stored_settings = stored_data.get("price_level_charging", {})
                 settings.update(stored_settings)
+            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
+                settings["no_grid_import"] = False
 
             return web.json_response({
                 "success": True,
@@ -14646,14 +14998,27 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_soc": 40,
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
+                "preserve_home_battery": False,
                 "no_grid_import": False,
                 "home_battery_minimum": 20,
             })
 
             # Update with provided values
-            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents", "no_grid_import", "home_battery_minimum"]:
+            for key in [
+                "enabled",
+                "recovery_soc",
+                "recovery_price_cents",
+                "opportunity_price_cents",
+                "preserve_home_battery",
+                "no_grid_import",
+                "home_battery_minimum",
+            ]:
                 if key in data:
                     settings[key] = data[key]
+            if settings.get("preserve_home_battery"):
+                settings["no_grid_import"] = False
+            elif settings.get("no_grid_import"):
+                settings["preserve_home_battery"] = False
 
             stored_data["price_level_charging"] = settings
             store._data = stored_data
@@ -14664,6 +15029,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 f"recovery_soc={settings.get('recovery_soc')}%, "
                 f"recovery_price={settings.get('recovery_price_cents')}c, "
                 f"opportunity_price={settings.get('opportunity_price_cents')}c, "
+                f"preserve_home_battery={settings.get('preserve_home_battery')}, "
                 f"no_grid_import={settings.get('no_grid_import')}, "
                 f"home_battery_minimum={settings.get('home_battery_minimum')}%"
             )
@@ -14753,12 +15119,15 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                 "end_time": "06:00",
                 "max_price_cents": 30,
                 "preserve_home_battery": False,
+                "no_grid_import": False,
             }
 
             if store:
                 stored_data = getattr(store, '_data', {}) or {}
                 stored_settings = stored_data.get("scheduled_charging", {})
                 settings.update(stored_settings)
+            if settings.get("preserve_home_battery") and settings.get("no_grid_import"):
+                settings["no_grid_import"] = False
 
             return web.json_response({
                 "success": True,
@@ -14791,6 +15160,7 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                 "end_time": "06:00",
                 "max_price_cents": 30,
                 "preserve_home_battery": False,
+                "no_grid_import": False,
             })
 
             # Update with provided values
@@ -14800,9 +15170,14 @@ class ScheduledChargingSettingsView(HomeAssistantView):
                 "end_time",
                 "max_price_cents",
                 "preserve_home_battery",
+                "no_grid_import",
             ]:
                 if key in data:
                     settings[key] = data[key]
+            if settings.get("preserve_home_battery"):
+                settings["no_grid_import"] = False
+            elif settings.get("no_grid_import"):
+                settings["preserve_home_battery"] = False
 
             stored_data["scheduled_charging"] = settings
             store._data = stored_data
@@ -14939,6 +15314,8 @@ class HomePowerSettingsView(HomeAssistantView):
                 "phase_type": "single",
                 "max_charge_speed_enabled": False,
                 "max_amps_per_phase": 32,
+                "max_grid_import_amps": 0,
+                "default_voltage": 240,
             }
 
             if store:
@@ -14975,10 +15352,18 @@ class HomePowerSettingsView(HomeAssistantView):
                 "phase_type": "single",
                 "max_charge_speed_enabled": False,
                 "max_amps_per_phase": 32,
+                "max_grid_import_amps": 0,
+                "default_voltage": 240,
             })
 
             # Update with provided values
-            for key in ["phase_type", "max_charge_speed_enabled", "max_amps_per_phase"]:
+            for key in [
+                "phase_type",
+                "max_charge_speed_enabled",
+                "max_amps_per_phase",
+                "max_grid_import_amps",
+                "default_voltage",
+            ]:
                 if key in data:
                     settings[key] = data[key]
 
@@ -15465,6 +15850,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Check if monitoring mode is active (blocks all control commands)."""
         return entry.options.get(CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False))
 
+    def _control_call_source(call: ServiceCall) -> str:
+        """Return the normalized source for a battery control service call."""
+        source = str(call.data.get("source", "")).lower()
+        if source:
+            return source
+        if getattr(call.context, "user_id", None):
+            return "user"
+        return "unknown"
+
+    def _monitoring_mode_should_block_control(call: ServiceCall) -> bool:
+        """Return True when monitoring mode should block this control call."""
+        source = _control_call_source(call)
+        return _is_monitoring_mode() and source not in ("user", "manual")
+
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_localvolts:
@@ -15519,8 +15918,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_id=amber_site_id,
                 sync_callback=None,  # Will be set up after coordinators are initialized
             )
-            await ws_client.start()
+            await asyncio.wait_for(
+                ws_client.start(),
+                timeout=AMBER_WEBSOCKET_START_TIMEOUT_SECONDS,
+            )
             _LOGGER.info("🔌 Amber WebSocket client initialized and started")
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "Amber WebSocket client start timed out after %.0fs - using REST API fallback",
+                AMBER_WEBSOCKET_START_TIMEOUT_SECONDS,
+            )
+            ws_client = None
         except Exception as e:
             _LOGGER.error(f"Failed to initialize WebSocket client: {e}", exc_info=True)
             _LOGGER.warning("WebSocket client not available - will use REST API fallback")
@@ -15581,6 +15989,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         or entry.data.get(CONF_SOLAREDGE_HOST)
         or entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX)
     )
+    is_custom_battery = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_CUSTOM
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -15885,7 +16294,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             inverter_rated_kw=float(saj_inverter_rated_kw),
         )
     elif is_fronius_reserva:
-        _LOGGER.info("Running in Fronius Reserva mode — bridging via fronius_modbus integration")
+        _LOGGER.info("Running in Fronius GEN24 storage mode — bridging via fronius_modbus integration")
         fronius_capacity_kwh = entry.options.get(
             CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH,
             entry.data.get(
@@ -15979,6 +16388,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             entity_prefix=solaredge_entity_prefix or "solaredge",
             entry_id=entry.entry_id,
+        )
+    elif is_custom_battery:
+        _LOGGER.info(
+            "Running in custom external-controller mode - using selected Home Assistant entities for planner telemetry"
         )
     else:
         # Get initial Tesla API token and provider
@@ -16089,9 +16502,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if fronius_reserva_coordinator:
         try:
             await fronius_reserva_coordinator.async_config_entry_first_refresh()
-            _LOGGER.info("Fronius Reserva coordinator initialized successfully")
+            _LOGGER.info("Fronius GEN24 storage coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Fronius Reserva coordinator failed to initialize: %s", e)
+            _LOGGER.warning("Fronius GEN24 storage coordinator failed to initialize: %s", e)
             fronius_reserva_coordinator = None
     if neovolt_coordinator:
         try:
@@ -16695,11 +17108,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _tariff_display_name(last_restorable_tesla_tariff),
         )
 
-    # Store coordinators and WebSocket client in hass.data
-    hass.data.setdefault(DOMAIN, {})
+    # Store coordinators and WebSocket client in hass.data. The Tesla
+    # capability probe can publish early while the first refresh is running, so
+    # preserve those values when replacing the setup entry with the full data.
+    existing_entry_data = hass.data.setdefault(DOMAIN, {}).get(entry.entry_id, {})
+    tesla_capabilities = existing_entry_data.get("tesla_capabilities")
+    if tesla_capabilities is None and tesla_coordinator:
+        tesla_capabilities = dict(getattr(tesla_coordinator, "tesla_capabilities", {}) or {})
+    tesla_site_country = existing_entry_data.get("tesla_site_country")
+    if tesla_site_country is None and tesla_coordinator:
+        tesla_site_country = getattr(tesla_coordinator, "_site_country", None)
     hass.data[DOMAIN][entry.entry_id] = {
         "amber_coordinator": amber_coordinator,
         "tesla_coordinator": tesla_coordinator,
+        "tesla_capabilities": tesla_capabilities or {},
+        "tesla_site_country": tesla_site_country,
         "sigenergy_coordinator": sigenergy_coordinator,  # For Sigenergy Modbus energy data
         "sungrow_coordinator": sungrow_coordinator,  # For Sungrow Modbus energy/battery data
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
@@ -16708,7 +17131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "esy_sunhome_coordinator": esy_sunhome_coordinator,  # For ESY Sunhome (bridges via esy_sunhome integration)
         "solax_coordinator": solax_coordinator,  # For Solax Hybrid (bridges via homeassistant-solax-modbus)
         "saj_h2_coordinator": saj_h2_coordinator,  # For SAJ H2 (bridges via saj_h2_modbus)
-        "fronius_reserva_coordinator": fronius_reserva_coordinator,  # For Fronius Reserva (bridges via fronius_modbus)
+        "fronius_reserva_coordinator": fronius_reserva_coordinator,  # For Fronius GEN24 storage (bridges via fronius_modbus)
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "demand_charge_coordinator": demand_charge_coordinator,
@@ -16737,6 +17160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "manual_export_rule": stored_manual_export_rule,  # Restored from persistent storage
         "battery_health": battery_health,  # Restored from persistent storage (from mobile app TEDAPI scans)
         "powerwall_bms_health_poll_cancel": None,  # 5-minute pack energy/BMS refresh timer
+        "powerwall_solar_strings_poll_cancel": None,  # 30-second PW2/PW3 DC string voltage refresh timer
         "force_mode_state": force_mode_state,  # Restored force charge/discharge state
         "last_restorable_tesla_tariff": last_restorable_tesla_tariff,
         "store": store,  # Reference to Store for saving updates
@@ -16749,7 +17173,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_esy_sunhome": is_esy_sunhome,  # Track if ESY Sunhome battery system
         "is_solax": is_solax,  # Track if Solax battery system
         "is_saj_h2": is_saj_h2,  # Track if SAJ H2 battery system
-        "is_fronius_reserva": is_fronius_reserva,  # Track if Fronius Reserva battery system
+        "is_fronius_reserva": is_fronius_reserva,  # Track if Fronius GEN24 storage battery system
         "is_neovolt": is_neovolt,  # Track if Neovolt battery system
         "is_solaredge": is_solaredge,  # Track if SolarEdge battery/curtailment system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
@@ -17572,7 +17996,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return success
             else:
                 _LOGGER.info(f"🟢 Restoring inverter at {inverter_host}")
-                success = await controller.restore()
+                import inspect
+                restore_sig = inspect.signature(controller.restore)
+                if "verify" in restore_sig.parameters:
+                    success = await controller.restore(verify=False)
+                else:
+                    success = await controller.restore()
                 if success:
                     _LOGGER.info(f"✅ Inverter restored successfully")
                     # Store last state
@@ -18103,9 +18532,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             try:
+                configured_station_id = str(station_id).strip()
+                cached_tariff_station_id = str(
+                    entry.data.get(CONF_SIGENERGY_TARIFF_STATION_ID) or ""
+                ).strip()
+                cached_tariff_station_source_id = str(
+                    entry.data.get(CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID) or ""
+                ).strip()
+
+                if (
+                    cached_tariff_station_id.isdigit()
+                    and cached_tariff_station_source_id == configured_station_id
+                ):
+                    tariff_station_id = cached_tariff_station_id
+                    _LOGGER.debug(
+                        "Using cached Sigenergy tariff station ID %s for "
+                        "configured station ID %s",
+                        tariff_station_id,
+                        configured_station_id,
+                    )
+                else:
+                    resolved_station = await client.resolve_tariff_station_id(
+                        configured_station_id
+                    )
+                    if "error" in resolved_station:
+                        _LOGGER.error(
+                            "❌ Sigenergy tariff sync failed: %s",
+                            resolved_station["error"],
+                        )
+                        return
+
+                    tariff_station_id = resolved_station["station_id"]
+                    new_data = {**entry.data}
+                    new_data[CONF_SIGENERGY_TARIFF_STATION_ID] = tariff_station_id
+                    new_data[CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID] = (
+                        configured_station_id
+                    )
+                    if new_data != entry.data:
+                        hass.config_entries.async_update_entry(entry, data=new_data)
+                        _LOGGER.info(
+                            "Cached Sigenergy tariff station ID for uploads: %s "
+                            "(configured station ID remains %s)",
+                            tariff_station_id,
+                            configured_station_id,
+                        )
+
                 provider_label = (provider_for_tz or "amber").replace("_", " ").title()
                 result = await client.set_tariff_rate(
-                    station_id=station_id,
+                    station_id=tariff_station_id,
                     buy_prices=buy_prices,
                     sell_prices=sell_prices if sell_prices else buy_prices,
                     plan_name=f"PowerSync {provider_label}",
@@ -19020,10 +19494,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if token_getter is None:
             return
 
-        # Blocked in monitoring mode — tariff_schedule already stored above for display
-        if _is_monitoring_mode():
+        # Blocked in monitoring mode — tariff_schedule already stored above for display.
+        # Exception: optimizer shutdown may need one final sync to replace an
+        # already-uploaded force tariff before monitoring mode takes ownership.
+        _monitoring_sync_override = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).pop(
+            "_allow_monitoring_tou_sync_once",
+            None,
+        )
+        if _is_monitoring_mode() and not _monitoring_sync_override:
             _LOGGER.info("[MONITORING] Tariff schedule updated for display; Tesla sync blocked by monitoring mode")
             return
+        if _is_monitoring_mode() and _monitoring_sync_override:
+            _LOGGER.info(
+                "[MONITORING] Allowing one Tesla TOU sync during restore cleanup - %s",
+                _monitoring_sync_override,
+            )
 
         # Get fresh token in case it was refreshed by tesla_fleet integration
         current_token, current_provider = token_getter()
@@ -19449,14 +19934,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Get prices from any available price coordinator if not provided
         if feedin_price is None:
-            _price_coord = amber_coordinator or localvolts_coordinator or aemo_sensor_coordinator or octopus_coordinator
-            if _price_coord and _price_coord.data:
-                current_prices = _price_coord.data.get("current", [])
-                for price_data in current_prices:
-                    if price_data.get("channelType") == "feedIn":
-                        feedin_price = price_data.get("perKwh", 0)
-                    elif price_data.get("channelType") == "general":
-                        import_price = price_data.get("perKwh", 0)
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                (
+                    amber_coordinator,
+                    localvolts_coordinator,
+                    aemo_sensor_coordinator,
+                    octopus_coordinator,
+                ),
+            )
+            if price_source == "tariff_schedule":
+                _LOGGER.debug("FoxESS curtailment using feed-in price from tariff schedule")
 
         if feedin_price is None:
             _LOGGER.warning("FoxESS curtailment: no feed-in price available")
@@ -19478,15 +19966,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
+                import time as _time_mod
+                _foxess_reapply_interval = 480  # Keep ahead of FoxESS 600s remote-control timeout
+                _last_reapply = entry_data.get("_last_foxess_curtailment_reapply", 0)
+                _now = _time_mod.monotonic()
+                _elapsed_since_reapply = _now - _last_reapply
+                _needs_reapply = (
+                    current_state == "curtailed"
+                    and _elapsed_since_reapply >= _foxess_reapply_interval
+                )
+
                 # Negative or near-zero export earnings → curtail
-                if current_state != "curtailed":
-                    _LOGGER.info("FoxESS curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export", export_earnings)
+                if current_state != "curtailed" or _needs_reapply:
+                    if current_state == "curtailed":
+                        _LOGGER.info(
+                            "FoxESS curtailment RE-APPLY: export_earnings=%.2fc (<1c), %ds since last apply",
+                            export_earnings,
+                            int(_elapsed_since_reapply),
+                        )
+                    else:
+                        _LOGGER.info("FoxESS curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export", export_earnings)
                     if hasattr(fc, "curtail"):
                         success = await fc.curtail()
                     else:
                         success = await controller.curtail()
                     if success:
-                        hass.data[DOMAIN][entry.entry_id]["foxess_curtailment_state"] = "curtailed"
+                        entry_data["foxess_curtailment_state"] = "curtailed"
+                        entry_data["_last_foxess_curtailment_reapply"] = _now
                     else:
                         _LOGGER.error("FoxESS curtail() failed")
                 else:
@@ -19500,7 +20006,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         success = await controller.restore()
                     if success:
-                        hass.data[DOMAIN][entry.entry_id]["foxess_curtailment_state"] = "normal"
+                        entry_data["foxess_curtailment_state"] = "normal"
+                        entry_data.pop("_last_foxess_curtailment_reapply", None)
                     else:
                         _LOGGER.error("FoxESS restore() failed")
                 else:
@@ -19534,14 +20041,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Get prices from any available price coordinator if not provided
         if feedin_price is None:
-            _price_coord = amber_coordinator or localvolts_coordinator or aemo_sensor_coordinator or octopus_coordinator
-            if _price_coord and _price_coord.data:
-                current_prices = _price_coord.data.get("current", [])
-                for price_data in current_prices:
-                    if price_data.get("channelType") == "feedIn":
-                        feedin_price = price_data.get("perKwh", 0)
-                    elif price_data.get("channelType") == "general":
-                        import_price = price_data.get("perKwh", 0)
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                (
+                    amber_coordinator,
+                    localvolts_coordinator,
+                    aemo_sensor_coordinator,
+                    octopus_coordinator,
+                ),
+            )
+            if price_source == "tariff_schedule":
+                _LOGGER.debug("Sigenergy curtailment using feed-in price from tariff schedule")
 
         if feedin_price is None:
             _LOGGER.warning("Sigenergy curtailment: no feed-in price available")
@@ -19612,17 +20122,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current_state = entry_data.get("alphaess_curtailment_state", "normal")
 
         if feedin_price is None:
-            _price_coord = (
-                amber_coordinator or localvolts_coordinator
-                or aemo_sensor_coordinator or octopus_coordinator
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                (
+                    amber_coordinator,
+                    localvolts_coordinator,
+                    aemo_sensor_coordinator,
+                    octopus_coordinator,
+                ),
             )
-            if _price_coord and _price_coord.data:
-                current_prices = _price_coord.data.get("current", [])
-                for price_data in current_prices:
-                    if price_data.get("channelType") == "feedIn":
-                        feedin_price = price_data.get("perKwh", 0)
-                    elif price_data.get("channelType") == "general":
-                        import_price = price_data.get("perKwh", 0)
+            if price_source == "tariff_schedule":
+                _LOGGER.debug("AlphaESS curtailment using feed-in price from tariff schedule")
 
         if feedin_price is None:
             _LOGGER.warning("AlphaESS curtailment: no feed-in price available")
@@ -19685,17 +20195,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current_state = entry_data.get("solaredge_curtailment_state", "normal")
 
         if feedin_price is None:
-            _price_coord = (
-                amber_coordinator or localvolts_coordinator
-                or aemo_sensor_coordinator or octopus_coordinator
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                (
+                    amber_coordinator,
+                    localvolts_coordinator,
+                    aemo_sensor_coordinator,
+                    octopus_coordinator,
+                ),
             )
-            if _price_coord and _price_coord.data:
-                current_prices = _price_coord.data.get("current", [])
-                for price_data in current_prices:
-                    if price_data.get("channelType") == "feedIn":
-                        feedin_price = price_data.get("perKwh", 0)
-                    elif price_data.get("channelType") == "general":
-                        import_price = price_data.get("perKwh", 0)
+            if price_source == "tariff_schedule":
+                _LOGGER.debug("SolarEdge curtailment using feed-in price from tariff schedule")
 
         if feedin_price is None:
             _LOGGER.warning("SolarEdge curtailment: no feed-in price available")
@@ -19789,17 +20299,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current_state = entry_data.get("goodwe_curtailment_state", "normal")
 
         if feedin_price is None:
-            _price_coord = (
-                amber_coordinator or localvolts_coordinator
-                or aemo_sensor_coordinator or octopus_coordinator
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                (
+                    amber_coordinator,
+                    localvolts_coordinator,
+                    aemo_sensor_coordinator,
+                    octopus_coordinator,
+                ),
             )
-            if _price_coord and _price_coord.data:
-                current_prices = _price_coord.data.get("current", [])
-                for price_data in current_prices:
-                    if price_data.get("channelType") == "feedIn":
-                        feedin_price = price_data.get("perKwh", 0)
-                    elif price_data.get("channelType") == "general":
-                        import_price = price_data.get("perKwh", 0)
+            if price_source == "tariff_schedule":
+                _LOGGER.debug("GoodWe curtailment using feed-in price from tariff schedule")
 
         if feedin_price is None:
             _LOGGER.warning("GoodWe curtailment: no feed-in price available")
@@ -19847,6 +20357,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.debug("GoodWe already in normal mode, no action needed")
         except Exception as e:
             _LOGGER.error("GoodWe curtailment error: %s", e, exc_info=True)
+
+    async def _active_solar_surplus_ev_needs_inverter_headroom() -> bool:
+        """Return true when a plugged-in solar-surplus EV should release curtailment."""
+        try:
+            from .automations.actions import DEFAULT_VEHICLE_ID, _dynamic_ev_state
+            from .automations.ev_charging_planner import (
+                get_ev_battery_level,
+                is_ev_plugged_in,
+            )
+            from .automations.ev_ownership import is_solar_surplus_owner_mode
+            from .solar_surplus_config import get_stored_solar_surplus_config
+        except Exception as err:
+            _LOGGER.debug("Solar surplus EV headroom check unavailable: %s", err)
+            return False
+
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        solar_config = get_stored_solar_surplus_config(entry_data)
+        if not solar_config.get("enabled", False):
+            return False
+
+        for vehicle_id, state in (_dynamic_ev_state.get(entry.entry_id, {}) or {}).items():
+            if not state or not state.get("active") or state.get("paused"):
+                continue
+
+            params = state.get("params") or {}
+            dynamic_mode = params.get("dynamic_mode")
+            owner_mode = params.get("owner_mode") or dynamic_mode
+            if dynamic_mode != "solar_surplus" and not is_solar_surplus_owner_mode(owner_mode):
+                continue
+
+            vehicle_vin = params.get("vehicle_vin")
+            if not vehicle_vin and vehicle_id != DEFAULT_VEHICLE_ID:
+                vehicle_vin = vehicle_id
+
+            if not await is_ev_plugged_in(hass, entry, vehicle_vin=vehicle_vin):
+                continue
+
+            ev_soc = await get_ev_battery_level(hass, entry, vehicle_vin=vehicle_vin)
+            if ev_soc is not None and ev_soc >= 100:
+                continue
+
+            _LOGGER.info(
+                "Solar surplus EV headroom requested for %s (SOC=%s%%)",
+                str(vehicle_vin or vehicle_id)[:8],
+                "unknown" if ev_soc is None else f"{ev_soc:.1f}",
+            )
+            return True
+
+        return False
 
     async def handle_sungrow_curtailment(feedin_price=None, import_price=None) -> None:
         """Handle Sungrow SH curtailment via the export-limit register.
@@ -19923,7 +20482,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Sungrow curtailment: no coordinator export-limit control available")
 
         try:
-            if native_available and export_earnings < 1:
+            ev_needs_headroom = (
+                await _active_solar_surplus_ev_needs_inverter_headroom()
+            )
+            should_curtail_for_price = export_earnings < 1 and not ev_needs_headroom
+
+            if native_available and export_earnings < 1 and ev_needs_headroom:
+                if current_state != "normal":
+                    _LOGGER.info(
+                        "Sungrow curtailment RESTORED: solar surplus EV needs PV headroom "
+                        "(export_earnings=%.2fc)",
+                        export_earnings,
+                    )
+                    success = await sungrow_coord.set_export_limit(None)
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id][
+                            "sungrow_curtailment_state"
+                        ] = "normal"
+                        hass.data[DOMAIN][entry.entry_id]["sungrow_power_limit_w"] = (
+                            None
+                        )
+                    else:
+                        _LOGGER.error("Sungrow set_export_limit(None) failed")
+                else:
+                    _LOGGER.debug(
+                        "Sungrow normal export retained: solar surplus EV needs PV headroom"
+                    )
+            elif native_available and should_curtail_for_price:
                 live_status = await get_live_status()
                 home_load_w = 0
                 if live_status and live_status.get("load_power"):
@@ -19995,7 +20580,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if ac_enabled and not ac_inverter_is_same_hybrid():
                 await apply_inverter_curtailment(
-                    curtail=export_earnings < 1,
+                    curtail=should_curtail_for_price,
                     import_price=import_price,
                     export_earnings=export_earnings,
                 )
@@ -20070,38 +20655,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
-        # Find an available price coordinator (Amber, AEMO, or Octopus)
-        _price_coord = amber_coordinator or localvolts_coordinator or aemo_sensor_coordinator or octopus_coordinator
-        if not _price_coord:
-            _LOGGER.debug("Solar curtailment skipped - no price coordinator available")
-            return
-
         _LOGGER.info("=== Starting solar curtailment check ===")
 
         try:
-            # Refresh prices to get latest feed-in price
-            await _price_coord.async_request_refresh()
+            price_coordinators = (
+                amber_coordinator,
+                localvolts_coordinator,
+                aemo_sensor_coordinator,
+                octopus_coordinator,
+            )
 
-            if not _price_coord.data:
-                _LOGGER.error("No price data available for curtailment check")
-                return
+            # Refresh live providers when present, then fall back to tariff_schedule
+            # so static/custom tariffs can drive curtailment for any provider.
+            for price_coord in price_coordinators:
+                if price_coord is None:
+                    continue
+                refresh = getattr(price_coord, "async_request_refresh", None)
+                if callable(refresh):
+                    await refresh()
 
-            # Get feed-in (export) price from current prices
-            current_prices = _price_coord.data.get("current", [])
-            if not current_prices:
-                _LOGGER.warning("No current price data available for curtailment check")
-                return
-
-            feedin_price = None
-            import_price = None  # General/buy price
-            for price_data in current_prices:
-                if price_data.get("channelType") == "feedIn":
-                    feedin_price = price_data.get("perKwh", 0)
-                elif price_data.get("channelType") == "general":
-                    import_price = price_data.get("perKwh", 0)
+            feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                entry_data,
+                price_coordinators,
+            )
 
             if feedin_price is None:
-                _LOGGER.warning("No feed-in price found in price data")
+                _LOGGER.warning("No feed-in price available for curtailment check")
                 return
 
             # Amber returns feed-in prices as NEGATIVE when you're paid to export
@@ -20109,7 +20688,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
             # So we want to curtail when feedin_price > 0 (user would pay to export)
             export_earnings = -feedin_price  # Convert to positive = earnings per kWh
-            _LOGGER.info(f"Current prices from Amber: import={import_price}c/kWh, export earnings={export_earnings:.2f}c/kWh")
+            _LOGGER.info(
+                "Current prices for curtailment from %s: import=%sc/kWh, export earnings=%.2fc/kWh",
+                price_source or "unknown",
+                import_price,
+                export_earnings,
+            )
 
             # Get current grid export settings from Tesla
             # Get fresh token in case it was refreshed by tesla_fleet integration
@@ -20440,26 +21024,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             # Extract feed-in price from WebSocket data
+            price_source = "websocket"
             feedin_data = websocket_data.get('feedIn', {}) if websocket_data else None
-            if not feedin_data:
-                _LOGGER.warning("No feed-in data in WebSocket price update")
-                return
-
-            feedin_price = feedin_data.get('perKwh')
-            if feedin_price is None:
-                _LOGGER.warning("No perKwh in WebSocket feed-in data")
-                return
+            feedin_price = feedin_data.get('perKwh') if feedin_data else None
 
             # Also extract import price for smart AC-coupled curtailment
             general_data = websocket_data.get('general', {}) if websocket_data else None
             import_price = general_data.get('perKwh') if general_data else None
+
+            if feedin_price is None:
+                feedin_price, import_price, price_source = get_current_prices_for_curtailment(
+                    entry_data,
+                    (
+                        amber_coordinator,
+                        localvolts_coordinator,
+                        aemo_sensor_coordinator,
+                        octopus_coordinator,
+                    ),
+                )
+
+            if feedin_price is None:
+                _LOGGER.warning("No feed-in price available for websocket curtailment check")
+                return
 
             # Amber returns feed-in prices as NEGATIVE when you're paid to export
             # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
             # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
             # So we want to curtail when feedin_price > 0 (user would pay to export)
             export_earnings = -feedin_price  # Convert to positive = earnings per kWh
-            _LOGGER.info(f"Current prices (WebSocket): import={import_price}c/kWh, export earnings={export_earnings:.2f}c/kWh")
+            _LOGGER.info(
+                "Current prices for curtailment from %s: import=%sc/kWh, export earnings=%.2fc/kWh",
+                price_source or "unknown",
+                import_price,
+                export_earnings,
+            )
 
             # Get current grid export settings from Tesla
             # Get fresh token in case it was refreshed by tesla_fleet integration
@@ -20963,6 +21561,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 persisted_force_state.get("power_w", 0)
             )
 
+            if _is_monitoring_mode():
+                _LOGGER.info(
+                    "[MONITORING] Persisted force %s was not replayed or restored after restart — blocked by monitoring mode",
+                    mode,
+                )
+                if persisted_source == "optimizer":
+                    hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
+                stored_data = await store.async_load() or {}
+                stored_data["force_mode_state"] = None
+                await store.async_save(stored_data)
+                return
+
             if persisted_source == "optimizer":
                 # Optimizer-owned force modes are schedule decisions, not user
                 # commands. After a restart/update the LP must recalculate from
@@ -21197,7 +21807,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         _LOGGER.debug(f"Force discharge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
-        source = call.data.get("source", "user")
+        source = _control_call_source(call)
         command_power_w = _resolve_force_command_power_w(
             "discharge",
             call.data.get("power_w", 0),
@@ -21241,6 +21851,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         parsed_tariff_duration,
                         duration,
                     )
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would force discharge for %d minutes (source=%s, power_w=%s) — blocked by monitoring mode",
+                duration,
+                source,
+                command_power_w,
+            )
+            return
 
         extend_hardware = call.data.get("_extend_hardware", False)
 
@@ -21323,7 +21942,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
                 await fronius_coord.force_discharge(duration, power_w=power_w)
-                _LOGGER.debug(f"Fronius Reserva force discharge hardware refreshed ({duration}min, {power_w}W)")
+                _LOGGER.debug(f"Fronius GEN24 storage force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             neovolt_coord = entry_data.get("neovolt_coordinator")
             if neovolt_coord:
@@ -21797,7 +22416,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("Force discharge: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Force discharge: Fronius GEN24 storage coordinator not available")
                     return
 
                 power_w = command_power_w
@@ -21808,7 +22427,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["source"] = source
                     force_discharge_state["duration"] = duration
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info("Fronius Reserva FORCE DISCHARGE ACTIVE for %d minutes", duration)
+                    _LOGGER.info("Fronius GEN24 storage FORCE DISCHARGE ACTIVE for %d minutes", duration)
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                         "active": True,
@@ -21823,7 +22442,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if _command_generation[0] != _restore_gen:
                             return
                         if force_discharge_state["active"]:
-                            _LOGGER.info("Fronius Reserva force discharge expired, auto-restoring")
+                            _LOGGER.info("Fronius GEN24 storage force discharge expired, auto-restoring")
                             await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -21832,13 +22451,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("Fronius Reserva force discharge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius Reserva entity write error"))
+                    _LOGGER.error("Fronius GEN24 storage force discharge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius GEN24 storage entity write error"))
                 return
             except Exception as e:
                 force_discharge_state["active"] = False
-                _LOGGER.error(f"Error in Fronius Reserva force discharge: {e}", exc_info=True)
-                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius Reserva entity write error"))
+                _LOGGER.error(f"Error in Fronius GEN24 storage force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius GEN24 storage entity write error"))
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -22480,7 +23099,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         _LOGGER.debug(f"Force charge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
-        source = call.data.get("source", "user")
+        source = _control_call_source(call)
         command_power_w = _resolve_force_command_power_w(
             "charge",
             call.data.get("power_w", 0),
@@ -22503,6 +23122,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         elif duration not in DISCHARGE_DURATIONS:
             _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would force charge for %d minutes (source=%s, power_w=%s) — blocked by monitoring mode",
+                duration,
+                source,
+                command_power_w,
+            )
+            return
 
         extend_hardware = call.data.get("_extend_hardware", False)
 
@@ -22582,7 +23210,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
                 await fronius_coord.force_charge(duration, power_w=power_w)
-                _LOGGER.debug(f"Fronius Reserva force charge hardware refreshed ({duration}min, {power_w}W)")
+                _LOGGER.debug(f"Fronius GEN24 storage force charge hardware refreshed ({duration}min, {power_w}W)")
                 return
             neovolt_coord = entry_data.get("neovolt_coordinator")
             if neovolt_coord:
@@ -23122,7 +23750,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
                     force_charge_state["active"] = False
-                    _LOGGER.error("Force charge: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Force charge: Fronius GEN24 storage coordinator not available")
                     return
 
                 if force_discharge_state["active"]:
@@ -23141,7 +23769,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["source"] = source
                     force_charge_state["duration"] = duration
                     force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info("Fronius Reserva FORCE CHARGE ACTIVE for %d minutes", duration)
+                    _LOGGER.info("Fronius GEN24 storage FORCE CHARGE ACTIVE for %d minutes", duration)
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
                         "active": True,
@@ -23156,7 +23784,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if _command_generation[0] != _restore_gen:
                             return
                         if force_charge_state["active"]:
-                            _LOGGER.info("Fronius Reserva force charge expired, auto-restoring")
+                            _LOGGER.info("Fronius GEN24 storage force charge expired, auto-restoring")
                             await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -23165,13 +23793,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_charge_state["active"] = False
-                    _LOGGER.error("Fronius Reserva force charge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius Reserva entity write error"))
+                    _LOGGER.error("Fronius GEN24 storage force charge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius GEN24 storage entity write error"))
                 return
             except Exception as e:
                 force_charge_state["active"] = False
-                _LOGGER.error(f"Error in Fronius Reserva force charge: {e}", exc_info=True)
-                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius Reserva entity write error"))
+                _LOGGER.error(f"Error in Fronius GEN24 storage force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius GEN24 storage entity write error"))
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -23851,7 +24479,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Restore normal operation - restore saved tariff or trigger Amber sync."""
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
-        source = call.data.get("source", "user")
+        source = _control_call_source(call)
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id}, source={source})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
         optimizer_owned_restore = (
@@ -23859,8 +24487,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             or force_discharge_state.get("source") == "optimizer"
             or force_charge_state.get("source") == "optimizer"
         )
+        allow_monitoring_restore = bool(
+            call.data.get("_allow_monitoring_restore")
+            and optimizer_owned_restore
+        )
         restore_was_force_discharging = bool(force_discharge_state.get("active"))
         restore_was_force_charging = bool(force_charge_state.get("active"))
+
+        if _monitoring_mode_should_block_control(call) and not allow_monitoring_restore:
+            _LOGGER.info(
+                "[MONITORING] Would restore normal operation (source=%s) — blocked by monitoring mode",
+                source,
+            )
+            return
+        if _is_monitoring_mode() and allow_monitoring_restore:
+            _LOGGER.info(
+                "[MONITORING] Allowing optimizer shutdown restore so existing hardware control is released"
+            )
 
         # Clear user-facing state toggles (Hold SoC and Self-Use buttons).
         # These are mobile-only visual flags; clearing them on user-sourced
@@ -23911,6 +24554,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # can interfere with this restore operation.
         _cancel_all_force_timers("restore_normal")
         _command_generation[0] += 1
+        _restore_generation = _command_generation[0]
+
+        def _restore_superseded(stage: str) -> bool:
+            """Return True if a newer force command started during this restore."""
+            if _command_generation[0] == _restore_generation:
+                return False
+            _LOGGER.info(
+                "Restore normal superseded by newer force command during %s; "
+                "leaving active force state untouched",
+                stage,
+            )
+            return True
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -24228,7 +24883,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["expires_at"] = None
                 force_discharge_state["expires_at"] = None
 
-                _LOGGER.info("Fronius Reserva NORMAL OPERATION RESTORED (Auto)")
+                _LOGGER.info("Fronius GEN24 storage NORMAL OPERATION RESTORED (Auto)")
 
                 if not suppress_notification:
                     try:
@@ -24247,7 +24902,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await persist_force_mode_state()
                 return
             except Exception as e:
-                _LOGGER.error(f"Error in Fronius Reserva restore normal: {e}", exc_info=True)
+                _LOGGER.error(f"Error in Fronius GEN24 storage restore normal: {e}", exc_info=True)
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -24411,6 +25066,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Switched site %s to self_consumption mode", site_id)
                         else:
                             _LOGGER.warning("Could not switch site %s to self_consumption: %s", site_id, response.status)
+                    if _restore_superseded("initial mode handoff"):
+                        return
 
             # Check if user is using dynamic pricing (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
@@ -24442,7 +25099,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
                     "_suppress_force_mode_toggle_once"
                 ] = "restore_normal is already controlling Tesla operation mode"
+                if allow_monitoring_restore:
+                    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+                        "_allow_monitoring_tou_sync_once"
+                    ] = "optimizer shutdown restore is releasing an active force tariff"
                 await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
+                if _restore_superseded("TOU sync"):
+                    return
             elif saved_tariff:
                 # Non-dynamic users - restore saved tariffs per site
                 _LOGGER.info("Restoring saved tariffs...")
@@ -24475,6 +25138,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                     if len(site_configs) > 1:
                         await asyncio.sleep(1)
+                    if _restore_superseded("tariff restore"):
+                        return
             else:
                 # No saved tariff - for tariff-backed spike users this is a problem
                 # because sync_tou_schedule intentionally skips these providers.
@@ -24495,6 +25160,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.warning("No saved tariff to restore, triggering sync")
                     await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
+                    if _restore_superseded("fallback TOU sync"):
+                        return
 
             # Restore operation mode and backup reserve on all gateways
             for site_id, current_token, provider in site_configs:
@@ -24627,6 +25294,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Restored export rule to %s for site %s", saved_export_rule, site_id)
                         else:
                             _LOGGER.warning("Could not restore export rule for site %s: %s", site_id, response.status)
+                if _restore_superseded("mode/reserve restore"):
+                    return
 
             # Explicitly re-enable grid charging unless still in a demand peak period
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -24763,7 +25432,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if duration not in DISCHARGE_DURATIONS:
             duration = DEFAULT_DISCHARGE_DURATION
 
-        source = call.data.get("source", "user")
+        source = _control_call_source(call)
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would hold battery SoC for %d minutes (source=%s) — blocked by monitoring mode",
+                duration,
+                source,
+            )
+            return
 
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
 
@@ -24909,9 +25586,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         button. When the caller supplies source='optimizer' (LP executor),
         the handler executes the hardware write only and skips updating
         self_consumption_state — that keeps automated activity out of the
-        user-facing Controls screen toggle. Manual calls (source='user' or
-        omitted) also flip self_consumption_state['active']=True so the
-        mobile UI can render the toggle on.
+        user-facing Controls screen toggle. Manual calls (source='user' or a
+        Home Assistant user context) also flip self_consumption_state['active']=True
+        so the mobile UI can render the toggle on.
 
         Unlike restore_normal, this:
         - Sets mode to self_consumption (not autonomous)
@@ -24919,8 +25596,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         - Does NOT send push notifications
         """
 
-        source = call.data.get("source", "user")
+        source = _control_call_source(call)
         _LOGGER.info("Setting pure self-consumption mode (source=%s)", source)
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set self-consumption mode (source=%s) — blocked by monitoring mode",
+                source,
+            )
+            return
 
         # Mark the mobile toggle on for user-sourced calls. The hardware
         # calls below are idempotent so we set the flag up front; optimizer
@@ -25071,23 +25755,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting SAJ H2 self-consumption: {e}", exc_info=True)
                 return
 
-        # Check if this is a Fronius Reserva system
+        # Check if this is a Fronius GEN24 storage system
         is_fronius_reserva_sc = bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID))
         if is_fronius_reserva_sc:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
-                    _LOGGER.error("Self-consumption: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Self-consumption: Fronius GEN24 storage coordinator not available")
                     return
                 success = await fronius_coord.restore_normal()
                 if success:
-                    _LOGGER.info("Fronius Reserva self-consumption mode restored (Auto)")
+                    _LOGGER.info("Fronius GEN24 storage self-consumption mode restored (Auto)")
                 else:
-                    _LOGGER.error("Failed to set Fronius Reserva self-consumption mode")
+                    _LOGGER.error("Failed to set Fronius GEN24 storage self-consumption mode")
                 return
             except Exception as e:
-                _LOGGER.error(f"Error setting Fronius Reserva self-consumption: {e}", exc_info=True)
+                _LOGGER.error(f"Error setting Fronius GEN24 storage self-consumption: {e}", exc_info=True)
                 return
 
         # Check if this is a Neovolt system
@@ -25208,6 +25892,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         backup_reserve to act as a hard floor that prevents discharge.
         In self_consumption mode, backup_reserve alone is not reliably enforced.
         """
+        source = _control_call_source(call)
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set autonomous mode (source=%s) — blocked by monitoring mode",
+                source or "unknown",
+            )
+            return
+
         _LOGGER.info("Optimizer: Setting autonomous (TOU) mode")
 
         # Non-Tesla systems: autonomous is the default, nothing to do
@@ -25296,6 +25989,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
         except (ValueError, TypeError):
             _LOGGER.error(f"Invalid backup reserve percent: {percent}")
+            return
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set backup reserve to %d%% — blocked by monitoring mode",
+                percent,
+            )
             return
 
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
@@ -25408,22 +26108,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # SAJ H2: no backup reserve register — no-op
             _LOGGER.debug("SAJ H2 does not support backup reserve (no-op)")
         elif bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID)):
-            # Fronius Reserva via fronius_modbus entities
+            # Fronius GEN24 storage via fronius_modbus entities
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
-                    _LOGGER.error("Fronius Reserva coordinator not available for set_backup_reserve")
+                    _LOGGER.error("Fronius GEN24 storage coordinator not available for set_backup_reserve")
                     return
 
                 success = await fronius_coord.set_backup_reserve(percent)
                 if success:
-                    _LOGGER.info(f"Fronius Reserva backup reserve set to {percent}%")
+                    _LOGGER.info(f"Fronius GEN24 storage backup reserve set to {percent}%")
                 else:
-                    _LOGGER.error("Failed to set Fronius Reserva backup reserve")
+                    _LOGGER.error("Failed to set Fronius GEN24 storage backup reserve")
 
             except Exception as e:
-                _LOGGER.error(f"Error setting Fronius Reserva backup reserve: {e}", exc_info=True)
+                _LOGGER.error(f"Error setting Fronius GEN24 storage backup reserve: {e}", exc_info=True)
         elif bool(_get_neovolt_entry_ids(entry.data, hass)):
             # Neovolt via HACS integration entities
             try:
@@ -25501,8 +26201,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
                     if not din:
                         return False
+                    from .powerwall_local.normalization import (
+                        detect_local_backup_reserve_offset,
+                        local_backup_reserve_write_percent,
+                    )
+
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    low_soe_reserve = entry_data.get("powerwall_local_low_soe_reserve_pct")
+                    if low_soe_reserve is None:
+                        try:
+                            config = await transport.read_config(din)
+                            local_reserve = (
+                                ((config or {}).get("site_info") or {})
+                                .get("backup_reserve_percent")
+                            )
+                            coord = entry_data.get("tesla_coordinator")
+                            site_info = getattr(coord, "_site_info_cache", None)
+                            cloud_reserve = (
+                                site_info.get("backup_reserve_percent")
+                                if isinstance(site_info, dict)
+                                else None
+                            )
+                            detected = detect_local_backup_reserve_offset(
+                                local_reserve,
+                                cloud_reserve,
+                            )
+                            if detected is not None:
+                                low_soe_reserve = detected
+                                entry_data["powerwall_local_low_soe_reserve_pct"] = detected
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Could not auto-detect Powerwall local reserve offset: %s",
+                                err,
+                            )
+
+                    local_percent = local_backup_reserve_write_percent(
+                        percent,
+                        low_soe_reserve,
+                    )
+                    if local_percent is None:
+                        return False
                     return await transport.write_config(
-                        din, {"site_info.backup_reserve_percent": percent}
+                        din, {"site_info.backup_reserve_percent": local_percent}
                     )
 
                 async def _cloud() -> bool:
@@ -25611,6 +26351,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Invalid operation mode: {mode}. Must be 'autonomous', 'self_consumption', or 'backup'.")
             return
 
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set operation mode to %s — blocked by monitoring mode",
+                mode,
+            )
+            return
+
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
         from .const import CONF_POWERWALL_LOCAL_DIN
@@ -25696,6 +26443,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
             _LOGGER.error(f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'.")
+            return
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set grid export rule to %s — blocked by monitoring mode",
+                rule,
+            )
             return
 
         _LOGGER.info(f"📤 Setting grid export rule to {rule}")
@@ -25857,6 +26611,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enabled = enabled.lower() == "true"
         enabled = bool(enabled)
 
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set grid charging to %s — blocked by monitoring mode",
+                "enabled" if enabled else "disabled",
+            )
+            return
+
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:
@@ -25912,6 +26673,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
         enabled = bool(enabled)
 
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set Storm Watch to %s — blocked by monitoring mode",
+                "enabled" if enabled else "disabled",
+            )
+            return
+
         coord = _get_tesla_coordinator_for_service("set_storm_watch")
         if coord is None:
             return
@@ -25940,6 +26708,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Off-grid EV reserve percent out of range: %d", percent)
             return
 
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would set off-grid EV reserve to %d%% — blocked by monitoring mode",
+                percent,
+            )
+            return
+
         coord = _get_tesla_coordinator_for_service("set_off_grid_ev_reserve")
         if coord is None:
             return
@@ -25963,6 +26738,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if isinstance(enrolled, str):
             enrolled = enrolled.strip().lower() in ("true", "1", "yes", "on")
         enrolled = bool(enrolled)
+
+        if _monitoring_mode_should_block_control(call):
+            _LOGGER.info(
+                "[MONITORING] Would %s VPP program %s — blocked by monitoring mode",
+                "enroll in" if enrolled else "unenroll from",
+                program_id,
+            )
+            return
 
         coord = _get_tesla_coordinator_for_service("set_vpp_enrollment")
         if coord is None:
@@ -26051,7 +26834,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             await hass.services.async_call(
                 DOMAIN, "set_backup_reserve",
-                {"percent": int(target)}, blocking=True,
+                {"percent": int(target), "source": "user"}, blocking=True,
             )
         except Exception as err:
             _LOGGER.error("schedule_max_backup: restore failed: %s", err)
@@ -26112,7 +26895,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         await hass.services.async_call(
             DOMAIN, "set_backup_reserve",
-            {"percent": 100}, blocking=True,
+            {"percent": 100, "source": "user"}, blocking=True,
         )
 
         cancel = async_call_later(hass, duration_minutes * 60, _max_backup_restore)
@@ -26634,6 +27417,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "🔋 Powerwall pack energy polling armed (%s seconds; no-op until paired)",
             int(POWERWALL_BMS_HEALTH_POLL_INTERVAL.total_seconds()),
         )
+
+        from homeassistant.helpers.event import async_track_time_interval as _track_solar_strings_interval
+
+        solar_strings_in_progress = False
+
+        async def _poll_powerwall_solar_strings(now=None) -> None:
+            nonlocal solar_strings_in_progress
+            if solar_strings_in_progress:
+                _LOGGER.debug("Skipping overlapping Powerwall solar string poll for %s", entry.entry_id)
+                return
+            if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+                return
+
+            solar_strings_in_progress = True
+            try:
+                payload = await battery_health_view._try_fleet_api_solar_strings_fetch(entry)
+                if not payload:
+                    return
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                entry_data["solar_string_diagnostics"] = payload
+                async_dispatcher_send(
+                    hass,
+                    f"{DOMAIN}_solar_strings_update_{entry.entry_id}",
+                    payload,
+                )
+            except Exception as err:
+                _LOGGER.debug("Powerwall solar string poll failed for %s: %s", entry.entry_id, err)
+            finally:
+                solar_strings_in_progress = False
+
+        hass.async_create_task(_poll_powerwall_solar_strings())
+        hass.data[DOMAIN][entry.entry_id]["powerwall_solar_strings_poll_cancel"] = (
+            _track_solar_strings_interval(
+                hass,
+                _poll_powerwall_solar_strings,
+                timedelta(seconds=30),
+            )
+        )
+        _LOGGER.info("☀️ Powerwall solar string voltage polling armed (30 seconds; no-op until paired)")
 
     # Register HTTP endpoint for Inverter status (for mobile app Solar controls)
     hass.http.register_view(InverterStatusView(hass))
@@ -27534,6 +28356,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if rate is not None:
                 hass.data[DOMAIN][entry.entry_id]["fp_tariff_rate"] = rate
+                async_dispatcher_send(
+                    hass,
+                    f"power_sync_tariff_updated_{entry.entry_id}",
+                )
 
         async def _refresh_fp_avg_daily_tariff(now):
             """Recompute avg daily tariff at midnight for seasonal tariff changes."""
@@ -27542,6 +28368,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if avg is not None:
                 hass.data[DOMAIN][entry.entry_id]["fp_avg_daily_tariff"] = avg
+                async_dispatcher_send(
+                    hass,
+                    f"power_sync_tariff_updated_{entry.entry_id}",
+                )
                 _LOGGER.info(
                     "Flow Power avg daily tariff recomputed: %.2fc/kWh", avg
                 )
@@ -28067,9 +28897,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         for _vid, _settings in _exec._settings.items():
                                             if _vid == vc.get("vehicle_id") and _settings.phases > 1:
                                                 vc_phases = _settings.phases
-                                                if vc.get("min_amps") is None:
+                                                if vc.get("min_amps") is None and vc.get("min_charge_amps") is None:
                                                     vc["min_amps"] = _settings.min_charge_amps
-                                                if vc.get("max_amps") is None:
+                                                if vc.get("max_amps") is None and vc.get("max_charge_amps") is None:
                                                     vc["max_amps"] = _settings.max_charge_amps
                                                 if vc.get("voltage") is None:
                                                     vc["voltage"] = _settings.voltage
@@ -28081,9 +28911,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             for _vid, _settings in _exec._settings.items():
                                                 if _settings.phases > 1:
                                                     vc_phases = _settings.phases
-                                                    if vc.get("min_amps") is None:
+                                                    if vc.get("min_amps") is None and vc.get("min_charge_amps") is None:
                                                         vc["min_amps"] = _settings.min_charge_amps
-                                                    if vc.get("max_amps") is None:
+                                                    if vc.get("max_amps") is None and vc.get("max_charge_amps") is None:
                                                         vc["max_amps"] = _settings.max_charge_amps
                                                     if vc.get("voltage") is None:
                                                         vc["voltage"] = _settings.voltage
@@ -28122,8 +28952,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "dynamic_mode": "solar_surplus",
                                 "owner_mode": "solar_surplus",
                                 "charger_type": vc_charger_type,
-                                "min_charge_amps": vc.get("min_amps", 5),
-                                "max_charge_amps": vc.get("max_amps", 32),
+                                "min_charge_amps": vc.get("min_amps", vc.get("min_charge_amps", 5)),
+                                "max_charge_amps": vc.get("max_amps", vc.get("max_charge_amps", 32)),
                                 "voltage": vc.get("voltage", 240),
                                 "phases": vc_phases,
                                 "charger_switch_entity": vc.get("charger_switch_entity"),
@@ -28152,7 +28982,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info(
                                 f"☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session "
                                 f"for {vc.get('display_name', vc.get('vehicle_id', 'EV'))} "
-                                f"(phases={vc_phases}, amps={vc.get('min_amps', 5)}-{vc.get('max_amps', 32)}, "
+                                f"(phases={vc_phases}, amps={vc.get('min_amps', vc.get('min_charge_amps', 5))}-{vc.get('max_amps', vc.get('max_charge_amps', 32))}, "
                                 f"voltage={vc.get('voltage', 240)})"
                             )
                             await _action_start_ev_charging_dynamic(hass, entry, params, context=None)
@@ -28336,6 +29166,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_solaredge:
                 battery_system = "solaredge"
                 energy_coordinator = solaredge_coordinator
+            elif is_custom_battery:
+                battery_system = BATTERY_SYSTEM_CUSTOM
+                energy_coordinator = None
             else:
                 battery_system = "tesla"
                 energy_coordinator = tesla_coordinator
@@ -28422,6 +29255,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             saved_max_discharge_w = _positive_int_setting(
                 CONF_OPTIMIZATION_MAX_DISCHARGE_W
             )
+            saved_max_grid_import_w = _positive_int_setting(
+                CONF_OPTIMIZATION_MAX_GRID_IMPORT_W
+            )
+            saved_auto_apply_reserve = bool(
+                entry.options.get(
+                    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                    entry.data.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False),
+                )
+            )
+            saved_manual_reserve_pct = entry.options.get(
+                CONF_OPTIMIZATION_MANUAL_RESERVE,
+                entry.data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+            )
+            saved_manual_reserve = None
+            if saved_manual_reserve_pct is not None:
+                try:
+                    saved_manual_reserve = float(saved_manual_reserve_pct)
+                    if saved_manual_reserve > 1:
+                        saved_manual_reserve = saved_manual_reserve / 100
+                    saved_manual_reserve = max(0.0, min(1.0, saved_manual_reserve))
+                except (TypeError, ValueError):
+                    saved_manual_reserve = None
+            if saved_auto_apply_reserve and saved_manual_reserve is None:
+                saved_manual_reserve = saved_backup_reserve
 
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
@@ -28445,6 +29302,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             optimizer_config_updates = {
                 "interval_minutes": saved_interval_minutes,
                 "backup_reserve": saved_backup_reserve,
+                "auto_apply_reserve_enabled": saved_auto_apply_reserve,
+                "manual_backup_reserve": saved_manual_reserve,
             }
             if saved_capacity_wh is not None:
                 optimizer_config_updates["battery_capacity_wh"] = saved_capacity_wh
@@ -28452,7 +29311,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 optimizer_config_updates["max_charge_w"] = saved_max_charge_w
             if saved_max_discharge_w is not None:
                 optimizer_config_updates["max_discharge_w"] = saved_max_discharge_w
+            optimizer_config_updates["max_grid_import_w"] = saved_max_grid_import_w
             optimization_coordinator.update_config(**optimizer_config_updates)
+            optimization_coordinator._auto_apply_reserve_enabled = saved_auto_apply_reserve
+            optimization_coordinator._manual_backup_reserve = saved_manual_reserve
+            optimization_coordinator._config.auto_apply_reserve_enabled = (
+                saved_auto_apply_reserve
+            )
+            optimization_coordinator._config.manual_backup_reserve = (
+                saved_manual_reserve
+            )
             if any(v is not None for v in (saved_capacity_wh, saved_max_charge_w, saved_max_discharge_w)):
                 optimization_coordinator._battery_specs_source = "manual"
             _LOGGER.info(
@@ -28886,6 +29754,8 @@ class OptimizationSettingsView(HomeAssistantView):
 
             backup_reserve = DEFAULT_OPTIMIZATION_BACKUP_RESERVE
             hardware_reserve = 0
+            auto_apply_reserve = False
+            manual_reserve = None
             if config_entry:
                 raw_backup = config_entry.data.get(
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
@@ -28910,6 +29780,23 @@ class OptimizationSettingsView(HomeAssistantView):
                         hardware_reserve = hardware_reserve * 100
                 except (TypeError, ValueError):
                     hardware_reserve = 0
+                auto_apply_reserve = bool(
+                    config_entry.options.get(
+                        CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                        config_entry.data.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False),
+                    )
+                )
+                raw_manual = config_entry.options.get(
+                    CONF_OPTIMIZATION_MANUAL_RESERVE,
+                    config_entry.data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+                )
+                try:
+                    if raw_manual is not None:
+                        manual_reserve = float(raw_manual)
+                        if manual_reserve > 1:
+                            manual_reserve = manual_reserve / 100
+                except (TypeError, ValueError):
+                    manual_reserve = None
 
             return web.json_response({
                 "success": True,
@@ -28919,6 +29806,10 @@ class OptimizationSettingsView(HomeAssistantView):
                 ),
                 "cost_function": "cost",
                 "backup_reserve": round(backup_reserve * 100),
+                "auto_apply_reserve_enabled": auto_apply_reserve,
+                "manual_backup_reserve": (
+                    round(manual_reserve * 100) if manual_reserve is not None else None
+                ),
                 "ev_integration": bool(
                     config_entry
                     and config_entry.options.get(
@@ -28960,6 +29851,11 @@ class OptimizationSettingsView(HomeAssistantView):
                         CONF_OPTIMIZATION_MAX_DISCHARGE_W,
                         default_power_w,
                     ),
+                    "max_grid_import_w": (
+                        _entry_int_setting(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W, 0)
+                        if config_entry
+                        else 0
+                    ),
                     "allow_grid_charge": bool(
                         config_entry.options.get(
                             CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
@@ -28983,6 +29879,12 @@ class OptimizationSettingsView(HomeAssistantView):
                         )
                         if config_entry
                         else False
+                    ),
+                    "auto_apply_reserve_enabled": auto_apply_reserve,
+                    "manual_backup_reserve": (
+                        round(manual_reserve * 100)
+                        if manual_reserve is not None
+                        else None
                     ),
                     "profit_max_target_time": (
                         config_entry.options.get(
@@ -29024,13 +29926,26 @@ class OptimizationSettingsView(HomeAssistantView):
             "profit_max_enabled": opt_coordinator.profit_max_mode,
             "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
+            "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
+            "manual_backup_reserve": (
+                round(opt_coordinator.manual_backup_reserve * 100)
+                if opt_coordinator.manual_backup_reserve is not None
+                else None
+            ),
             "config": {
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
                 "max_charge_w": opt_coordinator._config.max_charge_w,
                 "max_discharge_w": opt_coordinator._config.max_discharge_w,
+                "max_grid_import_w": opt_coordinator._config.max_grid_import_w,
                 "allow_grid_charge": opt_coordinator._config.allow_grid_charge,
                 "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
                 "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
+                "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
+                "manual_backup_reserve": (
+                    round(opt_coordinator.manual_backup_reserve * 100)
+                    if opt_coordinator.manual_backup_reserve is not None
+                    else None
+                ),
                 "backup_reserve": round(opt_coordinator._config.backup_reserve * 100),
                 "hardware_backup_reserve": opt_coordinator._startup_backup_reserve if opt_coordinator._startup_backup_reserve is not None else 0,
                 "battery_specs_source": opt_coordinator._battery_specs_source,
@@ -29149,6 +30064,63 @@ class OptimizationSettingsView(HomeAssistantView):
                 new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(settings["spread_import_enabled"])
                 changes.append(f"Set spread import to {settings['spread_import_enabled']}")
 
+            if "auto_apply_reserve_enabled" in settings:
+                auto_apply = bool(settings["auto_apply_reserve_enabled"])
+                current_live = new_data.get(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    new_options.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+                    ),
+                )
+                try:
+                    current_live = float(current_live)
+                except (TypeError, ValueError):
+                    current_live = DEFAULT_OPTIMIZATION_BACKUP_RESERVE
+                if current_live > 1:
+                    current_live = current_live / 100.0
+
+                manual_restore = new_options.get(
+                    CONF_OPTIMIZATION_MANUAL_RESERVE,
+                    new_data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+                )
+                try:
+                    manual_restore = (
+                        float(manual_restore)
+                        if manual_restore is not None
+                        else current_live
+                    )
+                except (TypeError, ValueError):
+                    manual_restore = current_live
+                if manual_restore > 1:
+                    manual_restore = manual_restore / 100.0
+                manual_restore = max(0.0, min(1.0, manual_restore))
+
+                new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply
+                new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply
+                new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_restore
+                new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_restore
+                if not auto_apply:
+                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = manual_restore
+                    new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = manual_restore
+                changes.append(f"Set auto-apply optimizer reserve to {auto_apply}")
+
+            if "manual_backup_reserve" in settings:
+                manual_restore = settings["manual_backup_reserve"]
+                try:
+                    manual_restore = float(manual_restore)
+                except (TypeError, ValueError):
+                    manual_restore = None
+                if manual_restore is not None:
+                    if manual_restore > 1:
+                        manual_restore = manual_restore / 100.0
+                    manual_restore = max(0.0, min(1.0, manual_restore))
+                    new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_restore
+                    new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_restore
+                    changes.append(
+                        f"Set manual optimizer reserve to {int(manual_restore * 100)}%"
+                    )
+
             if "cost_function" in settings:
                 from .const import CONF_OPTIMIZATION_COST_FUNCTION
                 new_data[CONF_OPTIMIZATION_COST_FUNCTION] = settings["cost_function"]
@@ -29162,6 +30134,9 @@ class OptimizationSettingsView(HomeAssistantView):
                     reserve = reserve / 100.0
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
                 new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
+                if new_options.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False):
+                    new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve
+                    new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve
                 changes.append(f"Set backup reserve to {int(reserve * 100)}%")
 
             if "hardware_backup_reserve" in settings:
@@ -29184,6 +30159,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "battery_capacity_wh": CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
                 "max_charge_w": CONF_OPTIMIZATION_MAX_CHARGE_W,
                 "max_discharge_w": CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                "max_grid_import_w": CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
             }
             for payload_key, option_key in spec_key_map.items():
                 if payload_key not in settings:
@@ -29304,10 +30280,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data["powerwall_pack_sensor_unsub"] = None
         _LOGGER.debug("Unsubscribed Powerwall pack sensor listener")
 
+    if solar_string_sensor_unsub := entry_data.get("powerwall_solar_string_sensor_unsub"):
+        solar_string_sensor_unsub()
+        entry_data["powerwall_solar_string_sensor_unsub"] = None
+        _LOGGER.debug("Unsubscribed Powerwall solar string sensor listener")
+
     if bms_poll_cancel := entry_data.get("powerwall_bms_health_poll_cancel"):
         bms_poll_cancel()
         entry_data["powerwall_bms_health_poll_cancel"] = None
         _LOGGER.debug("Cancelled Powerwall BMS health polling")
+
+    if solar_strings_poll_cancel := entry_data.get("powerwall_solar_strings_poll_cancel"):
+        solar_strings_poll_cancel()
+        entry_data["powerwall_solar_strings_poll_cancel"] = None
+        _LOGGER.debug("Cancelled Powerwall solar string polling")
 
     # Cancel the AEMO spike timer if it exists
     if aemo_spike_cancel := entry_data.get("aemo_spike_cancel"):

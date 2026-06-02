@@ -95,6 +95,160 @@ def test_vehicle_charger_config_syncs_generic_status_entity():
     assert settings.charger_status_entity == "sensor.garage_ev_status"
 
 
+def test_vehicle_charger_config_syncs_app_charge_amp_aliases():
+    settings = ev_planner.AutoScheduleSettings(
+        min_charge_amps=5,
+        max_charge_amps=32,
+    )
+
+    settings.apply_charger_config({
+        "min_charge_amps": 6,
+        "max_charge_amps": 15,
+        "voltage": 240,
+        "phases": 1,
+    })
+
+    assert settings.min_charge_amps == 6
+    assert settings.max_charge_amps == 15
+    assert settings.voltage == 240
+    assert settings.phases == 1
+
+
+def test_auto_schedule_sync_reads_app_vehicle_config_store():
+    automation_store = types.SimpleNamespace(
+        _data={
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": "ble_teslablefbd",
+                    "charger_type": "tesla",
+                    "min_amps": 5,
+                    "max_amps": 15,
+                    "voltage": 240,
+                    "phases": 1,
+                }
+            ]
+        }
+    )
+    hass = types.SimpleNamespace(
+        data={
+            ev_planner.DOMAIN: {
+                "entry-1": {
+                    "automation_store": automation_store,
+                }
+            }
+        }
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1")
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+    executor._store = types.SimpleNamespace(_data={})
+
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="ble_teslablefbd",
+        max_charge_amps=32,
+        voltage=230,
+    )
+
+    executor._sync_charger_params_from_vehicle_configs(
+        "ble_teslablefbd",
+        settings,
+    )
+
+    assert settings.max_charge_amps == 15
+    assert settings.voltage == 240
+    assert settings.phases == 1
+
+
+def test_auto_schedule_sync_reads_app_charge_amp_aliases():
+    automation_store = types.SimpleNamespace(
+        _data={
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": "ble_teslablefbd",
+                    "charger_type": "tesla",
+                    "min_charge_amps": 6,
+                    "max_charge_amps": 15,
+                    "voltage": 240,
+                    "phases": 1,
+                }
+            ]
+        }
+    )
+    hass = types.SimpleNamespace(
+        data={
+            ev_planner.DOMAIN: {
+                "entry-1": {
+                    "automation_store": automation_store,
+                }
+            }
+        }
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1")
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+    executor._store = types.SimpleNamespace(_data={})
+
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="ble_teslablefbd",
+        min_charge_amps=5,
+        max_charge_amps=32,
+        voltage=230,
+    )
+
+    executor._sync_charger_params_from_vehicle_configs(
+        "ble_teslablefbd",
+        settings,
+    )
+
+    assert settings.min_charge_amps == 6
+    assert settings.max_charge_amps == 15
+    assert settings.voltage == 240
+    assert settings.phases == 1
+
+
+def test_auto_schedule_sync_matches_ble_prefix_alias():
+    automation_store = types.SimpleNamespace(
+        _data={
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": "teslablefbd",
+                    "max_amps": 15,
+                    "voltage": 240,
+                    "phases": 1,
+                }
+            ]
+        }
+    )
+    hass = types.SimpleNamespace(
+        data={
+            ev_planner.DOMAIN: {
+                "entry-1": {
+                    "automation_store": automation_store,
+                }
+            }
+        }
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1")
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+    executor._store = types.SimpleNamespace(_data={})
+
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="ble_teslablefbd",
+        max_charge_amps=32,
+    )
+
+    executor._sync_charger_params_from_vehicle_configs(
+        "ble_teslablefbd",
+        settings,
+    )
+
+    assert settings.max_charge_amps == 15
+
+
 def test_configured_generic_entities_preserve_vehicle_overrides():
     params = {
         "charger_switch_entity": "switch.vehicle_ev",

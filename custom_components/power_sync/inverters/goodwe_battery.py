@@ -14,6 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _GOODWE_UDP_PORT = 8899
 _UDP_FAILURE_CACHE_SECONDS = 300  # re-try UDP no more than once every 5 min
+_GOODWE_EXPORT_LIMIT_MAX_W = 65535
 
 
 class GoodWeBatteryController:
@@ -250,8 +251,9 @@ class GoodWeBatteryController:
 
     async def set_grid_export_limit(self, watts: int) -> bool:
         """Set grid export limit in watts."""
-        await self._inverter.set_grid_export_limit(watts)
-        _LOGGER.info("GoodWe export limit set to %dW", watts)
+        limit_w = max(0, min(_GOODWE_EXPORT_LIMIT_MAX_W, int(watts)))
+        await self._inverter.set_grid_export_limit(limit_w)
+        _LOGGER.info("GoodWe export limit set to %dW", limit_w)
         return True
 
     async def curtail(self) -> bool:
@@ -271,8 +273,8 @@ class GoodWeBatteryController:
         try:
             if not await self.connect():
                 return False
-            # 99999W effectively removes the limit for any consumer-grade inverter
-            await self._inverter.set_grid_export_limit(99999)
+            # The GoodWe library encodes this as a 16-bit unsigned register.
+            await self._inverter.set_grid_export_limit(_GOODWE_EXPORT_LIMIT_MAX_W)
             _LOGGER.info("GoodWe restore: export limit removed")
             return True
         except Exception as e:

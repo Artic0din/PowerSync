@@ -96,6 +96,66 @@ def _runtime(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     )
 
 
+def _local_access_status(
+    entry: ConfigEntry,
+    coordinator: PowerwallLocalCoordinator | None = None,
+) -> dict[str, Any]:
+    """Return app-facing local LAN availability without probing the gateway."""
+    paired = bool(entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
+    gateway_ip = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
+    configured = bool(gateway_ip)
+
+    mode = "unpaired"
+    local_available = False
+    local_reachable = False
+    needs_repair = False
+
+    if paired and not configured:
+        mode = "cloud_only"
+    elif paired and coordinator is None:
+        mode = "local_pending"
+    elif paired:
+        needs_repair = bool(getattr(coordinator, "needs_repair", False))
+        has_snapshot = getattr(coordinator, "data", None) is not None
+        local_reachable = bool(getattr(coordinator, "reachable", False))
+        local_available = has_snapshot and local_reachable and not needs_repair
+        if needs_repair:
+            mode = "needs_repair"
+        elif local_available:
+            mode = "local_available"
+        else:
+            mode = "local_unavailable"
+
+    return {
+        "cloud_paired": paired,
+        "gateway_ip": gateway_ip or None,
+        "local_access_configured": configured,
+        "local_available": local_available,
+        "local_reachable": local_reachable,
+        "needs_repair": needs_repair,
+        "mode": mode,
+    }
+
+
+async def _warm_powerwall_local_coordinator(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Best-effort local coordinator warm-up after cloud pairing succeeds."""
+    try:
+        await ensure_coordinator(hass, entry)
+    except Exception as err:
+        _LOGGER.debug("Powerwall local coordinator warm-up failed: %s", err)
+
+
+def _schedule_local_coordinator_warmup(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Start local LAN polling without blocking the pairing success path."""
+    hass.async_create_task(_warm_powerwall_local_coordinator(hass, entry))
+
+
 def _get_fleet_api_context(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> tuple[str | None, str | None, int | None]:
@@ -343,8 +403,7 @@ class PowerwallPairStartView(HomeAssistantView):
                 CONF_POWERWALL_LOCAL_ENERGY_SITE_ID: result.energy_site_id,
             }
             self._hass.config_entries.async_update_entry(entry, data=updated)
-            # Spin up the coordinator in the background so local polling begins.
-            await ensure_coordinator(self._hass, entry)
+            _schedule_local_coordinator_warmup(self._hass, entry)
 
         mgr = PowerwallPairingManager(
             session,
@@ -384,24 +443,32 @@ class PowerwallPairStatusView(HomeAssistantView):
             )
         runtime = _runtime(self._hass, entry)
         mgr: PowerwallPairingManager | None = runtime.get("pairing_manager")
+        coordinator = runtime.get("coordinator")
         paired = bool(entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
+        local_status = _local_access_status(entry, coordinator)
         if mgr is None:
+            status = {
+                "state": "verified" if paired else "idle",
+                "message": "",
+                "remaining_seconds": None,
+                **local_status,
+            }
             return web.json_response(
                 {
                     "success": True,
                     "paired": paired,
-                    "status": {
-                        "state": "verified" if paired else "idle",
-                        "message": "",
-                        "remaining_seconds": None,
-                    },
+                    **local_status,
+                    "status": status,
                 }
             )
+        status = mgr.status().to_dict()
+        status.update(local_status)
         return web.json_response(
             {
                 "success": True,
                 "paired": paired,
-                "status": mgr.status().to_dict(),
+                **local_status,
+                "status": status,
             }
         )
 
@@ -543,6 +610,8 @@ class PowerwallSetGatewayIpView(HomeAssistantView):
             "Gateway IP updated to %r — local client will rebuild on next access",
             gateway_ip or "(cleared)",
         )
+        if gateway_ip and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+            _schedule_local_coordinator_warmup(self._hass, entry)
         return web.json_response({
             "success": True,
             "gateway_ip": gateway_ip or None,
@@ -801,16 +870,32 @@ class PowerwallLocalStatusView(HomeAssistantView):
             )
         paired = bool(entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
         if not paired:
-            return web.json_response({"success": True, "paired": False})
+            return web.json_response(
+                {
+                    "success": True,
+                    "paired": False,
+                    "available": False,
+                    "reachable": False,
+                    **_local_access_status(entry),
+                }
+            )
         coordinator = await ensure_coordinator(self._hass, entry)
+        local_status = _local_access_status(entry, coordinator)
         if coordinator is None:
             return web.json_response(
-                {"success": True, "paired": True, "available": False}
+                {
+                    "success": True,
+                    "paired": True,
+                    "available": False,
+                    "reachable": False,
+                    **local_status,
+                }
             )
         return web.json_response(
             {
                 "success": True,
                 "paired": True,
+                **local_status,
                 **coordinator.snapshot_as_api(),
             }
         )

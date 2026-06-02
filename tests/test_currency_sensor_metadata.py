@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ def _install_sensor_stubs() -> None:
     ha_update = types.ModuleType("homeassistant.helpers.update_coordinator")
     ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
     ha_event = types.ModuleType("homeassistant.helpers.event")
+    ha_restore_state = types.ModuleType("homeassistant.helpers.restore_state")
     ha_util = types.ModuleType("homeassistant.util")
     ha_dt = types.ModuleType("homeassistant.util.dt")
 
@@ -48,6 +50,10 @@ def _install_sensor_stubs() -> None:
     class CoordinatorEntity:
         def __init__(self, coordinator):
             self.coordinator = coordinator
+
+    class RestoreEntity:
+        async def async_get_last_state(self):
+            return None
 
     ha_sensor.SensorEntityDescription = SensorEntityDescription
     ha_sensor.SensorEntity = SensorEntity
@@ -87,6 +93,7 @@ def _install_sensor_stubs() -> None:
     ha_dispatcher.async_dispatcher_connect = lambda *args, **kwargs: (lambda: None)
     ha_event.async_track_time_interval = lambda *args, **kwargs: (lambda: None)
     ha_event.async_call_later = lambda *args, **kwargs: (lambda: None)
+    ha_restore_state.RestoreEntity = RestoreEntity
     ha_dt.now = lambda *args, **kwargs: datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
     ha_dt.as_local = lambda value: value
     ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
@@ -97,6 +104,7 @@ def _install_sensor_stubs() -> None:
     ha_helpers.update_coordinator = ha_update
     ha_helpers.dispatcher = ha_dispatcher
     ha_helpers.event = ha_event
+    ha_helpers.restore_state = ha_restore_state
     ha_components.sensor = ha_sensor
     ha_root.components = ha_components
     ha_root.config_entries = ha_config_entries
@@ -118,6 +126,7 @@ def _install_sensor_stubs() -> None:
     sys.modules["homeassistant.helpers.update_coordinator"] = ha_update
     sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
     sys.modules["homeassistant.helpers.event"] = ha_event
+    sys.modules["homeassistant.helpers.restore_state"] = ha_restore_state
     sys.modules["homeassistant.util"] = ha_util
     sys.modules["homeassistant.util.dt"] = ha_dt
 
@@ -186,6 +195,29 @@ def test_aud_monetary_total_keeps_monetary_device_class_and_value():
     assert entity.extra_state_attributes["currency"] == "AUD"
 
 
+def test_daily_cost_uses_restored_numeric_state_while_energy_summary_is_missing():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_import_cost")
+    entity = sensor.TeslaEnergySensor(SimpleNamespace(data={}), desc, _entry("amber"))
+    entity.hass = _hass("AUD")
+    entity._restored_native_value = 4.56
+
+    assert entity.native_value == 4.56
+
+
+def test_flow_power_import_price_uses_restored_state_before_coordinator_data():
+    sensor = _sensor_module()
+    entity = sensor.FlowPowerPriceSensor(
+        SimpleNamespace(data=None),
+        _entry("flow_power"),
+        "current_import_price",
+    )
+    entity.hass = _hass("AUD")
+    entity._restored_native_value = 0.321
+
+    assert entity.native_value == 0.321
+
+
 def test_daily_load_uses_total_state_class():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_load")
@@ -235,6 +267,72 @@ def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
     assert entity.extra_state_attributes["battery_inverter_solar_power_kw"] == 4.2
     assert entity.extra_state_attributes["ac_inverter_solar_power_kw"] == 5.1
     assert entity.extra_state_attributes["total_solar_power_kw"] == 9.3
+
+
+def test_local_powerwall_home_load_excludes_observed_ev_power():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+        options={},
+    )
+    local_coord = SimpleNamespace(
+        data=SimpleNamespace(load_w=10_700.0),
+        last_success_ts=time.time(),
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"load_power": 3.6, "ev_power": 7.1}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "powerwall_local": {
+                        "coordinator": local_coord,
+                    },
+                },
+            },
+        },
+    )
+
+    assert round(entity.native_value, 3) == 3.6
+
+
+def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+        options={},
+    )
+    local_coord = SimpleNamespace(
+        data=SimpleNamespace(load_w=2_000.0),
+        last_success_ts=time.time(),
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"load_power": 0.0, "ev_power": 7.1}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "powerwall_local": {
+                        "coordinator": local_coord,
+                    },
+                },
+            },
+        },
+    )
+
+    assert entity.native_value == 0.0
 
 
 def test_neovolt_surplus_balancer_sensor_exposes_status_and_attributes():
@@ -306,6 +404,40 @@ def test_optimizer_force_discharge_windows_include_discharge_and_export():
     assert attrs["total_minutes"] == 120
     assert [w["action"] for w in attrs["windows"]] == ["export", "discharge"]
     assert attrs["next_power_w"] == 4200
+
+
+def test_optimizer_current_action_exposes_reserve_recommendation():
+    sensor = _sensor_module()
+    desc = next(
+        d
+        for d in sensor.OPTIMIZER_ACTION_SENSORS
+        if d.key == "optimization_status"
+    )
+    recommendation = {
+        "suggested_optimizer_reserve_percent": 59,
+        "minimum_forecast_soc_percent": 59.1,
+        "next_charge_reason": "forecast_solar_surplus",
+    }
+    payload = {
+        "current_action": "self_consumption",
+        "current_power_w": 1000,
+        "actual_battery_power_w": 950,
+        "status": "active",
+        "current_action_end_time": "2026-05-04T00:05:00+00:00",
+        "lp_stats": {"solver_used": "highs"},
+        "reserve_recommendation": recommendation,
+        "idle_hold_active": True,
+        "idle_hold_reserve": 1.0,
+        "idle_hold_reserve_percent": 100,
+    }
+    entity = sensor.OptimizerActionSensor(SimpleNamespace(data=payload), desc, _entry("amber"))
+
+    assert entity.native_value == "self_consumption"
+    attrs = entity.extra_state_attributes
+    assert attrs["reserve_recommendation"] == recommendation
+    assert attrs["lp_stats"]["solver_used"] == "highs"
+    assert attrs["idle_hold_active"] is True
+    assert attrs["idle_hold_reserve_percent"] == 100
 
 
 def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():
@@ -420,6 +552,49 @@ def test_powerwall_pack_sensors_use_bms_health_and_parent_device():
     assert soc.extra_state_attributes["pack_role"] == "expansion"
     assert soc.extra_state_attributes["is_expansion"] is True
     assert soc.extra_state_attributes["source"] == "ha_local_tedapi"
+
+
+def test_powerwall_solar_string_voltage_sensor_metadata_and_value():
+    sensor = _sensor_module()
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    diagnostics = {
+        "source": "pw3_components",
+        "transport_source": "ha_fleet_api_relay",
+        "last_scan": "2026-05-30T10:00:00+10:00",
+        "strings": [
+            {
+                "id": "pch:A",
+                "label": "A",
+                "mppt": "A",
+                "voltage_v": 295.24,
+                "current_a": 3.1,
+                "power_w": 915.244,
+                "state": "PV_Active",
+                "connected": True,
+            }
+        ],
+        "groups": [
+            {
+                "id": "gateway:A+B",
+                "label": "MPPT A+B",
+                "string_ids": ["pch:A", "pch:B"],
+                "total_power_w": 1800.0,
+            }
+        ],
+    }
+    hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {"solar_string_diagnostics": diagnostics}}}
+    )
+
+    entity = sensor.PowerwallSolarStringVoltageSensor(hass, entry, "pch_a", "pch:A", "A")
+
+    assert entity.device_info == sensor.powerwall_device_info("entry-1")
+    assert entity.native_value == 295.2
+    assert entity.available is True
+    assert entity._attr_name == "Solar String A Voltage"
+    assert entity.extra_state_attributes["source"] == "pw3_components"
+    assert entity.extra_state_attributes["transport_source"] == "ha_fleet_api_relay"
+    assert entity.extra_state_attributes["group_label"] == "MPPT A+B"
 
 
 def test_powerwall_pack_builder_skips_missing_optional_metrics():
@@ -599,3 +774,55 @@ def test_has_tesla_ev_device_tolerates_extended_identifier_shape():
     )
 
     assert sensor._has_tesla_ev_device(hass) is True
+
+
+def test_has_solaredge_ev_power_detects_reported_charger_entity():
+    sensor = _sensor_module()
+    state = SimpleNamespace(
+        entity_id="sensor.ev_charger_power",
+        attributes={"friendly_name": "SolarEdge EV Charger EV Charger Power"},
+    )
+    hass = SimpleNamespace(states=SimpleNamespace(async_all=lambda domain=None: [state]))
+
+    assert sensor._has_solaredge_ev_power(hass) is True
+
+
+def test_has_solaredge_ev_power_ignores_unrelated_charger_power():
+    sensor = _sensor_module()
+    state = SimpleNamespace(
+        entity_id="sensor.tessy_charger_power",
+        attributes={"friendly_name": "Tessy Charger Power"},
+    )
+    hass = SimpleNamespace(states=SimpleNamespace(async_all=lambda domain=None: [state]))
+
+    assert sensor._has_solaredge_ev_power(hass) is False
+
+
+def test_ev_status_sensor_labels_solaredge_coordinator_power():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.EV_SENSORS if d.key == "ev_power")
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    entity = sensor.EVStatusSensor(SimpleNamespace(data={}), entry, desc)
+    entity.async_write_ha_state = lambda: None
+    entity.hass = SimpleNamespace(
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "solaredge_coordinator": SimpleNamespace(
+                        data={
+                            "ev_power": 7.4,
+                            "ev_charger_type": "solaredge",
+                            "ev_charger_connected": True,
+                            "ev_charger_charging": True,
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    entity._handle_coordinator_update()
+
+    assert entity.native_value == 7.4
+    assert entity.extra_state_attributes["vehicle_name"] == "SolarEdge EV Charger"
+    assert entity.extra_state_attributes["vehicle_id"] == "solaredge_ev_charger"

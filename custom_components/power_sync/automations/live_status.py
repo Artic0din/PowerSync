@@ -25,4 +25,5 @@ def coordinator_data_to_ev_live_status(data: dict[str, Any]) -> dict[str, Any]:
         "solar_power": _kw_to_w(data.get("solar_power", 0)),
         "battery_power": _kw_to_w(data.get("battery_power", 0)),
         "load_power": _kw_to_w(data.get("load_power", 0)),
+        "ev_power": _kw_to_w(data.get("ev_power", 0)),
     }

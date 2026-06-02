@@ -22,7 +22,7 @@ def _method_source(file_path: Path, class_name: str, method_name: str) -> str:
     for node in module.body:
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
                     return ast.unparse(item)
     raise AssertionError(f"{class_name}.{method_name} not found")
 
@@ -203,3 +203,127 @@ def test_network_tariff_lookup_uses_dispatch_interval_end(monkeypatch):
         "BLNRSS2",
     )
     assert captured_times[-1] == datetime(2026, 5, 27, 10, 0, tzinfo=tz)
+
+
+def test_flow_power_tariff_refresh_dispatches_sensor_update_signal():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tariff_refresh = source[
+        source.index("async def _refresh_fp_tariff_rate"):
+        source.index("async def _refresh_fp_avg_daily_tariff")
+    ]
+    avg_refresh = source[
+        source.index("async def _refresh_fp_avg_daily_tariff"):
+        source.index("fp_tariff_cancel = async_track_utc_time_change")
+    ]
+
+    signal = 'f"power_sync_tariff_updated_{entry.entry_id}"'
+
+    assert '["fp_tariff_rate"] = rate' in tariff_refresh
+    assert signal in tariff_refresh
+    assert tariff_refresh.index('["fp_tariff_rate"] = rate') < tariff_refresh.index(signal)
+
+    assert '["fp_avg_daily_tariff"] = avg' in avg_refresh
+    assert signal in avg_refresh
+    assert avg_refresh.index('["fp_avg_daily_tariff"] = avg') < avg_refresh.index(signal)
+
+
+def test_flow_power_price_sensor_listens_for_tariff_updates():
+    source = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "async_added_to_hass",
+    )
+
+    assert "async_dispatcher_connect" in source
+    assert "SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id)" in source
+    assert "_handle_flow_power_tariff_update" in source
+
+    handler = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "_handle_flow_power_tariff_update",
+    )
+    assert "async_write_ha_state" in handler
+
+
+def test_flow_power_tariff_dependent_sensors_listen_for_tariff_updates():
+    for class_name in (
+        "FlowPowerNetworkTariffSensor",
+        "FlowPowerAmberComparisonSensor",
+    ):
+        source = _method_source(
+            COMPONENT_ROOT / "sensor.py",
+            class_name,
+            "async_added_to_hass",
+        )
+
+        assert "async_dispatcher_connect" in source
+        assert "SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id)" in source
+        assert "_handle_flow_power_tariff_update" in source
+
+        handler = _method_source(
+            COMPONENT_ROOT / "sensor.py",
+            class_name,
+            "_handle_flow_power_tariff_update",
+        )
+        assert "async_write_ha_state" in handler
+
+
+def test_network_tariff_dropdown_uses_get_tariffs_api(monkeypatch):
+    fake_const = types.ModuleType("power_sync.const")
+    fake_const.NETWORK_MODULE_NAME = {"Energex": "energex"}
+    fake_power_sync = types.ModuleType("power_sync")
+    fake_power_sync.__path__ = [str(COMPONENT_ROOT)]
+    fake_aemo_to_tariff = types.ModuleType("aemo_to_tariff")
+    fake_energex = types.ModuleType("aemo_to_tariff.energex")
+    fake_energex.get_tariffs = lambda: {
+        "8400": {"name": "Residential Flat"},
+        "3700": {"name": "Residential Demand"},
+    }
+
+    monkeypatch.setitem(sys.modules, "power_sync", fake_power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", fake_const)
+    monkeypatch.setitem(sys.modules, "aemo_to_tariff", fake_aemo_to_tariff)
+    monkeypatch.setitem(sys.modules, "aemo_to_tariff.energex", fake_energex)
+
+    spec = importlib.util.spec_from_file_location(
+        "power_sync.tariff_utils",
+        COMPONENT_ROOT / "tariff_utils.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    assert module.get_tariff_codes_for_network("Energex") == {
+        "8400": "8400 — Residential Flat",
+        "3700": "3700 — Residential Demand",
+    }
+
+
+def test_network_tariff_dropdown_falls_back_to_legacy_tariffs_attr(monkeypatch):
+    fake_const = types.ModuleType("power_sync.const")
+    fake_const.NETWORK_MODULE_NAME = {"United": "victoria"}
+    fake_power_sync = types.ModuleType("power_sync")
+    fake_power_sync.__path__ = [str(COMPONENT_ROOT)]
+    fake_aemo_to_tariff = types.ModuleType("aemo_to_tariff")
+    fake_victoria = types.ModuleType("aemo_to_tariff.victoria")
+    fake_victoria.tariffs = {
+        "VICR_SINGLE": {"name": "Residential Single Rate"},
+    }
+
+    monkeypatch.setitem(sys.modules, "power_sync", fake_power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", fake_const)
+    monkeypatch.setitem(sys.modules, "aemo_to_tariff", fake_aemo_to_tariff)
+    monkeypatch.setitem(sys.modules, "aemo_to_tariff.victoria", fake_victoria)
+
+    spec = importlib.util.spec_from_file_location(
+        "power_sync.tariff_utils",
+        COMPONENT_ROOT / "tariff_utils.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    assert module.get_tariff_codes_for_network("United") == {
+        "VICR_SINGLE": "VICR_SINGLE — Residential Single Rate",
+    }

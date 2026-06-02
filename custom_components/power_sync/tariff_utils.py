@@ -164,7 +164,10 @@ def get_tariff_codes_for_network(network_display: str) -> dict[str, str]:
 
     try:
         mod = importlib.import_module(f"aemo_to_tariff.{module_name}")
-        tariffs = getattr(mod, "tariffs", {})
+        get_tariffs = getattr(mod, "get_tariffs", None)
+        tariffs = (
+            get_tariffs() if callable(get_tariffs) else getattr(mod, "tariffs", {})
+        )
         result = {}
         for code, data in tariffs.items():
             if isinstance(data, dict) and "name" in data:

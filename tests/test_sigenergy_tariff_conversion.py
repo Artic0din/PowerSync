@@ -301,6 +301,33 @@ def test_sigenergy_tariff_sync_does_not_require_optional_device_id():
     assert "device_id=device_id" in helper_source
 
 
+def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_id():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    helper_source = init_source[
+        init_source.index("async def _sync_tariff_to_sigenergy"):
+        init_source.index("async def _sync_tariff_to_foxess")
+    ]
+
+    assert "CONF_SIGENERGY_TARIFF_STATION_ID" in helper_source
+    assert "CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID" in helper_source
+    assert "new_data[CONF_SIGENERGY_STATION_ID] = tariff_station_id" not in helper_source
+    assert "configured station ID remains" in helper_source
+    assert "station_id=tariff_station_id" in helper_source
+
+
+def test_sigenergy_station_picker_preserves_system_id_and_caches_tariff_id():
+    config_flow_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+    helper_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_station"):
+        config_flow_source.index("async def async_step_sigenergy_modbus")
+    ]
+
+    assert "CONF_SIGENERGY_TARIFF_STATION_ID" in helper_source
+    assert "CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID" in helper_source
+    assert "not value.isdigit()" in helper_source
+    assert "station_tariff_ids[station_id] = tariff_station_id" in helper_source
+
+
 class _FakeTariffResponse:
     def __init__(
         self,
@@ -382,7 +409,7 @@ def test_sigenergy_set_tariff_retries_429_with_retry_after(
     assert sleeps == [0.25]
 
 
-def test_sigenergy_set_tariff_preserves_alphanumeric_station_id(
+def test_sigenergy_set_tariff_rejects_alphanumeric_system_id(
     sigenergy_api_module,
 ):
     session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
@@ -400,8 +427,46 @@ def test_sigenergy_set_tariff_preserves_alphanumeric_station_id(
         )
     )
 
-    assert result == {"success": True, "message": "Tariff updated"}
-    assert session.post_kwargs[0]["json"]["stationId"] == "TUWXW1774845255"
+    assert "Station ID must be numeric" in result["error"]
+    assert session.post_calls == 0
+
+
+def test_sigenergy_extract_tariff_station_id_prefers_numeric_station_id(
+    sigenergy_api_module,
+):
+    station = {
+        "id": "ERSUO1757055255",
+        "stationId": "102025092300219",
+        "stationName": "Home",
+    }
+
+    assert sigenergy_api_module.extract_tariff_station_id(station) == "102025092300219"
+
+
+def test_sigenergy_resolves_configured_system_id_to_numeric_station_id(
+    sigenergy_api_module,
+):
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+    )
+
+    async def fake_get_stations():
+        return {
+            "stations": [
+                {
+                    "id": "ERSUO1757055255",
+                    "stationId": "102025092300219",
+                    "stationName": "Home",
+                }
+            ]
+        }
+
+    client.get_stations = fake_get_stations
+
+    result = asyncio.run(client.resolve_tariff_station_id(" ERSUO1757055255 "))
+
+    assert result == {"station_id": "102025092300219", "resolved": True}
 
 
 def test_sigenergy_set_tariff_stops_after_repeated_429(

@@ -103,6 +103,7 @@ class OptimizerResult:
     grid_import_w: list[float] = field(default_factory=list)
     grid_export_w: list[float] = field(default_factory=list)
     lp_stats: dict[str, Any] = field(default_factory=dict)
+    reserve_recommendation: dict[str, Any] = field(default_factory=dict)
 
 
 class BatteryOptimizer:
@@ -118,6 +119,7 @@ class BatteryOptimizer:
         capacity_wh: float = 13500,
         max_charge_w: float = 5000,
         max_discharge_w: float = 5000,
+        max_grid_import_w: float | None = None,
         max_grid_export_w: float | None = None,
         max_battery_export_w: float | None = None,
         efficiency: float = DEFAULT_EFFICIENCY,
@@ -130,6 +132,7 @@ class BatteryOptimizer:
         self.capacity_wh = capacity_wh
         self.max_charge_w = max_charge_w
         self.max_discharge_w = max_discharge_w
+        self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
         self.max_grid_export_w = max_grid_export_w
         self.max_battery_export_w = max_battery_export_w
         self.efficiency = efficiency
@@ -173,6 +176,11 @@ class BatteryOptimizer:
         self.capacity_kwh = capacity_wh / 1000.0
         self.max_charge_kw = max_charge_w / 1000.0
         self.max_discharge_kw = max_discharge_w / 1000.0
+        self.max_grid_import_kw = (
+            self.max_grid_import_w / 1000.0
+            if self.max_grid_import_w is not None
+            else None
+        )
         self.max_battery_export_kw = (
             max_battery_export_w / 1000.0
             if max_battery_export_w is not None
@@ -185,6 +193,7 @@ class BatteryOptimizer:
         capacity_wh: float | None = None,
         max_charge_w: float | None = None,
         max_discharge_w: float | None = None,
+        max_grid_import_w: float | None | object = _UNSET,
         max_grid_export_w: float | None = None,
         max_battery_export_w: float | None | object = _UNSET,
         efficiency: float | None = None,
@@ -200,6 +209,13 @@ class BatteryOptimizer:
         if max_discharge_w is not None:
             self.max_discharge_w = max_discharge_w
             self.max_discharge_kw = max_discharge_w / 1000.0
+        if max_grid_import_w is not _UNSET:
+            self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
+            self.max_grid_import_kw = (
+                self.max_grid_import_w / 1000.0
+                if self.max_grid_import_w is not None
+                else None
+            )
         if max_grid_export_w is not None:
             self.max_grid_export_w = max_grid_export_w
         if max_battery_export_w is not _UNSET:
@@ -213,6 +229,31 @@ class BatteryOptimizer:
             self.efficiency = efficiency
         if backup_reserve is not None:
             self.backup_reserve = backup_reserve
+
+    @staticmethod
+    def _normalize_optional_power_w(value: float | None | object) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _charge_limit_kw(
+        self,
+        load_kw: float,
+        solar_kw: float,
+        allow_grid_charge: bool,
+    ) -> float:
+        """Return feasible battery charge power for a slot."""
+        charge_limit = self.max_charge_kw
+        if not allow_grid_charge:
+            charge_limit = min(charge_limit, max(0.0, solar_kw - load_kw))
+        elif self.max_grid_import_kw is not None:
+            charge_limit = min(
+                charge_limit,
+                max(0.0, self.max_grid_import_kw - load_kw + solar_kw),
+            )
+        return max(0.0, charge_limit)
 
     def update_hardware_reserve(self, hardware_reserve: float) -> None:
         """Update hardware reserve (from manufacturer's app setting)."""
@@ -818,12 +859,13 @@ class BatteryOptimizer:
             max_reachable = soc_0
             reserve_floor[0] = soc_0
             for t in range(p_n):
-                reachable_charge_kw = 0.0 if p_block_charge[t] else self.max_charge_kw
-                if not allow_grid_charge:
-                    reachable_charge_kw = min(
-                        reachable_charge_kw,
-                        max(0.0, p_solar[t] - p_load[t]),
+                reachable_charge_kw = (
+                    0.0
+                    if p_block_charge[t]
+                    else self._charge_limit_kw(
+                        p_load[t], p_solar[t], allow_grid_charge
                     )
+                )
                 max_reachable = min(
                     recovery_target,
                     max_reachable + reachable_charge_kw * eff * p_dt[t] / cap,
@@ -1052,7 +1094,15 @@ class BatteryOptimizer:
             if pre_window_boundary > 0:
                 slots_to_window = pre_window_boundary
                 max_soc_gain = (
-                    self.max_charge_kw * eff * sum(p_dt[:slots_to_window]) / cap
+                    sum(
+                        self._charge_limit_kw(
+                            p_load[t], p_solar[t], allow_grid_charge
+                        )
+                        * p_dt[t]
+                        for t in range(slots_to_window)
+                    )
+                    * eff
+                    / cap
                 )
                 max_reachable = min(1.0, soc_0 + max_soc_gain)
                 # 0.5% buffer so a tight LP doesn't flip infeasible from rounding
@@ -1137,8 +1187,12 @@ class BatteryOptimizer:
         # unbounded LP if a price accidentally goes negative or zero). Sites
         # with a known DNSP/export limit override the export side so the LP
         # models the same physical cap the runtime controller will enforce.
-        max_grid_kw = 100.0
-        max_grid_export_kw = max_grid_kw
+        max_grid_kw = (
+            max(0.0, self.max_grid_import_w / 1000.0)
+            if self.max_grid_import_w is not None
+            else 100.0
+        )
+        max_grid_export_kw = 100.0
         if self.max_grid_export_w is not None:
             max_grid_export_kw = max(0.0, self.max_grid_export_w / 1000.0)
         bounds = []
@@ -1204,10 +1258,19 @@ class BatteryOptimizer:
                 # passthrough.
                 bounds.append((0, 0.0))
             elif not allow_grid_charge:
-                solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
-                bounds.append((0, min(self.max_charge_kw, solar_surplus_kw)))
+                bounds.append((
+                    0,
+                    self._charge_limit_kw(
+                        p_load[t], p_solar[t], allow_grid_charge
+                    ),
+                ))
             else:
-                bounds.append((0, self.max_charge_kw))  # battery_charge
+                bounds.append((
+                    0,
+                    self._charge_limit_kw(
+                        p_load[t], p_solar[t], allow_grid_charge
+                    ),
+                ))  # battery_charge
 
         for t in range(p_n):
             export_profitable_slot = (
@@ -1389,6 +1452,11 @@ class BatteryOptimizer:
 
         schedule.predicted_cost = round(predicted_cost, 2)
         schedule.predicted_savings = round(predicted_savings, 2)
+        reserve_recommendation = self._build_reserve_recommendation(
+            schedule,
+            solar,
+            load,
+        )
 
         return OptimizerResult(
             schedule=schedule,
@@ -1398,7 +1466,92 @@ class BatteryOptimizer:
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
             lp_stats=lp_stats,
+            reserve_recommendation=reserve_recommendation,
         )
+
+    def _build_reserve_recommendation(
+        self,
+        schedule: OptimizationSchedule,
+        solar: list[float],
+        load: list[float],
+    ) -> dict[str, Any]:
+        """Suggest the optimizer reserve needed to bridge to the next charge."""
+        actions = schedule.actions or []
+        if not actions:
+            return {}
+
+        threshold_w = ACTION_THRESHOLD_W
+        next_charge_idx: int | None = None
+        next_charge_reason: str | None = None
+        for idx, action in enumerate(actions):
+            if action.battery_charge_w > threshold_w:
+                next_charge_idx = idx
+                next_charge_reason = (
+                    "scheduled_grid_charge"
+                    if action.action == "charge"
+                    else "forecast_solar_surplus"
+                )
+                break
+
+            if idx < len(solar) and idx < len(load):
+                if (solar[idx] - load[idx]) * 1000 > threshold_w:
+                    next_charge_idx = idx
+                    next_charge_reason = "forecast_solar_surplus"
+                    break
+
+        bridge_actions = (
+            actions[: next_charge_idx + 1]
+            if next_charge_idx is not None
+            else actions
+        )
+        soc_points = [
+            (idx, action.soc)
+            for idx, action in enumerate(bridge_actions)
+            if action.soc is not None
+        ]
+        if not soc_points:
+            return {}
+
+        minimum_idx, minimum_soc_raw = min(soc_points, key=lambda item: item[1])
+        minimum_soc = float(minimum_soc_raw)
+        configured_percent = max(
+            0,
+            min(100, int(round(self.backup_reserve * 100))),
+        )
+        hardware_percent = max(
+            0,
+            min(100, int(round(self.hardware_reserve * 100))),
+        )
+        starting_soc = float(soc_points[0][1])
+        meaningful_bridge_drop = starting_soc - minimum_soc > 0.02
+        if meaningful_bridge_drop:
+            suggested_ratio = max(self.hardware_reserve, min(1.0, minimum_soc))
+        else:
+            suggested_ratio = max(self.hardware_reserve, self.backup_reserve)
+        suggested_percent = max(0, min(100, int(round(suggested_ratio * 100))))
+
+        recommendation: dict[str, Any] = {
+            "suggested_optimizer_reserve_percent": suggested_percent,
+            "configured_optimizer_reserve_percent": configured_percent,
+            "hardware_reserve_percent": hardware_percent,
+            "minimum_forecast_soc_percent": max(
+                0,
+                min(100, round(minimum_soc * 100, 1)),
+            ),
+            "minimum_forecast_soc_time": actions[minimum_idx].timestamp.isoformat(),
+            "protects_until": (
+                actions[next_charge_idx].timestamp.isoformat()
+                if next_charge_idx is not None
+                else actions[-1].timestamp.isoformat()
+            ),
+            "next_charge_reason": next_charge_reason or "no_charge_in_horizon",
+            "needs_optimizer_reserve_raise": suggested_percent > configured_percent,
+        }
+        if not meaningful_bridge_drop:
+            recommendation["note"] = "No discharge bridge before next charge"
+        if next_charge_idx is None:
+            recommendation["note"] = "No charging opportunity in optimizer horizon"
+        return recommendation
 
     def _solve_lp_relaxed(
         self,
@@ -1623,9 +1776,9 @@ class BatteryOptimizer:
             ):
                 continue
             charge_room = (1.0 - soc_tracker) * cap / (eff * dt)
-            charge_limit = self.max_charge_kw
-            if not allow_grid_charge:
-                charge_limit = min(charge_limit, max(0.0, -net_load))
+            charge_limit = self._charge_limit_kw(
+                load[t], solar[t], allow_grid_charge
+            )
             charge_kw = min(charge_limit, max(0, charge_room))
             if charge_kw > 0.01:
                 actions[t] = (charge_kw, 0.0)
@@ -1694,6 +1847,11 @@ class BatteryOptimizer:
 
         schedule.predicted_cost = round(predicted_cost, 2)
         schedule.predicted_savings = round(baseline_cost - predicted_cost, 2)
+        reserve_recommendation = self._build_reserve_recommendation(
+            schedule,
+            solar,
+            load,
+        )
 
         return OptimizerResult(
             schedule=schedule,
@@ -1701,6 +1859,7 @@ class BatteryOptimizer:
             feasible=True,
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
+            reserve_recommendation=reserve_recommendation,
         )
 
     def _build_schedule(
@@ -1746,6 +1905,12 @@ class BatteryOptimizer:
         block_battery_charge = block_battery_charge or [False] * n
         actions = []
         soc = soc_0
+        optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
+        self_consumption_floor = (
+            max(0.0, min(soc_0, self.hardware_reserve))
+            if soc_0 < optimizer_reserve
+            else optimizer_reserve
+        )
 
         for t in range(n):
             ts = now + timedelta(minutes=t * self.interval_minutes)
@@ -1764,9 +1929,14 @@ class BatteryOptimizer:
             # Determine action
             if free_import_slot:
                 # Free electricity — always request force charge for the full
-                # slot so the action plan does not oscillate with the LP.
+                # feasible slot so the action plan does not oscillate with the LP.
                 action = "charge"
-                power_w = max(charge_kw * 1000, self.max_charge_w)
+                full_slot_w = (
+                    self._charge_limit_kw(load[t], solar[t], True) * 1000
+                    if self.max_grid_import_w is not None
+                    else self.max_charge_w
+                )
+                power_w = max(charge_kw * 1000, full_slot_w)
             elif charge_kw > threshold_kw and import_kw > (load[t] + threshold_kw):
                 # Grid is providing more than load needs → grid charging battery
                 action = "charge"
@@ -1834,7 +2004,7 @@ class BatteryOptimizer:
             ):
                 net_home_kw = load[t] - solar[t]
                 if net_home_kw > threshold_kw:
-                    available_kw = soc * cap * eff / dt
+                    available_kw = max(0.0, soc - self_consumption_floor) * cap * eff / dt
                     natural_discharge_kw = min(
                         self.max_discharge_kw,
                         net_home_kw,
@@ -1857,7 +2027,7 @@ class BatteryOptimizer:
             effective_charge_kw = reported_charge_w / 1000
             effective_discharge_kw = reported_discharge_w / 1000
             soc += (effective_charge_kw * eff - effective_discharge_kw / eff) * dt / cap
-            soc = max(0.0, min(1.0, soc))
+            soc = max(self_consumption_floor, min(1.0, soc))
 
             actions.append(ScheduleAction(
                 timestamp=ts,

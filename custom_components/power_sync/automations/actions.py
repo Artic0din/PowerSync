@@ -75,6 +75,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
     "wake_entity",
 )
 OCPP_MIN_CHARGE_AMPS = 6
+FULL_EV_SOC = 100
 PRE_CHARGE_WAKE_DURATION_KEYS = (
     "pre_charge_wake_duration_seconds",
     "pre_charge_wake_wait_seconds",
@@ -173,6 +174,15 @@ def _coerce_positive_int(value: Any, default: Optional[int] = None) -> Optional[
     except (TypeError, ValueError):
         return default
     return result if result > 0 else default
+
+
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    """Return a positive float from user/config input, or None when invalid."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
 
 
 def _kw_from_power_state(state: Any) -> float:
@@ -369,6 +379,65 @@ def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
                 if state.state and state.state.lower() in ("complete", "stopped"):
                     return True
     return False
+
+
+def _dynamic_ev_soc_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional[str]:
+    """Return the VIN/vehicle identifier to use for dynamic EV SOC lookups."""
+    return (
+        params.get("vehicle_vin")
+        or params.get("vehicle_id")
+        or (vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None)
+    )
+
+
+async def _get_dynamic_ev_battery_level(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Dict[str, Any],
+) -> Optional[float]:
+    """Return current EV SOC for dynamic charging when available."""
+    try:
+        from .ev_charging_planner import get_ev_battery_level
+    except (ImportError, AttributeError) as err:
+        _LOGGER.debug("Dynamic EV: could not import EV battery lookup: %s", err)
+        return None
+
+    try:
+        soc = await get_ev_battery_level(
+            hass,
+            config_entry,
+            _dynamic_ev_soc_vehicle_vin(vehicle_id, params),
+        )
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV: could not read EV battery level: %s", err)
+        return None
+
+    if soc is None:
+        return None
+
+    try:
+        return float(soc)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _dynamic_ev_full_soc_reason(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Return a stop/block reason if the target EV is already full."""
+    ev_soc = await _get_dynamic_ev_battery_level(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    if ev_soc is None or ev_soc < FULL_EV_SOC:
+        return None
+    return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
 
 
 async def _get_observed_ev_power_kw(
@@ -1526,7 +1595,7 @@ async def _action_set_backup_reserve(
             await hass.services.async_call(
                 DOMAIN,
                 SERVICE_SET_BACKUP_RESERVE,
-                {"percent": reserve_percent},
+                {"percent": reserve_percent, "source": "automation"},
                 blocking=True,
             )
             if attempt > 0:
@@ -1571,7 +1640,7 @@ async def _action_preserve_charge(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_EXPORT,
-            {"rule": "never"},
+            {"rule": "never", "source": "automation"},
             blocking=True,
         )
         return True
@@ -1607,7 +1676,7 @@ async def _action_set_operation_mode(
             await hass.services.async_call(
                 DOMAIN,
                 SERVICE_SET_OPERATION_MODE,
-                {"mode": mode},
+                {"mode": mode, "source": "automation"},
                 blocking=True,
             )
             if attempt > 0:
@@ -1633,7 +1702,7 @@ async def _action_force_discharge(
     from ..const import DOMAIN, SERVICE_FORCE_DISCHARGE
 
     try:
-        service_data: Dict[str, Any] = {"duration": duration}
+        service_data: Dict[str, Any] = {"duration": duration, "source": "automation"}
         power_w = params.get("power_w")
         if power_w is not None:
             service_data["power_w"] = int(power_w)
@@ -1661,7 +1730,7 @@ async def _action_force_charge(
     from ..const import DOMAIN, SERVICE_FORCE_CHARGE
 
     try:
-        service_data: Dict[str, Any] = {"duration": duration}
+        service_data: Dict[str, Any] = {"duration": duration, "source": "automation"}
         power_w = params.get("power_w")
         if power_w is not None:
             service_data["power_w"] = int(power_w)
@@ -1740,7 +1809,12 @@ async def _action_disable_optimizer(
             _LOGGER.info("Optimizer disabled via automation action (direct config path)")
         # Restore normal battery operation so the battery isn't stuck in a forced mode
         try:
-            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_RESTORE_NORMAL,
+                {"source": "automation"},
+                blocking=True,
+            )
         except Exception as restore_err:
             _LOGGER.warning(f"disable_optimizer: restore_normal failed (non-fatal): {restore_err}")
         return True
@@ -1916,7 +1990,7 @@ async def _action_set_grid_export(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_EXPORT,
-            {"rule": rule},
+            {"rule": rule, "source": "automation"},
             blocking=True,
         )
         return True
@@ -1943,7 +2017,7 @@ async def _action_set_grid_charging(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_CHARGING,
-            {"enabled": enabled},
+            {"enabled": enabled, "source": "automation"},
             blocking=True,
         )
         return True
@@ -2099,7 +2173,7 @@ async def _action_restore_normal(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_RESTORE_NORMAL,
-            {},
+            {"source": "automation"},
             blocking=True,
         )
         return True
@@ -3493,6 +3567,7 @@ async def _action_set_ev_charging_amps(
 # Structure: { entry_id: { vehicle_id: { state... }, ... }, ... }
 _dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
+_BATTERY_TAPER_BYPASS_SOC = 95.0
 _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
@@ -4632,7 +4707,18 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
     for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator"):
         coordinator = entry_data.get(coord_key)
         if coordinator and coordinator.data:
-            return coordinator_data_to_ev_live_status(coordinator.data)
+            live_status = coordinator_data_to_ev_live_status(coordinator.data)
+            if (
+                entry_data.get("inverter_last_state") == "curtailed"
+                or entry_data.get("sungrow_curtailment_state") == "curtailed"
+            ):
+                live_status["is_curtailed"] = True
+            elif (
+                entry_data.get("inverter_last_state") in ("normal", "running")
+                or entry_data.get("sungrow_curtailment_state") == "normal"
+            ):
+                live_status["is_curtailed"] = False
+            return live_status
 
     # Fall back to direct API call
     token_getter = entry_data.get("token_getter")
@@ -4676,6 +4762,30 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         return None
 
 
+def _live_status_power_kw(live_status: dict, key: str) -> float:
+    """Return a live_status power value in kW."""
+    try:
+        return (float(live_status.get(key) or 0.0)) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float:
+    """Derive non-EV home load from site balance when possible."""
+    ev_kw = max(0.0, current_ev_power_kw)
+    balance_keys = ("solar_power", "grid_power", "battery_power")
+    if all(key in live_status and live_status.get(key) is not None for key in balance_keys):
+        balanced_total_kw = (
+            _live_status_power_kw(live_status, "solar_power")
+            + _live_status_power_kw(live_status, "grid_power")
+            + _live_status_power_kw(live_status, "battery_power")
+        )
+        return max(0.0, balanced_total_kw - ev_kw)
+
+    load_power_kw = _live_status_power_kw(live_status, "load_power")
+    return max(0.0, load_power_kw - ev_kw)
+
+
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -4698,6 +4808,25 @@ async def _dynamic_ev_update_surplus(
     if await _clear_ble_dynamic_session_if_unplugged(
         hass, config_entry, vehicle_id, params
     ):
+        return
+
+    full_soc_reason = await _dynamic_ev_full_soc_reason(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    if full_soc_reason:
+        _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
+        await _action_stop_ev_charging_dynamic(
+            hass,
+            config_entry,
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_reason": "already full",
+            },
+        )
         return
 
     # Don't charge when vehicle is away from home
@@ -4865,11 +4994,6 @@ async def _dynamic_ev_update_surplus(
                 f"grid import {grid_power_kw:.1f}kW exceeds "
                 f"{grid_import_tolerance_kw:.1f}kW tolerance below the {min_soc}% floor"
             )
-        elif raw_surplus_kw <= 0:
-            unsafe_reason = (
-                f"no surplus remains after reserving {max_battery_charge_kw}kW "
-                f"for the battery below the {min_soc}% floor"
-            )
         elif battery_charge_kw <= 0.05:
             unsafe_reason = (
                 f"battery is not charging below the {min_soc}% floor"
@@ -4914,21 +5038,15 @@ async def _dynamic_ev_update_surplus(
             state["paused_reason"] = None
             state["parallel_charging_mode"] = False
 
-    # Pause if battery drops below pause threshold (only in normal mode, not parallel)
+    # Pause if battery drops below pause threshold. In parallel mode, a plain
+    # loss of reserved surplus is handled by the stop-delay hysteresis below.
     if state.get("charging_started") and battery_soc < pause_soc:
-        # In parallel mode, pause once no EV surplus remains after battery reserve.
+        # In parallel mode, keep the session active long enough for the stop
+        # delay to absorb short cloud dips when only reserved surplus is gone.
         if state.get("parallel_charging_mode"):
             if raw_surplus_kw <= 0:
-                if not state.get("paused"):
-                    state["paused"] = True
-                    state["paused_reason"] = (
-                        f"Parallel charging paused - no surplus remains after "
-                        f"reserving {max_battery_charge_kw}kW for the battery"
-                    )
-                    _LOGGER.info(f"⚡ Solar surplus EV: {state['paused_reason']}")
-                    await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
-                    state["current_amps"] = 0
-                return
+                state["paused"] = False
+                state["paused_reason"] = None
         else:
             # Normal mode: pause below pause_soc threshold
             if not state.get("paused"):
@@ -5209,6 +5327,143 @@ def _get_home_power_max_charge_amps(hass, config_entry) -> Optional[int]:
     return _coerce_positive_int(settings.get("max_amps_per_phase"))
 
 
+def _get_home_power_max_grid_import_kw(hass, config_entry) -> Optional[float]:
+    """Return configured site grid import capacity from Home Power settings."""
+    settings = _get_home_power_settings(hass, config_entry)
+    max_grid_import_amps = _coerce_positive_int(settings.get("max_grid_import_amps"))
+    if max_grid_import_amps is None:
+        return None
+
+    phases = 3 if settings.get("phase_type") == "three" else 1
+    voltage = _coerce_positive_int(settings.get("default_voltage"), 240) or 240
+    return round((max_grid_import_amps * voltage * phases) / 1000.0, 3)
+
+
+def _extract_tesla_site_max_meter_power_kw(data: Any) -> Optional[float]:
+    """Return Tesla's max site import limit from site_info/config payloads."""
+    if not isinstance(data, dict):
+        return None
+
+    for key in (
+        "max_site_meter_power_ac",
+        "max_site_meter_power",
+        "maxSiteMeterPowerAc",
+        "MaxSiteMeterPowerAc",
+    ):
+        value_kw = _coerce_positive_float(data.get(key))
+        if value_kw is not None:
+            # Tesla cloud site_info normally reports kW here; local config
+            # variants may report watts, so normalize large values.
+            return round(value_kw / 1000.0 if value_kw > 1000 else value_kw, 3)
+
+    for nested_key in ("site_info", "components", "config"):
+        nested_value = _extract_tesla_site_max_meter_power_kw(data.get(nested_key))
+        if nested_value is not None:
+            return nested_value
+
+    return None
+
+
+def _get_cached_tesla_max_site_meter_power_kw(hass, config_entry) -> Optional[float]:
+    """Return Tesla's cached max site import limit when available."""
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    except Exception:
+        return None
+
+    for coord_key in ("tesla_coordinator", "coordinator"):
+        coordinator = entry_data.get(coord_key)
+        site_info = getattr(coordinator, "_site_info_cache", None) if coordinator else None
+        value_kw = _extract_tesla_site_max_meter_power_kw(site_info)
+        if value_kw is not None:
+            return value_kw
+
+    local_runtime = entry_data.get("powerwall_local") or {}
+    local_coordinator = local_runtime.get("coordinator")
+    local_snapshot = getattr(local_coordinator, "data", None) if local_coordinator else None
+    raw_snapshot = getattr(local_snapshot, "raw", None) if local_snapshot else None
+    value_kw = _extract_tesla_site_max_meter_power_kw(raw_snapshot)
+    if value_kw is not None:
+        return value_kw
+
+    return _extract_tesla_site_max_meter_power_kw(entry_data.get("site_info"))
+
+
+async def _get_tesla_max_site_meter_power_kw(hass, config_entry) -> Optional[float]:
+    """Return Tesla's max site import limit, preferring cached data."""
+    cached = _get_cached_tesla_max_site_meter_power_kw(hass, config_entry)
+    if cached is not None:
+        return cached
+
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    except Exception:
+        return None
+
+    for coord_key in ("tesla_coordinator", "coordinator"):
+        coordinator = entry_data.get(coord_key)
+        if not coordinator or not hasattr(coordinator, "async_get_site_info"):
+            continue
+        try:
+            site_info = await coordinator.async_get_site_info()
+        except Exception as err:
+            _LOGGER.debug("Could not fetch Tesla site_info for max site import: %s", err)
+            continue
+        value_kw = _extract_tesla_site_max_meter_power_kw(site_info)
+        if value_kw is not None:
+            return value_kw
+
+    token_getter = entry_data.get("token_getter")
+    site_id = entry_data.get("site_id")
+    if not token_getter or not site_id:
+        return None
+
+    try:
+        current_token, current_provider = token_getter()
+        if not current_token:
+            return None
+
+        import aiohttp
+
+        if current_provider == "teslemetry":
+            url = f"https://api.teslemetry.com/api/energy_sites/{site_id}/site_info"
+        else:
+            url = f"https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/{site_id}/site_info"
+
+        headers = {"Authorization": f"Bearer {current_token}"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status != 200:
+                    _LOGGER.debug("Failed to get Tesla site_info for max site import: %s", response.status)
+                    return None
+                data = await response.json()
+                return _extract_tesla_site_max_meter_power_kw(data.get("response", {}))
+    except Exception as err:
+        _LOGGER.debug("Error getting Tesla max site import from site_info: %s", err)
+
+    return None
+
+
+async def _resolve_max_grid_import_kw(
+    hass,
+    config_entry,
+    params: Optional[dict] = None,
+) -> Optional[float]:
+    """Resolve site import capacity: explicit param, Tesla site limit, Home Power."""
+    params = params or {}
+    explicit = _coerce_positive_float(params.get("max_grid_import_kw"))
+    if explicit is not None:
+        return explicit
+
+    tesla_limit = await _get_tesla_max_site_meter_power_kw(hass, config_entry)
+    if tesla_limit is not None:
+        return tesla_limit
+
+    return _get_home_power_max_grid_import_kw(hass, config_entry)
+
+
 def _resolve_dynamic_max_charge_amps(
     hass,
     config_entry,
@@ -5357,7 +5612,10 @@ async def _dynamic_ev_update(
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
     # e.g., 5.0 means we want 5kW going INTO the battery
     target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
-    max_grid_import_kw = params.get("max_grid_import_kw", 12.5)
+    max_grid_import_kw = (
+        await _resolve_max_grid_import_kw(hass, config_entry, params)
+        or 12.5
+    )
 
     # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
     no_grid_import = params.get("no_grid_import", False)
@@ -5419,17 +5677,23 @@ async def _dynamic_ev_update(
     # battery_power: Positive = discharging, Negative = charging
     battery_power_kw = (live_status.get("battery_power", 0) or 0) / 1000
     grid_power_kw = (live_status.get("grid_power", 0) or 0) / 1000
-    current_ev_power_kw = (current_amps * voltage * phases) / 1000
+    observed_ev_power_kw = _live_status_power_kw(live_status, "ev_power")
+    current_ev_power_kw = (
+        observed_ev_power_kw
+        if observed_ev_power_kw > 0.05
+        else (current_amps * voltage * phases) / 1000
+    )
+    solar_power_kw = _live_status_power_kw(live_status, "solar_power")
+    home_load_kw = _non_ev_home_load_kw(live_status, current_ev_power_kw)
     battery_soc = live_status.get("battery_soc", 0) or 0
 
     # Target battery power in same convention (negative = charging)
     # If target_battery_charge_kw = 5, we want battery_power = -5 kW
     target_battery_power_kw = -target_battery_charge_kw
 
-    # When battery is full (>=97%), it tapers charge rate naturally.
-    # Don't treat this taper as a "deficit" — the battery isn't failing to charge,
-    # it's done. Use grid headroom directly instead of penalizing the EV.
-    battery_full = battery_soc >= 97.0
+    # When a Powerwall is nearly full it tapers charge rate naturally before
+    # reaching 100%. Use grid headroom directly instead of penalizing the EV.
+    battery_full = battery_soc >= _BATTERY_TAPER_BYPASS_SOC
 
     # Battery deficit: How much more the battery should be charging
     # Positive deficit = battery is charging MORE than target (surplus available for EV)
@@ -5445,14 +5709,23 @@ async def _dynamic_ev_update(
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
     battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
-    if no_grid_import:
+    battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
+    ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
+    if target_battery_charge_kw > 0 and not battery_full:
+        target_ev_power_kw = max(
+            0.0,
+            max_grid_import_kw
+            + solar_power_kw
+            - home_load_kw
+            - target_battery_charge_kw,
+        )
+        available_power_kw = target_ev_power_kw - current_ev_power_kw
+    elif no_grid_import:
         # Exclude intentional home battery grid-charging from the grid import figure.
         # When the LP optimizer force-charges the home battery from grid, battery_power_kw
         # is negative (charging) and grid_power_kw includes that draw.  The EV should not
         # be throttled because of intentional battery charging — only because of the EV's
         # own grid draw and household load.
-        battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
-        ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
 
         # Check if battery has effectively depleted (stopped discharging).
         # When battery is not providing power (hit backup_reserve or LP set IDLE),
@@ -5476,11 +5749,6 @@ async def _dynamic_ev_update(
                     f"re-engaging inverter capacity limit"
                 )
                 state["_battery_depleted_logged"] = False
-
-            # Calculate home load using Tesla API's load_power (total behind-the-meter consumption)
-            # load_power includes home + EV + everything; subtract EV estimate for home-only load
-            load_power_kw = (live_status.get("load_power", 0) or 0) / 1000
-            home_load_kw = max(0, load_power_kw - current_ev_power_kw)
 
             # Max power available from inverter for EV = inverter_capacity - home_load
             # This is proactive: we know the limit before hitting it
@@ -5515,11 +5783,10 @@ async def _dynamic_ev_update(
 
     # Calculate new target amps
     raw_new_amps = current_amps + available_amps
-    new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
-
-    # Clamp to 0 if below minimum (stop charging)
-    if new_amps < min_amps:
+    if raw_new_amps < min_amps:
         new_amps = 0
+    else:
+        new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
 
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
@@ -5542,6 +5809,7 @@ async def _dynamic_ev_update(
 
     _LOGGER.debug(
         f"Dynamic EV: battery={battery_power_kw:.1f}kW (target={target_battery_power_kw:.1f}kW), "
+        f"solar={solar_power_kw:.1f}kW, home_load={home_load_kw:.1f}kW, "
         f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
@@ -5554,6 +5822,7 @@ async def _dynamic_ev_update(
         _LOGGER.info(
             f"⚡ Dynamic EV: Adjusting from {current_amps}A to {new_amps}A "
             f"(battery={battery_power_kw:.1f}kW, grid={grid_power_kw:.1f}kW, "
+            f"solar={solar_power_kw:.1f}kW, home_load={home_load_kw:.1f}kW, "
             f"available={available_power_kw:.1f}kW)"
         )
         success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
@@ -5710,6 +5979,29 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         return False
 
+    if dynamic_mode == "solar_surplus":
+        full_soc_reason = await _dynamic_ev_full_soc_reason(
+            hass,
+            config_entry,
+            vehicle_id,
+            params,
+        )
+        if full_soc_reason:
+            _LOGGER.info(
+                "Solar surplus EV: start blocked for %s because %s",
+                vehicle_id,
+                full_soc_reason,
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=full_soc_reason,
+            )
+            return False
+
     # Legacy fallback for runtime state created before explicit ownership was
     # claimed. This keeps old dynamic sessions from being hijacked by another
     # automated mode during an in-place upgrade.
@@ -5862,7 +6154,10 @@ async def _action_start_ev_charging_dynamic_locked(
         no_grid_import = params.get("no_grid_import", False)
         mode_params = {
             "target_battery_charge_kw": target_battery_charge_kw,
-            "max_grid_import_kw": params.get("max_grid_import_kw", 12.5),
+            "max_grid_import_kw": (
+                await _resolve_max_grid_import_kw(hass, config_entry, params)
+                or 12.5
+            ),
             "no_grid_import": no_grid_import,
             "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
             "max_inverter_kw": params.get("max_inverter_kw", 10.0),

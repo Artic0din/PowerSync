@@ -147,6 +147,7 @@ class FoxESSRegisterMap:
     # PV registers
     pv1_power: int = 0         # Scaled by battery_pv_gain
     pv2_power: int = 0         # Scaled by battery_pv_gain
+    pv3_power: int = 0         # Scaled by battery_pv_gain
     pv_power_is_32bit: bool = False  # H3-Pro/H3-Smart use 32-bit PV power
 
     # Grid registers
@@ -300,6 +301,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         battery_temperature=37613,
         pv1_power=39280,          # 32-bit: 39279 (high) + 39280 (low), scale 0.001
         pv2_power=39282,          # 32-bit: 39281 (high) + 39282 (low), scale 0.001
+        pv3_power=39284,          # 32-bit: 39283 (high) + 39284 (low), scale 0.001
         pv_power_is_32bit=True,
         grid_power=38815,         # 32-bit: 38814 (high) + 38815 (low), scale 0.0001
         grid_power_is_32bit=True,
@@ -346,6 +348,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         total_charged_energy_kwh=39625, # 32-bit: 39625 (high) + 39626 (low), scale 0.01
         pv1_power=39280,          # 32-bit: 39279 (high) + 39280 (low), scale 0.001
         pv2_power=39282,          # 32-bit: 39281 (high) + 39282 (low), scale 0.001
+        pv3_power=39284,          # 32-bit: 39283 (high) + 39284 (low), scale 0.001
         pv_power_is_32bit=True,
         grid_power=38815,         # 32-bit: scale 0.0001
         grid_power_is_32bit=True,
@@ -584,6 +587,21 @@ class FoxESSController(InverterController):
             return value - 0x100000000
         return value
 
+    async def _read_pv_power_kw(self, address: int, gain: int) -> tuple[float | None, list[int] | None]:
+        """Read a PV string power register using the active model's encoding."""
+        if not address:
+            return None, None
+        if self._register_map and self._register_map.pv_power_is_32bit:
+            raw = await self._read_holding_registers(address - 1, 2)
+            if raw and len(raw) == 2:
+                return ((raw[0] << 16) | raw[1]) / gain, raw
+            return None, raw
+
+        raw = await self._read_data_register(address, 1)
+        if raw:
+            return raw[0] / gain, raw
+        return None, raw
+
     # ---- Model detection ----
 
     async def _probe_register(self, address: int) -> bool:
@@ -703,34 +721,21 @@ class FoxESSController(InverterController):
             attrs["battery_power_w"] = battery_power_kw * 1000 if battery_power_kw is not None else None
 
             # PV power
-            pv1_kw = None
-            pv2_kw = None
-            pv1_raw = None
-            pv2_raw = None
-            if reg.pv_power_is_32bit and reg.pv1_power:
-                pv1_raw = await self._read_holding_registers(reg.pv1_power - 1, 2)
-                if pv1_raw and len(pv1_raw) == 2:
-                    pv1_kw = ((pv1_raw[0] << 16) | pv1_raw[1]) / bp_gain
-            elif reg.pv1_power:
-                pv1_raw = await self._read_data_register(reg.pv1_power, 1)
-                pv1_kw = pv1_raw[0] / bp_gain if pv1_raw else None
-            if reg.pv_power_is_32bit and reg.pv2_power:
-                pv2_raw = await self._read_holding_registers(reg.pv2_power - 1, 2)
-                if pv2_raw and len(pv2_raw) == 2:
-                    pv2_kw = ((pv2_raw[0] << 16) | pv2_raw[1]) / bp_gain
-            elif reg.pv2_power:
-                pv2_raw = await self._read_data_register(reg.pv2_power, 1)
-                pv2_kw = pv2_raw[0] / bp_gain if pv2_raw else None
-            total_pv_kw = (pv1_kw or 0) + (pv2_kw or 0)
+            pv1_kw, pv1_raw = await self._read_pv_power_kw(reg.pv1_power, bp_gain)
+            pv2_kw, pv2_raw = await self._read_pv_power_kw(reg.pv2_power, bp_gain)
+            pv3_kw, pv3_raw = await self._read_pv_power_kw(reg.pv3_power, bp_gain)
+            total_pv_kw = (pv1_kw or 0) + (pv2_kw or 0) + (pv3_kw or 0)
             attrs["pv1_power_kw"] = pv1_kw
             attrs["pv2_power_kw"] = pv2_kw
+            attrs["pv3_power_kw"] = pv3_kw
             attrs["pv_power_kw"] = total_pv_kw
             attrs["pv_power_w"] = total_pv_kw * 1000
 
             _LOGGER.debug(
-                "FoxESS PV raw: pv1_reg=%s pv1_raw=%s pv1=%.3f kW, pv2_reg=%s pv2_raw=%s pv2=%.3f kW, gain=%d, 32bit=%s",
+                "FoxESS PV raw: pv1_reg=%s pv1_raw=%s pv1=%.3f kW, pv2_reg=%s pv2_raw=%s pv2=%.3f kW, pv3_reg=%s pv3_raw=%s pv3=%.3f kW, gain=%d, 32bit=%s",
                 reg.pv1_power, list(pv1_raw) if pv1_raw else None, pv1_kw or 0,
                 reg.pv2_power, list(pv2_raw) if pv2_raw else None, pv2_kw or 0,
+                reg.pv3_power, list(pv3_raw) if pv3_raw else None, pv3_kw or 0,
                 bp_gain, reg.pv_power_is_32bit,
             )
 
@@ -1255,22 +1260,19 @@ class FoxESSController(InverterController):
 
         reg = self._register_map
 
-        # Enable remote control
-        if reg.remote_enable:
-            await self._write_holding_register(reg.remote_enable, 1)
-            if reg.remote_timeout:
-                await self._write_holding_register(reg.remote_timeout, 600)
-
-        # Set remote active power
         power_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
 
-        if reg.remote_active_power:
-            if reg.remote_active_power_is_32bit:
-                high = (power_w >> 16) & 0xFFFF
-                low = power_w & 0xFFFF
-                await self._write_holding_registers(reg.remote_active_power, [high, low])
-            else:
-                await self._write_holding_register(reg.remote_active_power, power_w)
+        success = await self._write_remote_control(
+            reg,
+            power_w,
+            duration_minutes=10,
+            timeout_seconds=600,
+            label="curtailment",
+            enable_val=REMOTE_CONTROL_GRID,
+        )
+        if not success:
+            _LOGGER.error("FoxESS solar export curtailment failed")
+            return False
 
         if power_w > 0:
             _LOGGER.info(f"FoxESS solar export curtailed (load-following: {power_w}W)")

@@ -137,6 +137,86 @@ def test_widget_data_keeps_wall_connector_without_named_active_ev():
     assert coalesce_ev_widget_data(widgets) == widgets
 
 
+def test_loadpoint_status_merges_wall_connector_into_single_active_tesla():
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN_TESS": {
+                "active": True,
+                "vehicle_name": "TESSY",
+                "current_amps": 32,
+                "target_amps": 32,
+                "charging_started": True,
+                "params": {
+                    "dynamic_mode": "battery_target",
+                    "charger_type": "tesla",
+                    "voltage": 240,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "VIN_TESS",
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "ev_power_kw": 7.0,
+                "ev_soc": 70,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "wall_connector",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 3.4,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["TESSY"]
+    assert loadpoints[0]["current_power_kw"] == 3.4
+    assert loadpoints[0]["commanded_power_kw"] == 7.68
+    assert loadpoints[0]["status"] == "charging"
+
+
+def test_loadpoint_status_keeps_wall_connector_when_tesla_match_is_ambiguous():
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "VIN_TESS",
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "VIN_THEO",
+                "vehicle_name": "THEO",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "wall_connector",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 3.4,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "TESSY",
+        "THEO",
+        "Wall Connector",
+    ]
+
+
 def test_dynamic_state_reports_commanded_no_power_when_observed_power_is_zero():
     loadpoints = build_loadpoint_status(
         {

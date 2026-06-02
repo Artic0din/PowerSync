@@ -123,7 +123,7 @@ class BatteryControllerWrapper:
 
             await self.hass.services.async_call(
                 "power_sync", "restore_normal",
-                {},
+                {"source": "optimizer", "_allow_monitoring_restore": True},
                 blocking=True,
             )
             return True

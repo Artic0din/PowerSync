@@ -260,6 +260,70 @@ class _SEStates:
         ]
 
 
+def test_solaredge_m1_kwh_counters_are_reported_as_lifetime_totals():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy",
+                        "65",
+                        {"unit_of_measurement": "%"},
+                    ),
+                    "sensor.solaredge_m1_imported_kwh": _SEState(
+                        "sensor.solaredge_m1_imported_kwh",
+                        "12345.6",
+                        {"unit_of_measurement": "kWh"},
+                    ),
+                    "sensor.solaredge_m1_exported_kwh": _SEState(
+                        "sensor.solaredge_m1_exported_kwh",
+                        "6543.2",
+                        {"unit_of_measurement": "kWh"},
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["daily_grid_import_kwh"] is None
+    assert status["daily_grid_export_kwh"] is None
+    assert status["total_grid_import_kwh"] == pytest.approx(12345.6)
+    assert status["total_grid_export_kwh"] == pytest.approx(6543.2)
+
+
+def test_solaredge_energy_bridge_maps_ev_charger_power():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy",
+                        "65",
+                        {"unit_of_measurement": "%"},
+                    ),
+                    "sensor.ev_charger_power": _SEState(
+                        "sensor.ev_charger_power",
+                        "7.4",
+                        {
+                            "unit_of_measurement": "kW",
+                            "friendly_name": "SolarEdge EV Charger EV Charger Power",
+                        },
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["ev_power"] == "sensor.ev_charger_power"
+    assert status["ev_power"] == pytest.approx(7.4)
+
+
 class _SEServices:
     def __init__(self, states: _SEStates) -> None:
         self._states = states
@@ -349,6 +413,26 @@ def test_solaredge_energy_bridge_discovers_control_entities():
     assert controller._control_entity_map["backup_reserve"] == (
         "number.solaredge_backup_reserve"
     )
+
+
+def test_solaredge_energy_bridge_discovers_remote_command_mode_alias():
+    hass = _SEHass()
+    state = hass.states._states.pop("select.solaredge_storage_command_mode")
+    state.entity_id = "select.solaredge_remote_command_mode"
+    hass.states._states[state.entity_id] = state
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert controller.control_available()
+    assert controller._control_entity_map["storage_command_mode"] == (
+        "select.solaredge_remote_command_mode"
+    )
+
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert ("select", "select_option", {
+        "entity_id": "select.solaredge_remote_command_mode",
+        "option": "Charge",
+    }) in hass.services.calls
 
 
 def test_solaredge_force_charge_writes_remote_charge_entities_and_restores():

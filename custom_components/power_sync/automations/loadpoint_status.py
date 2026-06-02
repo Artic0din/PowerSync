@@ -187,6 +187,41 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
     target["is_charging"] = bool(target.get("is_charging")) or bool(source.get("is_charging"))
 
 
+def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Merge bridge/loadpoint telemetry into a physical Tesla observation.
+
+    Wall Connector power is the loadpoint measurement, so it should replace a
+    stale per-vehicle charger_power value even when the value went down.
+    """
+    source_power = _float_value(
+        source.get("ev_power_kw", source.get("current_power_kw")),
+        0.0,
+    )
+    target_power = _float_value(
+        target.get("ev_power_kw", target.get("current_power_kw")),
+        0.0,
+    )
+    if source_power > ACTIVE_POWER_THRESHOLD_KW or target_power <= ACTIVE_POWER_THRESHOLD_KW:
+        target["ev_power_kw"] = source_power
+        target["current_power_kw"] = source_power
+
+    source_soc = source.get("ev_soc", source.get("current_soc"))
+    if source_soc is not None:
+        target["ev_soc"] = source_soc
+        target["current_soc"] = source_soc
+
+    source_charging = (
+        bool(source.get("is_charging"))
+        or source_power > ACTIVE_POWER_THRESHOLD_KW
+    )
+    target["is_connected"] = (
+        bool(target.get("is_connected"))
+        or bool(source.get("is_connected"))
+        or source_charging
+    )
+    target["is_charging"] = bool(target.get("is_charging")) or source_charging
+
+
 def _physical_tesla_observation_key(observation: Mapping[str, Any]) -> str:
     """Return a stable key for duplicate Fleet/Tesla observations."""
     if not _is_physical_tesla_observation(observation):
@@ -227,6 +262,56 @@ def _merge_duplicate_physical_tesla_observations(
     return merged
 
 
+def _merge_single_bridge_loadpoint(
+    observations: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Collapse a Wall Connector bridge row into the single active Tesla row."""
+    bridge_indexes = [
+        index for index, observation in enumerate(observations)
+        if (
+            _is_bridge_loadpoint(observation)
+            and (
+                bool(observation.get("is_connected"))
+                or bool(observation.get("is_charging"))
+                or _float_value(
+                    observation.get("ev_power_kw", observation.get("current_power_kw")),
+                    0.0,
+                ) > ACTIVE_POWER_THRESHOLD_KW
+            )
+        )
+    ]
+    candidates = [
+        index for index, observation in enumerate(observations)
+        if (
+            index not in bridge_indexes
+            and not _is_generic_observation(observation)
+            and not _is_bridge_loadpoint(observation)
+            and _is_physical_tesla_observation(observation)
+            and (
+                bool(observation.get("is_connected"))
+                or bool(observation.get("is_charging"))
+                or _float_value(
+                    observation.get("ev_power_kw", observation.get("current_power_kw")),
+                    0.0,
+                ) > ACTIVE_POWER_THRESHOLD_KW
+            )
+        )
+    ]
+
+    if len(bridge_indexes) != 1 or len(candidates) != 1:
+        return observations
+
+    merged = [
+        dict(observation) if index == candidates[0] else observation
+        for index, observation in enumerate(observations)
+    ]
+    _merge_bridge_observation_status(merged[candidates[0]], observations[bridge_indexes[0]])
+    return [
+        observation for index, observation in enumerate(merged)
+        if index != bridge_indexes[0]
+    ]
+
+
 def coalesce_vehicle_observations(
     observed_vehicles: Iterable[Mapping[str, Any]] | None,
 ) -> list[Mapping[str, Any]]:
@@ -259,12 +344,12 @@ def coalesce_vehicle_observations(
             for index, observation in enumerate(observations)
         ]
         _merge_observation_status(merged[candidates[0]], observations[ble_indexes[0]])
-        return [
+        return _merge_single_bridge_loadpoint([
             observation for index, observation in enumerate(merged)
             if index != ble_indexes[0]
-        ]
+        ])
 
-    return observations
+    return _merge_single_bridge_loadpoint(observations)
 
 
 def _display_name(vehicle_id: str, state: Mapping[str, Any]) -> str:

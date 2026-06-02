@@ -23,6 +23,7 @@ from .const import (
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_CONTROLS,
     SENSOR_FAMILY_GRID_HOME,
+    TESLA_CAPABILITY_WAIT_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ async def async_setup_entry(
     async def _add_capability_gated_binary_sensors() -> None:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         waited = 0.0
-        while "tesla_capabilities" not in entry_data and waited < 120.0:
+        while "tesla_capabilities" not in entry_data and waited < TESLA_CAPABILITY_WAIT_SECONDS:
             await asyncio.sleep(2.0)
             waited += 2.0
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})

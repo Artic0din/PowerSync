@@ -340,7 +340,21 @@ class SigenergyAPIClient:
             "Content-Type": "application/json",
         }
 
-        station_id = str(station_id).strip()
+        station_id = _normalize_station_id(station_id)
+        if not _is_numeric_station_id(station_id):
+            _LOGGER.error(
+                "Sigenergy tariff sync requires the numeric tariff stationId, "
+                "but configured station ID is %r. Ask SigenAI for 'StationID' "
+                "or reselect the station in PowerSync options.",
+                station_id,
+            )
+            return {
+                "error": (
+                    "Sigenergy tariff Station ID must be numeric. "
+                    "Ask SigenAI for 'StationID' or reselect the station in "
+                    "PowerSync options."
+                )
+            }
 
         # Build the payload in Sigenergy's expected format
         payload = {
@@ -452,6 +466,52 @@ class SigenergyAPIClient:
             _LOGGER.error(f"Set tariff error: {e}")
             return {"error": str(e)}
 
+    async def resolve_tariff_station_id(self, configured_station_id: str) -> dict:
+        """Resolve a configured station identifier to Sigenergy's numeric tariff ID.
+
+        The tariff-save endpoint expects the numeric ``stationId`` used by the
+        mySigen tariff payload. Some station-list responses also expose
+        alphanumeric system IDs (for example ERSUO...), which authenticate fine
+        but fail tariff uploads with a generic cloud 500.
+        """
+        configured = _normalize_station_id(configured_station_id)
+        if _is_numeric_station_id(configured):
+            return {"station_id": configured, "resolved": False}
+
+        stations_result = await self.get_stations()
+        if "error" in stations_result:
+            return {
+                "error": (
+                    "Configured Sigenergy station ID is not numeric and the "
+                    f"station list could not be fetched: {stations_result['error']}"
+                )
+            }
+
+        configured_key = configured.upper()
+        for station in stations_result.get("stations", []):
+            if not isinstance(station, dict):
+                continue
+            if not _station_matches_configured_id(station, configured_key):
+                continue
+
+            resolved = extract_tariff_station_id(station)
+            if resolved:
+                _LOGGER.info(
+                    "Resolved Sigenergy tariff station ID %r to numeric stationId %s",
+                    configured,
+                    resolved,
+                )
+                return {"station_id": resolved, "resolved": True}
+
+        return {
+            "error": (
+                "Configured Sigenergy station ID is not numeric and no matching "
+                "numeric stationId was found in the account station list. Ask "
+                "SigenAI for 'StationID' or reselect the station in PowerSync "
+                "options."
+            )
+        }
+
     async def test_connection(self) -> tuple[bool, str]:
         """Test the connection to Sigenergy API.
 
@@ -494,6 +554,52 @@ def _sigenergy_retry_after(retry_after: str | None, *, attempt: int) -> float:
             pass
 
     return min(5.0 * attempt, 30.0)
+
+
+def _normalize_station_id(station_id: Any) -> str:
+    """Return a trimmed station identifier string."""
+    return "" if station_id is None else str(station_id).strip()
+
+
+def _is_numeric_station_id(station_id: Any) -> bool:
+    """Return True when the value is a tariff endpoint stationId."""
+    return _normalize_station_id(station_id).isdigit()
+
+
+def extract_tariff_station_id(station: dict[str, Any]) -> str | None:
+    """Extract the numeric stationId needed by Sigenergy tariff uploads."""
+    for key in ("stationId", "station_id", "stationID"):
+        value = _normalize_station_id(station.get(key))
+        if _is_numeric_station_id(value):
+            return value
+
+    for key in ("id", "plantId", "systemId"):
+        value = _normalize_station_id(station.get(key))
+        if _is_numeric_station_id(value):
+            return value
+
+    return None
+
+
+def _station_matches_configured_id(station: dict[str, Any], configured_key: str) -> bool:
+    """Return True when a station-list row matches the configured identifier."""
+    for key in (
+        "stationId",
+        "station_id",
+        "stationID",
+        "id",
+        "plantId",
+        "systemId",
+        "stationSn",
+        "stationSN",
+        "stationCode",
+        "stationName",
+        "name",
+    ):
+        value = _normalize_station_id(station.get(key))
+        if value and value.upper() == configured_key:
+            return True
+    return False
 
 
 def convert_tariff_rates_to_sigenergy(rates: dict[str, Any]) -> list[dict]:

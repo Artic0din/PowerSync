@@ -216,7 +216,7 @@ class PowerSyncChart extends HTMLElement {
 
     for (const series of chartSeries) {
       if (series.data.length === 0) continue;
-      const step = config.stepLine;
+      const step = config.stepLine !== undefined ? config.stepLine : mode === 'history';
       let pathD = '';
 
       for (let i = 0; i < series.data.length; i++) {
@@ -760,7 +760,7 @@ class PowerSyncChart extends HTMLElement {
   _statePoint(stateObj, now) {
     const value = Number(stateObj?.state);
     if (!Number.isFinite(value)) return [];
-    const changed = Date.parse(stateObj?.last_changed || stateObj?.last_updated || '');
+    const changed = Date.parse(stateObj?.last_updated || stateObj?.last_changed || '');
     const t = Number.isFinite(changed) ? changed : now;
     return [[Math.max(t, now - 3600000), value], [now, value]];
   }
@@ -781,6 +781,7 @@ class PowerSyncChart extends HTMLElement {
         filter_entity_id: entities.join(','),
         end_time: end.toISOString(),
         no_attributes: '1',
+        significant_changes_only: '0',
       });
       const response = await hass.callApi('GET', `history/period/${start.toISOString()}?${query.toString()}`);
       const next = new Map();
@@ -790,7 +791,7 @@ class PowerSyncChart extends HTMLElement {
           const entityId = series[0]?.entity_id;
           if (!entityId) continue;
           const points = series
-            .map((p) => [Date.parse(p.last_changed || p.last_updated), Number(p.state)])
+            .map((p) => [Date.parse(p.last_updated || p.last_changed), Number(p.state)])
             .filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
           next.set(entityId, points);
         }
@@ -1026,6 +1027,1465 @@ if (!customElements.get('power-sync-forecast-summary')) {
   customElements.define('power-sync-forecast-summary', PowerSyncForecastSummary);
 }
 
+// ─── PowerSyncBatteryHealth Custom Element ──────────────────────
+// A compact, data-dense health card for aggregate and per-pack capacity data.
+
+class PowerSyncBatteryHealth extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return 4;
+  }
+
+  _render() {
+    if (!this._config || !this._hass) return;
+
+    const entity = this._config.entity;
+    const stateObj = this._hass.states?.[entity];
+    const attrs = stateObj?.attributes || {};
+    const health = this._number(stateObj?.state);
+    const original = this._number(attrs.original_capacity_kwh);
+    const current = this._number(attrs.current_capacity_kwh);
+    const soh = this._number(attrs.state_of_health_percent);
+    const source = attrs.source;
+    const sourceLabel = this._sourceLabel(source);
+    const scanLabel = this._dateLabel(attrs.last_scan);
+    const packs = this._packRows(attrs);
+    const hasCapacity = Number.isFinite(current) && Number.isFinite(original);
+    const calculatedHealth = hasCapacity && original > 0 ? (current / original) * 100 : NaN;
+    const displayHealth = Number.isFinite(health) ? health : (Number.isFinite(soh) ? soh : calculatedHealth);
+    const hasFollower = packs.some(pack => pack.role === 'follower' || pack.isFollower);
+    const available = Number.isFinite(displayHealth) || hasCapacity || packs.length > 0;
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card {
+          overflow: hidden;
+          padding: 0;
+        }
+        .shell {
+          display: grid;
+          gap: 16px;
+          padding: 18px;
+          min-width: 0;
+        }
+        .header {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 12px;
+          align-items: center;
+          min-width: 0;
+        }
+        .title {
+          min-width: 0;
+          color: var(--primary-text-color);
+          font-size: 20px;
+          font-weight: 800;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+        .subtitle {
+          min-width: 0;
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.25;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .header ha-icon {
+          width: 28px;
+          height: 28px;
+          color: var(--primary-color);
+        }
+        .summary {
+          display: grid;
+          grid-template-columns: minmax(118px, 0.72fr) minmax(0, 1fr);
+          gap: 16px;
+          align-items: stretch;
+          min-width: 0;
+        }
+        .score {
+          display: grid;
+          align-content: center;
+          min-width: 0;
+          padding: 16px;
+          border-radius: 8px;
+          background: linear-gradient(135deg, color-mix(in srgb, var(--primary-color, #03a9f4) 20%, transparent), rgba(127, 127, 127, 0.08));
+          border: 1px solid color-mix(in srgb, var(--primary-color, #03a9f4) 28%, var(--divider-color));
+        }
+        .score-value {
+          min-width: 0;
+          overflow-wrap: anywhere;
+          color: var(--primary-text-color);
+          font-size: 40px;
+          font-weight: 850;
+          line-height: 0.95;
+          letter-spacing: 0;
+        }
+        .score-value small {
+          font-size: 20px;
+          font-weight: 800;
+        }
+        .score-label {
+          margin-top: 8px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        .details {
+          display: grid;
+          align-content: center;
+          gap: 12px;
+          min-width: 0;
+        }
+        .capacity-line {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: baseline;
+          gap: 6px;
+          min-width: 0;
+          color: var(--primary-text-color);
+          font-size: 15px;
+          font-weight: 800;
+          line-height: 1.25;
+          letter-spacing: 0;
+        }
+        .capacity-line span {
+          color: var(--secondary-text-color);
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .bar {
+          position: relative;
+          overflow: hidden;
+          height: 12px;
+          border-radius: 999px;
+          background: rgba(127, 127, 127, 0.16);
+        }
+        .bar::after {
+          content: "";
+          position: absolute;
+          inset: 0 auto 0 86.96%;
+          width: 2px;
+          background: color-mix(in srgb, var(--primary-text-color) 42%, transparent);
+        }
+        .fill {
+          position: absolute;
+          inset: 0 auto 0 0;
+          width: var(--fill);
+          max-width: 100%;
+          border-radius: inherit;
+          background: linear-gradient(90deg, #43a047, #f6bf26);
+        }
+        .meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 7px;
+          min-width: 0;
+        }
+        .pill {
+          min-width: 0;
+          max-width: 100%;
+          padding: 5px 8px;
+          border-radius: 999px;
+          background: rgba(127, 127, 127, 0.10);
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+        .packs {
+          display: grid;
+          gap: 8px;
+          min-width: 0;
+        }
+        .pack {
+          display: grid;
+          grid-template-columns: minmax(124px, 1fr) minmax(110px, 0.85fr) auto;
+          gap: 10px;
+          align-items: center;
+          min-width: 0;
+          padding: 10px 0;
+          border-top: 1px solid var(--divider-color);
+        }
+        .pack-name {
+          min-width: 0;
+          color: var(--primary-text-color);
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.25;
+          letter-spacing: 0;
+          overflow-wrap: anywhere;
+        }
+        .pack-meta {
+          margin-top: 2px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.25;
+          letter-spacing: 0;
+        }
+        .pack-bar {
+          min-width: 0;
+        }
+        .pack-value {
+          color: var(--primary-text-color);
+          font-size: 18px;
+          font-weight: 850;
+          line-height: 1;
+          letter-spacing: 0;
+          white-space: nowrap;
+        }
+        .note {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-style: italic;
+          line-height: 1.35;
+          letter-spacing: 0;
+        }
+        .empty {
+          padding: 6px 0 2px;
+          color: var(--secondary-text-color);
+          font-size: 13px;
+          font-weight: 700;
+          line-height: 1.35;
+          letter-spacing: 0;
+        }
+        @media (max-width: 640px) {
+          .shell {
+            padding: 14px;
+            gap: 14px;
+          }
+          .summary {
+            grid-template-columns: 1fr;
+          }
+          .score-value {
+            font-size: 34px;
+          }
+          .pack {
+            grid-template-columns: minmax(0, 1fr) auto;
+          }
+          .pack-bar {
+            grid-column: 1 / -1;
+            grid-row: 2;
+          }
+        }
+      </style>
+      <ha-card>
+        <div class="shell">
+          <div class="header">
+            <div>
+              <div class="title">Battery Health</div>
+              <div class="subtitle">${this._escHtml(this._subtitle(source, packs.length))}</div>
+            </div>
+            <ha-icon icon="mdi:battery-heart-variant"></ha-icon>
+          </div>
+          ${available ? `
+            <div class="summary">
+              <div class="score">
+                <div class="score-value">${this._formatPercent(displayHealth, true)}</div>
+                <div class="score-label">${source === 'inverter_modbus' ? 'State of health' : 'Measured vs rated capacity'}</div>
+              </div>
+              <div class="details">
+                ${hasCapacity ? `
+                  <div class="capacity-line">${this._formatKwh(current)} <span>available of ${this._formatKwh(original)} rated</span></div>
+                  ${this._renderBar(displayHealth)}
+                ` : this._renderBar(displayHealth)}
+                <div class="meta">
+                  ${sourceLabel ? `<div class="pill">Source: ${this._escHtml(sourceLabel)}</div>` : ''}
+                  ${scanLabel ? `<div class="pill">Last scan: ${this._escHtml(scanLabel)}</div>` : ''}
+                  ${packs.length ? `<div class="pill">${packs.length} ${packs.length === 1 ? 'pack' : 'packs'}</div>` : ''}
+                </div>
+              </div>
+            </div>
+            ${packs.length ? `<div class="packs">${packs.map(pack => this._renderPack(pack)).join('')}</div>` : ''}
+            ${hasFollower ? '<div class="note">Follower capacity is inferred from aggregate gateway data.</div>' : ''}
+          ` : '<div class="empty">No battery health data available yet.</div>'}
+        </div>
+      </ha-card>
+    `;
+  }
+
+  _packRows(attrs) {
+    const count = Math.min(Number(attrs.battery_count || 0) || 8, 8);
+    const rows = [];
+    for (let index = 1; index <= count; index++) {
+      const health = this._number(attrs[`battery_${index}_health_percent`]);
+      if (!Number.isFinite(health)) continue;
+      const role = String(attrs[`battery_${index}_role`] || '').toLowerCase();
+      const isFollower = attrs[`battery_${index}_is_follower`] === true;
+      const isExpansion = attrs[`battery_${index}_is_expansion`] === true;
+      rows.push({
+        index,
+        health,
+        label: attrs[`battery_${index}_label`] || this._fallbackPackLabel(index, role, isFollower, isExpansion),
+        role,
+        isFollower,
+        capacityKwh: this._number(attrs[`battery_${index}_original_kwh`]),
+      });
+    }
+    return rows;
+  }
+
+  _fallbackPackLabel(index, role, isFollower, isExpansion) {
+    if (role === 'leader') return 'Leader PW3';
+    if (role === 'follower' || isFollower) return 'Follower PW3';
+    if (role === 'expansion' || isExpansion) return `Expansion Pack ${index}`;
+    return `Powerwall ${index}`;
+  }
+
+  _renderPack(pack) {
+    const capacity = Number.isFinite(pack.capacityKwh)
+      ? `${this._formatKwh(pack.capacityKwh)} measured`
+      : this._roleLabel(pack);
+    return `
+      <div class="pack">
+        <div>
+          <div class="pack-name">${this._escHtml(pack.label)}</div>
+          <div class="pack-meta">${this._escHtml(capacity)}</div>
+        </div>
+        <div class="pack-bar">${this._renderBar(pack.health)}</div>
+        <div class="pack-value">${this._formatPercent(pack.health, false)}</div>
+      </div>
+    `;
+  }
+
+  _renderBar(value) {
+    if (!Number.isFinite(value)) return '';
+    const fill = Math.max(0, Math.min(100, (value / 115) * 100));
+    return `<div class="bar" aria-hidden="true"><div class="fill" style="--fill:${fill.toFixed(2)}%"></div></div>`;
+  }
+
+  _roleLabel(pack) {
+    if (pack.role === 'leader') return 'Leader';
+    if (pack.role === 'follower' || pack.isFollower) return 'Follower';
+    if (pack.role === 'expansion') return 'Expansion';
+    return `Pack ${pack.index}`;
+  }
+
+  _subtitle(source, packCount) {
+    if (source === 'inverter_modbus') return 'Inverter reported state of health';
+    if (packCount > 0) return 'Gateway capacity scan';
+    return 'Capacity summary';
+  }
+
+  _sourceLabel(source) {
+    const labels = {
+      ha_local_tedapi: 'local gateway',
+      ha_fleet_api_relay: 'Fleet API relay',
+      mobile_app_tedapi: 'mobile local scan',
+      mobile_app: 'mobile app',
+      mobile_app_cloud_rsa: 'mobile cloud RSA',
+      fleet_api: 'Fleet API',
+      inverter_modbus: 'inverter Modbus',
+    };
+    return labels[source] || source || '';
+  }
+
+  _dateLabel(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  _formatKwh(value) {
+    if (!Number.isFinite(value)) return '-- kWh';
+    return `${value.toFixed(1)} kWh`;
+  }
+
+  _formatPercent(value, includeSmallUnit) {
+    if (!Number.isFinite(value)) return '--';
+    const unit = includeSmallUnit ? '<small>%</small>' : '%';
+    return `${value.toFixed(1)}${unit}`;
+  }
+
+  _number(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  _escHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+}
+
+if (!customElements.get('power-sync-battery-health')) {
+  customElements.define('power-sync-battery-health', PowerSyncBatteryHealth);
+}
+
+// ─── PowerSyncOptimizationPlan Custom Element ───────────────────
+// API-backed Smart Optimization card that mirrors the mobile 24-hour view.
+
+class PowerSyncOptimizationPlan extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+    this._data = null;
+    this._error = null;
+    this._loading = false;
+    this._lastFetch = 0;
+    this._renderQueued = false;
+    this._resizeObserver = null;
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._data = null;
+    this._error = null;
+    this._lastFetch = 0;
+    this._scheduleRender();
+    this._maybeLoadData(true);
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._maybeLoadData(false);
+    this._scheduleRender();
+  }
+
+  connectedCallback() {
+    if (!this._resizeObserver && 'ResizeObserver' in window) {
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRender());
+      this._resizeObserver.observe(this);
+    }
+    this._maybeLoadData(true);
+    this._scheduleRender();
+  }
+
+  disconnectedCallback() {
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+  }
+
+  getCardSize() {
+    return 6;
+  }
+
+  _maybeLoadData(force) {
+    if (!this._config || !this._hass || typeof this._hass.callApi !== 'function') return;
+    const now = Date.now();
+    if (this._loading) return;
+    if (!force && this._data && now - this._lastFetch < 60000) return;
+    this._loadData();
+  }
+
+  async _loadData() {
+    this._loading = true;
+    const path = this._config.optimizationPath || 'power_sync/optimization';
+    try {
+      const response = await this._hass.callApi('GET', path);
+      this._data = response || null;
+      this._error = null;
+      this._lastFetch = Date.now();
+    } catch (err) {
+      this._error = err?.message || 'Optimization API unavailable';
+    } finally {
+      this._loading = false;
+      this._scheduleRender();
+    }
+  }
+
+  _scheduleRender() {
+    if (this._renderQueued) return;
+    this._renderQueued = true;
+    requestAnimationFrame(() => {
+      this._renderQueued = false;
+      this._render();
+    });
+  }
+
+  _render() {
+    if (!this._config) return;
+
+    const model = this._buildModel();
+    const hasSchedule = model.points.length > 0;
+    const priceMeta = _priceMeta(this._hass, this._config.importPriceEntity);
+    const box = this.getBoundingClientRect();
+    const compact = (box.width || 640) < 560;
+    const actions = hasSchedule ? this._actionRangesFromApi() : this._fallbackActionRanges();
+    const batteryWindows = this._batteryWindowsFromActions(actions, model);
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card {
+          padding: 16px;
+          overflow: hidden;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .title {
+          margin: 0;
+          color: var(--primary-text-color);
+          font-size: 18px;
+          font-weight: 800;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+        .subtitle {
+          margin-top: 4px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 600;
+          line-height: 1.3;
+        }
+        .refresh {
+          flex: 0 0 auto;
+          width: 34px;
+          height: 34px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+        }
+        .refresh ha-icon {
+          width: 19px;
+          height: 19px;
+        }
+        .chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 14px;
+        }
+        .chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          max-width: 100%;
+          padding: 7px 9px;
+          border-radius: 999px;
+          background: rgba(127, 127, 127, 0.09);
+          border: 1px solid var(--divider-color);
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.1;
+          min-width: 0;
+        }
+        .chip span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .chip.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.11);
+          border-color: rgba(255, 152, 0, 0.35);
+        }
+        .notice {
+          margin: 0 0 14px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          color: var(--secondary-text-color);
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+          font-size: 12px;
+          line-height: 1.35;
+        }
+        .notice.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.10);
+          border-color: rgba(255, 152, 0, 0.30);
+        }
+        .section-title {
+          margin: 16px 0 8px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .chart-wrap {
+          position: relative;
+          border-radius: 12px;
+          border: 1px solid var(--divider-color);
+          background: rgba(127, 127, 127, 0.045);
+          overflow: hidden;
+        }
+        svg {
+          display: block;
+          width: 100%;
+          height: auto;
+        }
+        .legend {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 10px 0 0;
+        }
+        .legend-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.1;
+        }
+        .swatch {
+          width: 10px;
+          height: 10px;
+          border-radius: 999px;
+          flex: 0 0 auto;
+        }
+        .battery-windows {
+          display: grid;
+          gap: 8px;
+        }
+        .window-row {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) minmax(86px, auto);
+          gap: 10px;
+          align-items: center;
+          padding: 10px 11px;
+          border-radius: 10px;
+          border: 1px solid var(--divider-color);
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          border-left-width: 4px;
+          min-width: 0;
+        }
+        .window-row.charge {
+          border-left-color: #4CAF50;
+        }
+        .window-row.discharge {
+          border-left-color: #FF9800;
+        }
+        .window-row.export {
+          border-left-color: #FFD54F;
+        }
+        .window-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 66px;
+          padding: 6px 8px;
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 900;
+          line-height: 1;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        .window-row.charge .window-pill {
+          color: #2E7D32;
+          background: rgba(76, 175, 80, 0.14);
+        }
+        .window-row.discharge .window-pill {
+          color: #EF6C00;
+          background: rgba(255, 152, 0, 0.15);
+        }
+        .window-row.export .window-pill {
+          color: #8A6A00;
+          background: rgba(255, 213, 79, 0.22);
+        }
+        .window-main {
+          min-width: 0;
+        }
+        .window-time {
+          color: var(--primary-text-color);
+          font-size: 14px;
+          font-weight: 850;
+          line-height: 1.2;
+          letter-spacing: 0;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .window-meta {
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 650;
+          line-height: 1.2;
+        }
+        .actions {
+          display: grid;
+          gap: 8px;
+        }
+        .action-row {
+          display: grid;
+          grid-template-columns: minmax(78px, auto) minmax(0, 1fr) minmax(82px, auto) auto;
+          gap: 10px;
+          align-items: center;
+          padding: 9px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--divider-color);
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          min-width: 0;
+        }
+        .action-time {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .action-main {
+          min-width: 0;
+        }
+        .action-label {
+          font-size: 14px;
+          font-weight: 800;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        .action-meta {
+          margin-top: 2px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1.2;
+        }
+        .soc {
+          color: var(--primary-text-color);
+          font-size: 15px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .price-stats {
+          min-width: 82px;
+          text-align: center;
+        }
+        .price-avg {
+          font-size: 15px;
+          font-weight: 900;
+          line-height: 1.1;
+          letter-spacing: 0;
+        }
+        .price-minmax {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          gap: 4px;
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1.1;
+          white-space: nowrap;
+        }
+        .price-kind {
+          margin-top: 2px;
+          color: var(--secondary-text-color);
+          font-size: 9px;
+          font-weight: 700;
+          line-height: 1.1;
+          white-space: nowrap;
+        }
+        .empty {
+          padding: 11px 12px;
+          border-radius: 10px;
+          color: var(--secondary-text-color);
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+          font-size: 13px;
+        }
+        @media (max-width: 560px) {
+          ha-card {
+            padding: 13px;
+          }
+          .header {
+            margin-bottom: 10px;
+          }
+          .title {
+            font-size: 17px;
+          }
+          .action-row {
+            grid-template-columns: minmax(0, 1fr) minmax(78px, auto) auto;
+          }
+          .action-time {
+            grid-column: 1 / -1;
+          }
+          .price-stats {
+            min-width: 78px;
+          }
+          .window-row {
+            grid-template-columns: minmax(0, 1fr) minmax(78px, auto);
+          }
+          .window-pill {
+            grid-column: 1 / -1;
+            justify-self: start;
+            min-width: 0;
+          }
+        }
+      </style>
+      <ha-card>
+        <div class="header">
+          <div>
+            <h2 class="title">24-Hour Optimizer Plan</h2>
+            <div class="subtitle">${this._escHtml(hasSchedule ? 'Now to next 24 hours from Smart Optimization' : 'Entity fallback while detailed schedule is unavailable')}</div>
+          </div>
+          <button class="refresh" type="button" title="Refresh optimizer plan" aria-label="Refresh optimizer plan">
+            <ha-icon icon="mdi:refresh"></ha-icon>
+          </button>
+        </div>
+        ${this._renderChips(model, priceMeta)}
+        ${this._renderNotice(hasSchedule)}
+        <div class="section-title">Planned Battery Windows</div>
+        ${this._renderBatteryWindows(batteryWindows, priceMeta)}
+        ${hasSchedule ? `
+          <div class="section-title">SOC and Battery Power</div>
+          <div class="chart-wrap">${this._renderPowerChart(model, compact)}</div>
+          ${this._renderLegend(model.powerSeries)}
+          ${model.priceSeries.length ? `
+            <div class="section-title">Electricity Price (${this._escHtml(priceMeta.minorPriceUnit)})</div>
+            <div class="chart-wrap">${this._renderPriceChart(model, compact, priceMeta)}</div>
+            ${this._renderLegend(model.priceSeries, false)}
+          ` : ''}
+        ` : ''}
+        <div class="section-title">24-Hour Action Plan</div>
+        ${this._renderActions(actions, model, priceMeta)}
+      </ha-card>
+    `;
+
+    this.shadowRoot.querySelector('.refresh')?.addEventListener('click', () => this._maybeLoadData(true));
+  }
+
+  _buildModel() {
+    const data = this._data || {};
+    const schedule = data.schedule || {};
+    const timestamps = Array.isArray(schedule.timestamps) ? schedule.timestamps : [];
+    const soc = Array.isArray(schedule.soc) ? schedule.soc : [];
+    const charge = Array.isArray(schedule.charge_w) ? schedule.charge_w : [];
+    const discharge = Array.isArray(schedule.discharge_w) ? schedule.discharge_w : [];
+    const detailed = Array.isArray(schedule.battery_consume_w) && Array.isArray(schedule.battery_export_w);
+    const consume = detailed ? schedule.battery_consume_w : [];
+    const exportPower = detailed ? schedule.battery_export_w : [];
+    const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
+    const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
+    const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
+    const intervalMinutes = this._intervalMinutes(timestamps);
+    const count = Math.min(
+      Math.round(24 * 60 / intervalMinutes),
+      timestamps.length,
+      soc.length,
+      charge.length,
+      discharge.length,
+    );
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      points.push({
+        index: i,
+        timestamp: timestamps[i],
+        soc: this._percent(soc[i]),
+        chargeKw: this._kw(charge[i]),
+        dischargeKw: this._kw(discharge[i]),
+        consumeKw: detailed ? this._kw(consume[i]) : 0,
+        exportKw: detailed ? this._kw(exportPower[i]) : 0,
+        evKw: this._kw(ev[i]),
+        importPrice: this._minorPrice(importPrice[i]),
+        exportPrice: this._minorPrice(exportPrice[i]),
+      });
+    }
+
+    const hasEv = points.some(p => p.evKw > 0);
+    const hasPrices = points.some(p => Number.isFinite(p.importPrice)) || points.some(p => Number.isFinite(p.exportPrice));
+    const powerSeries = detailed
+      ? [
+          { key: 'chargeKw', label: 'Charge', color: '#4CAF50' },
+          { key: 'consumeKw', label: 'Powering Home', color: '#FF9800' },
+          { key: 'exportKw', label: 'Export', color: '#FFD54F' },
+        ]
+      : [
+          { key: 'chargeKw', label: 'Charge', color: '#4CAF50' },
+          { key: 'dischargeKw', label: 'Discharge', color: '#FF9800' },
+        ];
+    if (hasEv) {
+      powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
+    }
+    const reserve = this._optimizerReserve(data);
+    const idleHold = this._idleHoldReserve(data);
+
+    return {
+      raw: data,
+      points,
+      intervalMinutes,
+      reservePercent: reserve.percent,
+      reserveCalculated: reserve.calculated,
+      idleHoldActive: idleHold.active,
+      idleHoldReservePercent: idleHold.percent,
+      powerSeries,
+      priceSeries: hasPrices
+        ? [
+            { key: 'importPrice', label: 'Import', color: '#FF9800' },
+            { key: 'exportPrice', label: 'Export', color: '#4CAF50' },
+          ]
+        : [],
+      demandRanges: this._demandRanges(points, data?.demand_window),
+    };
+  }
+
+  _renderChips(model, priceMeta) {
+    const data = model.raw || {};
+    const chips = [];
+    const status = data.monitoring_mode ? 'Monitoring' : data.enabled === false ? 'Disabled' : data.status || 'Active';
+    chips.push(['Mode', this._title(status)]);
+    chips.push(['Now', this._actionLabel(data.current_action || 'idle')]);
+    if (data.next_action && data.next_action_time) {
+      chips.push(['Next', `${this._actionLabel(data.next_action)} ${this._formatTime(data.next_action_time)}`]);
+    }
+    if (data.last_optimization) {
+      chips.push(['Optimized', this._formatTime(data.last_optimization)]);
+    }
+    if (model.reserveCalculated && Number.isFinite(model.reservePercent)) {
+      chips.push(['Auto Reserve', `${Math.round(model.reservePercent)}%`]);
+    }
+    if (model.idleHoldActive && Number.isFinite(model.idleHoldReservePercent)) {
+      chips.push(['IDLE Hold', `${Math.round(model.idleHoldReservePercent)}%`, true]);
+    }
+    const breakdown = data.daily_cost_breakdown || {};
+    if (Number.isFinite(Number(breakdown.predicted_remaining))) {
+      chips.push(['Remaining', this._formatMoney(Number(breakdown.predicted_remaining), priceMeta.currency)]);
+    }
+    if (Number.isFinite(Number(data.predicted_savings))) {
+      chips.push(['Savings', this._formatMoney(Number(data.predicted_savings), priceMeta.currency)]);
+    }
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    if (warnings.length) {
+      chips.push(['Warnings', String(warnings.length), true]);
+    }
+    return `<div class="chips">${chips.map(([name, value, warn]) => `
+      <div class="chip${warn ? ' warn' : ''}"><span>${this._escHtml(name)}:</span><span>${this._escHtml(value)}</span></div>
+    `).join('')}</div>`;
+  }
+
+  _renderNotice(hasSchedule) {
+    const warnings = Array.isArray(this._data?.warnings) ? this._data.warnings : [];
+    if (warnings.length) {
+      const text = warnings.map(w => w?.message || w?.title).filter(Boolean).join(' ');
+      return `<div class="notice warn">${this._escHtml(text)}</div>`;
+    }
+    if (this._error) {
+      return `<div class="notice warn">${this._escHtml(this._error)}. Showing available entity data.</div>`;
+    }
+    if (!hasSchedule && this._loading) {
+      return '<div class="notice">Loading Smart Optimization schedule...</div>';
+    }
+    if (!hasSchedule) {
+      return '<div class="notice">Detailed optimizer schedule is not available yet. Showing planned force windows from Home Assistant entities.</div>';
+    }
+    return '';
+  }
+
+  _renderPowerChart(model, compact) {
+    const W = compact ? 520 : 720;
+    const H = compact ? 240 : 270;
+    const pad = { top: 18, right: 14, bottom: 34, left: compact ? 44 : 52 };
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    const powerMax = Math.max(4, this._niceCeil(Math.max(
+      ...model.points.flatMap(p => model.powerSeries.map(s => p[s.key] || 0)),
+    )));
+    const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
+    const yPower = (value) => pad.top + chartH - (Math.max(0, value) / powerMax) * chartH;
+    const ySoc = (value) => pad.top + chartH - (Math.max(0, Math.min(100, value)) / 100) * chartH;
+    let svg = this._chartGrid(W, H, pad, model.points, compact, `${powerMax} kW`);
+
+    for (const range of model.demandRanges) {
+      const x1 = x(range.start);
+      const x2 = x(range.end);
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(2, x2 - x1)}" height="${chartH}" fill="#FF6B6B" opacity="0.11"/>`;
+    }
+
+    if (Number.isFinite(model.reservePercent)) {
+      const ry = ySoc(model.reservePercent);
+      const reserveLabel = model.reserveCalculated ? 'Calculated Reserve' : 'Reserve';
+      svg += `<rect x="${pad.left}" y="${ry}" width="${chartW}" height="${pad.top + chartH - ry}" fill="#F44336" opacity="0.06"/>`;
+      svg += `<line x1="${pad.left}" y1="${ry}" x2="${W - pad.right}" y2="${ry}" stroke="#F44336" stroke-width="1" stroke-dasharray="5,3" opacity="0.75"/>`;
+      svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`${reserveLabel} ${Math.round(model.reservePercent)}%`)}</text>`;
+    }
+    if (model.idleHoldActive && Number.isFinite(model.idleHoldReservePercent)) {
+      const holdY = ySoc(model.idleHoldReservePercent);
+      const labelY = Math.max(pad.top + 11, holdY - 5);
+      svg += `<line x1="${pad.left}" y1="${holdY}" x2="${W - pad.right}" y2="${holdY}" stroke="#FF9800" stroke-width="1.4" stroke-dasharray="2,4" opacity="0.9"/>`;
+      svg += `<text x="${pad.left + 4}" y="${labelY}" text-anchor="start" font-size="${compact ? 9 : 10}" fill="#FF9800">${this._escSvg(`IDLE Hold ${Math.round(model.idleHoldReservePercent)}%`)}</text>`;
+    }
+
+    for (const series of model.powerSeries) {
+      svg += `<path d="${this._stepPath(model.points, x, yPower, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>`;
+    }
+    svg += `<path d="${this._linePath(model.points, x, ySoc, 'soc')}" fill="none" stroke="#42A5F5" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour optimizer SOC and power chart">${svg}</svg>`;
+  }
+
+  _renderPriceChart(model, compact, priceMeta) {
+    const W = compact ? 520 : 720;
+    const H = compact ? 165 : 185;
+    const pad = { top: 16, right: 14, bottom: 32, left: compact ? 48 : 58 };
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    const maxPrice = Math.max(10, this._niceCeil(Math.max(
+      ...model.points.flatMap(p => model.priceSeries.map(s => Number.isFinite(p[s.key]) ? p[s.key] : 0)),
+    )));
+    const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
+    const y = (value) => pad.top + chartH - (Math.max(0, value) / maxPrice) * chartH;
+    let svg = this._chartGrid(W, H, pad, model.points, compact, `${maxPrice} ${priceMeta.minorUnit}`);
+
+    for (const range of model.demandRanges) {
+      const x1 = x(range.start);
+      const x2 = x(range.end);
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(2, x2 - x1)}" height="${chartH}" fill="#FF6B6B" opacity="0.09"/>`;
+    }
+    for (const series of model.priceSeries) {
+      svg += `<path d="${this._stepPath(model.points, x, y, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.05" stroke-linejoin="round" stroke-linecap="round"/>`;
+    }
+
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour import and export price chart">${svg}</svg>`;
+  }
+
+  _chartGrid(W, H, pad, points, compact, maxLabel) {
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    let svg = `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="var(--card-background-color, transparent)" opacity="0.02" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.6" rx="8"/>`;
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.top + (chartH / 4) * i;
+      svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.4" stroke-dasharray="4,3" opacity="0.65"/>`;
+    }
+    svg += `<text x="${pad.left - 8}" y="${pad.top + 4}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(maxLabel)}</text>`;
+    const labelEvery = Math.max(1, Math.round((6 * 60) / this._intervalMinutes(points.map(p => p.timestamp))));
+    for (let i = 0; i < points.length; i += labelEvery) {
+      const x = pad.left + (i / Math.max(1, points.length - 1)) * chartW;
+      svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.35" opacity="0.55"/>`;
+      svg += `<text x="${x}" y="${H - pad.bottom + 21}" text-anchor="middle" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(this._formatTime(points[i]?.timestamp))}</text>`;
+    }
+    return svg;
+  }
+
+  _renderLegend(series, includeSoc = true) {
+    return `<div class="legend">
+      ${includeSoc ? '<div class="legend-item"><span class="swatch" style="background:#42A5F5"></span><span>SOC</span></div>' : ''}
+      ${series.map(s => `<div class="legend-item"><span class="swatch" style="background:${s.color}"></span><span>${this._escHtml(s.label)}</span></div>`).join('')}
+    </div>`;
+  }
+
+  _renderBatteryWindows(windows, priceMeta) {
+    if (!windows.length) {
+      return '<div class="empty">No planned charge, discharge, or export windows in the next 24 hours.</div>';
+    }
+    return `<div class="battery-windows">${windows.slice(0, 8).map(window => {
+      const info = this._actionInfo(window.action);
+      const meta = [
+        this._formatDuration(window.durationMinutes),
+        window.socLabel,
+        window.power_w > 0 ? this._formatPower(window.power_w) : '',
+      ].filter(Boolean).join(' - ');
+      return `
+        <div class="window-row ${this._escHtml(window.action)}">
+          <div class="window-pill">${this._escHtml(info.shortLabel || info.label)}</div>
+          <div class="window-main">
+            <div class="window-time">${this._escHtml(this._timeRange(window.timestamp, window.end_time))}</div>
+            ${meta ? `<div class="window-meta">${this._escHtml(meta)}</div>` : ''}
+          </div>
+          ${this._renderActionPriceStats(window.priceStats, window.action, priceMeta)}
+        </div>
+      `;
+    }).join('')}${windows.length > 8 ? `<div class="empty">+${windows.length - 8} more battery window${windows.length - 8 === 1 ? '' : 's'}</div>` : ''}</div>`;
+  }
+
+  _renderActions(actions, model, priceMeta) {
+    if (!actions.length) {
+      return '<div class="empty">No optimizer actions scheduled in the next 24 hours.</div>';
+    }
+    return `<div class="actions">${actions.slice(0, 10).map(action => {
+      const info = this._actionInfo(action.action);
+      const priceStats = this._priceStatsForAction(action, model);
+      const power = Number(action.power_w || 0);
+      const meta = [
+        power > 0 ? this._formatPower(power) : '',
+        action.source === 'fallback' ? 'entity fallback' : '',
+      ].filter(Boolean).join(' - ');
+      const socValue = Number(action.soc);
+      const soc = Number.isFinite(socValue) ? `${Math.round(this._percent(socValue))}%` : '';
+      return `
+        <div class="action-row">
+          <div class="action-time">${this._escHtml(this._timeRange(action.timestamp, action.end_time))}</div>
+          <div class="action-main">
+            <div class="action-label" style="color:${info.color}">${this._escHtml(info.label)}</div>
+            ${meta ? `<div class="action-meta">${this._escHtml(meta)}</div>` : ''}
+          </div>
+          ${this._renderActionPriceStats(priceStats, action.action, priceMeta)}
+          <div class="soc">${this._escHtml(soc)}</div>
+        </div>
+      `;
+    }).join('')}${actions.length > 10 ? `<div class="empty">+${actions.length - 10} more actions</div>` : ''}</div>`;
+  }
+
+  _renderActionPriceStats(stats, action, priceMeta) {
+    if (!stats) return '<div class="price-stats"></div>';
+    const avgColor = this._priceAvgColor(stats.avg, action);
+    return `
+      <div class="price-stats">
+        <div class="price-avg" style="color:${avgColor}">${this._escHtml(this._formatMinorPrice(stats.avg, priceMeta.minorUnit))}</div>
+        <div class="price-minmax">
+          <span style="color:#4CAF50">${this._escHtml(this._formatMinorPrice(stats.min, priceMeta.minorUnit))}</span>
+          <span style="opacity:0.45">|</span>
+          <span style="color:#F44336">${this._escHtml(this._formatMinorPrice(stats.max, priceMeta.minorUnit))}</span>
+        </div>
+        <div class="price-kind">${this._escHtml(stats.kind)} avg min max</div>
+      </div>
+    `;
+  }
+
+  _priceStatsForAction(action, model) {
+    if (!action?.timestamp || !model?.points?.length) return null;
+    const start = Date.parse(action.timestamp);
+    const end = Date.parse(action.end_time || action.timestamp);
+    if (!Number.isFinite(start)) return null;
+    const safeEnd = Number.isFinite(end) && end > start
+      ? end
+      : start + (model.intervalMinutes || 5) * 60000;
+    const useExport = action.action === 'discharge' || action.action === 'export';
+    const key = useExport ? 'exportPrice' : 'importPrice';
+    const values = model.points
+      .filter(point => {
+        const ts = Date.parse(point.timestamp);
+        return Number.isFinite(ts) && ts >= start && ts < safeEnd;
+      })
+      .map(point => point[key])
+      .filter(value => Number.isFinite(value));
+    if (!values.length) return null;
+    return {
+      kind: useExport ? 'export' : 'import',
+      min: Math.min(...values),
+      max: Math.max(...values),
+      avg: values.reduce((sum, value) => sum + value, 0) / values.length,
+    };
+  }
+
+  _actionRangesFromApi() {
+    const actions = Array.isArray(this._data?.next_actions) ? this._data.next_actions : [];
+    return actions
+      .filter(action => action?.timestamp)
+      .map(action => ({ ...action }))
+      .slice(0, 24);
+  }
+
+  _fallbackActionRanges() {
+    const ranges = [];
+    const pushWindows = (entityId, fallbackAction) => {
+      const windows = this._hass?.states?.[entityId]?.attributes?.windows;
+      if (!Array.isArray(windows)) return;
+      for (const window of windows) {
+        if (!window?.start_time || !window?.end_time) continue;
+        ranges.push({
+          action: window.action || fallbackAction,
+          timestamp: window.start_time,
+          end_time: window.end_time,
+          power_w: window.power_w,
+          soc: window.soc,
+          source: 'fallback',
+        });
+      }
+    };
+    pushWindows(this._config.forceChargeEntity, 'charge');
+    pushWindows(this._config.forceDischargeEntity, 'discharge');
+    return ranges.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  }
+
+  _batteryWindowsFromActions(actions, model) {
+    return (actions || [])
+      .filter(action => this._isBatteryWindowAction(action?.action))
+      .map(action => ({
+        ...action,
+        durationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
+        socLabel: this._socRangeForAction(action, model),
+        priceStats: this._priceStatsForAction(action, model),
+      }));
+  }
+
+  _isBatteryWindowAction(action) {
+    return action === 'charge' || action === 'discharge' || action === 'export';
+  }
+
+  _durationMinutes(startValue, endValue, fallbackMinutes = 5) {
+    const start = Date.parse(startValue);
+    const end = Date.parse(endValue);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      return Math.round((end - start) / 60000);
+    }
+    return Number.isFinite(Number(fallbackMinutes)) ? Number(fallbackMinutes) : 5;
+  }
+
+  _socRangeForAction(action, model) {
+    const start = Date.parse(action?.timestamp);
+    const end = Date.parse(action?.end_time || action?.timestamp);
+    const points = (model?.points || []).filter(point => {
+      const ts = Date.parse(point.timestamp);
+      return Number.isFinite(ts) && Number.isFinite(start) && ts >= start && (!Number.isFinite(end) || ts < end);
+    });
+    const values = points.map(point => Number(point.soc)).filter(Number.isFinite);
+    if (!values.length) {
+      const fallback = Number(action?.soc);
+      return Number.isFinite(fallback) ? `${Math.round(this._percent(fallback))}% SOC` : '';
+    }
+    const first = Math.round(values[0]);
+    const last = Math.round(values[values.length - 1]);
+    return first === last ? `${first}% SOC` : `${first}% -> ${last}% SOC`;
+  }
+
+  _demandRanges(points, demandWindow) {
+    if (!demandWindow?.start_time || !demandWindow?.end_time || !points.length) return [];
+    const start = this._clockMinutes(demandWindow.start_time);
+    const end = this._clockMinutes(demandWindow.end_time);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+    const ranges = [];
+    for (let i = 0; i < points.length; i++) {
+      const current = this._timestampClockMinutes(points[i].timestamp);
+      const inWindow = end <= start ? current >= start || current < end : current >= start && current < end;
+      if (!inWindow) continue;
+      const last = ranges[ranges.length - 1];
+      if (last && last.end === i - 1) last.end = i;
+      else ranges.push({ start: i, end: i });
+    }
+    return ranges;
+  }
+
+  _linePath(points, xScale, yScale, key) {
+    return points.map((point, index) => {
+      const x = xScale(index);
+      const y = yScale(point[key]);
+      return `${index === 0 ? 'M' : 'L'}${x},${y}`;
+    }).join('');
+  }
+
+  _stepPath(points, xScale, yScale, key) {
+    let path = '';
+    for (let i = 0; i < points.length; i++) {
+      const x = xScale(i);
+      const y = yScale(Number.isFinite(points[i][key]) ? points[i][key] : 0);
+      if (i === 0) path += `M${x},${y}`;
+      else path += `H${x}V${y}`;
+    }
+    return path;
+  }
+
+  _intervalMinutes(timestamps) {
+    if (Array.isArray(timestamps) && timestamps.length > 1) {
+      const first = Date.parse(timestamps[0]);
+      const second = Date.parse(timestamps[1]);
+      const delta = (second - first) / 60000;
+      if (Number.isFinite(delta) && delta > 0) return delta;
+    }
+    if (Array.isArray(timestamps) && timestamps.length > 300) {
+      return (48 * 60) / timestamps.length;
+    }
+    return 5;
+  }
+
+  _percent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return n <= 1 ? n * 100 : n;
+  }
+
+  _kw(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n / 1000 : 0;
+  }
+
+  _minorPrice(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n * 100 : NaN;
+  }
+
+  _reservePercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return NaN;
+    return n <= 1 ? n * 100 : n;
+  }
+
+  _optimizerReserve(data) {
+    const recommendation = data?.reserve_recommendation || {};
+    const autoApplyEnabled = data?.auto_apply_reserve_enabled === true ||
+      data?.config?.auto_apply_reserve_enabled === true ||
+      recommendation?.auto_apply_enabled === true;
+    const appliedReserve = this._clampedPercent(recommendation?.applied_optimizer_reserve_percent);
+    if (autoApplyEnabled && Number.isFinite(appliedReserve)) {
+      return { percent: appliedReserve, calculated: true };
+    }
+    const configuredReserve = this._reservePercent(data?.config?.backup_reserve);
+    return {
+      percent: Number.isFinite(configuredReserve) ? Math.max(0, Math.min(100, configuredReserve)) : NaN,
+      calculated: false,
+    };
+  }
+
+  _idleHoldReserve(data) {
+    const active = data?.idle_hold_active === true || data?.config?.idle_hold_active === true;
+    const rawPercent = this._reservePercent(
+      data?.idle_hold_reserve_percent ??
+      data?.config?.idle_hold_reserve_percent ??
+      data?.idle_hold_reserve ??
+      data?.config?.idle_hold_reserve
+    );
+    return {
+      active,
+      percent: active && Number.isFinite(rawPercent)
+        ? Math.max(0, Math.min(100, rawPercent))
+        : NaN,
+    };
+  }
+
+  _clampedPercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return NaN;
+    return Math.max(0, Math.min(100, n));
+  }
+
+  _niceCeil(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 1;
+    if (n <= 4) return 4;
+    if (n <= 8) return 8;
+    if (n <= 12) return 12;
+    if (n <= 20) return 20;
+    if (n <= 40) return 40;
+    return Math.ceil(n / 20) * 20;
+  }
+
+  _actionInfo(action) {
+    const map = {
+      idle: { label: 'Idle', shortLabel: 'Idle', color: 'var(--secondary-text-color, #888)' },
+      charge: { label: 'Charging', shortLabel: 'Charge', color: '#4CAF50' },
+      discharge: { label: 'Discharging', shortLabel: 'Discharge', color: '#FF9800' },
+      consume: { label: 'Powering Home', shortLabel: 'Home', color: '#FF9800' },
+      export: { label: 'Exporting', shortLabel: 'Export', color: '#FFD54F' },
+      self_consumption: { label: 'Self Consumption', shortLabel: 'Self', color: '#42A5F5' },
+    };
+    return map[action] || map.idle;
+  }
+
+  _actionLabel(action) {
+    return this._actionInfo(action).label;
+  }
+
+  _formatPower(watts) {
+    const value = Number(watts || 0);
+    if (Math.abs(value) >= 1000) return `${(Math.abs(value) / 1000).toFixed(1)} kW`;
+    return `${Math.round(Math.abs(value))} W`;
+  }
+
+  _formatDuration(minutes) {
+    const value = Number(minutes || 0);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    if (value < 60) return `${Math.round(value)} min`;
+    const hours = Math.floor(value / 60);
+    const mins = Math.round(value % 60);
+    return mins ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+
+  _formatMinorPrice(value, minorUnit) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    const decimals = Math.abs(n) >= 10 ? 1 : 2;
+    return `${n.toFixed(decimals)}${minorUnit || ''}`;
+  }
+
+  _priceAvgColor(value, action) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 'var(--secondary-text-color, #888)';
+    if (action === 'discharge' || action === 'export') {
+      if (n >= 20) return '#4CAF50';
+      if (n >= 10) return '#FBC02D';
+      if (n >= 0) return '#FF9800';
+      return '#F44336';
+    }
+    if (n <= 10) return '#4CAF50';
+    if (n <= 25) return '#FBC02D';
+    if (n <= 40) return '#FF9800';
+    return '#F44336';
+  }
+
+  _formatMoney(value, currency) {
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'AUD' }).format(value);
+    } catch (_) {
+      return `${currency || 'AUD'} ${value.toFixed(2)}`;
+    }
+  }
+
+  _formatTime(value) {
+    if (!value) return '--:--';
+    const text = String(value);
+    if (text.length >= 16 && text[10] === 'T') return text.substring(11, 16);
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--:--';
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  _timeRange(start, end) {
+    const startText = this._formatTime(start);
+    const endText = this._formatTime(end);
+    return endText && endText !== '--:--' && endText !== startText ? `${startText} - ${endText}` : startText;
+  }
+
+  _clockMinutes(value) {
+    const [hours, minutes] = String(value || '').split(':').map(Number);
+    if (!Number.isFinite(hours)) return NaN;
+    return hours * 60 + (Number.isFinite(minutes) ? minutes : 0);
+  }
+
+  _timestampClockMinutes(value) {
+    const text = String(value || '');
+    if (text.length >= 16 && text[10] === 'T') {
+      return Number(text.substring(11, 13)) * 60 + Number(text.substring(14, 16));
+    }
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return 0;
+    return date.getHours() * 60 + date.getMinutes();
+  }
+
+  _title(value) {
+    return String(value || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  _escHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _escSvg(value) {
+    return this._escHtml(value);
+  }
+}
+
+if (!customElements.get('power-sync-optimization-plan')) {
+  customElements.define('power-sync-optimization-plan', PowerSyncOptimizationPlan);
+}
+
 // ─── PowerSyncLayout Custom Element ─────────────────────────────
 // Viewport-fitting grid layout: 3 columns, fills available height.
 // Chart cards flex to fill remaining space; control cards stay natural size.
@@ -1045,7 +2505,9 @@ class PowerSyncLayout extends HTMLElement {
     this._dragItem = null;
     this._pointerDrag = null;
     this._dragPlaceholder = null;
+    this._showingHidden = false;
     this._storageKey = 'power-sync-dashboard-layout-v2';
+    this._hiddenStorageKey = 'power-sync-dashboard-hidden-v1';
     this._appliedLayoutSignature = '';
   }
 
@@ -1120,6 +2582,95 @@ class PowerSyncLayout extends HTMLElement {
     }
   }
 
+  _loadHiddenKeys() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(this._hiddenStorageKey) || '[]');
+      return new Set(Array.isArray(saved) ? saved.filter(Boolean) : []);
+    } catch (_) {
+      return new Set();
+    }
+  }
+
+  _saveHiddenKeys(keys) {
+    try {
+      const unique = Array.from(new Set(keys)).filter(Boolean);
+      if (unique.length === 0) {
+        localStorage.removeItem(this._hiddenStorageKey);
+      } else {
+        localStorage.setItem(this._hiddenStorageKey, JSON.stringify(unique));
+      }
+    } catch (_) {}
+  }
+
+  _visibleItems() {
+    return this._items.filter(item => item.dataset.hidden !== 'true');
+  }
+
+  _hiddenItems() {
+    return this._items.filter(item => item.dataset.hidden === 'true');
+  }
+
+  _layoutItems() {
+    return this._items.filter(item => item.dataset.hidden !== 'true' || this._showingHidden);
+  }
+
+  _syncHiddenKeys() {
+    const savedKeys = this._loadHiddenKeys();
+    const currentKeys = new Set(this._items.map(item => item.dataset.key));
+    const legacyToCurrent = new Map(this._items
+      .map(item => [item.dataset.legacyKey, item.dataset.key])
+      .filter(([legacyKey]) => legacyKey));
+    const normalized = new Set();
+
+    for (const savedKey of savedKeys) {
+      if (currentKeys.has(savedKey)) {
+        normalized.add(savedKey);
+      } else {
+        const migratedKey = legacyToCurrent.get(savedKey);
+        if (migratedKey) normalized.add(migratedKey);
+      }
+    }
+
+    for (const item of this._items) {
+      if (item.dataset.hidden === 'true') normalized.add(item.dataset.key);
+    }
+    for (const item of this._items) {
+      item.dataset.hidden = normalized.has(item.dataset.key) ? 'true' : 'false';
+    }
+    this._saveHiddenKeys(Array.from(normalized));
+  }
+
+  _updateToolbarState() {
+    const toolbar = this.shadowRoot.querySelector('.toolbar');
+    if (!toolbar) return;
+    toolbar.classList.toggle('active', this._customizing);
+    const toggle = toolbar.querySelector('.toggle');
+    if (toggle) toggle.textContent = this._customizing ? 'Done' : 'Customize layout';
+
+    const hiddenCount = this._hiddenItems().length;
+    if (hiddenCount === 0) this._showingHidden = false;
+    const restoreHidden = toolbar.querySelector('.restore-hidden');
+    if (restoreHidden) {
+      restoreHidden.hidden = hiddenCount === 0;
+      restoreHidden.textContent = this._showingHidden
+        ? `Hide hidden (${hiddenCount})`
+        : `Show hidden (${hiddenCount})`;
+      restoreHidden.setAttribute('aria-pressed', this._showingHidden ? 'true' : 'false');
+    }
+
+    const hideDisabled = this._visibleItems().length <= 1;
+    for (const item of this._items) {
+      const isHidden = item.dataset.hidden === 'true';
+      item.classList.toggle('hidden-preview', isHidden && this._showingHidden);
+      const hideSurface = item.querySelector('.hide-surface');
+      if (hideSurface) {
+        hideSurface.disabled = !isHidden && hideDisabled;
+        hideSurface.textContent = isHidden ? 'Unhide' : 'Hide';
+        hideSurface.setAttribute('aria-label', isHidden ? 'Unhide dashboard card' : 'Hide dashboard card');
+      }
+    }
+  }
+
   _saveOrder() {
     try {
       const count = String(this._lanes.length || this._columnCount());
@@ -1133,26 +2684,82 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _setCustomizing(enabled) {
+    const wasShowingHidden = this._showingHidden;
     this._customizing = enabled;
-    this.shadowRoot.querySelector('.toolbar')?.classList.toggle('active', enabled);
-    this.shadowRoot.querySelector('.toggle').textContent = enabled ? 'Done' : 'Customize layout';
+    if (!enabled) {
+      this._showingHidden = false;
+      for (const item of this._hiddenItems()) item.remove();
+      if (wasShowingHidden) this._appliedLayoutSignature = '';
+    }
     for (const item of this._items) {
       item.draggable = false;
       item.classList.toggle('customizing', enabled);
+      item.classList.toggle('hidden-preview', item.dataset.hidden === 'true' && this._showingHidden);
       const dragSurface = item.querySelector('.drag-surface');
       if (dragSurface) dragSurface.draggable = false;
     }
+    this._updateToolbarState();
+    if (wasShowingHidden && !enabled) this._scheduleLayout();
   }
 
   _resetOrder() {
     this._cancelActiveDrag();
     try { localStorage.removeItem(this._storageKey); } catch (_) {}
+    this._saveHiddenKeys([]);
+    for (const item of this._items) item.dataset.hidden = 'false';
     this._items.sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
     if (this._lanes.length) {
       this._rebuildLanes(this._lanes.length);
     }
     this._appliedLayoutSignature = '';
+    this._updateToolbarState();
     this._scheduleLayout();
+  }
+
+  _hideItem(item) {
+    if (item.dataset.hidden === 'true' || this._visibleItems().length <= 1) return;
+    this._cancelActiveDrag();
+    item.dataset.hidden = 'true';
+    if (!this._showingHidden) item.remove();
+    this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
+    this._appliedLayoutSignature = '';
+    this._updateToolbarState();
+    this._scheduleLayout();
+  }
+
+  _showHiddenItems() {
+    this._cancelActiveDrag();
+    if (this._hiddenItems().length === 0) return;
+    this._showingHidden = !this._showingHidden;
+    if (this._showingHidden) this._customizing = true;
+    if (!this._showingHidden) {
+      for (const item of this._hiddenItems()) item.remove();
+    }
+    for (const item of this._items) {
+      item.classList.toggle('customizing', this._customizing);
+      item.classList.toggle('hidden-preview', item.dataset.hidden === 'true' && this._showingHidden);
+    }
+    this._appliedLayoutSignature = '';
+    this._updateToolbarState();
+    this._scheduleLayout();
+  }
+
+  _unhideItem(item) {
+    if (item.dataset.hidden !== 'true') return;
+    this._cancelActiveDrag();
+    item.dataset.hidden = 'false';
+    this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
+    this._appliedLayoutSignature = '';
+    this._updateToolbarState();
+    this._scheduleLayout();
+  }
+
+  _toggleItemHidden(item) {
+    if (item.dataset.hidden === 'true') {
+      this._unhideItem(item);
+    } else {
+      this._hideItem(item);
+    }
   }
 
   _renderedItemCount() {
@@ -1327,8 +2934,9 @@ class PowerSyncLayout extends HTMLElement {
     if (!Array.isArray(layout) || layout.length !== count) return null;
     if (!layout.every(lane => Array.isArray(lane))) return null;
 
-    const currentKeys = new Set(this._items.map(item => item.dataset.key));
-    const legacyToCurrent = new Map(this._items
+    const visibleItems = this._layoutItems();
+    const currentKeys = new Set(visibleItems.map(item => item.dataset.key));
+    const legacyToCurrent = new Map(visibleItems
       .map(item => [item.dataset.legacyKey, item.dataset.key])
       .filter(([legacyKey]) => legacyKey));
     const normalized = Array.from({ length: count }, () => []);
@@ -1356,7 +2964,7 @@ class PowerSyncLayout extends HTMLElement {
       });
     });
 
-    const missingItems = this._items
+    const missingItems = visibleItems
       .filter(item => !placed.has(item.dataset.key))
       .sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
     if (missingItems.length > 0) changed = true;
@@ -1399,7 +3007,7 @@ class PowerSyncLayout extends HTMLElement {
       return;
     }
 
-    const byKey = new Map(this._items.map(item => [item.dataset.key, item]));
+    const byKey = new Map(this._layoutItems().map(item => [item.dataset.key, item]));
     const placed = new Set();
     layout.forEach((keys, laneIndex) => {
       const lane = this._lanes[laneIndex];
@@ -1413,7 +3021,7 @@ class PowerSyncLayout extends HTMLElement {
     });
 
     const heights = this._lanes.map(lane => lane.getBoundingClientRect().height || 0);
-    this._items
+    this._layoutItems()
       .filter(item => !placed.has(item))
       .sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex))
       .forEach((item) => {
@@ -1425,14 +3033,24 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _balanceLayout() {
-    if (!this._items.length) return;
-    const count = Math.min(this._columnCount(), this._items.length);
+    const visibleItems = this._layoutItems();
+    if (!visibleItems.length) {
+      const grid = this.shadowRoot.querySelector('.grid');
+      if (grid) {
+        grid.style.setProperty('--ps-lane-count', '1');
+        grid.innerHTML = '<div class="empty">All dashboard sections are hidden.</div>';
+      }
+      this._lanes = [];
+      return;
+    }
+
+    const count = Math.min(this._columnCount(), visibleItems.length);
     if (this._lanes.length !== count) {
       this._rebuildLanes(count);
     }
 
     const renderedItemCount = this._renderedItemCount();
-    if (this._customizing && renderedItemCount === this._items.length) return;
+    if (this._customizing && renderedItemCount === visibleItems.length) return;
 
     const savedLayout = this._savedLayout(count);
     if (savedLayout) {
@@ -1441,7 +3059,7 @@ class PowerSyncLayout extends HTMLElement {
     }
 
     const heights = new Array(count).fill(0);
-    const sortedItems = [...this._items].sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
+    const sortedItems = [...visibleItems].sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
     for (const item of sortedItems) {
       const laneIndex = heights.indexOf(Math.min(...heights));
       this._lanes[laneIndex].appendChild(item);
@@ -1555,8 +3173,44 @@ class PowerSyncLayout extends HTMLElement {
         touch-action: none;
         user-select: none;
       }
+      .hide-surface {
+        display: none;
+        position: absolute;
+        top: 8px;
+        right: 62px;
+        min-width: 44px;
+        min-height: 32px;
+        padding: 0 9px;
+        appearance: none;
+        border-radius: 999px;
+        border: 0;
+        background: color-mix(in srgb, var(--error-color, #db4437) 82%, black);
+        color: white;
+        font: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 32px;
+        text-align: center;
+        z-index: 20;
+        cursor: pointer;
+        touch-action: manipulation;
+        user-select: none;
+      }
       .item.customizing .drag-surface {
         display: block;
+      }
+      .item.customizing .hide-surface {
+        display: block;
+      }
+      .hide-surface:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .item.hidden-preview {
+        opacity: 0.58;
+      }
+      .item.hidden-preview .hide-surface {
+        background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
       }
       .item.dragging {
         opacity: 0.55;
@@ -1575,6 +3229,11 @@ class PowerSyncLayout extends HTMLElement {
         background: color-mix(in srgb, var(--primary-color, #03a9f4) 10%, transparent);
         box-sizing: border-box;
       }
+      .empty {
+        padding: 24px;
+        color: var(--secondary-text-color, #888);
+        text-align: center;
+      }
       @media (max-width: 760px) {
         .grid {
           padding: 6px;
@@ -1587,9 +3246,11 @@ class PowerSyncLayout extends HTMLElement {
     toolbar.className = 'toolbar';
     toolbar.innerHTML = `
       <button class="toggle" type="button">Customize layout</button>
+      <button class="restore-hidden" type="button" hidden>Show hidden (0)</button>
       <button class="reset" type="button">Reset layout</button>
     `;
     toolbar.querySelector('.toggle').addEventListener('click', () => this._setCustomizing(!this._customizing));
+    toolbar.querySelector('.restore-hidden').addEventListener('click', () => this._showHiddenItems());
     toolbar.querySelector('.reset').addEventListener('click', () => this._resetOrder());
     root.appendChild(toolbar);
 
@@ -1606,16 +3267,20 @@ class PowerSyncLayout extends HTMLElement {
     try { helpers = await window.loadCardHelpers(); } catch (_) {}
 
     const keyOccurrences = new Map();
+    const hiddenKeys = this._loadHiddenKeys();
     for (const [index, cardConfig] of this._flattenCards().entries()) {
       const baseKey = this._cardKeyParts(cardConfig).join(':') || 'card';
       const occurrence = keyOccurrences.get(baseKey) || 0;
       keyOccurrences.set(baseKey, occurrence + 1);
+      const cardKey = this._cardKey(cardConfig, occurrence);
+      const legacyKey = this._legacyCardKey(cardConfig, index);
 
       const item = document.createElement('div');
       item.className = 'item';
       item.dataset.defaultIndex = String(index);
-      item.dataset.key = this._cardKey(cardConfig, occurrence);
-      item.dataset.legacyKey = this._legacyCardKey(cardConfig, index);
+      item.dataset.key = cardKey;
+      item.dataset.legacyKey = legacyKey;
+      item.dataset.hidden = hiddenKeys.has(cardKey) || hiddenKeys.has(legacyKey) ? 'true' : 'false';
       item.addEventListener('dragstart', (event) => event.preventDefault());
 
       const dragSurface = document.createElement('button');
@@ -1647,6 +3312,18 @@ class PowerSyncLayout extends HTMLElement {
         event.stopPropagation();
         this._cancelPointerDrag(item);
       });
+
+      const hideSurface = document.createElement('button');
+      hideSurface.className = 'hide-surface';
+      hideSurface.type = 'button';
+      hideSurface.textContent = 'Hide';
+      hideSurface.setAttribute('aria-label', 'Hide dashboard card');
+      hideSurface.addEventListener('click', (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        this._toggleItemHidden(item);
+      });
+
       let card;
       try {
         card = helpers
@@ -1661,10 +3338,13 @@ class PowerSyncLayout extends HTMLElement {
       if (this._hass) card.hass = this._hass;
       this._cards.push(card);
       item.appendChild(card);
+      item.appendChild(hideSurface);
       item.appendChild(dragSurface);
       this._items.push(item);
     }
 
+    this._syncHiddenKeys();
+    this._updateToolbarState();
     this._scheduleLayout();
     setTimeout(() => this._scheduleLayout(), 250);
     setTimeout(() => this._scheduleLayout(), 1000);
@@ -1727,22 +3407,54 @@ class PowerSyncStrategy {
     // Built-in energy flow card is always available (power-sync-energy-flow.js)
     const hasTeslaFlow = true;
 
-    // Entity resolver — tries power_sync_ prefixed first, then bare name.
+    const isAvailableState = (id) => {
+      const s = (hass.states || {})[id];
+      return s && s.state !== 'unavailable' && s.state !== 'unknown';
+    };
+
+    // Entity resolver - tries power_sync_ prefixed first, then HA-renamed
+    // PowerSync sensors such as sensor.powersync_amber_battery_level.
     // Handles mixed installs where some entities have the prefix and others don't.
     const e = (name) => {
       const prefixed = `sensor.power_sync_${name}`;
-      if (hass.states[prefixed]) return prefixed;
       const bare = `sensor.${name}`;
-      if (hass.states[bare]) return bare;
-      // Default to prefixed (modern convention)
-      return prefixed;
+      const tail = `_${name}`;
+      const candidates = [];
+      for (const id of [prefixed, bare]) {
+        if (hass.states[id]) candidates.push(id);
+      }
+      for (const id of Object.keys(hass.states || {})) {
+        if (!id.startsWith('sensor.')) continue;
+        const objectId = id.slice('sensor.'.length);
+        if (!objectId.endsWith(tail)) continue;
+        if (!objectId.startsWith('power_sync_') && !objectId.startsWith('powersync_')) continue;
+        candidates.push(id);
+      }
+      const unique = Array.from(new Set(candidates));
+      if (unique.length === 0) return prefixed;
+      return unique.sort((a, b) => {
+        const score = (id) => {
+          if (isAvailableState(id)) return 0;
+          return 1;
+        };
+        const nameScore = (id) => {
+          if (id === prefixed) return 0;
+          if (id.startsWith('sensor.powersync_')) return 1;
+          if (id.startsWith('sensor.power_sync_')) return 2;
+          if (id === bare) return 3;
+          return 4;
+        };
+        return (
+          score(a) - score(b) ||
+          nameScore(a) - nameScore(b) ||
+          a.length - b.length ||
+          a.localeCompare(b)
+        );
+      })[0];
     };
 
     // Entity existence + availability helper
-    const has = (id) => {
-      const s = hass.states[id];
-      return s && s.state !== 'unavailable' && s.state !== 'unknown';
-    };
+    const has = (id) => isAvailableState(id);
 
     // Shorthand: resolve then check
     const hasE = (name) => has(e(name));
@@ -1854,15 +3566,14 @@ class PowerSyncStrategy {
     // section gracefully scales from a basic Powerwall (4 rows) to a US site
     // with VPP enrollment (8+ rows).
     //
-    // Gated on power_sync_backup_reserve or power_sync_operation_mode — these
-    // are only created for Tesla setups. Without this guard, findEntity's broad
-    // suffix-match fallback picks up unrelated entities from GoodWe, Sigenergy,
-    // etc. and incorrectly renders the Tesla section for non-Tesla users.
+    // Gated through the Tesla-aware entity resolver. HA may compose these IDs
+    // from the device name, or from the newer power_sync_tesla_* object IDs, so
+    // direct power_sync_backup_reserve / power_sync_operation_mode checks miss
+    // valid Tesla controls.
     {
-      const _s = hass.states || {};
       const _hasTesla = !!(
-        _s['number.power_sync_backup_reserve'] ||
-        _s['select.power_sync_operation_mode']
+        findEntity('number', 'backup_reserve') ||
+        findEntity('select', 'operation_mode')
       );
       if (_hasTesla) {
         const teslaSection = _teslaEnergySiteControls(findEntity, findVppSwitches);
@@ -1874,11 +3585,8 @@ class PowerSyncStrategy {
 
     // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      left.push(_optimizerStatus(
-        e,
-        hasE('optimization_force_charge_windows'),
-        hasE('optimization_force_discharge_windows'),
-      ));
+      left.push(_optimizerStatus(e));
+      center.push(_optimizationPlan(e));
     }
 
     // --- Center Column: Power Flow ---
@@ -2123,6 +3831,18 @@ function _priceMeta(hass, entityId) {
 
 // ─── Section Builders ────────────────────────────────────────
 
+function _optimizationPlan(e) {
+  return {
+    type: 'custom:power-sync-optimization-plan',
+    optimizationPath: 'power_sync/optimization',
+    statusEntity: e('optimization_status'),
+    forceChargeEntity: e('optimization_force_charge_windows'),
+    forceDischargeEntity: e('optimization_force_discharge_windows'),
+    importPriceEntity: e('lp_import_price_forecast'),
+    exportPriceEntity: e('lp_export_price_forecast'),
+  };
+}
+
 function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
   // thresholds: { green, yellow, red } in display units (after multiplier).
   // Color picked is the one whose threshold is the highest <= displayed value.
@@ -2347,6 +4067,40 @@ function _batteryControls(hass) {
             },
           },
         ],
+      },
+      {
+        type: 'custom:button-card',
+        name: 'Self Consumption',
+        icon: 'mdi:home-battery',
+        styles: {
+          card: [
+            { height: '40px' },
+            { 'border-radius': '18px' },
+            { padding: '4px 12px' },
+            { background: 'rgba(var(--rgb-green-color, 76, 175, 80), 0.1)' },
+          ],
+          grid: [
+            { 'grid-template-areas': '"i n"' },
+            { 'grid-template-columns': '24px 1fr' },
+          ],
+          icon: [
+            { 'grid-area': 'i' },
+            { width: '24px' },
+            { color: 'var(--green-color, #4CAF50)' },
+          ],
+          name: [
+            { 'grid-area': 'n' },
+            { 'text-align': 'left' },
+            { 'padding-left': '8px' },
+            { 'font-weight': '600' },
+            { 'font-size': '14px' },
+          ],
+        },
+        tap_action: {
+          action: 'call-service',
+          service: 'power_sync.set_self_consumption',
+          confirmation: { text: 'Set battery to self-consumption mode?' },
+        },
       },
       {
         square: false,
@@ -2688,6 +4442,13 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
         : Math.round(powerW) + ' W';
       let line1 = action.charAt(0).toUpperCase() + action.slice(1);
       if (powerW) line1 += ' @ ' + powerStr;
+      if (current.attributes?.idle_hold_active) {
+        const holdPct = Number(current.attributes?.idle_hold_reserve_percent);
+        const holdText = Number.isFinite(holdPct)
+          ? 'holding SOC at ' + Math.round(holdPct) + '%'
+          : 'temporary hold';
+        line1 += ' - ' + holdText;
+      }
       if (next && next.state && next.state !== 'unknown' && next.state !== 'unavailable') {
         const nextAction = (next.state || '').replace('_', ' ');
         const nextTime = next.attributes?.time;
@@ -3522,180 +5283,9 @@ function _pvStringSensors(e, hass, findSensor) {
 }
 
 function _batteryHealth(e, hass) {
-  const healthEntity = e('battery_health');
-
-  // Determine how many individual battery gauges to show. Read battery_count from
-  // current state at render time so the grid expands for stacked PW3 systems.
-  const stateObj = hass?.states?.[healthEntity];
-  const batteryCount = Number(stateObj?.attributes?.battery_count || 0);
-  // Show at least 1 individual gauge slot, cap at 8. If we have no count data yet,
-  // default to 3 so the card isn't empty on first load.
-  const numSlots = batteryCount > 0 ? Math.min(batteryCount, 8) : 3;
-
-  const healthGauge = (name, attrPath) => ({
-    type: 'custom:button-card',
-    entity: healthEntity,
-    name,
-    show_icon: false,
-    show_name: true,
-    show_state: true,
-    state_display: `[[[
-      const v = ${attrPath};
-      if (v == null || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
-      const n = Number(v);
-      if (!Number.isFinite(n)) return '';
-      return n.toFixed(1) + ' %';
-    ]]]`,
-    styles: {
-      card: [
-        { height: '70px' },
-        { 'border-radius': '12px' },
-        { padding: '6px' },
-        {
-          display: `[[[
-            const v = ${attrPath};
-            if (v == null || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
-            const n = Number(v);
-            return Number.isFinite(n) ? 'block' : 'none';
-          ]]]`,
-        },
-      ],
-      name: [
-        { 'font-weight': '700' },
-        { 'font-size': '13px' },
-      ],
-      state: [
-        { 'font-size': '18px' },
-        { 'font-weight': '800' },
-        { 'margin-top': '2px' },
-      ],
-    },
-  });
-
-  // Build individual battery gauge cards using the same reconciled pack labels
-  // as the backend sensors. Legacy follower/expansion attributes are fallback
-  // only for already-restored data that has not been rescanned yet.
-  const individualGauges = [];
-  for (let n = 1; n <= numSlots; n++) {
-    const attrPath = `states['${healthEntity}']?.attributes?.battery_${n}_health_percent`;
-    const labelPath = `states['${healthEntity}']?.attributes?.battery_${n}_label`;
-    const rolePath = `states['${healthEntity}']?.attributes?.battery_${n}_role`;
-    const followerPath = `states['${healthEntity}']?.attributes?.battery_${n}_is_follower`;
-    const expansionPath = `states['${healthEntity}']?.attributes?.battery_${n}_is_expansion`;
-    individualGauges.push({
-      type: 'custom:button-card',
-      entity: healthEntity,
-      show_icon: false,
-      show_name: true,
-      show_state: true,
-      name: `[[[
-        const label = ${labelPath};
-        if (label) return label;
-        const role = String(${rolePath} || '').toLowerCase();
-        const isFollower = ${followerPath};
-        const isExpansion = ${expansionPath};
-        if (role === 'powerwall') return 'Powerwall ${n}';
-        if (role === 'leader') return 'Leader PW3';
-        if (role === 'follower' || isFollower) return 'Follower PW3';
-        if (role === 'expansion' || isExpansion) return 'Expansion Pack ${n}';
-        return 'Powerwall ${n}';
-      ]]]`,
-      state_display: `[[[
-        const v = ${attrPath};
-        if (v == null || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
-        const n = Number(v);
-        if (!Number.isFinite(n)) return '';
-        return n.toFixed(1) + ' %';
-      ]]]`,
-      styles: {
-        card: [
-          { height: '70px' },
-          { 'border-radius': '12px' },
-          { padding: '6px' },
-          {
-            display: `[[[
-              const v = ${attrPath};
-              if (v == null || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
-              const num = Number(v);
-              return Number.isFinite(num) ? 'block' : 'none';
-            ]]]`,
-          },
-        ],
-        name: [
-          { 'font-weight': '700' },
-          { 'font-size': '13px' },
-        ],
-        state: [
-          { 'font-size': '18px' },
-          { 'font-weight': '800' },
-          { 'margin-top': '2px' },
-        ],
-      },
-    });
-  }
-
-  // Grid columns: Overall + individual gauges. Use 4 columns for ≤3 slots, else match count.
-  const gridColumns = numSlots <= 3 ? 4 : Math.min(numSlots + 1, 5);
-
   return {
-    type: 'vertical-stack',
-    cards: [
-      {
-        type: 'custom:button-card',
-        name: 'Battery Health',
-        show_icon: false,
-        show_name: true,
-        styles: {
-          card: [
-            { height: '36px' },
-            { 'border-radius': '12px' },
-            { padding: '0px 12px' },
-            { background: 'rgba(var(--rgb-primary-color, 3, 169, 244), 0.10)' },
-          ],
-          name: [
-            { 'justify-self': 'start' },
-            { 'font-weight': '800' },
-            { 'font-size': '14px' },
-            { 'letter-spacing': '0.5px' },
-          ],
-        },
-      },
-      {
-        type: 'grid',
-        columns: gridColumns,
-        square: false,
-        cards: [
-          healthGauge('Overall', `states['${healthEntity}']?.state`),
-          ...individualGauges,
-        ],
-      },
-      {
-        type: 'markdown',
-        content: `{% set source = state_attr('${healthEntity}', 'source') %}
-{% set original = state_attr('${healthEntity}', 'original_capacity_kwh') %}
-{% set current = state_attr('${healthEntity}', 'current_capacity_kwh') %}
-{% set scan = state_attr('${healthEntity}', 'last_scan') %}
-{% set soh = state_attr('${healthEntity}', 'state_of_health_percent') %}
-{% set ns = namespace(has_follower=false) %}
-{%- for n in range(1, 9) %}
-{%- set role = state_attr('${healthEntity}', 'battery_' ~ n ~ '_role') %}
-{%- if role == 'follower' or state_attr('${healthEntity}', 'battery_' ~ n ~ '_is_follower') %}
-{%- set ns.has_follower = true %}
-{%- endif %}
-{%- endfor %}
-{% set source_label = 'local gateway' if source == 'ha_local_tedapi' else 'Fleet API relay' if source == 'ha_fleet_api_relay' else 'mobile local scan' if source == 'mobile_app_tedapi' else 'mobile cloud RSA' if source == 'mobile_app_cloud_rsa' else source %}
-{%- if source in ('mobile_app_tedapi', 'mobile_app', 'fleet_api', 'ha_local_tedapi', 'ha_fleet_api_relay', 'mobile_app_cloud_rsa') %}
-**Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }} | **Source:** {{ source_label }}
-{%- if ns.has_follower %} *(follower capacity inferred from aggregate)*{%- endif %}
-{%- elif source == 'inverter_modbus' %}
-**State of Health:** {{ soh }}% (from inverter)
-{%- elif states('${healthEntity}') not in ['unavailable', 'unknown'] %}
-**Health:** {{ states('${healthEntity}') }}%
-{%- else %}
-No battery health data available yet.
-{%- endif %}`,
-      },
-    ],
+    type: 'custom:power-sync-battery-health',
+    entity: e('battery_health'),
   };
 }
 

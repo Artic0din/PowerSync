@@ -16,10 +16,15 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "34"
+DASHBOARD_JS_VERSION = "39"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
+
+# Startup waits for external services should be bounded so HA startup is not
+# held at wrap-up for minutes when an API cannot publish initial state.
+TESLA_CAPABILITY_WAIT_SECONDS = 30.0
+AMBER_WEBSOCKET_START_TIMEOUT_SECONDS = 15.0
 
 # Configuration keys
 CONF_AMBER_API_TOKEN = "amber_api_token"
@@ -162,6 +167,7 @@ BATTERY_SYSTEM_SAJ_H2 = "saj_h2"
 BATTERY_SYSTEM_FRONIUS_RESERVA = "fronius_reserva"
 BATTERY_SYSTEM_NEOVOLT = "neovolt"
 BATTERY_SYSTEM_SOLAREDGE = "solaredge"
+BATTERY_SYSTEM_CUSTOM = "custom"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -173,10 +179,17 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome — via esy_sunhome companion integration",
     BATTERY_SYSTEM_SOLAX: "Solax Hybrid — via Solax Modbus integration",
     BATTERY_SYSTEM_SAJ_H2: "SAJ H2/HS2 — via SAJ H2 Modbus integration",
-    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva — via Fronius Modbus integration",
+    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage (BYD/Reserva) — via Fronius Modbus integration",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt/Bytewatt — via Neovolt Modbus integration",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge Home Battery / inverter curtailment — HA entity bridge + Modbus TCP",
+    BATTERY_SYSTEM_CUSTOM: "Custom / external controller — planner only via Home Assistant entities",
 }
+
+CONF_CUSTOM_BATTERY_LEVEL_ENTITY = "custom_battery_level_entity"
+CONF_CUSTOM_BATTERY_POWER_ENTITY = "custom_battery_power_entity"
+CONF_CUSTOM_GRID_POWER_ENTITY = "custom_grid_power_entity"
+CONF_CUSTOM_SOLAR_POWER_ENTITY = "custom_solar_power_entity"
+CONF_CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
 # Hybrid inverters with integrated battery control
@@ -383,6 +396,8 @@ CONF_SIGENERGY_PASSWORD = "sigenergy_password"  # Plain password (will be encode
 CONF_SIGENERGY_PASS_ENC = "sigenergy_pass_enc"  # Encoded password (backwards compat)
 CONF_SIGENERGY_DEVICE_ID = "sigenergy_device_id"
 CONF_SIGENERGY_STATION_ID = "sigenergy_station_id"
+CONF_SIGENERGY_TARIFF_STATION_ID = "sigenergy_tariff_station_id"
+CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID = "sigenergy_tariff_station_source_id"
 CONF_SIGENERGY_ACCESS_TOKEN = "sigenergy_access_token"
 CONF_SIGENERGY_REFRESH_TOKEN = "sigenergy_refresh_token"
 CONF_SIGENERGY_TOKEN_EXPIRES_AT = "sigenergy_token_expires_at"
@@ -456,7 +471,7 @@ DEFAULT_SAJ_BATTERY_CAPACITY_KWH = 10.0
 CONF_SAJ_INVERTER_RATED_KW = "saj_inverter_rated_kw"
 DEFAULT_SAJ_INVERTER_RATED_KW = 10.0
 
-# Fronius Reserva battery system — bridges via callifo/redpomodoro fronius_modbus
+# Fronius GEN24 storage battery system — bridges via callifo/redpomodoro fronius_modbus
 # Install fronius_modbus from HACS first; PowerSync reads/writes its entities.
 CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID = "fronius_reserva_config_entry_id"
 CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH = "fronius_reserva_battery_capacity_kwh"
@@ -1148,6 +1163,7 @@ SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
 SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
 SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT = "optimization_spread_import"
 SWITCH_TYPE_OPTIMIZATION_ENABLED = "optimization_enabled"
+SWITCH_TYPE_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
 SWITCH_TYPE_AUTO_UPDATE = "auto_update"
 
 # Monitoring mode — blocks all battery/inverter control commands
@@ -1653,9 +1669,10 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
     BATTERY_SYSTEM_SOLAX: "Solax",
     BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
-    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva",
+    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
+    BATTERY_SYSTEM_CUSTOM: "Custom / external controller",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1667,6 +1684,8 @@ OPTIMIZATION_PROVIDERS = {
 CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
 CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
 CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
+CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
+CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
 CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
 CONF_OPTIMIZATION_INTERVAL = "optimization_interval"
 CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
@@ -1677,9 +1696,11 @@ CONF_OPTIMIZATION_ML_FORECASTING = "optimization_ml_forecasting"
 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "optimization_battery_capacity_wh"
 CONF_OPTIMIZATION_MAX_CHARGE_W = "optimization_max_charge_w"
 CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
+CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "optimization_max_grid_import_w"
 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "optimization_allow_grid_charge"
 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
+CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
@@ -1731,9 +1752,10 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_ESY_SUNHOME: 10000,  # HM6 varies; default 10 kWh
     BATTERY_SYSTEM_SOLAX: 11600,      # T-BAT-SYS-HV 11.6 kWh typical
     BATTERY_SYSTEM_SAJ_H2: 10000,     # Varies, default 10 kWh
-    BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius Reserva varies by module count
+    BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius GEN24 storage varies by module count
     BATTERY_SYSTEM_NEOVOLT: 20100,    # Bytewatt pack is commonly 20.1 kWh
     BATTERY_SYSTEM_SOLAREDGE: 10000,  # SolarEdge Home Battery varies by stack
+    BATTERY_SYSTEM_CUSTOM: 10000,     # User-provided external system
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1750,6 +1772,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: 5000,  # Reserva/GEN24 common operating target
     BATTERY_SYSTEM_NEOVOLT: 5000,      # Configurable in the upstream Neovolt integration
     BATTERY_SYSTEM_SOLAREDGE: 5000,    # Active-power curtailment only in v1
+    BATTERY_SYSTEM_CUSTOM: 5000,       # User-provided external system
 }
 
 # Optimization service

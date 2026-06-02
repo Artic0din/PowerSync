@@ -9,7 +9,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+OPTIMIZATION_COORDINATOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+)
+OPTIMIZATION_EXECUTOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "executor.py"
+)
+OPTIMIZATION_BATTERY_CONTROLLER_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "battery_controller.py"
+)
 SELECT_PATH = ROOT / "custom_components" / "power_sync" / "select.py"
+NUMBER_PATH = ROOT / "custom_components" / "power_sync" / "number.py"
+SWITCH_PATH = ROOT / "custom_components" / "power_sync" / "switch.py"
+FOXESS_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "foxess.py"
 
 
 def _find_class_method(
@@ -86,6 +98,153 @@ def test_force_mode_persistence_uses_setup_store_reference():
     assert function_source is not None
     assert 'hass.data[DOMAIN][entry.entry_id]["store"]' not in function_source
     assert "await store.async_load()" in function_source
+
+
+def test_monitoring_mode_optimizer_shutdown_releases_active_control():
+    coordinator_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    coordinator_tree = ast.parse(coordinator_source)
+    monitoring_helper = _find_class_method(
+        coordinator_tree,
+        "OptimizationCoordinator",
+        "_monitoring_mode_active",
+    )
+    monitoring_helper_source = ast.get_source_segment(
+        coordinator_source,
+        monitoring_helper,
+    )
+    disable = _find_class_method(coordinator_tree, "OptimizationCoordinator", "disable")
+    disable_source = ast.get_source_segment(coordinator_source, disable)
+
+    executor_source = OPTIMIZATION_EXECUTOR_PATH.read_text()
+    executor_tree = ast.parse(executor_source)
+    stop = _find_class_method(executor_tree, "ScheduleExecutor", "stop")
+    stop_source = ast.get_source_segment(executor_source, stop)
+
+    assert disable_source is not None
+    assert stop_source is not None
+    assert monitoring_helper_source is not None
+    assert "CONF_MONITORING_MODE" in monitoring_helper_source
+    battery_source = OPTIMIZATION_BATTERY_CONTROLLER_PATH.read_text()
+    battery_tree = ast.parse(battery_source)
+    wrapper_restore = _find_class_method(
+        battery_tree,
+        "BatteryControllerWrapper",
+        "restore_normal",
+    )
+    wrapper_restore_source = ast.get_source_segment(
+        battery_source,
+        wrapper_restore,
+    )
+
+    assert "monitoring_mode = self._monitoring_mode_active()" in disable_source
+    assert 'if not monitoring_mode and self._last_executed_action == "idle":' in disable_source
+    assert "skipping IDLE cleanup writes" in disable_source
+    assert "skipping scheduled EV no-discharge release" in disable_source
+    assert "before handing off to monitoring mode" in disable_source
+    assert "await self._executor.stop(restore_normal=True)" in disable_source
+    assert "restore_normal: bool = True" in stop_source
+    assert "if restore_normal:" in stop_source
+    assert "await self._restore_normal_operation()" in stop_source
+    assert wrapper_restore_source is not None
+    assert '"source": "optimizer"' in wrapper_restore_source
+    assert '"_allow_monitoring_restore": True' in wrapper_restore_source
+
+
+def test_monitoring_mode_blocks_automation_but_allows_manual_controls():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    source_helper = ast.get_source_segment(
+        source, _find_function(tree, "_control_call_source")
+    )
+    assert source_helper is not None
+    assert 'call.data.get("source", "")' in source_helper
+    assert 'getattr(call.context, "user_id", None)' in source_helper
+    assert 'return "unknown"' in source_helper
+
+    helper = ast.get_source_segment(
+        source, _find_function(tree, "_monitoring_mode_should_block_control")
+    )
+    assert helper is not None
+    assert "_control_call_source(call)" in helper
+    assert "user" in helper
+    assert "manual" in helper
+
+    guarded_functions = {
+        "handle_force_discharge": "extend_hardware = call.data.get",
+        "handle_force_charge": "extend_hardware = call.data.get",
+        "handle_hold_battery_soc": "for coord_key, brand in",
+        "handle_set_self_consumption": 'self_consumption_state["active"] = True',
+        "handle_set_autonomous": "is_foxess = bool",
+        "handle_set_backup_reserve": "is_sigenergy = bool",
+        "handle_set_operation_mode": "dispatch_powerwall_write",
+        "handle_set_grid_export": 'entry_data.get("alphaess_coordinator")',
+        "handle_set_grid_charging": "_get_tesla_site_configs",
+        "handle_set_storm_watch": '_get_tesla_coordinator_for_service("set_storm_watch")',
+        "handle_set_off_grid_ev_reserve": '_get_tesla_coordinator_for_service("set_off_grid_ev_reserve")',
+        "handle_set_vpp_enrollment": '_get_tesla_coordinator_for_service("set_vpp_enrollment")',
+    }
+    for function_name, later_marker in guarded_functions.items():
+        function_source = ast.get_source_segment(
+            source, _find_function(tree, function_name)
+        )
+        assert function_source is not None
+        guard = "if _monitoring_mode_should_block_control(call):"
+        assert guard in function_source
+        assert function_source.index(guard) < function_source.index(later_marker)
+
+    restore = ast.get_source_segment(
+        source, _find_function(tree, "handle_restore_normal")
+    )
+    assert restore is not None
+    restore_guard = "if _monitoring_mode_should_block_control(call) and not allow_monitoring_restore:"
+    assert restore_guard in restore
+    assert restore.index(restore_guard) < restore.index(
+        '_cancel_all_force_timers("restore_normal")'
+    )
+    assert restore.index(restore_guard) < restore.index(
+        'entry_data.get("goodwe_coordinator")'
+    )
+
+    number_source = NUMBER_PATH.read_text()
+    select_source = SELECT_PATH.read_text()
+    switch_source = SWITCH_PATH.read_text()
+    automation_source = (
+        ROOT / "custom_components" / "power_sync" / "automations" / "actions.py"
+    ).read_text()
+
+    assert '{"percent": int(value), "source": "user"}' in number_source
+    assert '{"mode": option, "source": "user"}' in select_source
+    assert '{"rule": option, "source": "user"}' in select_source
+    assert '{"enabled": True, "source": "user"}' in switch_source
+    assert '{"enabled": False, "source": "user"}' in switch_source
+
+    assert '{"percent": reserve_percent, "source": "automation"}' in automation_source
+    assert '{"mode": mode, "source": "automation"}' in automation_source
+    assert '{"rule": rule, "source": "automation"}' in automation_source
+    assert '{"enabled": enabled, "source": "automation"}' in automation_source
+    assert '{"duration": duration, "source": "automation"}' in automation_source
+
+
+def test_monitoring_mode_blocks_persisted_force_replay_after_restart():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore = ast.get_source_segment(
+        source, _find_function(tree, "restore_force_mode_from_persistence")
+    )
+
+    assert restore is not None
+    assert "if _is_monitoring_mode():" in restore
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        'if persisted_source == "optimizer":'
+    )
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        "SERVICE_FORCE_CHARGE"
+    )
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        "SERVICE_FORCE_DISCHARGE"
+    )
+    assert 'stored_data["force_mode_state"] = None' in restore
 
 
 def test_force_mode_persistence_keeps_requested_power_setpoint():
@@ -186,10 +345,15 @@ def test_restore_normal_suppresses_tesla_force_toggle_during_dynamic_sync():
     assert restore_source is not None
     assert sync_source is not None
     assert '"_suppress_force_mode_toggle_once"' in restore_source
+    assert "allow_monitoring_restore" in restore_source
+    assert '"_allow_monitoring_restore"' in restore_source
+    assert '"_allow_monitoring_tou_sync_once"' in restore_source
     assert "restore_was_force_discharging" in restore_source
     assert 'force_discharge_state["active"] = False' in restore_source
     assert "SERVICE_SYNC_TOU" in restore_source
     assert '"_suppress_force_mode_toggle_once"' in sync_source
+    assert '"_allow_monitoring_tou_sync_once"' in sync_source
+    assert "Allowing one Tesla TOU sync during restore cleanup" in sync_source
     assert "Skipping force mode toggle" in sync_source
 
 
@@ -479,7 +643,7 @@ def test_optimizer_restart_restore_is_hidden_from_force_getter():
 
 
 def test_optimizer_startup_ignores_stale_force_restore_window():
-    source = (ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py").read_text()
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
     method = _find_class_method(tree, "OptimizationCoordinator", "_deferred_enable_restore")
     method_source = ast.get_source_segment(source, method)
@@ -492,7 +656,7 @@ def test_optimizer_startup_ignores_stale_force_restore_window():
 
 
 def test_optimizer_waits_for_restart_force_restore_before_solving():
-    source = (ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py").read_text()
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
     run_method = _find_class_method(tree, "OptimizationCoordinator", "_run_optimization")
     wait_method = _find_class_method(tree, "OptimizationCoordinator", "_wait_for_restart_force_restore")
@@ -507,6 +671,45 @@ def test_optimizer_waits_for_restart_force_restore_before_solving():
     assert "return True" in wait_source
 
 
+def test_tou_sync_does_not_skip_optimizer_owned_force_modes():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_handle_sync_tou_internal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "=== Starting TOU sync ===" in function_source
+    assert "Optimizer force %s active" not in function_source
+    assert 'opt_force_state.get("source") == "optimizer"' not in function_source
+
+
+def test_price_update_skips_optimizer_owned_force_reoptimization():
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(tree, "OptimizationCoordinator", "_on_price_update")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "force_state = self._get_active_force_state()" in method_source
+    assert 'force_state.get("source") == "optimizer"' in method_source
+    assert "skipping LP re-optimization" in method_source
+    assert "self.hass.async_create_background_task" in method_source
+
+
+def test_optimization_coordinator_exposes_optimizer_force_state():
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "get_active_force_state",
+    )
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "return self._get_active_force_state()" in method_source
+
+
 def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -519,6 +722,26 @@ def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     assert grid_disable_index < tariff_upload_index
+
+
+def test_restore_normal_does_not_clear_newer_force_command():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    generation_index = function_source.index("_restore_generation = _command_generation[0]")
+    helper_index = function_source.index("def _restore_superseded")
+    clear_index = function_source.index('force_discharge_state["active"] = False')
+    dispatch_index = function_source.index(
+        f'async_dispatcher_send(hass, f"{{DOMAIN}}_force_discharge_state"'
+    )
+
+    assert generation_index < helper_index < clear_index < dispatch_index
+    assert '_restore_superseded("initial mode handoff")' in function_source
+    assert '_restore_superseded("tariff restore")' in function_source
+    assert '_restore_superseded("mode/reserve restore")' in function_source
 
 
 def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
@@ -547,6 +770,21 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
     assert "if not optimizer_write:" in function_source
     persistence_branch = function_source.split("if not optimizer_write:", 1)[1]
     assert '"_user_backup_reserve": percent' in persistence_branch
+
+
+def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_backup_reserve")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "detect_local_backup_reserve_offset" in function_source
+    assert '"powerwall_local_low_soe_reserve_pct"' in function_source
+    assert "local_backup_reserve_write_percent" in function_source
+    assert "local_percent = local_backup_reserve_write_percent(" in function_source
+    assert '"site_info.backup_reserve_percent": local_percent' in function_source
+    assert 'json={"backup_reserve_percent": percent}' in function_source
 
 
 def test_foxess_force_charge_accepts_optimizer_min_timeout():
@@ -647,6 +885,32 @@ def test_foxess_cloud_curtailment_uses_export_active_power_and_scheduler_limits(
     assert "_restore_stored_scheduler()" in restore_source
     assert '"ActivePowerLimit"' in restore_source
     assert '"ExportLimit"' in restore_source
+
+
+def test_foxess_direct_curtailment_uses_verified_grid_remote_control():
+    source = FOXESS_INVERTER_PATH.read_text()
+    tree = ast.parse(source)
+    curtail = _find_class_method(tree, "FoxESSController", "curtail")
+    curtail_source = ast.get_source_segment(source, curtail)
+
+    assert curtail_source is not None
+    assert "_write_remote_control(" in curtail_source
+    assert "REMOTE_CONTROL_GRID" in curtail_source
+    assert 'label="curtailment"' in curtail_source
+    assert "_write_holding_register(reg.remote_enable, 1)" not in curtail_source
+
+
+def test_foxess_dc_curtailment_reapplies_before_remote_timeout():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_foxess_curtailment")
+    handler_source = ast.get_source_segment(source, handler)
+
+    assert handler_source is not None
+    assert "_last_foxess_curtailment_reapply" in handler_source
+    assert "_foxess_reapply_interval = 480" in handler_source
+    assert 'current_state != "curtailed" or _needs_reapply' in handler_source
+    assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in handler_source
 
 
 def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_modes():

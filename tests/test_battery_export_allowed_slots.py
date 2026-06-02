@@ -24,6 +24,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.core",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.dispatcher",
     "homeassistant.helpers.event",
     "homeassistant.helpers.storage",
     "homeassistant.helpers.update_coordinator",
@@ -46,6 +47,7 @@ def _install_ha_stubs() -> None:
     ha_core = types.ModuleType("homeassistant.core")
     ha_exceptions = types.ModuleType("homeassistant.exceptions")
     ha_helpers = types.ModuleType("homeassistant.helpers")
+    ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
     ha_event = types.ModuleType("homeassistant.helpers.event")
     ha_storage = types.ModuleType("homeassistant.helpers.storage")
     ha_update = types.ModuleType("homeassistant.helpers.update_coordinator")
@@ -71,6 +73,7 @@ def _install_ha_stubs() -> None:
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     ha_storage.Store = _Store
     ha_update.DataUpdateCoordinator = _DataUpdateCoordinator
+    ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
     ha_event.async_track_point_in_utc_time = (
         lambda hass, callback, when: getattr(hass, "scheduled", []).append((callback, when)) or (lambda: None)
     )
@@ -78,6 +81,7 @@ def _install_ha_stubs() -> None:
     ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     ha_dt.UTC = timezone.utc
     ha_helpers.storage = ha_storage
+    ha_helpers.dispatcher = ha_dispatcher
     ha_helpers.event = ha_event
     ha_helpers.update_coordinator = ha_update
     ha_util.dt = ha_dt
@@ -88,6 +92,7 @@ def _install_ha_stubs() -> None:
     sys.modules["homeassistant.core"] = ha_core
     sys.modules["homeassistant.exceptions"] = ha_exceptions
     sys.modules["homeassistant.helpers"] = ha_helpers
+    sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
     sys.modules["homeassistant.helpers.event"] = ha_event
     sys.modules["homeassistant.helpers.storage"] = ha_storage
     sys.modules["homeassistant.helpers.update_coordinator"] = ha_update
@@ -113,12 +118,16 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_FP_TWAP_OVERRIDE = "fp_twap_override"
     const_module.CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
+    const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
+    const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
     const_module.CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "battery_capacity_wh"
     const_module.CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "allow_grid_charge"
     const_module.CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
     const_module.CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
+    const_module.CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
     const_module.CONF_OPTIMIZATION_MAX_CHARGE_W = "max_charge_w"
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "max_discharge_w"
+    const_module.CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "max_grid_import_w"
     const_module.CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
     const_module.CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
     const_module.CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"
@@ -238,6 +247,8 @@ def _coordinator(opt_module, provider: str, profit_max: bool = False, **options)
     coordinator._actual_zerohero_base_export_earnings_today = 0.0
     coordinator._actual_zerohero_bonus_export_earnings_today = 0.0
     coordinator._actual_zerohero_credit_value_today = 0.0
+    coordinator._pre_idle_backup_reserve = None
+    coordinator._idle_hold_reserve = None
     coordinator._optimizer = None
     coordinator.energy_coordinator = None
     return coordinator
@@ -482,6 +493,230 @@ def test_set_settings_persists_optimizer_reserve_to_data_and_options(opt_module)
     assert coordinator._entry.options["optimization_backup_reserve"] == 0.2
     assert updates[-1]["data"]["optimization_backup_reserve"] == 0.2
     assert updates[-1]["options"]["optimization_backup_reserve"] == 0.2
+
+
+def test_auto_apply_reserve_enable_snapshots_current_optimizer_reserve(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_backup_reserve=0.35,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._config.backup_reserve = 0.35
+    coordinator._auto_apply_reserve_enabled = False
+    coordinator._manual_backup_reserve = None
+    coordinator._enabled = False
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    asyncio.run(coordinator.set_auto_apply_reserve_enabled(True))
+
+    assert coordinator.auto_apply_reserve_enabled is True
+    assert coordinator.manual_backup_reserve == 0.35
+    assert coordinator._entry.data["optimization_auto_apply_reserve"] is True
+    assert coordinator._entry.options["optimization_manual_reserve"] == 0.35
+    assert updates[-1]["options"]["optimization_manual_reserve"] == 0.35
+
+
+def test_auto_apply_reserve_manual_edit_updates_restore_value(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_backup_reserve=0.45,
+        optimization_manual_reserve=0.45,
+        optimization_auto_apply_reserve=True,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.45
+    coordinator._enabled = False
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"backup_reserve": 25}))
+
+    assert result["success"] is True
+    assert coordinator._config.backup_reserve == 0.25
+    assert coordinator.manual_backup_reserve == 0.25
+    assert coordinator._entry.options["optimization_backup_reserve"] == 0.25
+    assert coordinator._entry.options["optimization_manual_reserve"] == 0.25
+    assert updates[-1]["options"]["optimization_manual_reserve"] == 0.25
+
+
+def test_auto_apply_reserve_disable_restores_manual_optimizer_reserve(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_backup_reserve=0.60,
+        optimization_manual_reserve=0.30,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.10,
+        _user_backup_reserve=55,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.30
+    coordinator._config.backup_reserve = 0.60
+    coordinator._enabled = False
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    asyncio.run(coordinator.set_auto_apply_reserve_enabled(False))
+
+    assert coordinator.auto_apply_reserve_enabled is False
+    assert coordinator._config.backup_reserve == 0.30
+    assert coordinator._entry.options["optimization_auto_apply_reserve"] is False
+    assert coordinator._entry.options["optimization_backup_reserve"] == 0.30
+    assert coordinator._entry.options["optimization_manual_reserve"] == 0.30
+    assert coordinator._entry.options["hardware_backup_reserve"] == 0.10
+    assert coordinator._entry.options["_user_backup_reserve"] == 55
+
+
+def test_auto_apply_reserve_applies_clamped_optimizer_recommendation(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_backup_reserve=0.50,
+        optimization_manual_reserve=0.50,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.20,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.50
+    coordinator._config.backup_reserve = 0.50
+    coordinator._startup_backup_reserve = 20
+    update_calls = []
+    coordinator._optimizer = SimpleNamespace(
+        update_config=lambda **kwargs: update_calls.append(kwargs),
+        max_grid_export_w=None,
+        terminal_weight=0,
+    )
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    changed = coordinator._apply_auto_reserve_recommendation(
+        SimpleNamespace(
+            reserve_recommendation={"suggested_optimizer_reserve_percent": 30}
+        )
+    )
+
+    assert changed is True
+    assert coordinator._config.backup_reserve == 0.30
+    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.30
+    assert update_calls[-1]["backup_reserve"] == 0.30
+
+    changed = coordinator._apply_auto_reserve_recommendation(
+        SimpleNamespace(
+            reserve_recommendation={"suggested_optimizer_reserve_percent": 10}
+        )
+    )
+
+    assert changed is True
+    assert coordinator._config.backup_reserve == 0.20
+    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.20
+
+
+def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        optimization_backup_reserve=0.15,
+        optimization_manual_reserve=0.15,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.05,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.15
+    coordinator._config.backup_reserve = 0.15
+    coordinator._startup_backup_reserve = 5
+    update_calls = []
+    coordinator._optimizer = SimpleNamespace(
+        update_config=lambda **kwargs: update_calls.append(kwargs),
+        max_grid_export_w=None,
+        terminal_weight=0,
+    )
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+    recommendation = {"suggested_optimizer_reserve_percent": 5}
+
+    changed = coordinator._apply_auto_reserve_recommendation(
+        SimpleNamespace(reserve_recommendation=recommendation)
+    )
+
+    assert changed is True
+    assert coordinator._config.backup_reserve == 0.05
+    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.05
+    assert update_calls[-1]["backup_reserve"] == 0.05
+    assert recommendation["manual_optimizer_reserve_percent"] == 15
+    assert recommendation["applied_optimizer_reserve_percent"] == 5
 
 
 def test_set_settings_ignores_interval_minutes_override(opt_module):
@@ -905,6 +1140,7 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
     coordinator._last_executed_action = "self_consumption"
     coordinator._startup_backup_reserve = 20
     coordinator._pre_idle_backup_reserve = None
+    coordinator._idle_hold_reserve = None
     coordinator._scheduled_ev_no_discharge_active = False
     coordinator._last_export_prices = None
     coordinator.energy_coordinator = None
@@ -1021,6 +1257,52 @@ def test_active_optimizer_export_at_reserve_is_canceled_not_extended(opt_module)
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_profit_max_auto_apply_active_export_uses_live_optimizer_floor(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.10)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.backup_reserve = 0.05
+    coordinator._config.profit_max_enabled = True
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.15
+    action = SimpleNamespace(
+        action="export",
+        power_w=5000,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._set_optimizer_force_state("discharge", 15, 5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_profit_max_auto_apply_live_floor_blocks_projected_export(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.18)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.backup_reserve = 0.12
+    coordinator._config.profit_max_enabled = True
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.15
+    action = SimpleNamespace(
+        action="export",
+        power_w=5000,
+        soc=0.11,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_scheduled_ev_preserve_release_restores_no_discharge_mode(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
@@ -1090,6 +1372,24 @@ def test_self_consumption_uses_hardware_reserve_when_startup_reserve_is_lower(op
     )
 
     assert battery.backup_reserve_calls == []
+
+
+def test_self_consumption_adopts_manual_tesla_reserve_above_cached_target(opt_module):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=10)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.65)
+    coordinator._startup_backup_reserve = 5
+    coordinator._config.backup_reserve = 0.10
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == []
+    assert coordinator._startup_backup_reserve == 10
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_self_consumption_does_not_raise_tesla_reserve_above_current_soc(opt_module):
@@ -1281,6 +1581,37 @@ def test_optimizer_owned_force_charge_restores_when_current_slot_stops_charging(
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_optimizer_owned_force_charge_reissues_when_foxess_mode_drops_to_self_use(opt_module):
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.64)
+    coordinator.battery_system = "foxess"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "work_mode_name": "Self Use",
+            "battery_power": -3.4,
+        }
+    )
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=10000,
+            timestamp=now + idx * timedelta(minutes=5),
+        )
+        for idx in range(6)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("charge", 120, 10000)
+    coordinator._optimizer_force_state["hardware_expires_at"] = now + timedelta(hours=1)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == [(30, 10000, True)]
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["type"] == "charge"
+
+
 def test_optimizer_owned_force_charge_does_not_override_idle_with_lookahead_charge(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
@@ -1424,6 +1755,32 @@ def test_idle_to_self_consumption_exits_idle_immediately(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_foxess_idle_exit_restores_user_reserve_without_applying_optimizer_floor(opt_module):
+    battery = _FakeBattery()
+    energy_coordinator = _FakeEnergyCoordinator()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    coordinator._config.backup_reserve = 0.45
+    coordinator._startup_backup_reserve = 15
+    coordinator._last_executed_action = "idle"
+    coordinator._pre_idle_backup_reserve = 15
+    coordinator._idle_hold_reserve = 100
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [15]
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
@@ -1448,6 +1805,234 @@ def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
     assert battery.force_discharge_calls == [(40, 5000, False, None)]
+    assert coordinator._last_executed_action == "export"
+
+
+def test_single_slot_self_consumption_gap_between_exports_is_bridged(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=9000,
+            battery_charge_w=0,
+            battery_discharge_w=9000,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1200,
+            battery_charge_w=0,
+            battery_discharge_w=1200,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=7000,
+            battery_charge_w=0,
+            battery_discharge_w=7000,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    schedule = SimpleNamespace(actions=actions)
+
+    coordinator._bridge_short_export_gaps(schedule, [0.45, 0.45, 0.45])
+
+    assert [action.action for action in actions] == ["export", "export", "export"]
+    assert actions[1].power_w == 7000
+    assert actions[1].battery_discharge_w == 7000
+
+
+def test_multi_slot_self_consumption_gap_between_exports_is_not_bridged(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="export", power_w=9000, timestamp=start),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1200,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1300,
+            timestamp=start + timedelta(minutes=10),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=7000,
+            timestamp=start + timedelta(minutes=15),
+        ),
+    ]
+    schedule = SimpleNamespace(actions=actions)
+
+    coordinator._bridge_short_export_gaps(schedule, [0.45, 0.45, 0.45, 0.45])
+
+    assert [action.action for action in actions] == [
+        "export",
+        "self_consumption",
+        "self_consumption",
+        "export",
+    ]
+
+
+def test_flow_power_no_idle_converts_schedule_idle_to_self_consumption(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._config.disable_idle_enabled = True
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    charge_action = opt_module.ScheduleAction(
+        timestamp=start + timedelta(minutes=5),
+        action="charge",
+        power_w=5000,
+        soc=0.66,
+        battery_charge_w=5000,
+        battery_discharge_w=0,
+    )
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="idle",
+                power_w=0,
+                soc=0.65,
+                battery_charge_w=0,
+                battery_discharge_w=0,
+            ),
+            charge_action,
+        ],
+        predicted_cost=1.23,
+        predicted_savings=0.45,
+        last_updated=start,
+    )
+
+    converted = coordinator._disable_idle_schedule(schedule)
+
+    assert coordinator._should_disable_idle_schedule() is True
+    assert converted.actions[0].action == "self_consumption"
+    assert converted.actions[0].soc == 0.65
+    assert converted.actions[0].power_w == 0
+    assert converted.actions[1] is charge_action
+    assert converted.predicted_cost == schedule.predicted_cost
+
+
+def test_no_idle_schedule_guard_is_flow_power_only(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._config.disable_idle_enabled = True
+
+    assert coordinator._should_disable_idle_schedule() is False
+
+
+def test_flow_power_no_idle_executor_overrides_idle(opt_module):
+    battery = _FakeBattery(backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator._entry.options["electricity_provider"] = "flow_power"
+    coordinator._config.disable_idle_enabled = True
+    coordinator._last_executed_action = "export"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [20]
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_single_slot_export_gap_with_price_change_is_not_bridged(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="export", power_w=9000, timestamp=start),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1200,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=7000,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    schedule = SimpleNamespace(actions=actions)
+
+    coordinator._bridge_short_export_gaps(schedule, [0.45, 0.05, 0.45])
+
+    assert [action.action for action in actions] == [
+        "export",
+        "self_consumption",
+        "export",
+    ]
+
+
+def test_dynamic_price_provider_single_slot_export_gap_is_not_bridged(opt_module):
+    class AmberPriceCoordinator:
+        pass
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.price_coordinator = AmberPriceCoordinator()
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="export", power_w=9000, timestamp=start),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1200,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=7000,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    schedule = SimpleNamespace(actions=actions)
+
+    coordinator._bridge_short_export_gaps(schedule, [0.45, 0.45, 0.45])
+
+    assert [action.action for action in actions] == [
+        "export",
+        "self_consumption",
+        "export",
+    ]
+
+
+def test_bridged_export_gap_keeps_optimizer_force_active(opt_module):
+    now = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    actions = [
+        SimpleNamespace(action="export", power_w=9000, timestamp=now),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=1200,
+            timestamp=now + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=7000,
+            timestamp=now + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._bridge_short_export_gaps(
+        coordinator._current_schedule,
+        [0.45, 0.45, 0.45],
+    )
+    coordinator._set_optimizer_force_state("discharge", 30, 5000)
+    coordinator._last_executed_action = "export"
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[1]))
+
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
     assert coordinator._last_executed_action == "export"
 
 
@@ -1712,10 +2297,93 @@ def test_spread_import_free_window_caps_to_available_battery_room(opt_module):
     assert spread_wh == pytest.approx((1.0 - 0.80) * 50000 / 0.92, abs=0.1)
 
 
-def test_spread_import_free_only_smooths_free_window_when_setting_disabled(opt_module):
+def test_spread_import_schedule_respects_site_import_headroom(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.max_charge_w = 15000
+    coordinator._config.max_grid_import_w = 11100
+    coordinator._config.battery_capacity_wh = 50000
+    start = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="charge",
+            power_w=15000,
+            battery_charge_w=15000,
+        )
+        for idx in range(36)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_import_schedule(
+        schedule,
+        [0.12] * 36,
+        [False] * 36,
+        initial_soc=0.35,
+        solar_forecast=[0.0] * 36,
+        load_forecast=[1.0] * 36,
+    )
+
+    assert max(action.battery_charge_w for action in spread.actions) == pytest.approx(
+        10100.0,
+        abs=0.1,
+    )
+    assert all(
+        action.battery_charge_w + 1000 <= 11100.1
+        for action in spread.actions
+        if action.action == "charge"
+    )
+
+
+def test_spread_import_schedule_uses_solar_headroom_above_site_import_cap(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.max_charge_w = 15000
+    coordinator._config.max_grid_import_w = 11100
+    coordinator._config.battery_capacity_wh = 50000
+    start = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="charge",
+            power_w=15000,
+            battery_charge_w=15000,
+        )
+        for idx in range(36)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_import_schedule(
+        schedule,
+        [0.12] * 36,
+        [False] * 36,
+        initial_soc=0.35,
+        solar_forecast=[5.0] * 36,
+        load_forecast=[1.0] * 36,
+    )
+
+    assert max(action.battery_charge_w for action in spread.actions) == pytest.approx(
+        15000.0,
+        abs=0.1,
+    )
+
+
+def test_spread_import_free_only_smooths_free_window(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "sungrow"
-    coordinator._config.spread_import_enabled = False
+    coordinator._config.spread_import_enabled = True
     coordinator._config.max_charge_w = 6000
     coordinator._config.battery_capacity_wh = 20000
     start = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
@@ -1753,7 +2421,7 @@ def test_spread_import_free_only_smooths_free_window_when_setting_disabled(opt_m
 def test_spread_import_free_only_leaves_paid_window_unchanged(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "sungrow"
-    coordinator._config.spread_import_enabled = False
+    coordinator._config.spread_import_enabled = True
     coordinator._config.max_charge_w = 6000
     coordinator._config.battery_capacity_wh = 20000
     start = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
@@ -1951,22 +2619,23 @@ def test_spread_import_schedule_requires_enabled_supported_battery(opt_module):
     assert coordinator._should_spread_import_schedule() is False
 
 
-def test_free_import_smoothing_requires_grid_charge_supported_battery_and_free_price(opt_module):
+def test_free_import_smoothing_is_not_automatic_when_spread_import_is_disabled(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "sungrow"
     coordinator._config.spread_import_enabled = False
     coordinator._config.allow_grid_charge = True
 
     assert coordinator._should_spread_import_schedule() is False
-    assert coordinator._should_smooth_free_import_schedule([0.14, 0.0]) is True
-    assert coordinator._should_smooth_free_import_schedule([0.14, 0.12]) is False
 
-    coordinator._config.allow_grid_charge = False
-    assert coordinator._should_smooth_free_import_schedule([0.0]) is False
+    coordinator_source = (
+        ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+    ).read_text()
+    assert "_should_smooth_free_import_schedule" not in coordinator_source
+    assert "smooth_free_import" not in coordinator_source
+    assert "if self._should_spread_import_schedule():" in coordinator_source
 
-    coordinator._config.allow_grid_charge = True
-    coordinator.battery_system = "tesla"
-    assert coordinator._should_smooth_free_import_schedule([0.0]) is False
+    coordinator._config.spread_import_enabled = True
+    assert coordinator._should_spread_import_schedule() is True
 
 
 def test_profit_max_spread_uses_flow_power_export_window(opt_module):

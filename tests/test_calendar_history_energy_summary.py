@@ -29,7 +29,9 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_entry_from_energy_sensor_states",
         "_merge_calendar_energy_entries",
         "_calendar_current_entry",
+        "_calendar_residual_entry",
         "_calendar_range_includes_today",
+        "_calendar_statistics_end_dt",
     }
     body: list[ast.stmt] = []
     for node in tree.body:
@@ -89,6 +91,76 @@ def test_calendar_range_includes_today_when_end_is_now_snapshot():
         today_start,
         later_now,
     )
+
+
+def test_day_period_statistics_include_today_until_request_end():
+    namespace = _calendar_namespace()
+    now = datetime(2026, 5, 16, 18, 30, tzinfo=timezone.utc)
+    end_dt = now
+
+    assert namespace["_calendar_statistics_end_dt"](
+        "day",
+        end_dt,
+        now,
+        True,
+    ) == end_dt
+
+
+def test_month_period_statistics_exclude_today_to_avoid_live_duplicate():
+    namespace = _calendar_namespace()
+    now = datetime(2026, 5, 16, 18, 30, tzinfo=timezone.utc)
+    end_dt = now
+
+    assert namespace["_calendar_statistics_end_dt"](
+        "month",
+        end_dt,
+        now,
+        True,
+    ) == datetime(2026, 5, 16, tzinfo=timezone.utc)
+
+
+def test_calendar_residual_entry_subtracts_existing_hourly_rows():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-05-16T18:30:00+00:00",
+        "solar_generation": 10000,
+        "battery_discharge": 4000,
+        "battery_charge": 6000,
+        "grid_import": 12000,
+        "grid_export": 3000,
+        "home_consumption": 15000,
+    }
+    existing_rows = [
+        {
+            "timestamp": "2026-05-16T08:00:00+00:00",
+            "solar_generation": 2500,
+            "battery_discharge": 500,
+            "battery_charge": 1000,
+            "grid_import": 2000,
+            "grid_export": 0,
+            "home_consumption": 3000,
+        },
+        {
+            "timestamp": "2026-05-16T09:00:00+00:00",
+            "solar_generation": 3500,
+            "battery_discharge": 1500,
+            "battery_charge": 2000,
+            "grid_import": 4000,
+            "grid_export": 500,
+            "home_consumption": 5000,
+        },
+    ]
+
+    residual = namespace["_calendar_residual_entry"](current_entry, existing_rows)
+
+    assert residual["solar_generation"] == 4000
+    assert residual["battery_discharge"] == 2000
+    assert residual["battery_charge"] == 3000
+    assert residual["grid_import"] == 6000
+    assert residual["grid_export"] == 2500
+    assert residual["home_consumption"] == 7000
+    assert residual["solar_energy_exported"] == 4000
+    assert residual["consumer_energy_imported"] == 7000
 
 
 def test_current_calendar_entry_uses_live_daily_sensor_states_when_accumulator_is_zero():

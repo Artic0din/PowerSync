@@ -103,6 +103,32 @@ def test_tesla_mode_reads_current_ha_entity_but_backup_reserve_prefers_cache():
         restore()
 
 
+def test_tesla_backup_reserve_uses_cloud_site_info_cache_as_user_facing():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "entry": SimpleNamespace(data={"powerwall_local_paired": True}),
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 5,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.get_backup_reserve()) == 5
+    finally:
+        restore()
+
+
 def test_optimizer_backup_reserve_write_marks_source():
     module, restore = _load_controller_module()
     try:
