@@ -694,6 +694,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_spread_export_enabled(self, enabled: bool) -> None:
         """Enable or disable spread-export mode."""
+        # No-op when unchanged: a redundant settings push (e.g. the periodic
+        # settings sync from the companion app) must not invalidate the
+        # load-estimator cache, which forces an expensive temperature-sensitivity
+        # refit over the full load history on the event loop.
+        if self._config.spread_export_enabled == bool(enabled):
+            return
         self._config.spread_export_enabled = bool(enabled)
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
@@ -720,6 +726,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_spread_import_enabled(self, enabled: bool) -> None:
         """Enable or disable spread-import mode."""
+        # No-op when unchanged (see set_spread_export_enabled).
+        if self._config.spread_import_enabled == bool(enabled):
+            return
         self._config.spread_import_enabled = bool(enabled)
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
@@ -746,6 +755,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_profit_max_mode(self, enabled: bool) -> None:
         """Enable or disable profit maximisation mode."""
+        # No-op when unchanged (see set_spread_export_enabled) — avoids a
+        # redundant cache invalidation + load-estimator refit on every sync.
+        if self._config.profit_max_enabled == enabled:
+            return
         self._config.profit_max_enabled = enabled
         if self._optimizer:
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
