@@ -635,21 +635,24 @@ class LoadEstimator:
             self._temp_cache_time = now
             return None, None, None
 
-        # Build load bucket averages
-        load_pattern: dict[tuple[int, int, int], list[float]] = defaultdict(list)
-        for ts, val in history:
-            local_ts = dt_util.as_local(ts) if ts.tzinfo else ts
-            key = (local_ts.weekday(), local_ts.hour, 0 if local_ts.minute < 30 else 1)
-            load_pattern[key].append(val)
-        bucket_averages = {k: sum(v) / len(v) for k, v in load_pattern.items()}
+        # Offload the CPU-bound work to a worker thread. The load-bucket build
+        # and the sensitivity fit each iterate the full load history (O(N),
+        # 160k+ rows) and previously ran on the event loop, stalling the HA
+        # frontend. Run them via the executor instead. Full history retained.
+        def _build_and_fit() -> tuple[dict | None, float | None]:
+            load_pattern: dict[tuple[int, int, int], list[float]] = defaultdict(list)
+            for ts, val in history:
+                local_ts = dt_util.as_local(ts) if ts.tzinfo else ts
+                key = (local_ts.weekday(), local_ts.hour, 0 if local_ts.minute < 30 else 1)
+                load_pattern[key].append(val)
+            bucket_averages = {k: sum(v) / len(v) for k, v in load_pattern.items()}
+            bucket_temp_avgs_local = self._compute_bucket_temp_averages(temp_history)
+            alpha_local = self._fit_temperature_sensitivity(
+                history, temp_history, bucket_averages, bucket_temp_avgs_local
+            )
+            return bucket_temp_avgs_local, alpha_local
 
-        # Build temperature bucket averages
-        bucket_temp_avgs = self._compute_bucket_temp_averages(temp_history)
-
-        # Fit global sensitivity coefficient
-        alpha = self._fit_temperature_sensitivity(
-            history, temp_history, bucket_averages, bucket_temp_avgs
-        )
+        bucket_temp_avgs, alpha = await self.hass.async_add_executor_job(_build_and_fit)
 
         self._temp_alpha = alpha
         self._temp_bucket_averages = bucket_temp_avgs
