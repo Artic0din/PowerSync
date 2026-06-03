@@ -2305,6 +2305,11 @@ def _cleanup_legacy_powerwall_pack_registry(hass: HomeAssistant, entry: ConfigEn
 class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumericStateMixin, SensorEntity):
     """Sensor for Amber electricity prices."""
 
+    # The "forecast" attribute is a large rolling price-forecast array that
+    # exceeds the recorder's 16 KB per-state attribute cap and is not history.
+    # Keep the scalar state recorded but exclude the bulky attribute.
+    _unrecorded_attributes = frozenset({"forecast"})
+
     entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
@@ -3183,6 +3188,13 @@ class SavingSessionSensor(CoordinatorEntity, SensorEntity):
 class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
     """Sensor for Solcast solar production forecasts."""
 
+    # The "forecast" attribute is a large rolling prediction array (≈48h @ 5min)
+    # that exceeds the recorder's 16 KB per-state attribute cap and is not
+    # history (it's regenerated each cycle). Keep the scalar state recorded but
+    # exclude the bulky attribute so the recorder doesn't drop it with a warning
+    # or bloat the database.
+    _unrecorded_attributes = frozenset({"forecast"})
+
     entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
@@ -3348,6 +3360,11 @@ class LPForecastSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     Reads forecast data stored by the OptimizationCoordinator each
     optimization cycle via get_forecast_data().
     """
+
+    # The "forecast" attribute is a large rolling prediction array (≈48h @ 5min)
+    # that exceeds the recorder's 16 KB per-state attribute cap and is not
+    # history. Keep the scalar state recorded but exclude the bulky attribute.
+    _unrecorded_attributes = frozenset({"forecast"})
 
     entity_description: PowerSyncSensorEntityDescription
 
