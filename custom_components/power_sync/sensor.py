@@ -301,6 +301,24 @@ def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> fl
         return 0.0
 
 
+# Large rolling prediction arrays exposed as sensor attributes (≈48h @ 5min /
+# price-period series). They exceed Home Assistant's 16 KB per-state recorder
+# attribute cap and are regenerated each cycle (not history), so the recorder
+# is told to skip them via Entity._unrecorded_attributes while the scalar state
+# is still recorded. Keys cover the LP optimizer, Solcast and Amber forecast
+# sensors (different sensors use different key names for their array).
+_FORECAST_ARRAY_ATTRS = frozenset({
+    "forecast",
+    "forecast_values_kw",
+    "charge_values_kw",
+    "discharge_values_kw",
+    "power_values_kw",
+    "price_values",
+    "hourly_forecast",
+    "forecast_periods",
+})
+
+
 @dataclass
 class PowerSyncSensorEntityDescription(SensorEntityDescription):
     """Describes PowerSync sensor entity."""
@@ -2308,7 +2326,7 @@ class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumeri
     # The "forecast" attribute is a large rolling price-forecast array that
     # exceeds the recorder's 16 KB per-state attribute cap and is not history.
     # Keep the scalar state recorded but exclude the bulky attribute.
-    _unrecorded_attributes = frozenset({"forecast"})
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
 
     entity_description: PowerSyncSensorEntityDescription
 
@@ -3193,7 +3211,7 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
     # history (it's regenerated each cycle). Keep the scalar state recorded but
     # exclude the bulky attribute so the recorder doesn't drop it with a warning
     # or bloat the database.
-    _unrecorded_attributes = frozenset({"forecast"})
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
 
     entity_description: PowerSyncSensorEntityDescription
 
@@ -3364,7 +3382,7 @@ class LPForecastSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     # The "forecast" attribute is a large rolling prediction array (≈48h @ 5min)
     # that exceeds the recorder's 16 KB per-state attribute cap and is not
     # history. Keep the scalar state recorded but exclude the bulky attribute.
-    _unrecorded_attributes = frozenset({"forecast"})
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
 
     entity_description: PowerSyncSensorEntityDescription
 
