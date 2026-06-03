@@ -757,7 +757,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Enable or disable profit maximisation mode."""
         # No-op when unchanged (see set_spread_export_enabled) — avoids a
         # redundant cache invalidation + load-estimator refit on every sync.
-        if self._config.profit_max_enabled == enabled:
+        if self._config.profit_max_enabled == bool(enabled):
             return
         self._config.profit_max_enabled = enabled
         if self._optimizer:
@@ -7682,16 +7682,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Handle profit maximisation mode toggle
         if "profit_max_enabled" in settings:
-            self.set_profit_max_mode(bool(settings["profit_max_enabled"]))
-            response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
+            new_val = bool(settings["profit_max_enabled"])
+            changed = self._config.profit_max_enabled != new_val
+            self.set_profit_max_mode(new_val)
+            if changed:
+                response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
 
         if "spread_export_enabled" in settings:
-            self.set_spread_export_enabled(bool(settings["spread_export_enabled"]))
-            response["changes"].append(f"spread_export_enabled: {settings['spread_export_enabled']}")
+            new_val = bool(settings["spread_export_enabled"])
+            changed = self._config.spread_export_enabled != new_val
+            self.set_spread_export_enabled(new_val)
+            if changed:
+                response["changes"].append(f"spread_export_enabled: {settings['spread_export_enabled']}")
 
         if "spread_import_enabled" in settings:
-            self.set_spread_import_enabled(bool(settings["spread_import_enabled"]))
-            response["changes"].append(f"spread_import_enabled: {settings['spread_import_enabled']}")
+            new_val = bool(settings["spread_import_enabled"])
+            changed = self._config.spread_import_enabled != new_val
+            self.set_spread_import_enabled(new_val)
+            if changed:
+                response["changes"].append(f"spread_import_enabled: {settings['spread_import_enabled']}")
 
         if "profit_max_target_time" in settings and self._entry:
             from ..const import CONF_PROFIT_MAX_TARGET_TIME
