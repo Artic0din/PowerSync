@@ -444,3 +444,60 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def test_temperature_adjustment_runs_fit_via_executor(monkeypatch):
+    """The bucket build + sensitivity fit must run through
+    hass.async_add_executor_job (off the event loop) and recover the
+    temperature coefficient. Regression guard for the executor offload —
+    a hass without async_add_executor_job previously made this path AttributeError.
+    """
+    module = _load_estimator_module(monkeypatch)
+    now = datetime(2026, 5, 9, tzinfo=timezone.utc)
+
+    # 60 samples in one (weekday, hour, half-hour) bucket (7 days apart, so the
+    # local key is identical), with load linearly correlated to temperature.
+    mean_temp = 20.0
+    alpha_true = 0.1
+    history: list[tuple[datetime, float]] = []
+    temp_history: list[tuple[datetime, float]] = []
+    for i in range(60):
+        ts = now - timedelta(days=7 * i)
+        temp = mean_temp + (i - 30) * 0.5
+        load = 1000.0 * (1.0 + alpha_true * (temp - mean_temp))
+        history.append((ts, load))
+        temp_history.append((ts, temp))
+
+    executor_calls = {"count": 0}
+
+    async def fake_executor_job(func, *args):
+        executor_calls["count"] += 1
+        return func(*args)
+
+    hass = SimpleNamespace(
+        async_add_executor_job=fake_executor_job,
+        states=_FakeStates(),
+    )
+    estimator = module.LoadEstimator(
+        hass, "sensor.load", interval_minutes=5, weather_entity_id="weather.home"
+    )
+
+    async def fake_hist_temps(start, end):
+        return temp_history
+
+    async def fake_forecast_temps(horizon):
+        return [(now, 21.0)]
+
+    estimator._fetch_historical_temperatures = fake_hist_temps
+    estimator._fetch_forecast_temperatures = fake_forecast_temps
+
+    forecast_temps, bucket_temp_avgs, alpha = _run(
+        estimator._get_temperature_adjustment(history, horizon_hours=24)
+    )
+
+    # The fit ran on the executor (the behaviour under test).
+    assert executor_calls["count"] >= 1
+    # And it produced a sane, populated result rather than AttributeError-ing.
+    assert alpha is not None
+    assert abs(alpha - alpha_true) < 0.02
+    assert bucket_temp_avgs
