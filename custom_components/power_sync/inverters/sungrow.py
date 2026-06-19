@@ -339,9 +339,17 @@ class SungrowController(InverterController):
 
             except ModbusException as e:
                 _LOGGER.debug(f"Modbus exception reading holding register {address}: {e}")
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
                 return None
             except Exception as e:
                 _LOGGER.debug(f"Error reading holding register {address}: {e}")
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
                 return None
 
     async def _read_input_register(self, address: int, count: int = 1) -> Optional[list]:
@@ -377,9 +385,17 @@ class SungrowController(InverterController):
 
             except ModbusException as e:
                 _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
                 return None
             except Exception as e:
                 _LOGGER.debug(f"Error reading input register {address}: {e}")
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
                 return None
 
     def _to_signed16(self, value: int) -> int:

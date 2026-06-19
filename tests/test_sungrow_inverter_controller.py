@@ -106,6 +106,75 @@ def test_sungrow_modbus_requests_are_serialized_per_endpoint():
     asyncio.run(_run())
 
 
+class _FailingReadClient:
+    """Fake client whose register reads raise, exercising the read-failure path.
+
+    Tracks ``close()`` so tests can assert the controller drops a poisoned
+    connection rather than reusing it on the next poll.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.connected = True
+        self.closed = False
+        self._exc = exc
+
+    def close(self) -> None:
+        self.closed = True
+        self.connected = False
+
+    async def read_holding_registers(self, **_kwargs):
+        raise self._exc
+
+    async def read_input_registers(self, **_kwargs):
+        raise self._exc
+
+
+def test_sungrow_holding_read_failure_drops_client_for_reconnect():
+    """A failed holding read must close the client and clear connected state.
+
+    Regression: a Modbus read exception used to leave the client in place, so
+    the next poll reused a poisoned socket and returned stale/zero values
+    (daily-PV sensor flapping to 0). Dropping the client forces a clean
+    reconnect on the next read.
+    """
+
+    async def _run() -> None:
+        SungrowController._endpoint_request_locks.clear()
+        controller = SungrowController("192.0.2.10", port=502, slave_id=1)
+        client = _FailingReadClient(RuntimeError("modbus read blew up"))
+        controller._client = client
+        controller._connected = True
+
+        result = await controller._read_register(5002, 1)
+
+        assert result is None
+        assert client.closed is True
+        assert controller._client is None
+        assert controller._connected is False
+
+    asyncio.run(_run())
+
+
+def test_sungrow_input_read_failure_drops_client_for_reconnect():
+    """A failed input read must close the client and clear connected state."""
+
+    async def _run() -> None:
+        SungrowController._endpoint_request_locks.clear()
+        controller = SungrowController("192.0.2.10", port=502, slave_id=1)
+        client = _FailingReadClient(RuntimeError("modbus read blew up"))
+        controller._client = client
+        controller._connected = True
+
+        result = await controller._read_input_register(5002, 1)
+
+        assert result is None
+        assert client.closed is True
+        assert controller._client is None
+        assert controller._connected is False
+
+    asyncio.run(_run())
+
+
 def test_sungrow_sg_and_sh_requests_share_endpoint_lock():
     async def _run() -> None:
         SungrowController._endpoint_request_locks.clear()
