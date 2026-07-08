@@ -19,7 +19,6 @@
 
 ## Docs impact
 
-- [ ] No docs update required.
 - [ ] README updated.
 - [ ] docs/ updated.
 - [ ] CHANGELOG.md updated.
