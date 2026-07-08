@@ -22,7 +22,8 @@ jobs:
               "## Summary",
               "## Type of change",
               "## Validation",
-              "## Docs impact"
+              "## Docs impact",
+              "## Checklist"
             ];
 
             const missing = requiredSections.filter((section) => !body.includes(section));
