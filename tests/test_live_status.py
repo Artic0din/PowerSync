@@ -26,6 +26,8 @@ def test_coordinator_data_to_ev_live_status_converts_kw_to_watts():
         "solar_power": 5.5,
         "battery_power": -2.0,
         "load_power": 3.75,
+        "ev_power": 7.1,
+        "is_curtailed": True,
     })
 
     assert live_status == {
@@ -34,6 +36,8 @@ def test_coordinator_data_to_ev_live_status_converts_kw_to_watts():
         "solar_power": 5500.0,
         "battery_power": -2000.0,
         "load_power": 3750.0,
+        "ev_power": 7100.0,
+        "is_curtailed": True,
     }
 
 
@@ -45,3 +49,5 @@ def test_coordinator_data_to_ev_live_status_handles_missing_values():
     assert live_status["solar_power"] == 0.0
     assert live_status["battery_power"] == 0.0
     assert live_status["load_power"] == 0.0
+    assert live_status["ev_power"] == 0.0
+    assert live_status["is_curtailed"] is False

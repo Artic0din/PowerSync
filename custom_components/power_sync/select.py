@@ -233,7 +233,10 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 
     async def async_select_option(self, option: str) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_operation_mode", {"mode": option}, blocking=False,
+            DOMAIN,
+            "set_operation_mode",
+            {"mode": option, "source": "user"},
+            blocking=False,
         )
 
 
@@ -289,5 +292,8 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     async def async_select_option(self, option: str) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_grid_export", {"rule": option}, blocking=False,
+            DOMAIN,
+            "set_grid_export",
+            {"rule": option, "source": "user"},
+            blocking=False,
         )

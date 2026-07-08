@@ -26,6 +26,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from datetime import timedelta
@@ -142,6 +143,11 @@ from .const import (
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
     BATTERY_MODE_STATE_HOLD_SOC,
     BATTERY_MODE_STATE_SELF_CONSUMPTION,
+    INVERTER_CONTROL_MODE_NORMAL,
+    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+    INVERTER_CONTROL_MODE_SHUTDOWN,
+    INVERTER_CONTROL_MODE_CURTAILED,
+    INVERTER_CONTROL_MODES,
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
@@ -166,6 +172,8 @@ from .const import (
     CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
+    CONF_FLOWPOWER_API_KEY,
+    CONF_FLOWPOWER_NETWORK_TARIFF,
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
@@ -181,6 +189,7 @@ from .const import (
     ATTR_AEMO_THRESHOLD,
     ATTR_SPIKE_START_TIME,
     family_device_info,
+    provider_pricing_device_info,
     powerwall_device_info,
     SENSOR_KEY_TO_FAMILY,
     SENSOR_FAMILY_LP_OPTIMIZER,
@@ -239,6 +248,37 @@ def _has_tesla_ev_device(hass: HomeAssistant) -> bool:
     return False
 
 
+def _has_solaredge_ev_power(hass: HomeAssistant) -> bool:
+    """Return true when the SolarEdge EV charger integration exposes power."""
+    try:
+        states = hass.states.async_all("sensor")
+    except TypeError:
+        states = hass.states.async_all()
+    except Exception:
+        return False
+
+    for state in states:
+        entity_id = str(getattr(state, "entity_id", "")).lower()
+        if not entity_id.startswith("sensor."):
+            continue
+        body = entity_id.split(".", 1)[-1]
+        if body not in {"ev_charger_power", "ev_charging_power"} and not body.endswith(
+            ("_ev_charger_power", "_ev_charging_power")
+        ):
+            continue
+
+        attrs = getattr(state, "attributes", {}) or {}
+        friendly_name = str(attrs.get("friendly_name", "")).lower()
+        if (
+            body in {"ev_charger_power", "ev_charging_power"}
+            or "solaredge" in body
+            or "solar edge" in friendly_name
+            or "solaredge" in friendly_name
+        ):
+            return True
+    return False
+
+
 def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> float:
     """Return separately configured Sungrow SG inverter output in kW."""
     if entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_SUNGROW:
@@ -269,6 +309,37 @@ def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> fl
         return 0.0
 
 
+def _home_load_power_kw(data: Any) -> float | None:
+    """Return Home Load in kW, clamped to its physical lower bound."""
+    if not data:
+        return None
+    value = data.get("load_power")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+# Large rolling prediction arrays exposed as sensor attributes (≈48h @ 5min /
+# price-period series). They exceed Home Assistant's 16 KB per-state recorder
+# attribute cap and are regenerated each cycle (not history), so the recorder
+# is told to skip them via Entity._unrecorded_attributes while the scalar state
+# is still recorded. Keys cover the LP optimizer, Solcast and Amber forecast
+# sensors (different sensors use different key names for their array).
+_FORECAST_ARRAY_ATTRS = frozenset({
+    "forecast",
+    "forecast_values_kw",
+    "charge_values_kw",
+    "discharge_values_kw",
+    "power_values_kw",
+    "price_values",
+    "hourly_forecast",
+    "forecast_periods",
+})
+
+
 @dataclass
 class PowerSyncSensorEntityDescription(SensorEntityDescription):
     """Describes PowerSync sensor entity."""
@@ -286,6 +357,40 @@ class PowerSyncSensorEntityDescription(SensorEntityDescription):
 
 
 RATE_CURRENCY_UNITS = {"major_rate", "market_rate", "minor_rate"}
+_RESTORED_NUMERIC_SENSOR_KEYS = {
+    SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+    SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+    SENSOR_TYPE_DAILY_IMPORT_COST,
+    SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
+    SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
+    SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
+}
+
+
+def _restored_numeric_state_value(state: Any) -> float | None:
+    """Return a numeric value from a restored HA state, if it is usable."""
+    raw = getattr(state, "state", None)
+    if raw in (None, "", "unknown", "unavailable"):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+class RestoredNumericStateMixin(RestoreEntity):
+    """Restore the last valid numeric state while startup data is unavailable."""
+
+    _restored_native_value: float | None = None
+
+    async def _async_restore_numeric_state(self) -> None:
+        last_state = await self.async_get_last_state()
+        self._restored_native_value = _restored_numeric_state_value(last_state)
+
+    def _restored_numeric_value(self, sensor_key: str) -> float | None:
+        if sensor_key not in _RESTORED_NUMERIC_SENSOR_KEYS:
+            return None
+        return self._restored_native_value
 
 
 def _currency_unit_for_kind(kind: str | None, currency: str) -> str | None:
@@ -494,7 +599,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
-        value_fn=lambda data: data.get("load_power") if data else None,
+        value_fn=_home_load_power_kw,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_LEVEL,
@@ -658,7 +763,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS,
-        name="Daily Battery Charge",
+        name="FoxESS Daily Battery Charge",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -668,7 +773,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
-        name="Daily Battery Discharge",
+        name="FoxESS Daily Battery Discharge",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -1068,12 +1173,27 @@ def _future_optimizer_action_windows(
         if end and end <= now:
             continue
 
+        planned_power_w = item.get("power_w")
+        display_power_w = planned_power_w
+        if start and end and start <= now < end:
+            effective_action = (
+                data.get("effective_current_action") or data.get("current_action")
+            )
+            if item_action == effective_action:
+                try:
+                    current_power_w = float(data.get("current_power_w") or 0)
+                except (TypeError, ValueError):
+                    current_power_w = 0
+                if current_power_w > 0:
+                    display_power_w = current_power_w
+
         window: dict[str, Any] = {
             "action": item_action,
             "start_time": item.get("timestamp"),
             "end_time": item.get("end_time"),
             "label": _format_optimizer_window(start, end),
-            "power_w": item.get("power_w"),
+            "power_w": display_power_w,
+            "planned_power_w": planned_power_w,
             "soc": item.get("soc"),
         }
 
@@ -1132,10 +1252,17 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         value_fn=lambda data: data.get("current_action") if data else None,
         attr_fn=lambda data: {
             "power_w": data.get("current_power_w"),
+            "planned_action": data.get("planned_current_action"),
+            "planned_power_w": data.get("planned_current_power_w"),
+            "effective_action": data.get("effective_current_action"),
             "actual_battery_power_w": data.get("actual_battery_power_w"),
             "status": data.get("status"),
             "until": data.get("current_action_end_time"),
             "lp_stats": data.get("lp_stats", {}),
+            "reserve_recommendation": data.get("reserve_recommendation", {}),
+            "idle_hold_active": data.get("idle_hold_active", False),
+            "idle_hold_reserve": data.get("idle_hold_reserve"),
+            "idle_hold_reserve_percent": data.get("idle_hold_reserve_percent"),
         } if data else {},
     ),
     PowerSyncSensorEntityDescription(
@@ -1376,6 +1503,8 @@ async def async_setup_entry(
     saj_h2_coordinator = domain_data.get("saj_h2_coordinator")
     fronius_reserva_coordinator = domain_data.get("fronius_reserva_coordinator")
     neovolt_coordinator = domain_data.get("neovolt_coordinator")
+    solaredge_coordinator = domain_data.get("solaredge_coordinator")
+    anker_solix_coordinator = domain_data.get("anker_solix_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -1388,6 +1517,8 @@ async def async_setup_entry(
     is_saj_h2 = domain_data.get("is_saj_h2", False)
     is_fronius_reserva = domain_data.get("is_fronius_reserva", False)
     is_neovolt = domain_data.get("is_neovolt", False)
+    is_solaredge = domain_data.get("is_solaredge", False)
+    is_anker_solix = domain_data.get("is_anker_solix", False)
 
     entities: list[SensorEntity] = []
 
@@ -1481,6 +1612,10 @@ async def async_setup_entry(
         energy_coordinator = fronius_reserva_coordinator
     elif is_neovolt:
         energy_coordinator = neovolt_coordinator
+    elif is_solaredge:
+        energy_coordinator = solaredge_coordinator
+    elif is_anker_solix:
+        energy_coordinator = anker_solix_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -1615,6 +1750,7 @@ async def async_setup_entry(
         or zaptec_standalone
         or sigenergy_charger_enabled
         or _has_tesla_ev_device(hass)
+        or (is_solaredge and _has_solaredge_ev_power(hass))
     )
     if has_ev:
         for description in EV_SENSORS:
@@ -1783,7 +1919,11 @@ async def async_setup_entry(
     )
     if electricity_provider == "flow_power":
         # Get the price coordinator (Amber or AEMO)
-        price_coordinator = amber_coordinator or domain_data.get("aemo_sensor_coordinator")
+        price_coordinator = (
+            amber_coordinator
+            or domain_data.get("aemo_sensor_coordinator")
+            or domain_data.get("flow_power_kwatch_coordinator")
+        )
         if price_coordinator:
             # Publish Flow Power-adjusted rates under the standard current_* sensor
             # ids so the mobile app and default dashboard read the retail price
@@ -1856,7 +1996,10 @@ async def async_setup_entry(
             fp_email = entry.options.get(
                 CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL)
             )
-            if fp_email:
+            fp_api_key = entry.options.get(
+                CONF_FLOWPOWER_API_KEY, entry.data.get(CONF_FLOWPOWER_API_KEY)
+            )
+            if fp_email or fp_api_key:
                 for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_PORTAL_SENSORS:
                     entities.append(
                         FlowPowerPortalSensor(
@@ -1871,6 +2014,15 @@ async def async_setup_entry(
                         )
                     )
                 _LOGGER.info("Flow Power portal sensors added (%d sensors)", len(FLOW_POWER_PORTAL_SENSORS))
+
+    # Add GloBird portal/account sensors if the provider account is connected.
+    globird_coordinator = domain_data.get("globird_coordinator")
+    if electricity_provider == "globird" and globird_coordinator:
+        from .globird_sensors import build_globird_entities
+
+        globird_entities = build_globird_entities(globird_coordinator, entry)
+        entities.extend(globird_entities)
+        _LOGGER.info("GloBird portal sensors added (%d sensors)", len(globird_entities))
 
     # Always add battery health sensor
     # For non-Tesla systems, pass coordinator so it can read battery_soh
@@ -1891,6 +2043,8 @@ async def async_setup_entry(
         battery_system = "fronius_reserva"
     elif is_neovolt:
         battery_system = "neovolt"
+    elif is_anker_solix:
+        battery_system = "anker_solix"
     entities.append(BatteryHealthSensor(
         entry=entry,
         coordinator=energy_coordinator,
@@ -1918,6 +2072,7 @@ async def async_setup_entry(
     # batteryBlocks only contains shallow block identity/count data on PW3 sites.
     if battery_system == "tesla":
         _setup_powerwall_pack_sensor_additions(hass, entry, async_add_entities)
+        _setup_powerwall_solar_string_sensor_additions(hass, entry, async_add_entities)
 
     async_add_entities(entities)
 
@@ -1962,25 +2117,39 @@ def _pack_label(packs: list[dict[str, Any]], index: int) -> str:
         powerwall_number = sum(1 for prior in packs[: index + 1] if prior.get("role") == "powerwall")
         return f"Powerwall {powerwall_number}"
     if role == "leader":
-        return "Leader PW3"
+        return "Leader Powerwall"
     if role == "follower" or pack.get("isFollower"):
         follower_number = sum(
             1
             for prior in packs[: index + 1]
             if prior.get("role") == "follower" or prior.get("isFollower")
         )
-        return "Follower PW3" if follower_number == 1 else f"Follower PW3 {follower_number}"
+        return (
+            "Follower Powerwall"
+            if follower_number == 1
+            else f"Follower Powerwall {follower_number}"
+        )
     if pack.get("isExpansion"):
         expansion_number = sum(1 for prior in packs[: index + 1] if prior.get("isExpansion"))
         return f"Expansion Pack {expansion_number}"
 
     base_number = sum(1 for prior in packs[: index + 1] if not prior.get("isExpansion"))
-    return "Leader PW3" if base_number == 1 else f"Follower PW3 {base_number - 1}"
+    return "Leader Powerwall" if base_number == 1 else f"Follower Powerwall {base_number - 1}"
 
 
 def _pack_metric_available(packs: list[dict[str, Any]], metric: str) -> bool:
     if metric in ("soc", "capacity", "soh"):
         return any(_pack_float(pack, "nominalFullPackEnergyWh", "nominal_full_pack_energy_wh") for pack in packs)
+    if metric == "current_energy":
+        return any(
+            _pack_float(
+                pack,
+                "nominalEnergyRemainingWh",
+                "nominal_energy_remaining_wh",
+            )
+            is not None
+            for pack in packs
+        )
     if metric == "voltage":
         return any(
             _pack_has_value(
@@ -2010,6 +2179,7 @@ def _pack_metric_available(packs: list[dict[str, Any]], metric: str) -> bool:
 def _pack_sensor_classes_for(packs: list[dict[str, Any]]) -> tuple[type[SensorEntity], ...]:
     classes: list[type[SensorEntity]] = [
         PowerwallBlockSocSensor,
+        PowerwallBlockCurrentEnergySensor,
         PowerwallBlockCapacitySensor,
         PowerwallBlockSohSensor,
     ]
@@ -2083,6 +2253,95 @@ def _setup_powerwall_pack_sensor_additions(
         _LOGGER.warning("Could not clean up legacy Powerwall pack registry entries", exc_info=True)
 
 
+def _solar_string_data(diagnostics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(diagnostics, dict):
+        return []
+    strings = diagnostics.get("strings")
+    if not isinstance(strings, list):
+        return []
+    return [string for string in strings if isinstance(string, dict)]
+
+
+def _solar_string_label(reading: dict[str, Any], index: int) -> str:
+    label = reading.get("label")
+    if isinstance(label, str) and label:
+        return label
+    mppt = reading.get("mppt")
+    if isinstance(mppt, str) and mppt:
+        return mppt
+    return str(index + 1)
+
+
+def _solar_string_key(reading: dict[str, Any], index: int) -> str:
+    raw = reading.get("id") or reading.get("label") or f"string_{index + 1}"
+    key = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(raw)).strip("_")
+    return key or f"string_{index + 1}"
+
+
+def _build_powerwall_solar_string_sensors(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    diagnostics: dict[str, Any] | None,
+    added_keys: set[str],
+) -> list[SensorEntity]:
+    """Build DC string voltage entities for strings reported by TEDAPI scans."""
+    entities: list[SensorEntity] = []
+    for index, reading in enumerate(_solar_string_data(diagnostics)):
+        key = _solar_string_key(reading, index)
+        if key in added_keys:
+            continue
+        added_keys.add(key)
+        entities.append(
+            PowerwallSolarStringVoltageSensor(
+                hass,
+                entry,
+                key,
+                reading.get("id"),
+                _solar_string_label(reading, index),
+            )
+        )
+    return entities
+
+
+def _setup_powerwall_solar_string_sensor_additions(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Create Powerwall string voltage sensors now and after future scans."""
+    domain_data = hass.data[DOMAIN][entry.entry_id]
+    added_keys: set[str] = domain_data.setdefault("powerwall_solar_string_sensor_keys", set())
+
+    def _add_from_diagnostics(diagnostics: dict[str, Any] | None) -> None:
+        new_entities = _build_powerwall_solar_string_sensors(
+            hass,
+            entry,
+            diagnostics,
+            added_keys,
+        )
+        if new_entities:
+            async_add_entities(new_entities)
+            _LOGGER.info(
+                "Added %d Powerwall solar string voltage sensor(s)",
+                len(new_entities),
+            )
+
+    _add_from_diagnostics(domain_data.get("solar_string_diagnostics"))
+
+    if domain_data.get("powerwall_solar_string_sensor_unsub") is not None:
+        return
+
+    @callback
+    def _handle_solar_strings_update(data: dict[str, Any]) -> None:
+        _add_from_diagnostics(data)
+
+    domain_data["powerwall_solar_string_sensor_unsub"] = async_dispatcher_connect(
+        hass,
+        f"{DOMAIN}_solar_strings_update_{entry.entry_id}",
+        _handle_solar_strings_update,
+    )
+
+
 def _cleanup_legacy_powerwall_pack_registry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove stale standalone Powerwall N registry entries from older releases."""
     try:
@@ -2126,8 +2385,13 @@ def _cleanup_legacy_powerwall_pack_registry(hass: HomeAssistant, entry: ConfigEn
             _LOGGER.debug("Unable to remove legacy Powerwall pack device %s: %s", device_id, err)
 
 
-class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
+class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumericStateMixin, SensorEntity):
     """Sensor for Amber electricity prices."""
+
+    # The "forecast" attribute is a large rolling price-forecast array that
+    # exceeds the recorder's 16 KB per-state attribute cap and is not history.
+    # Keep the scalar state recorded but exclude the bulky attribute.
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
 
     entity_description: PowerSyncSensorEntityDescription
 
@@ -2160,8 +2424,13 @@ class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
         if self.entity_description.value_fn:
             value = self.entity_description.value_fn(self.coordinator.data)
             _LOGGER.debug("AmberPriceSensor %s native_value: %s", self.entity_description.key, value)
-            return value
+            return value if value is not None else self._restored_numeric_value(self.entity_description.key)
         return None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last price while coordinator data warms up."""
+        await super().async_added_to_hass()
+        await self._async_restore_numeric_state()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -2184,7 +2453,12 @@ _LOCAL_GRID_STATUS_TO_CLOUD = {
 }
 
 
-def _local_value_for(sensor_key: str, snap: Any) -> Any:
+def _local_value_for(
+    sensor_key: str,
+    snap: Any,
+    *,
+    ev_power_kw: float = 0.0,
+) -> Any:
     """Map a sensor key to its equivalent on the local PowerwallSnapshot.
 
     Returns the locally-derived value (in the same units the cloud value_fn
@@ -2199,7 +2473,12 @@ def _local_value_for(sensor_key: str, snap: Any) -> Any:
     if sensor_key == SENSOR_TYPE_SOLAR_POWER:
         return None if snap.solar_w is None else snap.solar_w / 1000.0
     if sensor_key == SENSOR_TYPE_HOME_LOAD:
-        return None if snap.load_w is None else snap.load_w / 1000.0
+        if snap.load_w is None:
+            return None
+        # Powerwall local TEDAPI reports total behind-the-meter load, which
+        # includes EV charging. Keep Home Load aligned with the cloud
+        # coordinator and Tesla app by removing observed EV charging power.
+        return max(0.0, (snap.load_w / 1000.0) - max(0.0, ev_power_kw))
     if sensor_key == SENSOR_TYPE_BATTERY_LEVEL:
         return snap.soc
     if sensor_key == SENSOR_TYPE_GRID_STATUS:
@@ -2223,6 +2502,8 @@ _LOCAL_OVERRIDABLE = {
 # 30s is ~15 missed ticks — comfortably past transient blips, well before
 # the data turns into a "stuck at 41%" disaster.
 _LOCAL_STALE_SECONDS = 30
+_ENERGY_COORDINATOR_STALE_FACTOR = 4
+_ENERGY_COORDINATOR_MIN_STALE_SECONDS = 60
 
 
 def _local_data_is_fresh(local_coord: Any) -> bool:
@@ -2236,7 +2517,36 @@ def _local_data_is_fresh(local_coord: Any) -> bool:
     return (_time.time() - last_ts) <= _LOCAL_STALE_SECONDS
 
 
-class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
+def _coordinator_data_is_fresh(coordinator: Any) -> bool:
+    """Return False when a coordinator is serving stale energy data."""
+    if not getattr(coordinator, "last_update_success", True):
+        return False
+    if getattr(coordinator, "data", None) is None:
+        return False
+
+    last_update = getattr(coordinator, "last_update_success_time", None)
+    update_interval = getattr(coordinator, "update_interval", None)
+    if last_update is None or update_interval is None:
+        return True
+
+    try:
+        stale_after = max(
+            update_interval * _ENERGY_COORDINATOR_STALE_FACTOR,
+            timedelta(seconds=_ENERGY_COORDINATOR_MIN_STALE_SECONDS),
+        )
+        now = dt_util.utcnow()
+        if getattr(now, "tzinfo", None) is None and getattr(last_update, "tzinfo", None) is not None:
+            now = now.replace(tzinfo=last_update.tzinfo)
+        elif getattr(now, "tzinfo", None) is not None and getattr(last_update, "tzinfo", None) is None:
+            last_update = last_update.replace(tzinfo=now.tzinfo)
+        age = now - last_update
+    except Exception:
+        return True
+
+    return age <= stale_after
+
+
+class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumericStateMixin, SensorEntity):
     """Sensor for Tesla energy data.
 
     Reads cloud-coordinator data via the entity description's ``value_fn`` by
@@ -2285,6 +2595,11 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity)
         return bucket.get("coordinator")
 
     @property
+    def available(self) -> bool:
+        """Return False when the backing energy coordinator is stale."""
+        return _coordinator_data_is_fresh(self.coordinator)
+
+    @property
     def native_value(self) -> Any:
         """Prefer local snapshot value when paired AND fresh; else cloud value_fn.
 
@@ -2299,7 +2614,11 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity)
             local_coord = self._local_coordinator()
             if local_coord is not None and _local_data_is_fresh(local_coord):
                 local_v = _local_value_for(
-                    self.entity_description.key, local_coord.data
+                    self.entity_description.key,
+                    local_coord.data,
+                    ev_power_kw=(
+                        (self.coordinator.data or {}).get("ev_power", 0.0) or 0.0
+                    ),
                 )
                 if local_v is not None:
                     return local_v
@@ -2310,12 +2629,13 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity)
                 and value is not None
             ):
                 value += _sungrow_ac_inverter_power_kw(self._entry, self.hass)
-            return value
+            return value if value is not None else self._restored_numeric_value(self.entity_description.key)
         return None
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to both cloud and local coordinator updates."""
         await super().async_added_to_hass()
+        await self._async_restore_numeric_state()
         if self.entity_description.key in _LOCAL_OVERRIDABLE:
             local_coord = self._local_coordinator()
             if local_coord is not None:
@@ -2579,6 +2899,30 @@ class PowerwallBlockSocSensor(_PowerwallBlockSensorBase):
         return None
 
 
+class PowerwallBlockCurrentEnergySensor(_PowerwallBlockSensorBase):
+    metric_key = "current_energy"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+    _attr_icon = "mdi:battery-50"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, index: int) -> None:
+        super().__init__(hass, entry, index, "current_energy", "Current Energy")
+
+    @property
+    def native_value(self) -> Any:
+        block = self._block
+        if not block:
+            return None
+        remaining = _pack_float(
+            block,
+            "nominalEnergyRemainingWh",
+            "nominal_energy_remaining_wh",
+        )
+        return round(remaining / 1000.0, 2) if remaining is not None else None
+
+
 class PowerwallBlockCapacitySensor(_PowerwallBlockSensorBase):
     metric_key = "capacity"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -2667,6 +3011,122 @@ class PowerwallBlockSohSensor(_PowerwallBlockSensorBase):
         if not full:
             return None
         return round(float(full) / self._NAMEPLATE_WH * 100.0, 1)
+
+
+class PowerwallSolarStringVoltageSensor(SensorEntity):
+    """Voltage for a single Powerwall DC-coupled solar string."""
+
+    _attr_has_entity_name = False
+    _attr_native_unit_of_measurement = "V"
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:solar-power-variant"
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        key: str,
+        string_id: Any,
+        label: str,
+    ) -> None:
+        self._hass = hass
+        self._entry = entry
+        self._key = key
+        self._string_id = string_id
+        self._label = label
+        self._attr_unique_id = f"{entry.entry_id}_solar_string_{key}_voltage"
+        self._attr_suggested_object_id = f"powerwall_solar_string_{key}_voltage"
+        self._attr_name = f"Solar String {label} Voltage"
+
+    @property
+    def device_info(self):
+        return powerwall_device_info(self._entry.entry_id)
+
+    @property
+    def _diagnostics(self) -> dict[str, Any] | None:
+        return (
+            self._hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("solar_string_diagnostics")
+        )
+
+    @property
+    def _reading(self) -> dict[str, Any] | None:
+        strings = _solar_string_data(self._diagnostics)
+        for index, reading in enumerate(strings):
+            if reading.get("id") == self._string_id or _solar_string_key(reading, index) == self._key:
+                return reading
+        return None
+
+    @property
+    def available(self) -> bool:
+        reading = self._reading
+        return reading is not None and reading.get("voltage_v") is not None
+
+    @property
+    def native_value(self) -> Any:
+        reading = self._reading
+        if not reading:
+            return None
+        value = _pack_float(reading, "voltage_v")
+        return round(value, 1) if value is not None else None
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_solar_strings_update_{self._entry.entry_id}",
+                self._handle_solar_strings_update,
+            )
+        )
+
+    @callback
+    def _handle_solar_strings_update(self, data: dict[str, Any]) -> None:
+        reading = self._reading
+        if reading:
+            self._label = str(reading.get("label") or self._label)
+            self._attr_name = f"Solar String {self._label} Voltage"
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        reading = self._reading
+        diagnostics = self._diagnostics or {}
+        if not reading:
+            return {
+                "string_id": self._string_id,
+                "source": diagnostics.get("source"),
+                "last_scan": diagnostics.get("last_scan"),
+            }
+
+        attrs: dict[str, Any] = {
+            "string_id": reading.get("id"),
+            "string_label": reading.get("label"),
+            "mppt": reading.get("mppt"),
+            "connected": reading.get("connected"),
+            "source": diagnostics.get("source"),
+            "transport_source": diagnostics.get("transport_source"),
+            "last_scan": diagnostics.get("last_scan"),
+        }
+        for attr_key in ("current_a", "power_w", "state", "device_id"):
+            if reading.get(attr_key) is not None:
+                attrs[attr_key] = reading.get(attr_key)
+
+        string_id = reading.get("id")
+        groups = diagnostics.get("groups") if isinstance(diagnostics, dict) else None
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                if string_id in (group.get("string_ids") or []):
+                    attrs["group_id"] = group.get("id")
+                    attrs["group_label"] = group.get("label")
+                    if group.get("total_power_w") is not None:
+                        attrs["group_total_power_w"] = group.get("total_power_w")
+                    break
+        return attrs
 
 
 class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
@@ -2847,6 +3307,13 @@ class SavingSessionSensor(CoordinatorEntity, SensorEntity):
 class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
     """Sensor for Solcast solar production forecasts."""
 
+    # The "forecast" attribute is a large rolling prediction array (≈48h @ 5min)
+    # that exceeds the recorder's 16 KB per-state attribute cap and is not
+    # history (it's regenerated each cycle). Keep the scalar state recorded but
+    # exclude the bulky attribute so the recorder doesn't drop it with a warning
+    # or bloat the database.
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
+
     entity_description: PowerSyncSensorEntityDescription
 
     def __init__(
@@ -2912,6 +3379,9 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("load_peak_kw"),
             "forecast_values_kw": data.get("load_forecast"),
+            "planned_ev_load_peak_kw": data.get("planned_ev_load_peak_kw"),
+            "planned_ev_load_kwh": data.get("planned_ev_load_kwh"),
+            "planned_ev_load_forecast_w": data.get("planned_ev_load_forecast_w"),
         } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
@@ -3012,6 +3482,11 @@ class LPForecastSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     Reads forecast data stored by the OptimizationCoordinator each
     optimization cycle via get_forecast_data().
     """
+
+    # The "forecast" attribute is a large rolling prediction array (≈48h @ 5min)
+    # that exceeds the recorder's 16 KB per-state attribute cap and is not
+    # history. Keep the scalar state recorded but exclude the bulky attribute.
+    _unrecorded_attributes = _FORECAST_ARRAY_ATTRS
 
     entity_description: PowerSyncSensorEntityDescription
 
@@ -3175,23 +3650,13 @@ class TariffScheduleSensor(SensorEntity):
             schedule_list = []
             now = dt_util.now()
             today = now.date()
-            tomorrow = today + timedelta(days=1)
-            current_slot_minutes = now.hour * 60 + (0 if now.minute < 30 else 30)
             for period_key in sorted(buy_prices.keys()):
                 parts = period_key.replace("PERIOD_", "").split("_")
                 time_str = f"{parts[0]}:{parts[1]}"
-                period_minutes = int(parts[0]) * 60 + int(parts[1])
-                period_date = tomorrow if period_minutes < current_slot_minutes else today
-                if period_date == today:
-                    date_label = "Today"
-                elif period_date == tomorrow:
-                    date_label = "Tomorrow"
-                else:
-                    date_label = period_date.isoformat()
                 schedule_list.append({
                     "time": time_str,
-                    "date": period_date.isoformat(),
-                    "date_label": date_label,
+                    "date": today.isoformat(),
+                    "date_label": "Today",
                     "buy": buy_prices.get(period_key, 0),
                     "sell": sell_prices.get(period_key, 0),
                 })
@@ -3316,7 +3781,7 @@ class TariffScheduleSensor(SensorEntity):
         }
 
 
-class TariffPriceSensor(PowerSyncCurrencyMixin, SensorEntity):
+class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, SensorEntity):
     """Sensor for current price derived from TOU tariff schedule.
 
     This sensor provides current import/export prices for non-Amber users
@@ -3359,6 +3824,7 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
+        await self._async_restore_numeric_state()
 
         _LOGGER.info(
             "Tariff price sensor registered: %s (entity_id=%s)",
@@ -3403,7 +3869,7 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, SensorEntity):
         """Return the current price from tariff schedule."""
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
-            return None
+            return self._restored_numeric_value(self._sensor_type)
 
         # Import the function from __init__.py
         from . import get_current_price_from_tariff_schedule
@@ -3771,10 +4237,23 @@ class InverterStatusSensor(SensorEntity):
             self._cached_attrs["brand"] = inverter_brand
             self._cached_attrs["last_poll"] = dt_util.now().isoformat()
 
-            # Also update hass.data for consistency with curtailment logic
+            # Also update hass.data for consistency with curtailment logic.
+            # Keep explicit manual/automatic control modes more specific than
+            # the inverter's generic curtailed/running status.
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
             if entry_data:
-                entry_data["inverter_last_state"] = self._cached_state
+                control_mode = entry_data.get("inverter_control_mode")
+                if control_mode in (
+                    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                    INVERTER_CONTROL_MODE_SHUTDOWN,
+                ):
+                    entry_data["inverter_last_state"] = "curtailed"
+                else:
+                    entry_data["inverter_last_state"] = self._cached_state
+                    if self._cached_state == "running":
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_NORMAL
+                    elif self._cached_state == "curtailed" and control_mode not in INVERTER_CONTROL_MODES:
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_CURTAILED
                 entry_data["inverter_attributes"] = self._cached_attrs
 
             _LOGGER.info(f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%")
@@ -3791,14 +4270,31 @@ class InverterStatusSensor(SensorEntity):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
 
+    def _entry_data(self) -> dict[str, Any]:
+        """Return runtime data for this config entry."""
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+    def _control_mode(self) -> str:
+        """Return the current runtime AC inverter control mode."""
+        mode = self._entry_data().get("inverter_control_mode")
+        if mode in INVERTER_CONTROL_MODES:
+            return mode
+        if self._cached_state == "curtailed":
+            return INVERTER_CONTROL_MODE_CURTAILED
+        return INVERTER_CONTROL_MODE_NORMAL
+
+    def _target_power_w(self) -> int | None:
+        """Return the runtime inverter target limit when one is known."""
+        value = self._entry_data().get("inverter_power_limit_w")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @property
     def native_value(self) -> str:
         """Return the inverter status."""
-        if self._cached_state == "curtailed":
-            return "Curtailed"
-        elif self._cached_state == "running":
-            return "Normal"
-        elif self._cached_state == "offline":
+        if self._cached_state == "offline":
             return "Offline"
         elif self._cached_state == "disabled":
             return "Disabled"
@@ -3806,6 +4302,16 @@ class InverterStatusSensor(SensorEntity):
             return "Not Configured"
         elif self._cached_state == "error":
             return "Error"
+
+        control_mode = self._control_mode()
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            return "Load Following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            return "Shutdown"
+        elif control_mode == INVERTER_CONTROL_MODE_CURTAILED or self._cached_state == "curtailed":
+            return "Curtailed"
+        elif self._cached_state == "running":
+            return "Normal"
         else:
             return "Unknown"
 
@@ -3828,6 +4334,9 @@ class InverterStatusSensor(SensorEntity):
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
 
+        control_mode = self._control_mode()
+        target_power_w = self._target_power_w()
+
         # Base attributes
         attrs = {
             "enabled": inverter_enabled,
@@ -3835,11 +4344,26 @@ class InverterStatusSensor(SensorEntity):
             "host": inverter_host,
             "model": inverter_model,
             "state": self._cached_state,
+            "control_mode": control_mode,
+            "target_power_w": target_power_w,
         }
 
-        # Add description based on state
-        if self._cached_state == "curtailed":
-            attrs["description"] = "Inverter power limited to prevent negative export"
+        # Add cached attributes from inverter polling
+        attrs.update(self._cached_attrs)
+        attrs["control_mode"] = control_mode
+        attrs["target_power_w"] = target_power_w
+
+        # Add description based on state after cached attrs so the public
+        # dashboard text remains specific to PowerSync's active control mode.
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            if target_power_w is not None and target_power_w > 0:
+                attrs["description"] = f"Inverter curtailed - load following at {target_power_w}W"
+            else:
+                attrs["description"] = "Inverter curtailed - load following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            attrs["description"] = "Inverter curtailed - shutdown mode"
+        elif self._cached_state == "curtailed":
+            attrs["description"] = "Inverter curtailed"
         elif self._cached_state == "running":
             attrs["description"] = "Inverter operating normally"
         elif self._cached_state == "offline":
@@ -3858,13 +4382,10 @@ class InverterStatusSensor(SensorEntity):
         else:
             attrs["description"] = "Status unknown"
 
-        # Add cached attributes from inverter polling
-        attrs.update(self._cached_attrs)
-
         return attrs
 
 
-class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
+class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumericStateMixin, SensorEntity):
     """Sensor for Flow Power electricity prices with PEA adjustment.
 
     Shows real-time import price calculated as:
@@ -3915,10 +4436,11 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
         self._attr_currency_unit = "major_rate"
         self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 4
+        self._current_period = None
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -3966,8 +4488,40 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
             domain_data,
         )
 
+    @property
+    def _uses_standard_current_price_id(self) -> bool:
+        """Return true for standard dashboard/mobile current price entities."""
+        return self._sensor_type in (
+            SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+            SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+        )
+
+    def _get_current_tariff_price(self) -> tuple[float, dict[str, Any]] | None:
+        """Read the canonical tariff schedule for standard current price sensors."""
+        if not self._uses_standard_current_price_id or not hasattr(self, "hass"):
+            return None
+
+        tariff_data = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("tariff_schedule")
+        )
+        if not tariff_data:
+            return None
+
+        buy_price_cents, sell_price_cents, current_period = (
+            get_current_price_from_tariff_schedule(tariff_data)
+        )
+        self._current_period = current_period
+        price_cents = (
+            buy_price_cents
+            if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
+            else sell_price_cents
+        )
+        return max(0.0, price_cents / 100), tariff_data
+
     def _get_effective_twap(self) -> float:
-        """Get effective TWAP: override -> portal -> raw wholesale tracker -> fallback."""
+        """Get effective raw wholesale TWAP: override -> tracker -> fallback."""
         return self._get_pricing_context().twap
 
     def _get_twap_source(self) -> str:
@@ -4048,10 +4602,33 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
     @property
     def native_value(self) -> float | None:
         """Return the current price in $/kWh."""
+        tariff_price = self._get_current_tariff_price()
+        if tariff_price is not None:
+            value, _tariff_data = tariff_price
+            return round(value, 4)
+
         if self._is_import_sensor:
-            return self._calculate_import_price()
+            value = self._calculate_import_price()
         else:
-            return self._calculate_export_price()
+            value = self._calculate_export_price()
+        return value if value is not None else self._restored_numeric_value(self._sensor_type)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last price while coordinator data warms up."""
+        await super().async_added_to_hass()
+        await self._async_restore_numeric_state()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -4067,6 +4644,24 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
             "pea_enabled": pea_enabled,
             "base_rate_cents": base_rate,
         }
+
+        tariff_price = self._get_current_tariff_price()
+        if tariff_price is not None:
+            value, tariff_data = tariff_price
+            attributes.update(
+                {
+                    "source": "tariff_schedule",
+                    "current_period": self._current_period,
+                    "final_rate_cents": round(value * 100, 2),
+                    "utility": tariff_data.get("utility"),
+                    "plan_name": tariff_data.get("plan_name"),
+                }
+            )
+            if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
+                attributes["price_spike"] = None
+            else:
+                attributes["channel_type"] = "feedIn"
+            return _entity_currency_attrs(self, attributes, tariff_data)
 
         if self._is_import_sensor:
             # Import price attributes
@@ -4099,6 +4694,10 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
             if has_tariff:
                 attributes["network_cents"] = round(tariff_rate, 2)
                 attributes["avg_daily_tariff"] = round(avg_daily_tariff, 2)
+                attributes["network_tou_adjustment_cents"] = round(
+                    tariff_rate - avg_daily_tariff,
+                    2,
+                )
 
             if wholesale_cents is not None:
                 attributes["wholesale_cents"] = round(wholesale_cents, 2)
@@ -4113,7 +4712,18 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
                         pea = self._calculate_pea_auto(wholesale_cents)
 
                     attributes["pea_cents"] = round(pea, 2)
-                    attributes["final_rate_cents"] = round(base_rate + pea, 2)
+                    final_rate_cents = base_rate + pea
+                    attributes["final_rate_cents"] = round(final_rate_cents, 2)
+                    if has_tariff:
+                        without_network_tou = final_rate_cents - (
+                            tariff_rate - avg_daily_tariff
+                        )
+                        attributes[
+                            "price_without_network_tou_adjustment_cents"
+                        ] = round(without_network_tou, 2)
+                        attributes[
+                            "price_without_network_tou_adjustment_dollars"
+                        ] = round(without_network_tou / 100, 4)
                 else:
                     attributes["pea_cents"] = 0
                     attributes["final_rate_cents"] = base_rate
@@ -4148,7 +4758,7 @@ class FlowPowerTWAPSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -4218,11 +4828,27 @@ class FlowPowerNetworkTariffSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Flow Power tariff data updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> float | None:
@@ -4274,11 +4900,27 @@ class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Flow Power tariff data updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
 
     def _get_wholesale_price_cents(self) -> float | None:
         """Extract current wholesale price in cents from coordinator data."""
@@ -4374,13 +5016,14 @@ class FlowPowerPortalSensor(SensorEntity):
         self._source_label = source_label
         self._attr_name = f"Power Sync {name}"
         self._attr_unique_id = f"power_sync_{entry.entry_id}_{sensor_type}"
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
         self._attr_state_class = SensorStateClass.MEASUREMENT if unit else None
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     @property
     def native_value(self) -> float | None:
@@ -4398,7 +5041,17 @@ class FlowPowerPortalSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"source": self._source_label}
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        portal_data = domain_data.get("flow_power_portal_data") or {}
+        source = portal_data.get("source", self._source_label)
+        attrs = {"source": source}
+        raw_network_tariff = self._entry.options.get(
+            CONF_FLOWPOWER_NETWORK_TARIFF,
+            self._entry.data.get(CONF_FLOWPOWER_NETWORK_TARIFF),
+        )
+        if raw_network_tariff:
+            attrs["network_tariff_raw"] = raw_network_tariff
+        return attrs
 
     @property
     def should_poll(self) -> bool:
@@ -4638,7 +5291,7 @@ class EVStatusSensor(SensorEntity):
         # Also listen to energy coordinator updates for faster refresh
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         self._unsub_coordinators = []
-        for key in ("tesla_coordinator", "sigenergy_coordinator"):
+        for key in ("tesla_coordinator", "sigenergy_coordinator", "solaredge_coordinator"):
             coordinator = entry_data.get(key)
             if coordinator:
                 self._unsub_coordinators.append(
@@ -4662,7 +5315,7 @@ class EVStatusSensor(SensorEntity):
     def _handle_coordinator_update(self) -> None:
         """Handle energy coordinator updates with embedded EV telemetry."""
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        for key in ("tesla_coordinator", "sigenergy_coordinator"):
+        for key in ("tesla_coordinator", "sigenergy_coordinator", "solaredge_coordinator"):
             coordinator = entry_data.get(key)
             if not coordinator or not coordinator.data:
                 continue
@@ -4672,15 +5325,28 @@ class EVStatusSensor(SensorEntity):
                 continue
             if self._ev_data is None:
                 self._ev_data = {}
-            if coord_data.get("ev_charger_type"):
+            if key == "solaredge_coordinator":
                 self._ev_data["ev_power_kw"] = ev_power
-                self._ev_data["vehicle_id"] = "sigenergy_charger"
-                self._ev_data["vehicle_name"] = "Sigenergy EVDC"
-                self._ev_data["is_connected"] = coord_data.get("ev_charger_connected", False)
-                self._ev_data["is_charging"] = coord_data.get("ev_charger_charging", False)
-                self._ev_data["is_discharging"] = coord_data.get("ev_charger_discharging", False)
-                if coord_data.get("ev_soc") is not None:
-                    self._ev_data["ev_soc"] = coord_data.get("ev_soc")
+                self._ev_data["vehicle_id"] = "solaredge_ev_charger"
+                self._ev_data["vehicle_name"] = "SolarEdge EV Charger"
+                self._ev_data["is_connected"] = coord_data.get(
+                    "ev_charger_connected", ev_power > 0.05
+                )
+                self._ev_data["is_charging"] = coord_data.get(
+                    "ev_charger_charging", ev_power > 0.05
+                )
+                self._ev_data["is_discharging"] = coord_data.get(
+                    "ev_charger_discharging", False
+                )
+            elif coord_data.get("ev_charger_type"):
+                self._apply_sigenergy_charger_context(
+                    charger_type=coord_data.get("ev_charger_type"),
+                    ev_power_kw=ev_power,
+                    is_connected=coord_data.get("ev_charger_connected", False),
+                    is_charging=coord_data.get("ev_charger_charging", False),
+                    is_discharging=coord_data.get("ev_charger_discharging", False),
+                    ev_soc=coord_data.get("ev_soc"),
+                )
             elif abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0:
                 self._ev_data["ev_power_kw"] = ev_power
         self.async_write_ha_state()
@@ -4736,9 +5402,48 @@ class EVStatusSensor(SensorEntity):
         if active_soc is not None:
             self._ev_data["ev_soc"] = active_soc
 
+    @staticmethod
+    def _sigenergy_vehicle_name(charger_type: Any) -> str:
+        """Return a dashboard label for a Sigenergy charger type."""
+        if str(charger_type or "").lower() == "evdc":
+            return "Sigenergy EVDC"
+        return "Sigenergy EVAC"
+
+    def _apply_sigenergy_charger_context(
+        self,
+        *,
+        charger_type: Any,
+        ev_power_kw: Any,
+        is_connected: Any,
+        is_charging: Any,
+        is_discharging: Any = False,
+        ev_soc: Any = None,
+    ) -> None:
+        """Attach Sigenergy charger presence so the dashboard can show idle EVs."""
+        if self._ev_data is None:
+            self._ev_data = {}
+
+        try:
+            power_kw = float(ev_power_kw if ev_power_kw is not None else 0.0)
+        except (TypeError, ValueError):
+            power_kw = 0.0
+
+        self._ev_data["ev_power_kw"] = power_kw
+        self._ev_data["vehicle_id"] = "sigenergy_charger"
+        self._ev_data["vehicle_name"] = self._sigenergy_vehicle_name(charger_type)
+        self._ev_data["is_connected"] = bool(is_connected)
+        self._ev_data["is_charging"] = bool(is_charging)
+        self._ev_data["is_discharging"] = bool(is_discharging)
+        if ev_soc is not None:
+            self._ev_data["ev_soc"] = ev_soc
+
     async def _async_update_ev(self, _now=None) -> None:
         """Poll EV status from vehicle sensors."""
-        from . import _get_ev_vehicle_status, _get_ev_vehicles_status
+        from . import (
+            _get_ev_vehicle_status,
+            _get_ev_vehicles_status,
+            _read_sigenergy_charger_state_for_entry,
+        )
         try:
             self._ev_data = _get_ev_vehicle_status(self.hass, self._entry)
             self._apply_vehicle_context(_get_ev_vehicles_status(self.hass, self._entry))
@@ -4749,23 +5454,59 @@ class EVStatusSensor(SensorEntity):
                 wc_power = tesla_coordinator.data.get("ev_power", 0)
                 if wc_power > 0 and self._ev_data.get("ev_power_kw", 0) <= 0:
                     self._ev_data["ev_power_kw"] = wc_power
+            sigenergy_context_applied = False
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             if sigenergy_coordinator and sigenergy_coordinator.data:
                 coord_data = sigenergy_coordinator.data
                 ev_power = coord_data.get("ev_power")
                 if ev_power is not None and coord_data.get("ev_charger_type"):
-                    self._ev_data["ev_power_kw"] = ev_power
-                    self._ev_data["vehicle_id"] = "sigenergy_charger"
-                    self._ev_data["vehicle_name"] = "Sigenergy EVDC"
-                    self._ev_data["is_connected"] = coord_data.get("ev_charger_connected", False)
-                    self._ev_data["is_charging"] = coord_data.get("ev_charger_charging", False)
-                    self._ev_data["is_discharging"] = coord_data.get("ev_charger_discharging", False)
-                    if coord_data.get("ev_soc") is not None:
-                        self._ev_data["ev_soc"] = coord_data.get("ev_soc")
+                    sigenergy_context_applied = True
+                    self._apply_sigenergy_charger_context(
+                        charger_type=coord_data.get("ev_charger_type"),
+                        ev_power_kw=ev_power,
+                        is_connected=coord_data.get("ev_charger_connected", False),
+                        is_charging=coord_data.get("ev_charger_charging", False),
+                        is_discharging=coord_data.get("ev_charger_discharging", False),
+                        ev_soc=coord_data.get("ev_soc"),
+                    )
                 elif ev_power is not None and (
                     abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0
                 ):
                     self._ev_data["ev_power_kw"] = ev_power
+
+            if not sigenergy_context_applied:
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
+                    self._entry,
+                    self.hass,
+                )
+            else:
+                sigenergy_state = None
+            if sigenergy_state is not None:
+                self._apply_sigenergy_charger_context(
+                    charger_type=getattr(sigenergy_state, "charger_type", None),
+                    ev_power_kw=getattr(sigenergy_state, "power_kw", 0.0),
+                    is_connected=getattr(sigenergy_state, "is_connected", False),
+                    is_charging=getattr(sigenergy_state, "is_charging", False),
+                    is_discharging=getattr(sigenergy_state, "is_discharging", False),
+                    ev_soc=getattr(sigenergy_state, "vehicle_soc", None),
+                )
+            solaredge_coordinator = entry_data.get("solaredge_coordinator")
+            if solaredge_coordinator and solaredge_coordinator.data:
+                coord_data = solaredge_coordinator.data
+                ev_power = coord_data.get("ev_power")
+                if ev_power is not None:
+                    self._ev_data["ev_power_kw"] = ev_power
+                    self._ev_data["vehicle_id"] = "solaredge_ev_charger"
+                    self._ev_data["vehicle_name"] = "SolarEdge EV Charger"
+                    self._ev_data["is_connected"] = coord_data.get(
+                        "ev_charger_connected", ev_power > 0.05
+                    )
+                    self._ev_data["is_charging"] = coord_data.get(
+                        "ev_charger_charging", ev_power > 0.05
+                    )
+                    self._ev_data["is_discharging"] = coord_data.get(
+                        "ev_charger_discharging", False
+                    )
         except Exception:
             _LOGGER.debug("Error polling EV status", exc_info=True)
         self.async_write_ha_state()

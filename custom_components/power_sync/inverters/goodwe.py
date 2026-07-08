@@ -77,6 +77,7 @@ class GoodWeController(InverterController):
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
+    RESET_CONNECTION_AFTER_REQUEST = True
 
     def __init__(
         self,
@@ -96,6 +97,7 @@ class GoodWeController(InverterController):
         super().__init__(host, int(port), int(slave_id), model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Connect to the GoodWe inverter via Modbus TCP."""
@@ -127,24 +129,44 @@ class GoodWeController(InverterController):
     async def disconnect(self) -> None:
         """Disconnect from the GoodWe inverter."""
         async with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
-            self._connected = False
+            self._close_client()
             _LOGGER.debug(f"Disconnected from GoodWe inverter at {self.host}")
+
+    def _close_client(self) -> None:
+        """Close and discard the active Modbus TCP client."""
+        client = self._client
+        if client:
+            try:
+                client.close()
+            except Exception as err:
+                _LOGGER.debug("Error closing GoodWe Modbus TCP client: %s", err)
+        self._client = None
+        self._connected = False
+
+    async def _connected_client(self) -> Optional[AsyncModbusTcpClient]:
+        """Return a connected Modbus TCP client."""
+        if self._client and self._client.connected:
+            return self._client
+        if await self.connect():
+            return self._client
+        return None
 
     async def _write_register(self, address: int, value: int) -> bool:
         """Write a value to a Modbus register."""
-        if not self._client or not self._client.connected:
-            if not await self.connect():
-                return False
-
         try:
-            result = await self._client.write_register(
-                address=address,
-                value=value,
-                **{_SLAVE_PARAM: self.slave_id},
-            )
+            async with self._request_lock:
+                client = await self._connected_client()
+                if not client:
+                    return False
+                try:
+                    result = await client.write_register(
+                        address=address,
+                        value=value,
+                        **{_SLAVE_PARAM: self.slave_id},
+                    )
+                finally:
+                    if self.RESET_CONNECTION_AFTER_REQUEST:
+                        self._close_client()
 
             if result.isError():
                 _LOGGER.error(f"Modbus write error at register {address}: {result}")
@@ -154,24 +176,33 @@ class GoodWeController(InverterController):
             return True
 
         except ModbusException as e:
+            self._close_client()
             _LOGGER.error(f"Modbus exception writing to register {address}: {e}")
             return False
         except Exception as e:
+            self._close_client()
             _LOGGER.error(f"Error writing to register {address}: {e}")
             return False
 
     async def _read_register(self, address: int, count: int = 1) -> Optional[list]:
         """Read values from Modbus registers."""
-        if not self._client or not self._client.connected:
-            if not await self.connect():
-                return None
-
         try:
-            result = await self._client.read_holding_registers(
-                address=address,
-                count=count,
-                **{_SLAVE_PARAM: self.slave_id},
-            )
+            async with self._request_lock:
+                client = await self._connected_client()
+                if not client:
+                    return None
+                try:
+                    result = await client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        **{_SLAVE_PARAM: self.slave_id},
+                    )
+                finally:
+                    # Some GoodWe LAN/TCP gateways repeat delayed Modbus TCP
+                    # frames on the same stream. Dropping the socket prevents
+                    # stale frames from being consumed by the next request.
+                    if self.RESET_CONNECTION_AFTER_REQUEST:
+                        self._close_client()
 
             if result.isError():
                 _LOGGER.debug(f"Modbus read error at register {address}: {result}")
@@ -180,11 +211,38 @@ class GoodWeController(InverterController):
             return result.registers
 
         except ModbusException as e:
+            self._close_client()
             _LOGGER.debug(f"Modbus exception reading register {address}: {e}")
             return None
         except Exception as e:
+            self._close_client()
             _LOGGER.debug(f"Error reading register {address}: {e}")
             return None
+
+    async def _read_register_block(self, address: int, count: int) -> dict[int, int]:
+        """Read a block of registers and return address-indexed values."""
+        registers = await self._read_register(address, count)
+        if not registers:
+            return {}
+        return {
+            address + offset: value
+            for offset, value in enumerate(registers)
+        }
+
+    def _block_values(
+        self,
+        registers: dict[int, int],
+        address: int,
+        count: int = 1,
+    ) -> Optional[list[int]]:
+        """Return values from a register block when the full range is present."""
+        values: list[int] = []
+        for offset in range(count):
+            register = address + offset
+            if register not in registers:
+                return None
+            values.append(registers[register])
+        return values
 
     def _to_signed16(self, value: int) -> int:
         """Convert unsigned 16-bit to signed."""
@@ -279,78 +337,91 @@ class GoodWeController(InverterController):
         attrs = {}
 
         try:
+            pv_block = await self._read_register_block(self.REG_PV1_VOLTAGE, 16)
+            grid_block = await self._read_register_block(self.REG_GRID_POWER, 20)
+            battery_block = await self._read_register_block(self.REG_TEMP_AIR, 10)
+            soc_block = await self._read_register_block(self.REG_BATTERY_SOC, 1)
+            export_block = await self._read_register_block(
+                self.REG_EXPORT_LIMIT_ENABLED,
+                2,
+            )
+
             # Read PV1 data
-            pv1_voltage = await self._read_register(self.REG_PV1_VOLTAGE, 1)
+            pv1_voltage = self._block_values(pv_block, self.REG_PV1_VOLTAGE, 1)
             if pv1_voltage:
                 attrs["pv1_voltage"] = round(pv1_voltage[0] * 0.1, 1)
 
-            pv1_current = await self._read_register(self.REG_PV1_CURRENT, 1)
+            pv1_current = self._block_values(pv_block, self.REG_PV1_CURRENT, 1)
             if pv1_current:
                 attrs["pv1_current"] = round(pv1_current[0] * 0.1, 1)
 
-            pv1_power = await self._read_register(self.REG_PV1_POWER, 2)
+            pv1_power = self._block_values(pv_block, self.REG_PV1_POWER, 2)
             if pv1_power and len(pv1_power) >= 2:
                 attrs["pv1_power"] = self._to_unsigned32(pv1_power[0], pv1_power[1])
 
             # Read PV2 data
-            pv2_voltage = await self._read_register(self.REG_PV2_VOLTAGE, 1)
+            pv2_voltage = self._block_values(pv_block, self.REG_PV2_VOLTAGE, 1)
             if pv2_voltage:
                 attrs["pv2_voltage"] = round(pv2_voltage[0] * 0.1, 1)
 
-            pv2_current = await self._read_register(self.REG_PV2_CURRENT, 1)
+            pv2_current = self._block_values(pv_block, self.REG_PV2_CURRENT, 1)
             if pv2_current:
                 attrs["pv2_current"] = round(pv2_current[0] * 0.1, 1)
 
-            pv2_power = await self._read_register(self.REG_PV2_POWER, 2)
+            pv2_power = self._block_values(pv_block, self.REG_PV2_POWER, 2)
             if pv2_power and len(pv2_power) >= 2:
                 attrs["pv2_power"] = self._to_unsigned32(pv2_power[0], pv2_power[1])
 
             # Read battery data
-            battery_voltage = await self._read_register(self.REG_BATTERY_VOLTAGE, 1)
+            battery_voltage = self._block_values(battery_block, self.REG_BATTERY_VOLTAGE, 1)
             if battery_voltage:
                 attrs["battery_voltage"] = round(battery_voltage[0] * 0.1, 1)
 
-            battery_current = await self._read_register(self.REG_BATTERY_CURRENT, 1)
+            battery_current = self._block_values(battery_block, self.REG_BATTERY_CURRENT, 1)
             if battery_current:
                 attrs["battery_current"] = round(self._to_signed16(battery_current[0]) * 0.1, 1)
 
-            battery_power = await self._read_register(self.REG_BATTERY_POWER, 2)
+            battery_power = self._block_values(battery_block, self.REG_BATTERY_POWER, 2)
             if battery_power and len(battery_power) >= 2:
                 attrs["battery_power"] = self._to_signed32(battery_power[0], battery_power[1])
 
-            battery_soc = await self._read_register(self.REG_BATTERY_SOC, 1)
+            battery_soc = self._block_values(soc_block, self.REG_BATTERY_SOC, 1)
             if battery_soc:
                 attrs["battery_level"] = battery_soc[0]
 
             # Read grid power
-            grid_power = await self._read_register(self.REG_GRID_POWER, 1)
+            grid_power = self._block_values(grid_block, self.REG_GRID_POWER, 1)
             if grid_power:
                 attrs["grid_power"] = self._to_signed16(grid_power[0])
 
             # Read temperatures
-            temp_air = await self._read_register(self.REG_TEMP_AIR, 1)
+            temp_air = self._block_values(battery_block, self.REG_TEMP_AIR, 1)
             if temp_air:
                 attrs["inverter_temperature"] = round(self._to_signed16(temp_air[0]) * 0.1, 1)
 
             # Read daily energy
-            daily_pv = await self._read_register(self.REG_DAILY_PV, 1)
+            daily_pv = self._block_values(pv_block, self.REG_DAILY_PV, 1)
             if daily_pv:
                 attrs["daily_pv_generation"] = round(daily_pv[0] * 0.1, 2)
 
-            daily_export = await self._read_register(self.REG_DAILY_EXPORT, 1)
+            daily_export = self._block_values(grid_block, self.REG_DAILY_EXPORT, 1)
             if daily_export:
                 attrs["daily_export"] = round(daily_export[0] * 0.1, 2)
 
-            daily_import = await self._read_register(self.REG_DAILY_IMPORT, 1)
+            daily_import = self._block_values(grid_block, self.REG_DAILY_IMPORT, 1)
             if daily_import:
                 attrs["daily_import"] = round(daily_import[0] * 0.1, 2)
 
             # Read export limit status
-            export_enabled = await self._read_register(self.REG_EXPORT_LIMIT_ENABLED, 1)
+            export_enabled = self._block_values(
+                export_block,
+                self.REG_EXPORT_LIMIT_ENABLED,
+                1,
+            )
             if export_enabled:
                 attrs["export_limit_enabled"] = export_enabled[0] == 1
 
-            export_limit = await self._read_register(self.REG_EXPORT_LIMIT, 1)
+            export_limit = self._block_values(export_block, self.REG_EXPORT_LIMIT, 1)
             if export_limit:
                 attrs["export_limit_w"] = export_limit[0]
 

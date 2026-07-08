@@ -223,7 +223,7 @@ async def _start_pairing_with_notifications(
     from .powerwall_local.views import (
         _get_fleet_api_context,
         _runtime,
-        ensure_coordinator,
+        _schedule_local_coordinator_warmup,
     )
 
     token, base, site_id = _get_fleet_api_context(hass, entry)
@@ -253,7 +253,7 @@ async def _start_pairing_with_notifications(
             CONF_POWERWALL_LOCAL_ENERGY_SITE_ID: result.energy_site_id,
         }
         hass.config_entries.async_update_entry(entry, data=updated)
-        await ensure_coordinator(hass, entry)
+        _schedule_local_coordinator_warmup(hass, entry)
 
     mgr = PowerwallPairingManager(
         session,

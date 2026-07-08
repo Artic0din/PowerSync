@@ -1,0 +1,239 @@
+name: Notify Discord for Release
+
+on:
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [notify-discord-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to post, for example v2.12.481
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Discord payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          marker_path = ".github/discord-release-last-posted.txt"
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          target_tag = (
+              (event.get("release") or {}).get("tag_name")
+              or (event.get("inputs") or {}).get("tag")
+              or (event.get("client_payload") or {}).get("tag")
+              or ""
+          ).strip()
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          try:
+              marker = json.loads(
+                  subprocess.check_output(
+                      [
+                          "gh",
+                          "api",
+                          f"repos/{repo}/contents/{marker_path}?ref=main",
+                      ],
+                      text=True,
+                      stderr=subprocess.DEVNULL,
+                  )
+              )
+              last_posted = base64.b64decode(marker["content"]).decode().strip()
+          except subprocess.CalledProcessError:
+              last_posted = ""
+
+          releases = json.loads(
+              subprocess.check_output(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{repo}/releases?per_page=20",
+                  ],
+                  text=True,
+              )
+          )
+          releases = [release for release in releases if not release.get("draft")]
+
+          if not releases:
+              selected = []
+          else:
+              tags = [release["tag_name"] for release in releases]
+              target_index = 0
+              if target_tag:
+                  try:
+                      target_index = tags.index(target_tag)
+                  except ValueError as exc:
+                      raise SystemExit(f"Release tag {target_tag} was not found") from exc
+
+              if last_posted in tags:
+                  marker_index = tags.index(last_posted)
+                  selected = releases[target_index:marker_index] if marker_index > target_index else []
+              else:
+                  # First run or marker aged out of the API page: post the
+                  # requested release, or only the latest scheduled release, to
+                  # avoid spamming historical releases.
+                  selected = [releases[target_index]]
+
+              selected = list(reversed(selected))
+
+          payload_dir = Path("/tmp/discord_release_payloads")
+          payload_dir.mkdir(parents=True, exist_ok=True)
+          tags_to_post: list[str] = []
+
+          for index, release in enumerate(selected):
+              tag = release["tag_name"]
+              name = release.get("name") or tag
+              notes = (release.get("body") or "").strip()
+              url = release["html_url"]
+
+              if not notes:
+                  raise SystemExit(f"Release {tag} has no notes; refusing to post an empty Discord update.")
+
+              if len(notes) > 4000:
+                  notes = notes[:3997] + "..."
+
+              payload = {
+                  "allowed_mentions": {"parse": []},
+                  "embeds": [
+                      {
+                          "title": f"{name} Released",
+                          "description": notes,
+                          "color": 5025616,
+                          "url": url,
+                          "footer": {"text": "Update available via HACS"},
+                      }
+                  ],
+              }
+              (payload_dir / f"{index}.json").write_text(json.dumps(payload))
+              tags_to_post.append(tag)
+
+          Path("/tmp/discord_release_tags.txt").write_text(
+              "\n".join(tags_to_post) + ("\n" if tags_to_post else "")
+          )
+          Path("/tmp/discord_release_count.txt").write_text(str(len(tags_to_post)))
+
+          if tags_to_post:
+              print("Discord releases to post: " + ", ".join(tags_to_post))
+          else:
+              print(f"No Discord release notifications needed; last marker is {last_posted or 'empty'}")
+          PY
+
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          COUNT=$(cat /tmp/discord_release_count.txt)
+          if [ "$COUNT" = "0" ]; then
+            echo "No pending Discord release notifications"
+            exit 0
+          fi
+
+          : > /tmp/discord_release_posted_tags.txt
+          for index in $(seq 0 $((COUNT - 1))); do
+            tag=$(sed -n "$((index + 1))p" /tmp/discord_release_tags.txt)
+            payload="/tmp/discord_release_payloads/$index.json"
+
+            HTTP_CODE=$(curl -sS -o /tmp/discord_response.txt -w "%{http_code}" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$payload" \
+              "$DISCORD_WEBHOOK")
+
+            echo "Discord webhook HTTP status for $tag: $HTTP_CODE"
+            if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+              echo "Discord webhook failed for $tag:"
+              cat /tmp/discord_response.txt
+              exit 1
+            fi
+
+            echo "$tag" >> /tmp/discord_release_posted_tags.txt
+          done
+
+      - name: Record Discord marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s /tmp/discord_release_posted_tags.txt ]; then
+            echo "No Discord marker update needed"
+            exit 0
+          fi
+
+          LAST_TAG=$(tail -n 1 /tmp/discord_release_posted_tags.txt)
+          export LAST_TAG
+
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          marker_path = ".github/discord-release-last-posted.txt"
+          tag = os.environ["LAST_TAG"].strip()
+
+          try:
+              current = json.loads(
+                  subprocess.check_output(
+                      [
+                          "gh",
+                          "api",
+                          f"repos/{repo}/contents/{marker_path}?ref=main",
+                      ],
+                      text=True,
+                      stderr=subprocess.DEVNULL,
+                  )
+              )
+              sha = current.get("sha")
+              current_value = base64.b64decode(current["content"]).decode().strip()
+          except subprocess.CalledProcessError:
+              sha = None
+              current_value = ""
+
+          if current_value == tag:
+              print(f"Discord marker already records {tag}")
+              sys.exit(0)
+
+          payload = {
+              "message": f"ci(release): record Discord notification through {tag} [skip ci]",
+              "content": base64.b64encode(f"{tag}\n".encode()).decode(),
+              "branch": "main",
+          }
+          if sha:
+              payload["sha"] = sha
+
+          subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  "--method",
+                  "PUT",
+                  f"repos/{repo}/contents/{marker_path}",
+                  "--input",
+                  "-",
+              ],
+              input=json.dumps(payload),
+              text=True,
+              check=True,
+          )
+          print(f"Recorded Discord marker through {tag}")
+          PY

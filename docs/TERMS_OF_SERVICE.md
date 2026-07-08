@@ -102,7 +102,7 @@ These Terms are governed by the laws of Australia. Any disputes shall be resolve
 ## 10. Contact
 
 For questions about these Terms, contact:
-- GitHub: https://github.com/bolagnaise/PowerSync/issues
+- Discord: https://discord.gg/eaWDWxEWE3
 - Email: [your email]
 
 ---

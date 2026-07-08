@@ -120,7 +120,14 @@ class TEDAPIv1rTransport:
         timeout: float = 8.0,
     ) -> None:
         self._host = host
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
+        # Bound the socket connect explicitly (not just the request total): a
+        # connect to an unreachable gateway otherwise runs to the OS TCP timeout
+        # (~100s) rather than the intended budget.
+        self._timeout = aiohttp.ClientTimeout(
+            total=timeout,
+            connect=min(5.0, timeout),
+            sock_connect=min(5.0, timeout),
+        )
 
         try:
             self._private_key: rsa.RSAPrivateKey = serialization.load_pem_private_key(

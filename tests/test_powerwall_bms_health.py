@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import Mock
 
 
 MODULE_PATH = (
@@ -70,6 +71,31 @@ def test_reconciles_serial_less_near_empty_expansion_from_aggregate_remaining():
     assert corrected["remainingReconciledFromAggregate"] is True
     assert corrected["nominalEnergyRemainingWh"] == 6240.0
     assert sum(pack["nominalEnergyRemainingWh"] for pack in result) == 25750.0
+
+
+def test_reconcile_logs_at_debug_level():
+    packs = [
+        {
+            "role": "leader",
+            "serialNumber": "LEADER",
+            "isExpansion": False,
+            "nominalFullPackEnergyWh": 14290.0,
+            "nominalEnergyRemainingWh": 5740.0,
+        },
+        {
+            "role": "expansion",
+            "serialNumber": None,
+            "isExpansion": True,
+            "nominalFullPackEnergyWh": 14470.0,
+            "nominalEnergyRemainingWh": 200.0,
+        },
+    ]
+    logger = Mock()
+
+    reconcile_pack_remaining_with_aggregate(packs, 12000.0, 28760.0, logger=logger)
+
+    logger.debug.assert_called_once()
+    logger.warning.assert_not_called()
 
 
 def test_reconciles_serial_less_tail_follower_with_physical_serial_from_aggregate():

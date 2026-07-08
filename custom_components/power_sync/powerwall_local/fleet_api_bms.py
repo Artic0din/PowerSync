@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +62,60 @@ DEVICE_CONTROLLER_QUERY = "query DeviceControllerQuery($msaComp:ComponentFilter$
 DEVICE_CONTROLLER_QUERY_VARIABLES = '{"msaComp":{"types" :["PVS","PVAC", "TESYNC", "TEPINV", "TETHC", "STSTSM",  "TEMSA", "TEPINV", "PW3BMS" ]},\n\t"msaSignals":[\n\t"MSA_pcbaId",\n\t"MSA_usageId",\n\t"MSA_appGitHash",\n\t"PVAC_Fan_Speed_Actual_RPM",\n\t"PVAC_Fan_Speed_Target_RPM",\n\t"MSA_HeatingRateOccurred",\n\t"THC_AmbientTemp",\n\t"METER_Z_CTA_InstRealPower",\n\t"METER_Z_CTA_InstReactivePower",\n\t"METER_Z_CTA_I",\n\t"METER_Z_VL1G",\n\t"METER_Z_CTB_InstRealPower",\n\t"METER_Z_CTB_InstReactivePower",\n\t"METER_Z_CTB_I",\n\t"METER_Z_VL2G",\n\t"METER_Z_CTC_InstRealPower",\n\t"METER_Z_CTC_InstReactivePower",\n\t"METER_Z_CTC_I",\n\t"METER_Z_VL3G",\n\t"METER_Z_LifetimeEnergyExport",\n\t"METER_Z_LifetimeEnergyImport",\n\t"BMS_nominalFullPackEnergy",\n\t"BMS_nominalEnergyRemaining"]}'  # noqa: E501
 
 
+PW3_COMPONENTS_QUERY_CODE_B64 = "MIGIAkIAuHHsPqNt1XD5U6uZ5n46Go5+orOHD0y7T4N1objbd5vsvqZosqOtsQeCRL/reBNPEsOOtAgtJ2k28D5Cn57EpG0CQgETUGsbKb+e4lK0p2ewdR4T9jLsousdkZwXpdFK4uUfcbJP5DYt681tMZ96YWkw4YdDNMfAWn9AaN3XEzmqZgqGVw=="  # noqa: E501
+
+PW3_COMPONENTS_QUERY = (
+    " query ComponentsQuery (\n  $pchComponentsFilter: ComponentFilter,\n  $pchSignalNames: [String!],\n  "
+    "$pwsComponentsFilter: ComponentFilter,\n  $pwsSignalNames: [String!],\n  $bmsComponentsFilter: ComponentFilter,\n  "
+    "$bmsSignalNames: [String!],\n  $hvpComponentsFilter: ComponentFilter,\n  $hvpSignalNames: [String!],\n  "
+    "$baggrComponentsFilter: ComponentFilter,\n  $baggrSignalNames: [String!],\n  ) {\n  # TODO STST-57686: "
+    "Introduce GraphQL fragments to shorten\n  pw3Can {\n    firmwareUpdate {\n      isUpdating\n      progress {\n         "
+    "updating\n         numSteps\n         currentStep\n         currentStepProgress\n         progress\n      }\n    }\n  }\n  "
+    "components {\n    pws: components(filter: $pwsComponentsFilter) {\n      signals(names: $pwsSignalNames) {\n        "
+    "name\n        value\n        textValue\n        boolValue\n        timestamp\n      }\n      activeAlerts {\n        "
+    "name\n      }\n    }\n    pch: components(filter: $pchComponentsFilter) {\n      signals(names: $pchSignalNames) {\n        "
+    "name\n        value\n        textValue\n        boolValue\n        timestamp\n      }\n      activeAlerts {\n        "
+    "name\n      }\n    }\n    bms: components(filter: $bmsComponentsFilter) {\n      signals(names: $bmsSignalNames) {\n        "
+    "name\n        value\n        textValue\n        boolValue\n        timestamp\n      }\n      activeAlerts {\n        "
+    "name\n      }\n    }\n    hvp: components(filter: $hvpComponentsFilter) {\n      partNumber\n      serialNumber\n      "
+    "signals(names: $hvpSignalNames) {\n        name\n        value\n        textValue\n        boolValue\n        "
+    "timestamp\n      }\n      activeAlerts {\n        name\n      }\n    }\n    baggr: components(filter: $baggrComponentsFilter) "
+    "{\n      signals(names: $baggrSignalNames) {\n        name\n        value\n        textValue\n        boolValue\n        "
+    "timestamp\n      }\n      activeAlerts {\n        name\n      }\n    }\n  }\n}\n"
+)
+
+PW3_COMPONENTS_QUERY_VARIABLES = '{"pwsComponentsFilter":{"types":["PW3SAF"]},"pwsSignalNames":["PWS_SelfTest","PWS_PeImpTestState","PWS_PvIsoTestState","PWS_RelaySelfTest_State","PWS_MciTestState","PWS_appGitHash","PWS_ProdSwitch_State"],"pchComponentsFilter":{"types":["PCH"]},"pchSignalNames":["PCH_State","PCH_PvState_A","PCH_PvState_B","PCH_PvState_C","PCH_PvState_D","PCH_PvState_E","PCH_PvState_F","PCH_AcFrequency","PCH_AcVoltageAB","PCH_AcVoltageAN","PCH_AcVoltageBN","PCH_packagePartNumber_1_7","PCH_packagePartNumber_8_14","PCH_packagePartNumber_15_20","PCH_packageSerialNumber_1_7","PCH_packageSerialNumber_8_14","PCH_PvVoltageA","PCH_PvVoltageB","PCH_PvVoltageC","PCH_PvVoltageD","PCH_PvVoltageE","PCH_PvVoltageF","PCH_PvCurrentA","PCH_PvCurrentB","PCH_PvCurrentC","PCH_PvCurrentD","PCH_PvCurrentE","PCH_PvCurrentF","PCH_BatteryPower","PCH_AcRealPowerAB","PCH_SlowPvPowerSum","PCH_AcMode","PCH_AcFrequency","PCH_DcdcState_A","PCH_DcdcState_B","PCH_appGitHash"],"bmsComponentsFilter":{"types":["PW3BMS"]},"bmsSignalNames":["BMS_nominalEnergyRemaining","BMS_nominalFullPackEnergy","BMS_appGitHash"],"hvpComponentsFilter":{"types":["PW3HVP"]},"hvpSignalNames":["HVP_State","HVP_appGitHash"],"baggrComponentsFilter":{"types":["BAGGR"]},"baggrSignalNames":["BAGGR_State","BAGGR_OperationRequest","BAGGR_NumBatteriesConnected","BAGGR_NumBatteriesPresent","BAGGR_NumBatteriesExpected","BAGGR_LOG_BattConnectionStatus0","BAGGR_LOG_BattConnectionStatus1","BAGGR_LOG_BattConnectionStatus2","BAGGR_LOG_BattConnectionStatus3"]}'  # noqa: E501
+
+
+def _build_old_tedapi_query_envelope(
+    din: str,
+    query: str,
+    code_b64: str,
+    variables: str,
+) -> bytes:
+    """Build a MessageEnvelope for a signed old-TEDAPI GraphQL query."""
+    code_bytes = base64.b64decode(code_b64)
+
+    sender = _field_varint(3, 1)          # Participant.local = 1
+    recipient = _field_string(1, din)     # Participant.din
+    query_payload = _field_varint(1, 1) + _field_string(2, query)
+    query_b = _field_string(1, variables)
+    query_send = (
+        _field_varint(1, 2)
+        + _field_bytes(2, query_payload)
+        + _field_bytes(3, code_bytes)
+        + _field_bytes(4, query_b)
+    )
+    query_type = _field_bytes(1, query_send)
+
+    return (
+        _field_varint(1, 1)
+        + _field_bytes(2, sender)
+        + _field_bytes(3, recipient)
+        + _field_bytes(16, query_type)
+    )
+
+
 def build_device_controller_query_envelope(din: str) -> bytes:
     """Build a MessageEnvelope for DeviceControllerQuery (tedapi.proto wire format).
 
@@ -73,33 +128,21 @@ def build_device_controller_query_envelope(din: str) -> bytes:
                               code(3)=<138-byte ECDSA>, b(4)={value(1)=<variables>}
                             })
     """
-    code_bytes = base64.b64decode(DEVICE_CONTROLLER_QUERY_CODE_B64)
-
-    sender = _field_varint(3, 1)          # Participant.local = 1
-    recipient = _field_string(1, din)     # Participant.din
-
-    # PayloadString: value(1)=1 (enum), text(2)=<query text>
-    query_payload = _field_varint(1, 1) + _field_string(2, DEVICE_CONTROLLER_QUERY)
-
-    # StringValue: value(1)=<variables JSON>
-    query_b = _field_string(1, DEVICE_CONTROLLER_QUERY_VARIABLES)
-
-    # PayloadQuerySend: num(1)=2, payload(2)=<PayloadString>, code(3)=<bytes>, b(4)=<StringValue>
-    query_send = (
-        _field_varint(1, 2)
-        + _field_bytes(2, query_payload)
-        + _field_bytes(3, code_bytes)
-        + _field_bytes(4, query_b)
+    return _build_old_tedapi_query_envelope(
+        din,
+        DEVICE_CONTROLLER_QUERY,
+        DEVICE_CONTROLLER_QUERY_CODE_B64,
+        DEVICE_CONTROLLER_QUERY_VARIABLES,
     )
 
-    # QueryType: send(1) = <PayloadQuerySend>
-    query_type = _field_bytes(1, query_send)
 
-    return (
-        _field_varint(1, 1)          # deliveryChannel = 1
-        + _field_bytes(2, sender)
-        + _field_bytes(3, recipient)
-        + _field_bytes(16, query_type)
+def build_pw3_components_query_envelope(din: str) -> bytes:
+    """Build a MessageEnvelope for PW3 ComponentsQuery PCH string telemetry."""
+    return _build_old_tedapi_query_envelope(
+        din,
+        PW3_COMPONENTS_QUERY,
+        PW3_COMPONENTS_QUERY_CODE_B64,
+        PW3_COMPONENTS_QUERY_VARIABLES,
     )
 
 
@@ -165,6 +208,213 @@ def parse_device_controller_response(envelope_bytes: bytes) -> dict | None:
     except Exception as err:
         _LOGGER.warning("fleet_api_bms: JSON parse error: %s", err)
         return None
+
+
+# ── Solar string normalisers ───────────────────────────────────────────────────
+
+_PW3_STRING_LETTERS = ("A", "B", "C", "D", "E", "F")
+_LEGACY_STRING_LETTERS = ("A", "B", "C", "D")
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _positive_number_or_none(value: Any) -> float | None:
+    number = _number_or_none(value)
+    return number if number is not None and number > 0 else None
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _power_or_none(voltage_v: float | None, current_a: float | None) -> float | None:
+    return voltage_v * current_a if voltage_v is not None and current_a is not None else None
+
+
+def _connected_from_state(state: str | None) -> bool | None:
+    if not state:
+        return None
+    normalized = state.lower()
+    if "active" in normalized:
+        return True
+    if "disabled" in normalized or "standby" in normalized:
+        return False
+    return None
+
+
+def _has_useful_string_data(reading: dict[str, Any]) -> bool:
+    return (
+        (reading.get("voltage_v") is not None and reading["voltage_v"] > 0)
+        or (reading.get("current_a") is not None and reading["current_a"] > 0)
+        or (reading.get("power_w") is not None and reading["power_w"] > 0)
+        or reading.get("connected") is True
+        or bool(reading.get("state") and "active" in str(reading["state"]).lower())
+    )
+
+
+def _build_string_groups(strings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_device: dict[str, list[dict[str, Any]]] = {}
+    for reading in strings:
+        device_key = reading.get("device_id") or "gateway"
+        by_device.setdefault(device_key, []).append(reading)
+
+    groups: list[dict[str, Any]] = []
+    for device_id, readings in by_device.items():
+        by_mppt = {reading.get("mppt"): reading for reading in readings}
+        for offset in range(0, len(_PW3_STRING_LETTERS), 2):
+            pair = [
+                reading
+                for letter in _PW3_STRING_LETTERS[offset:offset + 2]
+                if (reading := by_mppt.get(letter)) is not None
+            ]
+            if not pair:
+                continue
+            total_power = sum(reading.get("power_w") or 0 for reading in pair)
+            connected_values = [
+                reading.get("connected")
+                for reading in pair
+                if reading.get("connected") is not None
+            ]
+            groups.append({
+                "id": f"{device_id}:{'+'.join(str(reading.get('mppt')) for reading in pair)}",
+                "label": (
+                    f"MPPT {pair[0].get('mppt')}+{pair[1].get('mppt')}"
+                    if len(pair) == 2
+                    else f"MPPT {pair[0].get('mppt')}"
+                ),
+                "string_ids": [reading["id"] for reading in pair],
+                "voltage_v": [reading.get("voltage_v") for reading in pair],
+                "total_power_w": total_power if total_power > 0 else None,
+                "connected": any(connected_values) if connected_values else None,
+            })
+    return groups
+
+
+def normalize_pw3_components_strings(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract PW3 PCH A-F string voltage/current readings from ComponentsQuery."""
+    components = data.get("components") or {}
+    pch = components.get("pch") if isinstance(components, dict) else None
+    if not isinstance(pch, list) or not pch:
+        return None
+
+    strings: list[dict[str, Any]] = []
+    for device_index, component in enumerate(pch):
+        if not isinstance(component, dict):
+            continue
+        signals = component.get("signals") or []
+        by_name = {
+            signal.get("name"): signal
+            for signal in signals
+            if isinstance(signal, dict) and isinstance(signal.get("name"), str)
+        }
+        device_id = component.get("serialNumber") or (
+            f"pch-{device_index + 1}" if len(pch) > 1 else None
+        )
+
+        for letter in _PW3_STRING_LETTERS:
+            state = _string_or_none((by_name.get(f"PCH_PvState_{letter}") or {}).get("textValue"))
+            voltage_v = _number_or_none((by_name.get(f"PCH_PvVoltage{letter}") or {}).get("value"))
+            current_a = _positive_number_or_none((by_name.get(f"PCH_PvCurrent{letter}") or {}).get("value"))
+            reading = {
+                "id": f"{device_id or 'pch'}:{letter}",
+                "label": f"{device_index + 1}{letter}" if len(pch) > 1 else letter,
+                "device_id": device_id,
+                "mppt": letter,
+                "voltage_v": voltage_v,
+                "current_a": current_a,
+                "power_w": _power_or_none(voltage_v, current_a),
+                "state": state,
+                "connected": _connected_from_state(state),
+            }
+            if _has_useful_string_data(reading):
+                strings.append(reading)
+
+    if not strings:
+        return None
+    if not any(
+        reading.get("connected") is True
+        or (reading.get("current_a") is not None and reading["current_a"] > 0)
+        or (reading.get("power_w") is not None and reading["power_w"] > 0)
+        for reading in strings
+    ):
+        return None
+
+    return {
+        "source": "pw3_components",
+        "strings": strings,
+        "groups": _build_string_groups(strings),
+    }
+
+
+def normalize_legacy_pvac_strings(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract Powerwall+/PW2 PVAC/PVS string voltage/current readings."""
+    es_can = data.get("esCan") or {}
+    bus = es_can.get("bus") if isinstance(es_can, dict) else None
+    if not isinstance(bus, dict):
+        return None
+    pvac = bus.get("PVAC")
+    if not isinstance(pvac, list) or not pvac:
+        return None
+    pvs = bus.get("PVS") if isinstance(bus.get("PVS"), list) else []
+
+    strings: list[dict[str, Any]] = []
+    for device_index, device in enumerate(pvac):
+        if not isinstance(device, dict):
+            continue
+        logging_data = device.get("PVAC_Logging")
+        if not isinstance(logging_data, dict):
+            continue
+        status = device.get("PVAC_Status") if isinstance(device.get("PVAC_Status"), dict) else {}
+        pvs_device = pvs[device_index] if device_index < len(pvs) and isinstance(pvs[device_index], dict) else {}
+        pvs_status = pvs_device.get("PVS_Status") if isinstance(pvs_device.get("PVS_Status"), dict) else {}
+        serial = _string_or_none(device.get("packageSerialNumber")) or (
+            f"pvac-{device_index + 1}" if len(pvac) > 1 else None
+        )
+
+        for letter in _LEGACY_STRING_LETTERS:
+            voltage_v = _number_or_none(logging_data.get(f"PVAC_PVMeasuredVoltage_{letter}"))
+            current_a = _positive_number_or_none(logging_data.get(f"PVAC_PVCurrent_{letter}"))
+            connected = _bool_or_none(pvs_status.get(f"PVS_String{letter}_Connected"))
+            state = (
+                _string_or_none(status.get("PVAC_State"))
+                if connected is None
+                else "PV_Active" if connected else "PV_Disabled"
+            )
+            reading = {
+                "id": f"{serial or 'pvac'}:{letter}",
+                "label": f"{device_index + 1}{letter}" if len(pvac) > 1 else letter,
+                "device_id": serial,
+                "mppt": letter,
+                "voltage_v": voltage_v,
+                "current_a": current_a,
+                "power_w": _power_or_none(voltage_v, current_a),
+                "state": state,
+                "connected": connected,
+            }
+            if _has_useful_string_data(reading):
+                strings.append(reading)
+
+    if not strings:
+        return None
+    return {
+        "source": "legacy_pvac",
+        "strings": strings,
+        "groups": _build_string_groups(strings),
+    }
 
 
 # ── Signing helper (no SSL context, no local gateway connection) ──────────────

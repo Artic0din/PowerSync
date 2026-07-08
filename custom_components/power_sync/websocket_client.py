@@ -9,6 +9,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import websockets
 
+from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
+
 
 class SensitiveDataFilter(logging.Filter):
     """
@@ -105,6 +107,7 @@ class SensitiveDataFilter(logging.Filter):
             text,
             flags=re.IGNORECASE
         )
+        text = obfuscate_vin_tokens(text, self.obfuscate)
 
         # Handle DIN numbers in JSON format
         text = re.sub(
@@ -190,15 +193,7 @@ class SensitiveDataFilter(logging.Filter):
 
     def _obfuscate_arg(self, arg) -> Any:
         """Obfuscate an argument only if it contains sensitive data, preserving type otherwise."""
-        # Convert to string for pattern matching
-        str_value = str(arg)
-        obfuscated = self._obfuscate_string(str_value)
-
-        # Only return string version if obfuscation actually changed something
-        # This preserves numeric types for format specifiers like %d and %.3f
-        if obfuscated != str_value:
-            return obfuscated
-        return arg
+        return obfuscate_log_arg(arg, self._obfuscate_string)
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter log record to obfuscate sensitive data."""

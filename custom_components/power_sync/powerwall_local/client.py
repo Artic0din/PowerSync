@@ -23,11 +23,22 @@ from .fleet_api_bms import (
     build_device_controller_query_envelope,
     parse_device_controller_response,
 )
+from .normalization import (
+    normalize_local_backup_reserve_percent,
+    normalize_local_soc_percent,
+)
+from .pairing import _authorization_command_payload
 from .signaling import TeslaSignalingClient
 from .transport import TEDAPIv1rTransport
 
 _LOGGER = logging.getLogger(__name__)
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Return True for loopback placeholders that are not real gateway hosts."""
+    return str(host or "").strip().lower() in _LOOPBACK_HOSTS
 
 
 class PowerwallVersion(str, Enum):
@@ -169,6 +180,11 @@ class PowerwallLocalClient:
 
     async def get_snapshot(self) -> PowerwallSnapshot:
         """Fetch live status via RSA-signed DCQ + config.json read in parallel."""
+        if not self._local_access_enabled or is_loopback_host(self._host):
+            raise PowerwallUnreachableError(
+                "Powerwall local access disabled; gateway IP is not configured"
+            )
+
         dcq_task = self._fetch_dcq_local()
         cfg_task = self._transport.read_config(self._din)
         dcq, cfg = await asyncio.gather(dcq_task, cfg_task, return_exceptions=True)
@@ -216,17 +232,10 @@ class PowerwallLocalClient:
             "Authorization": f"Bearer {self._fleet_api_token}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "command_type": "grpc_command",
-            "command_properties": {
-                "identifier_type": 1,
-                "message": {
-                    "authorization": {
-                        "list_authorized_clients_request": {}
-                    }
-                },
-            },
-        }
+        payload = _authorization_command_payload(
+            "list_authorized_clients_request",
+            {"list_authorized_clients_request": {}},
+        )
 
         try:
             async with aiohttp.ClientSession() as sess:
@@ -607,12 +616,6 @@ _DCQ_ISLAND_MODE_TO_GRID_STATUS = {
     "Normal": "SystemGridConnected",
 }
 
-# Powerwall reserves the bottom 5% of nominal capacity for cell health and
-# won't discharge past it. Tesla's user-facing apps rescale operational SOC
-# across the usable 5–100% range, so 24% raw shows as 20% in the Tesla app.
-_LOW_SOE_RESERVE_PCT = 5.0
-
-
 def _snapshot_from_dcq(
     dcq: dict[str, Any],
     cfg: dict[str, Any] | None,
@@ -653,8 +656,7 @@ def _snapshot_from_dcq(
     full_wh = _float_or_none(sys_status.get("nominalFullPackEnergyWh"))
     rem_wh = _float_or_none(sys_status.get("nominalEnergyRemainingWh"))
     if full_wh and full_wh > 0 and rem_wh is not None:
-        raw_soc = max(0.0, min(100.0, (rem_wh / full_wh) * 100.0))
-        soc_pct: float | None = max(0.0, (raw_soc - _LOW_SOE_RESERVE_PCT) / (100.0 - _LOW_SOE_RESERVE_PCT) * 100.0)
+        soc_pct = normalize_local_soc_percent((rem_wh / full_wh) * 100.0)
     else:
         soc_pct = None
 
@@ -671,8 +673,11 @@ def _snapshot_from_dcq(
     # transport, fired in parallel).
     site_info = (cfg or {}).get("site_info") or {}
     operation_mode = site_info.get("default_real_mode") if isinstance(site_info, dict) else None
-    backup_reserve_percent = _int_or_none(
+    raw_backup_reserve_percent = _int_or_none(
         site_info.get("backup_reserve_percent") if isinstance(site_info, dict) else None
+    )
+    backup_reserve_percent = normalize_local_backup_reserve_percent(
+        raw_backup_reserve_percent
     )
 
     # Alerts: DCQ flat list of names; coerce to dict shape consumers expect.

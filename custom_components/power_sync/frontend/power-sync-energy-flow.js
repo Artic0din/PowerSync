@@ -1200,6 +1200,11 @@ import {
       }
     }
 
+    const attrs = entityState.attributes || {};
+    if (attrs.is_connected === true || attrs.is_charging === true) return true;
+    if (String(attrs.is_connected || '').toLowerCase() === 'true') return true;
+    if (String(attrs.is_charging || '').toLowerCase() === 'true') return true;
+
     if (['on', 'home', 'present', 'true', 'occupied', 'detected'].includes(state)) return true;
     // EV charging states that indicate vehicle is present (plugged in)
     if (['charging', 'complete', 'connected', 'stopped', 'ready', 'waiting', 'paused', 'full'].includes(state)) return true;
@@ -1485,12 +1490,7 @@ import {
           const batteryState = this._entityState(slot.batteryEntity);
           const switchState = this._entityState(slot.chargeSwitchEntity);
           const presenceState = this._entityState(slot.presenceEntity);
-          const batteryPct = [
-            toPct(batteryState, Number.NaN),
-            toPct(powerState, Number.NaN),
-            toPct(presenceState, Number.NaN),
-            toPct(switchState, Number.NaN)
-          ].find((value) => Number.isFinite(value));
+          const batteryPct = toPct(batteryState, Number.NaN);
           const derivedLabel = (
             friendlyEntityName(powerState) ||
             friendlyEntityName(batteryState) ||
@@ -1502,7 +1502,7 @@ import {
             key: slot.key,
             configured,
             hasPowerEntity: !!powerState,
-            hasBatteryEntity: Number.isFinite(batteryPct) || !!batteryState,
+            hasBatteryEntity: Number.isFinite(batteryPct),
             power: signedPower,
             drawPower: Math.max(0, signedPower),
             supplyPower: Math.max(0, -signedPower),

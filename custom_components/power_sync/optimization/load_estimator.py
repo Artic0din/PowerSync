@@ -11,6 +11,8 @@ recency weighting and outlier handling to avoid overreacting to one unusual day.
 from __future__ import annotations
 
 import bisect
+import functools
+import inspect
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -20,7 +22,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    DEFAULT_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLAR_FORECAST_PROVIDER_OPEN_METEO,
+    SOLAR_FORECAST_PROVIDER_SOLCAST,
+    SOLAR_FORECAST_PROVIDERS,
     SOLCAST_ESTIMATE,
     SOLCAST_ESTIMATE10,
     SOLCAST_ESTIMATE90,
@@ -37,12 +43,26 @@ OUTLIER_MIN_SAMPLES = 4
 OUTLIER_MIN_THRESHOLD_W = 500.0
 OUTLIER_MEDIAN_FRACTION = 0.5
 MAD_NORMAL_SCALE = 1.4826
+RECENT_LOAD_WINDOW_HOURS = 48
+RECENT_LOAD_BASELINE_EXCLUDE_HOURS = 48
+RECENT_LOAD_MIN_COVERAGE_HOURS = 12
+RECENT_LOAD_DEADBAND = 0.15
+RECENT_LOAD_BLEND = 0.7
+RECENT_LOAD_MIN_SCALE = 0.8
+RECENT_LOAD_MAX_SCALE = 2.5
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
     SOLCAST_ESTIMATE10: ("pv_estimate10", "pv_estimate", "pv_estimate50"),
     SOLCAST_ESTIMATE90: ("pv_estimate90", "pv_estimate", "pv_estimate50"),
 }
+
+OPEN_METEO_SOLAR_FORECAST_DOMAIN = "open_meteo_solar_forecast"
+OPEN_METEO_WATTS_ATTR = "watts"
+OPEN_METEO_DAILY_SENSOR_SUFFIXES = (
+    "_energy_production_today",
+    "_energy_production_tomorrow",
+)
 
 
 class LoadEstimator:
@@ -74,6 +94,12 @@ class LoadEstimator:
         self.load_entity_id = load_entity_id
         self.interval_minutes = interval_minutes
         self.weather_entity_id = weather_entity_id
+        # Optional EV charger power sensor entity ids. When set (by the
+        # coordinator, only for battery brands whose home-load sensor does NOT
+        # already exclude EV charging), their recorded power is subtracted from
+        # the load history so recurring EV charging is not double-counted once
+        # the planned-EV overlay is added back on top of the forecast.
+        self.ev_power_entity_ids: list[str] = []
         self.away_enabled_at: datetime | None = None   # when switch turned ON (departure)
         self.away_disabled_at: datetime | None = None  # when switch turned OFF (return)
         self._history_cache: dict[str, list[tuple[datetime, float]]] = {}
@@ -133,11 +159,20 @@ class LoadEstimator:
                     forecast_temps, bucket_temp_avgs, alpha = await self._get_temperature_adjustment(
                         history, horizon_hours
                     )
-                forecast = self._forecast_from_history(
-                    history, start_time, n_intervals,
-                    forecast_temps=forecast_temps,
-                    bucket_temp_averages=bucket_temp_avgs,
-                    alpha=alpha,
+                # Building the forecast iterates the full load history (tens to
+                # hundreds of thousands of recorder points) and re-scans it for
+                # the recent-regime adjustment — heavy, pure-CPU work. Run it off
+                # the event loop so it can't freeze HA on every optimisation
+                # cycle. _forecast_from_history operates only on its arguments
+                # and constants, so it is safe in a worker thread.
+                forecast = await self.hass.async_add_executor_job(
+                    functools.partial(
+                        self._forecast_from_history,
+                        history, start_time, n_intervals,
+                        forecast_temps=forecast_temps,
+                        bucket_temp_averages=bucket_temp_avgs,
+                        alpha=alpha,
+                    )
                 )
                 avg_w = sum(forecast) / len(forecast) if forecast else 0
                 _LOGGER.info(
@@ -194,7 +229,10 @@ class LoadEstimator:
         else:
             days = HISTORY_LOOKBACK_DAYS
 
-        cache_key = f"{self.load_entity_id}:en={self.away_enabled_at}:dis={self.away_disabled_at}"
+        cache_key = (
+            f"{self.load_entity_id}:en={self.away_enabled_at}"
+            f":dis={self.away_disabled_at}:ev={','.join(self.ev_power_entity_ids)}"
+        )
 
         # Check cache
         if (
@@ -204,13 +242,16 @@ class LoadEstimator:
         ):
             return self._history_cache[cache_key]
 
-        # Determine unit multiplier from current state
-        multiplier = 1.0
+        # Determine unit multiplier from current state. Match _get_current_load:
+        # a missing/absent unit defaults to kW (PowerSync's own home-load sensor
+        # reports kW), so kW history is not silently parsed 1000x low as Watts.
+        # Only an explicit non-kW unit (e.g. "W") is treated as Watts.
+        multiplier = 1000.0
         current_state = self.hass.states.get(self.load_entity_id)
         if current_state:
-            unit = (current_state.attributes.get("unit_of_measurement") or "").lower()
-            if unit == "kw":
-                multiplier = 1000.0
+            unit = (current_state.attributes.get("unit_of_measurement") or "").strip().lower()
+            if unit and unit != "kw":
+                multiplier = 1.0
             _LOGGER.debug(
                 "Load sensor %s: unit=%s, multiplier=%.0f",
                 self.load_entity_id, unit, multiplier,
@@ -238,33 +279,39 @@ class LoadEstimator:
                 _LOGGER.warning("No history found for %s", self.load_entity_id)
                 return []
 
-            # Parse states into (timestamp, value_watts) tuples
-            result = []
-            for state in history[self.load_entity_id]:
-                try:
-                    value = float(state.state)
-                    value_watts = value * multiplier
-                    # Filter invalid values: must be positive and < 100kW residential max
-                    if 0 < value_watts < 100_000:
-                        result.append((state.last_changed, value_watts))
-                except (ValueError, TypeError):
-                    continue
+            # Parsing/filtering the raw states (tens of thousands of points) is
+            # pure-CPU work — run it off the event loop so it can't block HA.
+            result, excluded = await self.hass.async_add_executor_job(
+                self._parse_load_history,
+                history[self.load_entity_id],
+                multiplier,
+                has_away_window,
+                self.away_enabled_at,
+                away_end,
+            )
 
-            # Away Mode recovery: exclude the completed away window
-            # [enabled_at, disabled_at], then keep the most recent 30 days of
-            # the remaining data.
-            excluded = 0
-            if has_away_window:
-                before = len(result)
-                result = [
-                    (ts, w) for (ts, w) in result
-                    if not (self.away_enabled_at <= ts <= away_end)
-                ]
-                excluded = before - len(result)
-                if result:
-                    result.sort(key=lambda h: h[0])
-                    cutoff = result[-1][0] - timedelta(days=HISTORY_LOOKBACK_DAYS)
-                    result = [h for h in result if h[0] >= cutoff]
+            # Subtract configured EV charger power from the load history so a
+            # recurring EV charging pattern embedded in the whole-home load
+            # sensor is not double-counted against the planned-EV overlay the
+            # coordinator adds on top of the forecast.
+            if result and self.ev_power_entity_ids:
+                ev_multipliers = self._resolve_power_multipliers(
+                    self.ev_power_entity_ids
+                )
+                ev_history = await instance.async_add_executor_job(
+                    get_significant_states,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    self.ev_power_entity_ids,
+                )
+                result = await self.hass.async_add_executor_job(
+                    self._subtract_ev_power,
+                    result,
+                    ev_history,
+                    self.ev_power_entity_ids,
+                    ev_multipliers,
+                )
 
             # Cache the result
             self._history_cache[cache_key] = result
@@ -365,7 +412,106 @@ class LoadEstimator:
         # Apply smoothing
         forecast = self._smooth_forecast(forecast)
 
+        recent_scale = self._recent_load_scale(history, start_time)
+        if recent_scale is not None:
+            forecast = [value * recent_scale for value in forecast]
+
         return forecast
+
+    def _recent_load_scale(
+        self,
+        history: list[tuple[datetime, float]],
+        start_time: datetime,
+    ) -> float | None:
+        """Return a recent-regime multiplier when load has clearly shifted.
+
+        The day/time pattern and weather model are deliberately still the base
+        forecast. This multiplier catches step changes such as the first cold
+        snap of winter where the 30-day history is too slow to move.
+        """
+        if not history:
+            return None
+
+        ref_time = dt_util.as_local(start_time) if start_time.tzinfo else start_time
+        recent_end = ref_time
+        recent_start = recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
+        baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
+
+        older_pattern: dict[tuple[int, int, int], list[tuple[datetime, float]]] = defaultdict(list)
+        recent_samples: list[tuple[datetime, float]] = []
+        actual_values: list[float] = []
+        expected_values: list[float] = []
+        matched_timestamps: list[datetime] = []
+
+        # Single pass over the full history: bucket the older baseline samples
+        # and collect the (much smaller) recent window. Converting each timestamp
+        # to local time is the per-point cost, so doing it once here rather than
+        # in two separate full scans halves the work on a large history.
+        for ts, value in history:
+            sample_time = dt_util.as_local(ts) if ts.tzinfo else ts
+            if sample_time < baseline_end:
+                key = (
+                    sample_time.weekday(),
+                    sample_time.hour,
+                    0 if sample_time.minute < 30 else 1,
+                )
+                older_pattern[key].append((ts, value))
+            elif recent_start <= sample_time <= recent_end:
+                recent_samples.append((sample_time, value))
+
+        for sample_time, value in recent_samples:
+            key = (
+                sample_time.weekday(),
+                sample_time.hour,
+                0 if sample_time.minute < 30 else 1,
+            )
+            exact_samples = self._clip_outliers(older_pattern.get(key, []))
+            if len(exact_samples) < MIN_EXACT_BUCKET_SAMPLES:
+                continue
+
+            expected = self._weighted_average(exact_samples, sample_time)
+            if expected is None or expected <= 0:
+                continue
+
+            actual_values.append(value)
+            expected_values.append(expected)
+            matched_timestamps.append(sample_time)
+
+        matched_coverage = 0.0
+        if len(matched_timestamps) > 1:
+            matched_coverage = (
+                max(matched_timestamps) - min(matched_timestamps)
+            ).total_seconds() / 3600.0
+
+        if not actual_values or matched_coverage < RECENT_LOAD_MIN_COVERAGE_HOURS:
+            return None
+
+        ratios = [
+            actual / expected
+            for actual, expected in zip(actual_values, expected_values)
+            if expected > 0
+        ]
+        if not ratios:
+            return None
+
+        recent_avg = sum(actual_values) / len(actual_values)
+        baseline_avg = sum(expected_values) / len(expected_values)
+        ratio = self._median(ratios)
+        if abs(ratio - 1.0) < RECENT_LOAD_DEADBAND:
+            return None
+
+        scale = 1.0 + (ratio - 1.0) * RECENT_LOAD_BLEND
+        scale = max(RECENT_LOAD_MIN_SCALE, min(RECENT_LOAD_MAX_SCALE, scale))
+        _LOGGER.info(
+            "Recent load regime adjustment: recent=%.0fW over %.1fh, "
+            "matched_history=%.0fW, median_ratio=%.2fx, scale=%.2fx",
+            recent_avg,
+            matched_coverage,
+            baseline_avg,
+            ratio,
+            scale,
+        )
+        return scale
 
     def _history_bucket_forecast(
         self,
@@ -534,20 +680,12 @@ class LoadEstimator:
             self._temp_cache_time = now
             return None, None, None
 
-        # Build load bucket averages
-        load_pattern: dict[tuple[int, int, int], list[float]] = defaultdict(list)
-        for ts, val in history:
-            local_ts = dt_util.as_local(ts) if ts.tzinfo else ts
-            key = (local_ts.weekday(), local_ts.hour, 0 if local_ts.minute < 30 else 1)
-            load_pattern[key].append(val)
-        bucket_averages = {k: sum(v) / len(v) for k, v in load_pattern.items()}
-
-        # Build temperature bucket averages
-        bucket_temp_avgs = self._compute_bucket_temp_averages(temp_history)
-
-        # Fit global sensitivity coefficient
-        alpha = self._fit_temperature_sensitivity(
-            history, temp_history, bucket_averages, bucket_temp_avgs
+        # Bucketing the full load history (tens of thousands of points) and
+        # fitting the sensitivity coefficient (a bisect per point) is heavy,
+        # pure-CPU work. Run it off the event loop so it can't freeze HA during
+        # the optimiser's first forecast at setup.
+        bucket_temp_avgs, alpha = await self.hass.async_add_executor_job(
+            self._compute_temperature_fit, history, temp_history
         )
 
         self._temp_alpha = alpha
@@ -680,6 +818,157 @@ class LoadEstimator:
             key = (local_ts.weekday(), local_ts.hour, 0 if local_ts.minute < 30 else 1)
             bucket[key].append(temp_c)
         return {k: sum(v) / len(v) for k, v in bucket.items()}
+
+    @staticmethod
+    def _parse_load_history(
+        raw_states,
+        multiplier: float,
+        has_away_window: bool,
+        away_start: datetime | None,
+        away_end: datetime | None,
+    ) -> tuple[list[tuple[datetime, float]], int]:
+        """Parse + away-filter raw recorder states (executor-only, CPU-bound).
+
+        Iterates every recorder state for the load sensor (tens of thousands of
+        points), so it must not run on the event loop. Pure function over its
+        arguments — safe in a worker thread.
+        """
+        result: list[tuple[datetime, float]] = []
+        for state in raw_states:
+            try:
+                value_watts = float(state.state) * multiplier
+                # Filter invalid values: must be positive and < 100kW residential max
+                if 0 < value_watts < 100_000:
+                    result.append((state.last_changed, value_watts))
+            except (ValueError, TypeError):
+                continue
+
+        # Away Mode recovery: exclude the completed away window
+        # [enabled_at, disabled_at], then keep the most recent 30 days of
+        # the remaining data.
+        excluded = 0
+        if has_away_window:
+            before = len(result)
+            result = [
+                (ts, w) for (ts, w) in result
+                if not (away_start <= ts <= away_end)
+            ]
+            excluded = before - len(result)
+            if result:
+                result.sort(key=lambda h: h[0])
+                # Extend the retention window back by the away duration so
+                # ~HISTORY_LOOKBACK_DAYS of *actual* (non-away) history survive.
+                # A flat calendar cutoff from the newest sample would let the
+                # excluded away gap eat into the window, discarding the extra
+                # pre-away history that _get_load_history deliberately fetched
+                # and collapsing per-bucket sample counts after long trips.
+                away_span = timedelta(0)
+                if away_start is not None and away_end is not None:
+                    away_span = max(timedelta(0), away_end - away_start)
+                cutoff = (
+                    result[-1][0]
+                    - timedelta(days=HISTORY_LOOKBACK_DAYS)
+                    - away_span
+                )
+                result = [h for h in result if h[0] >= cutoff]
+        return result, excluded
+
+    def _resolve_power_multipliers(
+        self, entity_ids: list[str]
+    ) -> dict[str, float]:
+        """Return a W multiplier per entity from its current unit (kW -> 1000).
+
+        Runs on the event loop (reads hass.states). Charger power sensors
+        usually report Watts; only an explicit "kW" unit is scaled. Defaulting
+        an unknown unit to Watts is deliberately conservative — it can only
+        under-subtract EV power (leaving some double-count), never over-subtract
+        (which would under-forecast household load).
+        """
+        multipliers: dict[str, float] = {}
+        for eid in entity_ids:
+            state = self.hass.states.get(eid)
+            unit = ""
+            if state is not None:
+                unit = (
+                    state.attributes.get("unit_of_measurement") or ""
+                ).strip().lower()
+            multipliers[eid] = 1000.0 if unit == "kw" else 1.0
+        return multipliers
+
+    @staticmethod
+    def _subtract_ev_power(
+        load_samples: list[tuple[datetime, float]],
+        ev_history: dict | None,
+        ev_entity_ids: list[str],
+        ev_multipliers: dict[str, float],
+    ) -> list[tuple[datetime, float]]:
+        """Subtract concurrent EV charger power from each load sample (Watts).
+
+        Pure/CPU-bound (executor-safe). For each load sample, the EV power at
+        that instant is the most recent recorded value of each EV entity at or
+        before the sample time (states are step functions). The load is clamped
+        at zero so a noisy over-subtraction can never produce negative load.
+        """
+        import bisect
+
+        timelines: list[tuple[list[datetime], list[float]]] = []
+        for eid in ev_entity_ids:
+            states = ev_history.get(eid) if ev_history else None
+            if not states:
+                continue
+            mult = ev_multipliers.get(eid, 1.0)
+            ts_list: list[datetime] = []
+            w_list: list[float] = []
+            for state in states:
+                try:
+                    watts = float(state.state) * mult
+                except (ValueError, TypeError):
+                    continue
+                # Ignore implausible/negative charger readings.
+                if not (0 <= watts < 100_000):
+                    continue
+                ts_list.append(state.last_changed)
+                w_list.append(watts)
+            if ts_list:
+                timelines.append((ts_list, w_list))
+
+        if not timelines:
+            return load_samples
+
+        adjusted: list[tuple[datetime, float]] = []
+        for ts, load_w in load_samples:
+            ev_w = 0.0
+            for ts_list, w_list in timelines:
+                idx = bisect.bisect_right(ts_list, ts) - 1
+                if idx >= 0:
+                    ev_w += w_list[idx]
+            adjusted.append((ts, max(0.0, load_w - ev_w)))
+        return adjusted
+
+    def _compute_temperature_fit(
+        self,
+        history: list[tuple[datetime, float]],
+        temp_history: list[tuple[datetime, float]],
+    ) -> tuple[dict[tuple[int, int, int], float] | None, float | None]:
+        """Bucket the load history and fit temperature sensitivity (executor-only).
+
+        Iterates the full load history (tens of thousands of points) and runs a
+        bisect per point in the fit, so this must NOT run on the event loop — it
+        would block HA during the optimiser's first forecast. Operates purely on
+        the passed-in data, so it is safe to run in a worker thread.
+        """
+        load_pattern: dict[tuple[int, int, int], list[float]] = defaultdict(list)
+        for ts, val in history:
+            local_ts = dt_util.as_local(ts) if ts.tzinfo else ts
+            key = (local_ts.weekday(), local_ts.hour, 0 if local_ts.minute < 30 else 1)
+            load_pattern[key].append(val)
+        bucket_averages = {k: sum(v) / len(v) for k, v in load_pattern.items()}
+
+        bucket_temp_avgs = self._compute_bucket_temp_averages(temp_history)
+        alpha = self._fit_temperature_sensitivity(
+            history, temp_history, bucket_averages, bucket_temp_avgs
+        )
+        return bucket_temp_avgs, alpha
 
     def _fit_temperature_sensitivity(
         self,
@@ -853,10 +1142,11 @@ class LoadEstimator:
 
 class SolcastForecaster:
     """
-    Wrapper for Solcast solar forecasts.
+    Wrapper for solar production forecasts.
 
-    Retrieves solar production forecasts from the Solcast coordinator
-    if available in Home Assistant.
+    Retrieves solar production forecasts from supported Home Assistant
+    integrations, using the configured provider preference and falling back to
+    the other supported provider when available.
     """
 
     def __init__(
@@ -865,6 +1155,7 @@ class SolcastForecaster:
         solcast_entity: str | None = None,
         interval_minutes: int = 5,
         estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE,
+        provider_preference: str = DEFAULT_SOLAR_FORECAST_PROVIDER,
     ):
         """
         Initialize Solcast forecaster.
@@ -874,15 +1165,28 @@ class SolcastForecaster:
             solcast_entity: Solcast sensor entity ID
             interval_minutes: Forecast interval in minutes
             estimate_type: Solcast estimate to use: estimate, estimate10, or estimate90
+            provider_preference: Preferred forecast source: solcast or open_meteo
         """
         self.hass = hass
         self.solcast_entity = solcast_entity
         self.interval_minutes = interval_minutes
+        self.provider_preference = (
+            provider_preference
+            if provider_preference in SOLAR_FORECAST_PROVIDERS
+            else DEFAULT_SOLAR_FORECAST_PROVIDER
+        )
+        self.last_forecast_source: str | None = None
         self.estimate_type = (
             estimate_type
             if estimate_type in _SOLCAST_ESTIMATE_FIELDS
             else DEFAULT_SOLCAST_ESTIMATE_TYPE
         )
+
+    def _provider_order(self) -> tuple[str, str]:
+        """Return preferred provider first, then fallback provider."""
+        if self.provider_preference == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
+            return (SOLAR_FORECAST_PROVIDER_OPEN_METEO, SOLAR_FORECAST_PROVIDER_SOLCAST)
+        return (SOLAR_FORECAST_PROVIDER_SOLCAST, SOLAR_FORECAST_PROVIDER_OPEN_METEO)
 
     def _get_pv_estimate(self, period: dict[str, Any]) -> float:
         """Return the configured Solcast estimate value for a forecast period."""
@@ -903,6 +1207,29 @@ class SolcastForecaster:
                 return state
         return None
 
+    def _iter_solcast_detailed_states(self) -> list[Any]:
+        """Return Solcast sensor states that expose detailed forecast periods."""
+        async_all = getattr(self.hass.states, "async_all", None)
+        if not callable(async_all):
+            return []
+
+        try:
+            states = async_all("sensor")
+        except TypeError:
+            states = async_all()
+
+        detailed_states: list[Any] = []
+        for state in states or []:
+            entity_id = getattr(state, "entity_id", "")
+            if "solcast" not in entity_id:
+                continue
+            attributes = getattr(state, "attributes", {}) or {}
+            detailed = attributes.get("detailedForecast")
+            if isinstance(detailed, list) and detailed:
+                detailed_states.append(state)
+
+        return detailed_states
+
     async def get_forecast(
         self,
         horizon_hours: int = 48,
@@ -919,18 +1246,269 @@ class SolcastForecaster:
 
         n_intervals = horizon_hours * 60 // self.interval_minutes
 
-        # Try to get Solcast forecast from coordinator data
-        forecast = await self._get_solcast_forecast(start_time, n_intervals)
-        if forecast:
-            return forecast
+        for provider in self._provider_order():
+            if provider == SOLAR_FORECAST_PROVIDER_SOLCAST:
+                forecast = await self._get_solcast_forecast(start_time, n_intervals)
+            else:
+                forecast = self._get_open_meteo_forecast(start_time, n_intervals)
+            if forecast is not None:
+                self.last_forecast_source = provider
+                return forecast
 
         # No solar forecast available — use zero solar so LP makes
         # purely price-based decisions rather than guessing production
+        self.last_forecast_source = None
         _LOGGER.warning(
-            "Solcast forecast not available — using zero solar forecast. "
-            "Install Solcast Solar for optimal battery scheduling."
+            "Solar forecast not available — using zero solar forecast. "
+            "Install Solcast Solar or Open-Meteo Solar Forecast for optimal battery scheduling."
         )
         return [0.0] * n_intervals
+
+    async def get_daily_summary(
+        self,
+        horizon_hours: int = 48,
+        start_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return today/tomorrow kWh summary using the configured provider order."""
+        if start_time is None:
+            start_time = dt_util.now()
+
+        forecast = await self.get_forecast(horizon_hours=horizon_hours, start_time=start_time)
+        interval_hours = self.interval_minutes / 60
+        today = start_time.date()
+        tomorrow = today + timedelta(days=1)
+        today_kwh = 0.0
+        tomorrow_kwh = 0.0
+
+        for idx, watts in enumerate(forecast):
+            slot_time = start_time + timedelta(minutes=idx * self.interval_minutes)
+            kwh = max(0.0, float(watts or 0.0)) * interval_hours / 1000
+            if slot_time.date() == today:
+                today_kwh += kwh
+            elif slot_time.date() == tomorrow:
+                tomorrow_kwh += kwh
+
+        return {
+            "today_kwh": today_kwh,
+            "tomorrow_kwh": tomorrow_kwh,
+            "today_forecast_kwh": today_kwh,
+            "source": self.last_forecast_source,
+        }
+
+    def _get_open_meteo_forecast(
+        self,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Get forecast from the Open-Meteo Solar Forecast integration."""
+        forecasts: list[list[float]] = []
+
+        try:
+            open_meteo_data = self.hass.data.get(OPEN_METEO_SOLAR_FORECAST_DOMAIN)
+            if open_meteo_data:
+                forecast = self._extract_from_open_meteo_integration(
+                    open_meteo_data,
+                    start_time,
+                    n_intervals,
+                )
+                if forecast is not None:
+                    forecasts.append(forecast)
+
+            if not forecasts:
+                forecast = self._read_from_open_meteo_sensors(start_time, n_intervals)
+                if forecast is not None:
+                    forecasts.append(forecast)
+
+            if not forecasts:
+                return None
+
+            combined = self._sum_forecasts(forecasts, n_intervals)
+            total_kwh = sum(combined) * (self.interval_minutes / 60) / 1000
+            _LOGGER.info(
+                "Open-Meteo solar forecast: %d intervals, peak=%.1fW, total=%.1fkWh",
+                len(combined),
+                max(combined) if combined else 0,
+                total_kwh,
+            )
+            return combined
+        except Exception as e:
+            _LOGGER.warning("Could not get Open-Meteo solar forecast: %s", e)
+            return None
+
+    def _extract_from_open_meteo_integration(
+        self,
+        open_meteo_data: Any,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Extract forecasts from hass.data for Open-Meteo Solar Forecast."""
+        forecasts: list[list[float]] = []
+
+        forecast = self._try_extract_open_meteo_estimate(
+            open_meteo_data,
+            start_time,
+            n_intervals,
+        )
+        if forecast is not None:
+            forecasts.append(forecast)
+
+        if isinstance(open_meteo_data, dict):
+            for value in open_meteo_data.values():
+                forecast = self._try_extract_open_meteo_estimate(
+                    value,
+                    start_time,
+                    n_intervals,
+                )
+                if forecast is not None:
+                    forecasts.append(forecast)
+
+        if not forecasts:
+            return None
+        return self._sum_forecasts(forecasts, n_intervals)
+
+    def _try_extract_open_meteo_estimate(
+        self,
+        data: Any,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Parse an Open-Meteo Estimate object, coordinator, or dict."""
+        estimate = data.data if hasattr(data, "data") else data
+        watts = None
+        if hasattr(estimate, OPEN_METEO_WATTS_ATTR):
+            watts = getattr(estimate, OPEN_METEO_WATTS_ATTR)
+        elif isinstance(estimate, dict):
+            watts = estimate.get(OPEN_METEO_WATTS_ATTR)
+
+        if not watts:
+            return None
+        return self._parse_open_meteo_watts(watts, start_time, n_intervals)
+
+    def _read_from_open_meteo_sensors(
+        self,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Read Open-Meteo forecast data from sensor attributes."""
+        forecasts: list[list[float]] = []
+        states_obj = getattr(self.hass, "states", None)
+        async_all = getattr(states_obj, "async_all", None)
+        if not callable(async_all):
+            return None
+
+        try:
+            all_states = async_all("sensor")
+        except TypeError:
+            all_states = async_all()
+
+        for state in all_states or []:
+            entity_id = getattr(state, "entity_id", "")
+            attributes = getattr(state, "attributes", {})
+            watts = attributes.get(OPEN_METEO_WATTS_ATTR)
+            if (
+                not self._is_open_meteo_daily_sensor(entity_id)
+                and not self._looks_like_open_meteo_watts(watts)
+            ):
+                continue
+            forecast = self._parse_open_meteo_watts(watts, start_time, n_intervals)
+            if forecast is not None:
+                forecasts.append(forecast)
+
+        if not forecasts:
+            return None
+        return self._sum_forecasts(forecasts, n_intervals)
+
+    def _is_open_meteo_daily_sensor(self, entity_id: str) -> bool:
+        """Return true for Open-Meteo daily energy sensors carrying watts attrs."""
+        if not entity_id.startswith("sensor."):
+            return False
+        object_id = entity_id.split(".", 1)[1]
+        return (
+            object_id.endswith(OPEN_METEO_DAILY_SENSOR_SUFFIXES)
+            or "_energy_production_d" in object_id
+        )
+
+    def _looks_like_open_meteo_watts(self, watts: Any) -> bool:
+        """Return true when a sensor exposes Open-Meteo timestamp-to-Watts data."""
+        if not isinstance(watts, dict) or not watts:
+            return False
+
+        for raw_time, raw_power in watts.items():
+            try:
+                if not isinstance(raw_time, datetime):
+                    datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+                float(raw_power)
+                return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def _parse_open_meteo_watts(
+        self,
+        watts: Any,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Parse Open-Meteo timestamp-to-Watts data into optimizer intervals."""
+        if not isinstance(watts, dict):
+            return None
+
+        points: list[tuple[datetime, float]] = []
+        for raw_time, raw_power in watts.items():
+            try:
+                point_time = self._parse_forecast_time(raw_time, start_time)
+                point_power = max(0.0, float(raw_power))
+            except (TypeError, ValueError):
+                continue
+            points.append((point_time, point_power))
+
+        if not points:
+            return None
+
+        sorted_points = sorted(points, key=lambda item: item[0])
+        result: list[float] = []
+        point_index = 0
+        current_power = 0.0
+        current_time = start_time
+
+        for _ in range(n_intervals):
+            while (
+                point_index < len(sorted_points)
+                and sorted_points[point_index][0] <= current_time
+            ):
+                current_power = sorted_points[point_index][1]
+                point_index += 1
+            result.append(current_power)
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        return result
+
+    def _parse_forecast_time(self, value: Any, start_time: datetime) -> datetime:
+        """Parse a forecast timestamp and align it to the optimizer timezone."""
+        forecast_time = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+        if start_time.tzinfo is not None:
+            forecast_time = (
+                forecast_time.replace(tzinfo=start_time.tzinfo)
+                if forecast_time.tzinfo is None
+                else forecast_time.astimezone(start_time.tzinfo)
+            )
+        return forecast_time
+
+    def _sum_forecasts(
+        self,
+        forecasts: list[list[float]],
+        n_intervals: int,
+    ) -> list[float]:
+        """Sum multiple same-horizon forecast arrays."""
+        combined = [0.0] * n_intervals
+        for forecast in forecasts:
+            for idx, value in enumerate(forecast[:n_intervals]):
+                combined[idx] += value
+        return combined
 
     async def _get_solcast_forecast(
         self,
@@ -954,7 +1532,7 @@ class SolcastForecaster:
             # Fallback: try the Solcast Solar integration hass.data
             solcast_solar_data = self.hass.data.get("solcast_solar")
             if solcast_solar_data:
-                forecast = self._extract_from_solcast_solar_integration(
+                forecast = await self._extract_from_solcast_solar_integration(
                     solcast_solar_data, start_time, n_intervals
                 )
                 if forecast:
@@ -1031,12 +1609,19 @@ class SolcastForecaster:
             "sensor.solcast_forecast_today",
             "sensor.solcast_pv_forecast_today",
         ])
-        if not today_state:
+        fallback_states = self._iter_solcast_detailed_states()
+        if not today_state and not fallback_states:
             return None
 
-        today_detailed = today_state.attributes.get("detailedForecast")
+        today_detailed = (
+            today_state.attributes.get("detailedForecast") if today_state else None
+        )
         if not today_detailed or not isinstance(today_detailed, list):
-            return None
+            if fallback_states:
+                today_state = fallback_states[0]
+                today_detailed = today_state.attributes["detailedForecast"]
+            else:
+                return None
 
         # Combine today + tomorrow for 48h coverage
         combined_forecast = list(today_detailed)
@@ -1055,6 +1640,18 @@ class SolcastForecaster:
             )
             if tomorrow_detailed and isinstance(tomorrow_detailed, list):
                 combined_forecast.extend(tomorrow_detailed)
+
+        seen_entity_ids = {
+            getattr(state, "entity_id", None)
+            for state in (today_state, tomorrow_state)
+            if state is not None
+        }
+        for state in fallback_states:
+            entity_id = getattr(state, "entity_id", None)
+            if entity_id in seen_entity_ids:
+                continue
+            combined_forecast.extend(state.attributes["detailedForecast"])
+            seen_entity_ids.add(entity_id)
 
         if not combined_forecast:
             return None
@@ -1138,7 +1735,7 @@ class SolcastForecaster:
 
         return result
 
-    def _extract_from_solcast_solar_integration(
+    async def _extract_from_solcast_solar_integration(
         self,
         solcast_data: Any,
         start_time: datetime,
@@ -1181,6 +1778,8 @@ class SolcastForecaster:
                         if hasattr(solcast_api, 'get_forecast_list'):
                             try:
                                 forecast_list = solcast_api.get_forecast_list()
+                                if inspect.isawaitable(forecast_list):
+                                    forecast_list = await forecast_list
                                 if forecast_list:
                                     parsed = self._parse_detailed_forecast(
                                         forecast_list, start_time, n_intervals

@@ -13,8 +13,6 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from homeassistant.util import dt as dt_util
-
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -29,6 +27,18 @@ def _suppress_stdout():
         sys.stdout = old_stdout
 
 
+def _dispatch_interval_end(dt: datetime) -> datetime:
+    """Return the dispatch interval end for a wall-clock timestamp."""
+    interval_seconds = 5 * 60
+    seconds_since_boundary = (dt.minute % 5) * 60 + dt.second
+    if seconds_since_boundary == 0 and dt.microsecond == 0:
+        return dt + timedelta(seconds=interval_seconds)
+    return dt + timedelta(
+        seconds=interval_seconds - seconds_since_boundary,
+        microseconds=-dt.microsecond,
+    )
+
+
 def get_network_tariff_rate(
     dt: datetime,
     network: str,
@@ -39,6 +49,10 @@ def get_network_tariff_rate(
     Calls spot_to_tariff with rrp=0 so the result is *only* the network
     charge (no wholesale component).  Loss factors are set to 1.0 because
     the Flow Power formula applies its own GST multiplier.
+
+    aemo_to_tariff expects the NEM dispatch interval end. PowerSync passes
+    wall-clock/start-of-interval timestamps, so look up the next 5-minute
+    dispatch boundary to avoid publishing the previous tariff window.
 
     Args:
         dt: The timestamp to look up (timezone-aware preferred).
@@ -51,9 +65,10 @@ def get_network_tariff_rate(
     try:
         from aemo_to_tariff import spot_to_tariff
 
+        lookup_dt = _dispatch_interval_end(dt)
         with _suppress_stdout():
             rate = spot_to_tariff(
-                interval_time=dt,
+                interval_time=lookup_dt,
                 network=network,
                 tariff=tariff_code,
                 rrp=0,
@@ -88,6 +103,7 @@ def compute_avg_daily_tariff(
         Average daily tariff in c/kWh, or None on error.
     """
     try:
+        from homeassistant.util import dt as dt_util
         from aemo_to_tariff import spot_to_tariff
 
         now = dt_util.now()  # Uses HA configured timezone
@@ -99,7 +115,7 @@ def compute_avg_daily_tariff(
             slot_time = base_date + timedelta(minutes=slot * 30)
             with _suppress_stdout():
                 rate = spot_to_tariff(
-                    interval_time=slot_time,
+                    interval_time=_dispatch_interval_end(slot_time),
                     network=network,
                     tariff=tariff_code,
                     rrp=0,
@@ -148,7 +164,10 @@ def get_tariff_codes_for_network(network_display: str) -> dict[str, str]:
 
     try:
         mod = importlib.import_module(f"aemo_to_tariff.{module_name}")
-        tariffs = getattr(mod, "tariffs", {})
+        get_tariffs = getattr(mod, "get_tariffs", None)
+        tariffs = (
+            get_tariffs() if callable(get_tariffs) else getattr(mod, "tariffs", {})
+        )
         result = {}
         for code, data in tariffs.items():
             if isinstance(data, dict) and "name" in data:

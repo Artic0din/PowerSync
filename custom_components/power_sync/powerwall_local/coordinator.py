@@ -8,6 +8,7 @@ it leaves ``snapshot`` at ``None`` so consumers know to fall back to cloud data.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -18,6 +19,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from ..const import (
     CONF_POWERWALL_LOCAL_PAIRED,
+    DOMAIN,
     POWERWALL_LOCAL_POLL_INTERVAL,
 )
 from .client import PowerwallLocalClient, PowerwallSnapshot
@@ -26,8 +28,21 @@ from .exceptions import (
     PowerwallSignatureError,
     PowerwallUnreachableError,
 )
+from .normalization import (
+    detect_local_backup_reserve_offset,
+    normalize_local_backup_reserve_percent,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Hard ceiling on a single snapshot fetch. The transport's per-request
+# ClientTimeout is 8s, but that relies on event-loop timer callbacks — when the
+# loop is briefly blocked (weak hardware / startup load) those timers fire late
+# and a dead-gateway connect can run to the OS TCP timeout (~100s). That long
+# block during the first refresh exceeds HA's bootstrap window and crash-loops
+# setup, so wrap every fetch in an explicit ceiling well under the per-request
+# budget's worst case but far below the runaway.
+POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
 
 
 class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None]):
@@ -107,8 +122,26 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._consecutive_failures = 0
 
     async def _async_update_data(self) -> PowerwallSnapshot | None:
+        if not self._client.local_access_enabled:
+            return None
+
         try:
-            snap = await self._client.get_snapshot()
+            snap = await asyncio.wait_for(
+                self._client.get_snapshot(),
+                timeout=POWERWALL_LOCAL_SNAPSHOT_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as err:
+            self._consecutive_failures += 1
+            if self._consecutive_failures <= 3:
+                _LOGGER.debug(
+                    "Powerwall local snapshot timed out after %.0fs (attempt %s)",
+                    POWERWALL_LOCAL_SNAPSHOT_TIMEOUT,
+                    self._consecutive_failures,
+                )
+            raise UpdateFailed(
+                "Powerwall unreachable: snapshot timed out after "
+                f"{POWERWALL_LOCAL_SNAPSHOT_TIMEOUT:.0f}s"
+            ) from err
         except PowerwallSignatureError as err:
             # Gateway no longer recognises our RSA key — usually means the
             # user revoked it from the Tesla app, or the gateway was
@@ -136,7 +169,45 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
         self._last_success_ts = _time.time()
         self._consecutive_failures = 0
+        self._update_backup_reserve_offset(snap)
         return snap
+
+    def _update_backup_reserve_offset(self, snap: PowerwallSnapshot) -> None:
+        """Detect the local reserve offset by comparing local and cloud readbacks."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        if not isinstance(entry_data, dict):
+            return
+
+        config = (snap.raw or {}).get("config") or {}
+        site_info = config.get("site_info") or {}
+        local_reserve = site_info.get("backup_reserve_percent")
+        tesla_coord = entry_data.get("tesla_coordinator")
+        cloud_site_info = getattr(tesla_coord, "_site_info_cache", None)
+        cloud_reserve = (
+            cloud_site_info.get("backup_reserve_percent")
+            if isinstance(cloud_site_info, dict)
+            else None
+        )
+        detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
+        if detected is None:
+            return
+
+        previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
+        entry_data["powerwall_local_low_soe_reserve_pct"] = detected
+        normalized = normalize_local_backup_reserve_percent(
+            local_reserve,
+            detected,
+        )
+        if normalized is not None:
+            snap.backup_reserve_percent = normalized
+        if previous != detected:
+            _LOGGER.info(
+                "Detected Powerwall local backup reserve offset: %.1f%% "
+                "(local=%s%%, Tesla site_info=%s%%)",
+                detected,
+                local_reserve,
+                cloud_reserve,
+            )
 
     async def _handle_key_rejected(self, err: Exception) -> None:
         """Mark the entry as unpaired and prompt the user to re-pair.
@@ -180,19 +251,29 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             return {
                 "available": False,
                 "reachable": self.reachable,
+                "snapshot_available": False,
                 "last_success_ts": self._last_success_ts,
                 "needs_repair": self._needs_repair,
             }
+        ev_power_w = self._observed_ev_power_w()
+        load_w = snap.load_w
+        if load_w is not None:
+            load_w = max(0.0, load_w - ev_power_w)
+
+        local_reachable = self.reachable
         return {
-            "available": True,
-            "reachable": True,
+            "available": local_reachable,
+            "reachable": local_reachable,
+            "snapshot_available": True,
             "last_success_ts": self._last_success_ts,
             "needs_repair": self._needs_repair,
             "soc_percent": snap.soc,
             "solar_w": snap.solar_w,
             "battery_w": snap.battery_w,
             "grid_w": snap.grid_w,
-            "load_w": snap.load_w,
+            "load_w": load_w,
+            "raw_load_w": snap.load_w,
+            "ev_power_w": ev_power_w,
             "grid_status": snap.grid_status,
             "operation_mode": snap.operation_mode,
             "backup_reserve_percent": snap.backup_reserve_percent,
@@ -200,3 +281,25 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "gateway_din": self._client.din,
             "version": self._client.version.value,
         }
+
+    def _observed_ev_power_w(self) -> float:
+        """Return observed EV charging power from the site coordinator in watts."""
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+            for coord_key in (
+                "tesla_coordinator",
+                "sigenergy_coordinator",
+                "sungrow_coordinator",
+                "foxess_coordinator",
+            ):
+                data = getattr(entry_data.get(coord_key), "data", None)
+                if not data:
+                    continue
+                ev_power_kw = data.get("ev_power")
+                if ev_power_kw is None:
+                    ev_power_kw = data.get("ev_power_kw")
+                if ev_power_kw is not None:
+                    return max(0.0, float(ev_power_kw or 0.0) * 1000.0)
+        except (TypeError, ValueError, AttributeError):
+            return 0.0
+        return 0.0

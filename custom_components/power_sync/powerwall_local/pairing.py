@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 _DEFAULT_WINDOW_SECONDS = 120
 _POLL_INTERVAL_SECONDS = 4
 _KEY_STATE_VERIFIED = 3
+_AUTHORIZATION_COMMAND_CATEGORY = "authorization"
 
 
 class PairingState(str, Enum):
@@ -312,22 +313,17 @@ class PowerwallPairingManager:
     ) -> dict[str, Any] | None:
         """Send the add_authorized_client_request grpc command."""
         b64 = base64.b64encode(public_key_der).decode()
-        payload = {
-            "command_properties": {
-                "message": {
-                    "authorization": {
-                        "add_authorized_client_request": {
-                            "key_type": 1,
-                            "public_key": b64,
-                            "authorized_client_type": 1,
-                            "description": "PowerSync Local Client",
-                        }
-                    }
+        payload = _authorization_command_payload(
+            "add_authorized_client_request",
+            {
+                "add_authorized_client_request": {
+                    "key_type": 1,
+                    "public_key": b64,
+                    "authorized_client_type": 1,
+                    "description": "PowerSync Local Client",
                 },
-                "identifier_type": 1,
             },
-            "command_type": "grpc_command",
-        }
+        )
         url = (
             f"{self._fleet_api_base}/api/1/energy_sites/"
             f"{energy_site_id}/command"
@@ -360,15 +356,10 @@ class PowerwallPairingManager:
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "command_properties": {
-                "message": {
-                    "authorization": {"list_authorized_clients_request": {}}
-                },
-                "identifier_type": 1,
-            },
-            "command_type": "grpc_command",
-        }
+        payload = _authorization_command_payload(
+            "list_authorized_clients_request",
+            {"list_authorized_clients_request": {}},
+        )
         while True:
             if (
                 self._status.expires_at is not None
@@ -394,6 +385,21 @@ class PowerwallPairingManager:
             if state == _KEY_STATE_VERIFIED:
                 return True
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def _authorization_command_payload(
+    command_name: str, authorization_message: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the Fleet API command envelope for Powerwall auth commands."""
+    return {
+        "category": _AUTHORIZATION_COMMAND_CATEGORY,
+        "command_name": command_name,
+        "command_properties": {
+            "message": {"authorization": authorization_message},
+            "identifier_type": 1,
+        },
+        "command_type": "grpc_command",
+    }
 
 
 def _generate_rsa_4096() -> tuple[rsa.RSAPrivateKey, bytes]:

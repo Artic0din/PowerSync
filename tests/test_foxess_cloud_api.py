@@ -39,6 +39,64 @@ def foxess_api_module():
                 sys.modules[name] = module
 
 
+class _FakeResp:
+    def __init__(self, status, payload):
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return str(self._payload)
+
+
+class _FakeSession:
+    def __init__(self, status, payload):
+        self.closed = False
+        self.status = status
+        self.payload = payload
+        self.requests = []
+
+    def request(self, method, url, **kwargs):
+        self.requests.append((method, url, kwargs))
+        return _FakeResp(self.status, self.payload)
+
+
+def _run_request(foxess_api_module, status, payload):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+    client._session = _FakeSession(status, payload)
+    return asyncio.run(client._request("POST", "/op/test", {"x": 1}))
+
+
+def test_request_accepts_code_field_and_unwraps_result(foxess_api_module):
+    assert _run_request(foxess_api_module, 200, {"code": 0, "result": {"value": 7}}) == {"value": 7}
+
+
+def test_request_accepts_errno_200_and_falls_back_to_data(foxess_api_module):
+    assert _run_request(foxess_api_module, 200, {"errno": 200, "data": [1, 2]}) == [1, 2]
+
+
+def test_request_raises_foxess_api_error_with_code(foxess_api_module):
+    with pytest.raises(foxess_api_module.FoxESSApiError) as excinfo:
+        _run_request(
+            foxess_api_module, 200, {"errno": 44096, "msg": "unsupported function code"}
+        )
+    assert str(excinfo.value.code) == "44096"
+
+
+def test_request_http_error_carries_status_code(foxess_api_module):
+    with pytest.raises(foxess_api_module.FoxESSApiError) as excinfo:
+        _run_request(foxess_api_module, 500, {"msg": "boom"})
+    assert excinfo.value.code == "http_500"
+
+
 def test_signature_uses_literal_crlf_separator(foxess_api_module, monkeypatch):
     monkeypatch.setattr(foxess_api_module.time, "time", lambda: 1712345678.901)
 
@@ -78,8 +136,12 @@ def test_real_data_query_uses_v1_sns_shape(foxess_api_module, monkeypatch):
                     "pvPower",
                     "gridConsumptionPower",
                     "feedinPower",
+                    "meterPower",
                     "loadsPower",
                     "batPower",
+                    "invBatPower",
+                    "batChargePower",
+                    "batDischargePower",
                     "SoC",
                     "workMode",
                     "generationPower",
@@ -133,13 +195,44 @@ def test_scheduler_set_uses_v3_groups_and_extra_param(foxess_api_module, monkeyp
         "fdSoc": 90.0,
         "fdPwr": 5000.0,
         "maxSoc": 95.0,
-        "importLimit": 30000.0,
-        "exportLimit": 30000.0,
-        "pvLimit": 30000.0,
-        "reactivePower": 0.0,
     }
     assert "minSocOnGrid" not in payload["groups"][0]
     assert "fdPwr" not in payload["groups"][0]
+
+
+def test_scheduler_set_preserves_explicit_extra_limits(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+    calls = []
+
+    async def fake_post(path, payload, *, write=False):
+        calls.append((path, payload, write))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    asyncio.run(
+        client.set_scheduler(
+            "INV123",
+            [
+                {
+                    "startHour": 0,
+                    "startMinute": 0,
+                    "endHour": 23,
+                    "endMinute": 59,
+                    "workMode": "SelfUse",
+                    "exportLimit": 12000,
+                    "pvLimit": 8000,
+                    "reactivePower": 0,
+                }
+            ],
+        )
+    )
+
+    extra = calls[0][1]["groups"][0]["extraParam"]
+    assert extra["exportLimit"] == 12000.0
+    assert extra["pvLimit"] == 8000.0
+    assert extra["reactivePower"] == 0.0
+    assert "importLimit" not in extra
 
 
 def test_setting_soc_and_modbus_passthrough_payloads(foxess_api_module, monkeypatch):
@@ -179,6 +272,85 @@ def test_setting_soc_and_modbus_passthrough_payloads(foxess_api_module, monkeypa
         {"sn": "LOGGER1", "timeout": 12, "data": "AQIDBA=="},
         True,
     )
+
+
+def test_set_work_mode_disables_scheduler_and_retries_on_44096(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+    setting_calls = []
+    flag_calls = []
+
+    async def fake_set_setting(key, value, sn=""):
+        setting_calls.append((key, value))
+        if len(setting_calls) == 1:
+            raise foxess_api_module.FoxESSApiError(
+                "FoxESS API error 44096: unsupported function code", 44096
+            )
+        return {"ok": True}
+
+    async def fake_flag(enabled, sn=""):
+        flag_calls.append(enabled)
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "set_device_setting", fake_set_setting)
+    monkeypatch.setattr(client, "set_scheduler_flag", fake_flag)
+
+    asyncio.run(client.set_work_mode("Backup"))
+
+    # First write is rejected, scheduler flag disabled, then the write is retried.
+    assert setting_calls == [("WorkMode", "Backup"), ("WorkMode", "Backup")]
+    assert flag_calls == [False]
+
+
+def test_set_work_mode_propagates_non_scheduler_errors(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+
+    async def fake_set_setting(key, value, sn=""):
+        raise foxess_api_module.FoxESSApiError("FoxESS API error 40256: illegal signature", 40256)
+
+    async def fake_flag(enabled, sn=""):
+        raise AssertionError("scheduler flag must not be touched for non-44096 errors")
+
+    monkeypatch.setattr(client, "set_device_setting", fake_set_setting)
+    monkeypatch.setattr(client, "set_scheduler_flag", fake_flag)
+
+    with pytest.raises(foxess_api_module.FoxESSApiError):
+        asyncio.run(client.set_work_mode("Backup"))
+
+
+def test_set_device_setting_optional_swallows_unsupported_key(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+
+    async def unsupported(key, value, sn=""):
+        raise foxess_api_module.FoxESSApiError(
+            "FoxESS API error 40257: this device does not currently support", 40257
+        )
+
+    monkeypatch.setattr(client, "set_device_setting", unsupported)
+    assert asyncio.run(client.set_device_setting_optional("ActivePowerLimit", 5000)) is False
+
+    async def other_error(key, value, sn=""):
+        raise foxess_api_module.FoxESSApiError("FoxESS API error 40256", 40256)
+
+    monkeypatch.setattr(client, "set_device_setting", other_error)
+    with pytest.raises(foxess_api_module.FoxESSApiError):
+        asyncio.run(client.set_device_setting_optional("ActivePowerLimit", 5000))
+
+
+def test_scheduler_flag_uses_v1_enable_payload(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+    calls = []
+
+    async def fake_post(path, payload, *, write=False):
+        calls.append((path, payload, write))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    asyncio.run(client.set_scheduler_flag(False))
+
+    assert calls == [
+        ("/op/v1/device/scheduler/set/flag", {"deviceSN": "INV123", "enable": 0}, True)
+    ]
 
 
 def test_scheduler_helpers_filter_hidden_defaults_and_extract_serials(foxess_api_module):

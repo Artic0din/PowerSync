@@ -134,68 +134,176 @@ jobs:
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
 
-      - name: Clear RELEASE_NOTES.md after use
+      # NOTE: the separate manual-release Discord workflow will not fire here,
+      # because GitHub Actions intentionally suppresses downstream workflows for
+      # release events triggered by GITHUB_TOKEN. Posting to Discord directly in
+      # this job is the only reliable path for automated manifest releases.
+      - name: Build Discord payloads
         if: steps.check_tag.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Prevent stale hand-written notes from being reused on the
-          # next version bump. Truncate the file and commit it back so
-          # future releases fall through to auto-generated commit notes.
-          if [ -f "RELEASE_NOTES.md" ] && [ -s "RELEASE_NOTES.md" ]; then
-            echo -n "" > RELEASE_NOTES.md
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add RELEASE_NOTES.md
-            git commit -m "docs(release): clear RELEASE_NOTES.md after v${{ steps.version.outputs.version }}"
-            git push origin main
-            echo "Cleared RELEASE_NOTES.md"
-          fi
+          set -euo pipefail
 
-      # NOTE: a separate workflow listening on `release: published` would NOT
-      # fire here, because GitHub Actions intentionally suppresses downstream
-      # workflows for events triggered by GITHUB_TOKEN. Posting to Discord
-      # directly in this job is the only reliable path.
-      #
-      # We build the JSON payload in Python (safe escaping of release notes)
-      # and post it via curl. urllib's default User-Agent is blocked by
-      # Discord's webhook spam filter (returns 403), so curl is required.
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import time
+          from pathlib import Path
+
+          def gh_json(path: str, attempts: int = 6):
+              for attempt in range(attempts):
+                  try:
+                      return json.loads(
+                          subprocess.check_output(
+                              ["gh", "api", path],
+                              text=True,
+                              stderr=subprocess.STDOUT,
+                          )
+                      )
+                  except subprocess.CalledProcessError as exc:
+                      if attempt == attempts - 1:
+                          raise SystemExit(exc.output) from exc
+                      time.sleep(2)
+
+          marker_path = Path(".github/discord-release-last-posted.txt")
+          last_posted = marker_path.read_text().strip() if marker_path.exists() else ""
+          target_tag = f"v{os.environ['VERSION']}"
+          repo = os.environ["GITHUB_REPOSITORY"]
+
+          releases = gh_json(f"repos/{repo}/releases?per_page=20")
+          releases = [release for release in releases if not release.get("draft")]
+
+          tags = [release["tag_name"] for release in releases]
+          if target_tag not in tags:
+              # GitHub can return the newly-created release from the direct tag
+              # endpoint before it appears in the releases list.
+              target_release = gh_json(f"repos/{repo}/releases/tags/{target_tag}")
+              releases.insert(0, target_release)
+              tags = [release["tag_name"] for release in releases]
+
+          try:
+              target_index = tags.index(target_tag)
+          except ValueError as exc:
+              raise SystemExit(f"Release tag {target_tag} was not found") from exc
+
+          if last_posted in tags:
+              marker_index = tags.index(last_posted)
+              selected = releases[target_index:marker_index] if marker_index > target_index else []
+          else:
+              # First run or marker aged out of the API page: post only the
+              # current release to avoid spamming historical releases.
+              selected = [releases[target_index]]
+
+          selected = list(reversed(selected))
+
+          payload_dir = Path("/tmp/discord_release_payloads")
+          payload_dir.mkdir(parents=True, exist_ok=True)
+          tags_to_post: list[str] = []
+
+          for index, release in enumerate(selected):
+              tag = release["tag_name"]
+              name = release.get("name") or tag
+              notes = (release.get("body") or "").strip()
+              url = release["html_url"]
+
+              if tag == target_tag:
+                  notes = Path("/tmp/release_notes.md").read_text().strip()
+
+              if not notes:
+                  raise SystemExit(f"Release {tag} has no notes; refusing to post an empty Discord update.")
+
+              if len(notes) > 4000:
+                  notes = notes[:3997] + "..."
+
+              payload = {
+                  "allowed_mentions": {"parse": []},
+                  "embeds": [
+                      {
+                          "title": f"🚀 {name} Released",
+                          "description": notes,
+                          "color": 5025616,
+                          "url": url,
+                          "footer": {"text": "Update available via HACS"},
+                      }
+                  ],
+              }
+              (payload_dir / f"{index}.json").write_text(json.dumps(payload))
+              tags_to_post.append(tag)
+
+          Path("/tmp/discord_release_tags.txt").write_text(
+              "\n".join(tags_to_post) + ("\n" if tags_to_post else "")
+          )
+          Path("/tmp/discord_release_count.txt").write_text(str(len(tags_to_post)))
+
+          if tags_to_post:
+              print("Discord releases to post: " + ", ".join(tags_to_post))
+          else:
+              print(f"No Discord release notifications needed; last marker is {last_posted or 'empty'}")
+          PY
+
+      # urllib's default User-Agent is blocked by Discord's webhook spam filter
+      # (returns 403), so curl is required.
       - name: Notify Discord
         if: steps.check_tag.outputs.exists == 'false'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          COUNT=$(cat /tmp/discord_release_count.txt)
+          if [ "$COUNT" = "0" ]; then
+            echo "No pending Discord release notifications"
+            exit 0
+          fi
+
+          : > /tmp/discord_release_posted_tags.txt
+          for index in $(seq 0 $((COUNT - 1))); do
+            tag=$(sed -n "$((index + 1))p" /tmp/discord_release_tags.txt)
+            payload="/tmp/discord_release_payloads/$index.json"
+
+            HTTP_CODE=$(curl -sS -o /tmp/discord_response.txt -w "%{http_code}" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$payload" \
+              "$DISCORD_WEBHOOK")
+
+            echo "Discord webhook HTTP status for $tag: $HTTP_CODE"
+            if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+              echo "Discord webhook failed for $tag:"
+              cat /tmp/discord_response.txt
+              exit 1
+            fi
+
+            echo "$tag" >> /tmp/discord_release_posted_tags.txt
+          done
+
+      - name: Clear release notes and record Discord marker
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          python3 - <<'PYEOF' > /tmp/discord_payload.json
-          import json, os
+          set -euo pipefail
 
-          with open('/tmp/release_notes.md', 'r') as f:
-              notes = f.read().strip()
-          if len(notes) > 4000:
-              notes = notes[:3997] + '...'
+          MARKER_PATH=".github/discord-release-last-posted.txt"
 
-          version = os.environ['VERSION']
-          payload = {
-              'embeds': [{
-                  'title': f'🚀 PowerSync v{version} Released',
-                  'description': notes,
-                  'color': 5025616,
-                  'url': f'https://github.com/bolagnaise/PowerSync/releases/tag/v{version}',
-                  'footer': {'text': 'Update available via HACS'},
-              }]
-          }
-          print(json.dumps(payload))
-          PYEOF
-
-          HTTP_CODE=$(curl -s -o /tmp/discord_response.txt -w "%{http_code}" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/discord_payload.json \
-            "$DISCORD_WEBHOOK")
-
-          echo "Discord webhook HTTP status: $HTTP_CODE"
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "Discord webhook failed:"
-            cat /tmp/discord_response.txt
-            exit 1
+          # Prevent stale hand-written notes from being reused on the
+          # next version bump. Also record the Discord notification marker
+          # only after the webhook succeeds, so scheduled backfill can catch
+          # any missed release later without duplicating successful posts.
+          echo -n "" > RELEASE_NOTES.md
+          if [ -s /tmp/discord_release_posted_tags.txt ]; then
+            tail -n 1 /tmp/discord_release_posted_tags.txt > "$MARKER_PATH"
           fi
-          echo "Discord notified for v$VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add RELEASE_NOTES.md "$MARKER_PATH"
+          if git diff --cached --quiet; then
+            echo "No release cleanup changes to commit"
+          else
+            git commit -m "docs(release): clear RELEASE_NOTES.md after v$VERSION"
+            git push origin main
+            echo "Cleared RELEASE_NOTES.md and recorded Discord marker v$VERSION"
+          fi

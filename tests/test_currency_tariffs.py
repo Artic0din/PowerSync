@@ -111,6 +111,31 @@ def test_dashboard_history_chart_projects_series_to_now():
     assert "const marker = mode === 'tou'" in source
 
 
+def test_dashboard_history_chart_requests_full_update_history():
+    dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
+    source = dashboard.read_text()
+
+    assert "significant_changes_only: '0'" in source
+    assert "Date.parse(p.last_updated || p.last_changed)" in source
+
+
+def test_dashboard_history_chart_renders_state_history_as_steps_by_default():
+    dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
+    source = dashboard.read_text()
+
+    assert "const step = config.stepLine !== undefined ? config.stepLine : mode === 'history'" in source
+    assert "Date.parse(stateObj?.last_updated || stateObj?.last_changed || '')" in source
+
+
+def test_dashboard_history_chart_filters_impossible_home_load_values():
+    dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
+    source = dashboard.read_text()
+
+    assert "const filtered = this._filterSeriesData(data, s)" in source
+    assert "const minValue = Number(seriesConfig?.minValue)" in source
+    assert "name: 'Home', color: '#9C27B0', minValue: 0" in source
+
+
 def test_dashboard_prefers_backend_matched_ev_label():
     dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
     source = dashboard.read_text()

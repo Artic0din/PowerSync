@@ -137,6 +137,86 @@ def test_widget_data_keeps_wall_connector_without_named_active_ev():
     assert coalesce_ev_widget_data(widgets) == widgets
 
 
+def test_loadpoint_status_merges_wall_connector_into_single_active_tesla():
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN_TESS": {
+                "active": True,
+                "vehicle_name": "TESSY",
+                "current_amps": 32,
+                "target_amps": 32,
+                "charging_started": True,
+                "params": {
+                    "dynamic_mode": "battery_target",
+                    "charger_type": "tesla",
+                    "voltage": 240,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "VIN_TESS",
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "ev_power_kw": 7.0,
+                "ev_soc": 70,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "wall_connector",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 3.4,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["TESSY"]
+    assert loadpoints[0]["current_power_kw"] == 3.4
+    assert loadpoints[0]["commanded_power_kw"] == 7.68
+    assert loadpoints[0]["status"] == "charging"
+
+
+def test_loadpoint_status_keeps_wall_connector_when_tesla_match_is_ambiguous():
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "VIN_TESS",
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "VIN_THEO",
+                "vehicle_name": "THEO",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "wall_connector",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 3.4,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "TESSY",
+        "THEO",
+        "Wall Connector",
+    ]
+
+
 def test_dynamic_state_reports_commanded_no_power_when_observed_power_is_zero():
     loadpoints = build_loadpoint_status(
         {
@@ -646,6 +726,115 @@ def test_default_session_merges_with_single_observed_charging_vehicle():
     assert loadpoints[0]["confidence"] == "observed"
 
 
+def test_smart_schedule_solar_surplus_session_reports_solar_source_after_consuming_surplus():
+    loadpoints = build_loadpoint_status(
+        {
+            "_default": {
+                "active": True,
+                "vehicle_name": "EV",
+                "current_amps": 0,
+                "target_amps": 0,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "smart_schedule_solar_surplus",
+                    "charger_type": "sigenergy",
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "sigenergy_charger",
+                "vehicle_name": "Sigenergy charger",
+                "charger_type": "sigenergy",
+                "ev_power_kw": 5.93,
+                "ev_soc": 41,
+                "is_connected": True,
+                "is_charging": True,
+                "current_amps": 0,
+            }
+        ],
+        site={"surplus_kw": 0.0},
+    )
+
+    assert loadpoints[0]["loadpoint_id"] == "sigenergy_charger"
+    assert loadpoints[0]["owner_mode"] == "smart_schedule_solar_surplus"
+    assert loadpoints[0]["source"] == "solar"
+    assert loadpoints[0]["current_power_kw"] == 5.93
+    assert loadpoints[0]["current_amps"] == 0
+
+
+def test_dynamic_session_prefers_observed_current_amps_when_command_state_is_zero():
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN123": {
+                "active": True,
+                "vehicle_name": "Blue Car",
+                "current_amps": 0,
+                "target_amps": 0,
+                "params": {"dynamic_mode": "solar_surplus"},
+            }
+        },
+        [
+            {
+                "vehicle_id": "VIN123",
+                "vehicle_name": "Blue Car",
+                "ev_power_kw": 5.5,
+                "is_connected": True,
+                "is_charging": True,
+                "current_amps": 24,
+            }
+        ],
+    )
+
+    assert loadpoints[0]["current_amps"] == 24
+    assert loadpoints[0]["target_amps"] == 24
+
+
+def test_default_session_is_hidden_when_multiple_observed_vehicles_are_active():
+    loadpoints = build_loadpoint_status(
+        {
+            "_default": {
+                "active": True,
+                "current_amps": 10,
+                "target_amps": 10,
+                "charging_started": True,
+                "params": {
+                    "dynamic_mode": "scheduled",
+                    "charger_type": "tesla",
+                    "voltage": 240,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "VIN_TESS",
+                "vehicle_name": "Tess",
+                "charger_type": "tesla",
+                "ev_power_kw": 5.8,
+                "ev_soc": 75,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "VIN_THEO",
+                "vehicle_name": "Theo",
+                "charger_type": "tesla",
+                "ev_power_kw": 11.7,
+                "ev_soc": 19,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["Tess", "Theo"]
+    assert {loadpoint["loadpoint_id"] for loadpoint in loadpoints} == {
+        "VIN_TESS",
+        "VIN_THEO",
+    }
+
+
 def test_generic_charger_observation_reports_commanded_without_power():
     observation = build_generic_charger_observation(
         vehicle_name="Generic EV",
@@ -664,6 +853,26 @@ def test_generic_charger_observation_reports_commanded_without_power():
     assert loadpoints[0]["status"] == "commanded_no_power"
     assert loadpoints[0]["current_amps"] == 16
     assert loadpoints[0]["soc"] == 62
+
+
+def test_generic_charger_observation_uses_measured_power():
+    observation = build_generic_charger_observation(
+        vehicle_name="Generic EV",
+        switch_state="off",
+        amps_value="15",
+        status_state="disconnected",
+        power_value="3500",
+        soc_value="69",
+    )
+
+    loadpoints = build_loadpoint_status({}, [observation])
+
+    assert loadpoints[0]["connected"] is True
+    assert loadpoints[0]["actual_charging"] is True
+    assert loadpoints[0]["status"] == "charging"
+    assert loadpoints[0]["current_power_kw"] == 3.5
+    assert loadpoints[0]["blocking_reason"] is None
+    assert loadpoints[0]["soc"] == 69
 
 
 def test_generic_charger_loadpoint_uses_fallback_soc_value():

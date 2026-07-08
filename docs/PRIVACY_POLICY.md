@@ -90,7 +90,7 @@ We may update this Privacy Policy from time to time. We will notify you of signi
 ## 8. Contact
 
 For privacy questions or concerns:
-- GitHub: https://github.com/bolagnaise/PowerSync/issues
+- Discord: https://discord.gg/eaWDWxEWE3
 - Email: [your email]
 
 ---

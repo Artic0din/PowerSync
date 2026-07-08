@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from homeassistant.components.number import (
@@ -30,13 +31,54 @@ from .const import (
     CONF_SAJ_CONFIG_ENTRY_ID,
     CONF_NEOVOLT_CONFIG_ENTRY_ID,
     CONF_NEOVOLT_CONFIG_ENTRY_IDS,
+    CONF_FRONIUS_RESERVA_MAX_CHARGE_KW,
+    CONF_FRONIUS_RESERVA_MAX_DISCHARGE_KW,
+    CONF_NEOVOLT_MAX_CHARGE_KW,
+    CONF_NEOVOLT_MAX_DISCHARGE_KW,
+    CONF_OPTIMIZATION_MAX_CHARGE_W,
+    CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_SAJ_INVERTER_RATED_KW,
+    CONF_SOLAX_BATTERY_NOMINAL_V,
+    CONF_SOLAX_MAX_CHARGE_CURRENT_A,
+    CONF_SOLAX_MAX_DISCHARGE_CURRENT_A,
     family_device_info,
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_EV_CHARGING,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    TESLA_CAPABILITY_WAIT_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+FORCE_POWER_FALLBACK_MAX_KW = 50.0
+FORCE_POWER_STEP_KW = 0.05
+FORCE_POWER_COORDINATOR_KEYS = (
+    "foxess_coordinator",
+    "goodwe_coordinator",
+    "sigenergy_coordinator",
+    "sungrow_coordinator",
+    "alphaess_coordinator",
+    "esy_sunhome_coordinator",
+    "solax_coordinator",
+    "saj_h2_coordinator",
+    "fronius_reserva_coordinator",
+    "neovolt_coordinator",
+    "anker_solix_coordinator",
+)
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _entry_value(entry: ConfigEntry, key: str) -> Any:
+    if key in entry.options and entry.options.get(key) is not None:
+        return entry.options.get(key)
+    return entry.data.get(key)
 
 
 async def async_setup_entry(
@@ -57,7 +99,7 @@ async def async_setup_entry(
     async def _add_capability_gated_numbers() -> None:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         waited = 0.0
-        while "tesla_capabilities" not in entry_data and waited < 120.0:
+        while "tesla_capabilities" not in entry_data and waited < TESLA_CAPABILITY_WAIT_SECONDS:
             await asyncio.sleep(2.0)
             waited += 2.0
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -165,13 +207,19 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if site_info and "backup_reserve_percent" in site_info:
-            return float(site_info["backup_reserve_percent"])
+            reserve = site_info["backup_reserve_percent"]
+            if reserve is None:
+                return None
+            return float(reserve)
         stored = self._entry.options.get("_user_backup_reserve")
         return float(stored) if stored is not None else None
 
     async def async_set_native_value(self, value: float) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_backup_reserve", {"percent": int(value)}, blocking=False,
+            DOMAIN,
+            "set_backup_reserve",
+            {"percent": int(value), "source": "user"},
+            blocking=False,
         )
 
 
@@ -200,7 +248,10 @@ class OffGridEvReserveNumber(_TeslaSiteNumberBase):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_off_grid_ev_reserve", {"percent": int(value)}, blocking=False,
+            DOMAIN,
+            "set_off_grid_ev_reserve",
+            {"percent": int(value), "source": "user"},
+            blocking=False,
         )
 
 
@@ -214,8 +265,7 @@ class ForcePowerNumber(NumberEntity):
     _attr_has_entity_name = True
     _attr_mode = NumberMode.SLIDER
     _attr_native_min_value = 0
-    _attr_native_max_value = 50
-    _attr_native_step = 0.5
+    _attr_native_step = FORCE_POWER_STEP_KW
     _attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
     _attr_icon = "mdi:lightning-bolt"
     # User-facing power input for force charge/discharge — Controls, not Configuration.
@@ -231,6 +281,86 @@ class ForcePowerNumber(NumberEntity):
     @property
     def device_info(self):
         return family_device_info(self._entry.entry_id, SENSOR_FAMILY_BATTERY)
+
+    @property
+    def native_max_value(self) -> float:
+        """Scale the force-power slider to the site instead of a universal 50 kW."""
+        candidates = [
+            *self._configured_power_limits_kw(),
+            *self._coordinator_power_limits_kw(),
+            _positive_float(self._attr_native_value),
+        ]
+        max_kw = max((value for value in candidates if value), default=None)
+        if max_kw is None:
+            return FORCE_POWER_FALLBACK_MAX_KW
+        rounded_max = math.ceil(max_kw / FORCE_POWER_STEP_KW) * FORCE_POWER_STEP_KW
+        return min(
+            FORCE_POWER_FALLBACK_MAX_KW,
+            max(FORCE_POWER_STEP_KW, round(rounded_max, 2)),
+        )
+
+    def _configured_power_limits_kw(self) -> list[float]:
+        entry = self._entry
+        candidates: list[float] = []
+
+        for key in (
+            CONF_OPTIMIZATION_MAX_CHARGE_W,
+            CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+        ):
+            watts = _positive_float(_entry_value(entry, key))
+            if watts:
+                candidates.append(watts / 1000.0)
+
+        for key in (
+            CONF_SAJ_INVERTER_RATED_KW,
+            CONF_FRONIUS_RESERVA_MAX_CHARGE_KW,
+            CONF_FRONIUS_RESERVA_MAX_DISCHARGE_KW,
+            CONF_NEOVOLT_MAX_CHARGE_KW,
+            CONF_NEOVOLT_MAX_DISCHARGE_KW,
+        ):
+            kw = _positive_float(_entry_value(entry, key))
+            if kw:
+                candidates.append(kw)
+
+        solax_voltage = _positive_float(_entry_value(entry, CONF_SOLAX_BATTERY_NOMINAL_V))
+        if solax_voltage:
+            for key in (
+                CONF_SOLAX_MAX_CHARGE_CURRENT_A,
+                CONF_SOLAX_MAX_DISCHARGE_CURRENT_A,
+            ):
+                amps = _positive_float(_entry_value(entry, key))
+                if amps:
+                    candidates.append((amps * solax_voltage) / 1000.0)
+
+        return candidates
+
+    def _coordinator_power_limits_kw(self) -> list[float]:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        candidates: list[float] = []
+
+        opt_coord = entry_data.get("optimization_coordinator")
+        opt_config = getattr(opt_coord, "_config", None)
+        for attr in ("max_charge_w", "max_discharge_w"):
+            watts = _positive_float(getattr(opt_config, attr, None))
+            if watts:
+                candidates.append(watts / 1000.0)
+
+        for coord_key in FORCE_POWER_COORDINATOR_KEYS:
+            coord = entry_data.get(coord_key)
+            data = getattr(coord, "data", None) or {}
+            for field in (
+                "battery_max_charge_power_w",
+                "battery_max_discharge_power_w",
+            ):
+                watts = _positive_float(data.get(field))
+                if watts:
+                    candidates.append(watts / 1000.0)
+            for field in ("battery_max_charge_power", "battery_max_discharge_power"):
+                kw = _positive_float(data.get(field))
+                if kw:
+                    candidates.append(kw)
+
+        return candidates
 
     async def async_set_native_value(self, value: float) -> None:
         self._attr_native_value = value

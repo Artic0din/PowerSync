@@ -67,6 +67,18 @@ def _portal_data(domain_data: Mapping[str, Any]) -> Mapping[str, Any]:
     return data if isinstance(data, Mapping) else {}
 
 
+def _preferred_portal_bpea(portal: Mapping[str, Any]) -> float | None:
+    """Pick the most reliable portal/API BPEA value for import pricing."""
+    bpea_import = _as_float(portal.get("bpea_import"))
+    bpea = _as_float(portal.get("bpea"))
+
+    if bpea_import is not None and bpea_import > 0:
+        return bpea_import
+    if bpea is not None:
+        return bpea
+    return bpea_import
+
+
 def resolve_flow_power_pricing_context(
     options: Mapping[str, Any] | None,
     data: Mapping[str, Any] | None,
@@ -76,12 +88,12 @@ def resolve_flow_power_pricing_context(
 
     Priority for TWAP is:
       1. explicit PowerSync override,
-      2. Flow Power portal account TWAP when logged in,
-      3. PowerSync rolling raw wholesale TWAP,
-      4. hardcoded fallback.
+      2. PowerSync rolling raw wholesale TWAP,
+      3. hardcoded fallback.
 
-    Portal BPEA/GST values are used whenever available, even when a user has
-    explicitly overridden TWAP.
+    Flow Power account TWAP from KWatch/portal data is exposed on account
+    sensors, but it is not used for import PEA pricing because it already
+    includes account/network effects that the v2 formula models separately.
     """
     options = options or {}
     data = data or {}
@@ -92,15 +104,11 @@ def resolve_flow_power_pricing_context(
         options.get(CONF_FP_TWAP_OVERRIDE),
         data.get(CONF_FP_TWAP_OVERRIDE),
     )
-    portal_twap = _first_number(portal.get("twap_import"), portal.get("twap"))
     tracker_twap = _tracker_twap(domain_data)
 
     if override is not None:
         twap = override
         twap_source = "override"
-    elif portal_twap is not None:
-        twap = portal_twap
-        twap_source = "portal"
     elif tracker_twap is not None:
         twap = tracker_twap
         twap_source = "dynamic"
@@ -108,7 +116,7 @@ def resolve_flow_power_pricing_context(
         twap = FLOW_POWER_MARKET_AVG
         twap_source = "fallback"
 
-    portal_bpea = _first_number(portal.get("bpea_import"), portal.get("bpea"))
+    portal_bpea = _preferred_portal_bpea(portal)
     if portal_bpea is not None:
         bpea = portal_bpea
         bpea_source = "portal"

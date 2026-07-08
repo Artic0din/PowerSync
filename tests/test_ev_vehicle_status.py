@@ -136,6 +136,7 @@ def _install_import_stubs() -> None:
         "SajH2EnergyCoordinator",
         "FroniusReservaEnergyCoordinator",
         "NeovoltEnergyCoordinator",
+        "SolarEdgeEnergyCoordinator",
         "DemandChargeCoordinator",
         "AEMOSensorCoordinator",
         "OctopusPriceCoordinator",
@@ -260,6 +261,38 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     assert vehicles[0]["ev_soc"] == 73
 
 
+def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesla():
+    power_sync = _power_sync_module()
+    hass = _tesla_hass([
+        _State("sensor.tessy_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.tessy_charging_2", "charging"),
+        _State("binary_sensor.tessy_charge_cable_2", "on"),
+        _State("device_tracker.tessy_location_2", "home"),
+        _State("sensor.tessy_battery_level_2", "70", {"unit_of_measurement": "%"}),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "wall_connectors_raw": [
+                {
+                    "wall_connector_state": 2,
+                    "wall_connector_power": 3400,
+                }
+            ]
+        }
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert vehicles == [{
+        "vehicle_id": "LRWYHCEK3PC907290",
+        "vehicle_name": "TESSY",
+        "ev_power_kw": 3.4,
+        "ev_soc": 70,
+        "is_connected": True,
+        "is_charging": True,
+    }]
+
+
 def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
@@ -308,3 +341,66 @@ def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
     status = power_sync._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 72}
+
+
+def test_aggregate_ev_status_uses_configured_generic_charger_soc():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.solaredge_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.solaredge_ev_soc", "64"),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
+
+
+def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.primary_ev_soc",
+            "generic_charger_soc_entity_2": "sensor.fallback_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.primary_ev_soc", "unknown"),
+        _State("sensor.fallback_ev_soc", "68"),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 68}
+
+
+def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallback():
+    power_sync = _power_sync_module()
+    vin = "LRWYHCEK3PC907290"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.solaredge_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.solaredge_ev_soc", "64"),
+        _State(f"sensor.{vin}_charging_state", "Stopped"),
+        _State(f"switch.{vin}_charge", "off"),
+        _State(f"sensor.{vin}_battery_level", "72", {"unit_of_measurement": "%"}),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 64}

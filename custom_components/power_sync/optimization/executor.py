@@ -172,7 +172,7 @@ class ScheduleExecutor:
 
         return True
 
-    async def stop(self) -> None:
+    async def stop(self, restore_normal: bool = True) -> None:
         """Stop the schedule executor."""
         if not self._enabled:
             return
@@ -187,7 +187,10 @@ class ScheduleExecutor:
         self._status.enabled = False
 
         # Restore battery to normal operation
-        await self._restore_normal_operation()
+        if restore_normal:
+            await self._restore_normal_operation()
+        else:
+            _LOGGER.info("Schedule executor stopped without restoring battery mode")
 
     async def _tick(self, now: datetime | None = None) -> None:
         """Periodic tick (if timer enabled)."""

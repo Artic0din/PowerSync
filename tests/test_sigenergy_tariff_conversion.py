@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import asyncio
 import sys
@@ -210,6 +211,126 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
     assert by_start["20:30"] == 35.33
 
 
+def test_flow_power_canonical_tariff_ignores_raw_current_wholesale_spike(
+    tariff_converter_module,
+    monkeypatch,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 23, 18, 38, tzinfo=brisbane).astimezone(tz)
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", FixedDatetime)
+
+    forecast = _day_intervals(datetime(2026, 6, 23, tzinfo=brisbane))
+    for point in forecast:
+        interval_start = datetime.fromisoformat(point["nemTime"]) - timedelta(
+            minutes=point["duration"]
+        )
+        if point["channelType"] == "general" and (
+            interval_start.hour,
+            interval_start.minute,
+        ) == (18, 30):
+            point["perKwh"] = 38.91
+            point["advancedPrice"] = {"predicted": 38.91}
+
+    current_actual = {
+        "general": {"perKwh": 593.84},
+        "feedIn": {"perKwh": -35.0},
+    }
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="none",
+        forecast_type="predicted",
+        powerwall_timezone="Australia/Brisbane",
+        current_actual_interval=current_actual,
+        electricity_provider="flow_power",
+    )
+
+    rates = tariff["energy_charges"]["Summer"]["rates"]
+    assert rates["PERIOD_18_30"] == 0.3891
+    assert rates["PERIOD_18_30"] != 5.9384
+
+
+def test_flow_power_pea_uses_current_wholesale_without_raw_tariff_injection(
+    tariff_converter_module,
+    monkeypatch,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 23, 18, 38, tzinfo=brisbane).astimezone(tz)
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", FixedDatetime)
+
+    forecast = _day_intervals(datetime(2026, 6, 23, tzinfo=brisbane))
+    for point in forecast:
+        interval_start = datetime.fromisoformat(point["nemTime"]) - timedelta(
+            minutes=point["duration"]
+        )
+        if point["channelType"] == "general" and (
+            interval_start.hour,
+            interval_start.minute,
+        ) == (18, 30):
+            point["perKwh"] = 65.46
+            point["advancedPrice"] = {"predicted": 65.46}
+
+    current_actual = {
+        "general": {
+            "nemTime": datetime(2026, 6, 23, 18, 35, tzinfo=brisbane).isoformat(),
+            "duration": 5,
+            "type": "CurrentInterval",
+            "channelType": "general",
+            "perKwh": 15.55,
+        },
+        "feedIn": {
+            "nemTime": datetime(2026, 6, 23, 18, 35, tzinfo=brisbane).isoformat(),
+            "duration": 5,
+            "type": "CurrentInterval",
+            "channelType": "feedIn",
+            "perKwh": 0.0,
+        },
+    }
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="none",
+        forecast_type="predicted",
+        powerwall_timezone="Australia/Brisbane",
+        current_actual_interval=current_actual,
+        electricity_provider="flow_power",
+    )
+    rates = tariff["energy_charges"]["Summer"]["rates"]
+    assert rates["PERIOD_18_30"] == 0.6546
+    assert rates["PERIOD_18_30"] != 0.1555
+
+    wholesale_lookup = tariff_converter_module.get_wholesale_lookup(
+        forecast,
+        current_actual_interval=current_actual,
+    )
+    assert wholesale_lookup["PERIOD_18_30"] == 0.1555
+
+    adjusted = tariff_converter_module.apply_flow_power_pea(
+        tariff,
+        wholesale_lookup,
+        base_rate=31.707,
+        twap=13.55,
+        tariff_rate_lookup={"PERIOD_18_30": 8.05},
+        avg_daily_tariff=8.85,
+        bpea=0.0,
+        gst_multiplier=1.1,
+    )
+
+    adjusted_rates = adjusted["energy_charges"]["Summer"]["rates"]
+    assert adjusted_rates["PERIOD_18_30"] == 0.4196
+    assert adjusted_rates["PERIOD_18_30"] != 0.8801
+
+
 def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
     sigenergy_api_module,
     tariff_converter_module,
@@ -259,6 +380,42 @@ def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
     assert sell_by_start["20:30"] != buy_by_start["20:30"]
 
 
+def test_chip_mode_threshold_uses_unboosted_tesla_tariff_price(tariff_converter_module):
+    tariff = {
+        "sell_tariff": {
+            "energy_charges": {
+                "Summer": {
+                    "rates": {
+                        "PERIOD_17_00": 0.208,
+                        "PERIOD_17_30": 0.26,
+                    }
+                }
+            }
+        }
+    }
+    reference_tariff = copy.deepcopy(tariff)
+
+    boosted = tariff_converter_module.apply_export_boost(
+        tariff,
+        offset_cents=10.0,
+        boost_start="17:00",
+        boost_end="18:00",
+        activation_threshold_cents=0.0,
+    )
+    chipped = tariff_converter_module.apply_chip_mode(
+        boosted,
+        chip_start="17:00",
+        chip_end="18:00",
+        threshold_cents=25.0,
+        reference_tariff=reference_tariff,
+    )
+    sell_rates = chipped["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+
+    assert boosted["sell_tariff"]["energy_charges"]["Summer"]["rates"]["PERIOD_17_30"] > 0.25
+    assert sell_rates["PERIOD_17_00"] == 0.0
+    assert sell_rates["PERIOD_17_30"] > 0.25
+
+
 def test_sigenergy_canonical_upload_converts_buy_and_sell_in_sync_helper():
     init_source = (COMPONENT_ROOT / "__init__.py").read_text()
     helper_source = init_source[
@@ -272,6 +429,23 @@ def test_sigenergy_canonical_upload_converts_buy_and_sell_in_sync_helper():
     sigenergy_upload_pos = helper_source.index("client.set_tariff_rate")
 
     assert canonical_call_pos < sell_rates_pos < sell_convert_pos < sigenergy_upload_pos
+
+
+def test_sigenergy_canonical_upload_applies_provider_tariff_adjustments_first():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    helper_source = init_source[
+        init_source.index("async def _sync_tariff_to_sigenergy"):
+        init_source.index("async def _sync_tariff_to_foxess")
+    ]
+
+    canonical_call_pos = helper_source.index("canonical_tariff = convert_amber_to_tesla_tariff")
+    provider_adjust_pos = helper_source.index(
+        "canonical_tariff = _apply_provider_tariff_adjustments"
+    )
+    buy_rates_pos = helper_source.index("canonical_buy_rates =")
+    sigenergy_upload_pos = helper_source.index("client.set_tariff_rate")
+
+    assert canonical_call_pos < provider_adjust_pos < buy_rates_pos < sigenergy_upload_pos
 
 
 def test_sigenergy_sync_resolves_demand_settings_inside_helper():
@@ -299,6 +473,78 @@ def test_sigenergy_tariff_sync_does_not_require_optional_device_id():
     assert credentials_guard in helper_source
     assert "if not all([station_id, username, pass_enc, device_id]):" not in helper_source
     assert "device_id=device_id" in helper_source
+    assert "cloud_region=cloud_region" in helper_source
+
+
+def test_sigenergy_region_detection_tolerates_setup_time_cache_miss():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    helper_source = init_source[
+        init_source.index("async def _get_nem_region_from_amber"):
+        init_source.index("def _record_flow_power_twap_sample")
+    ]
+
+    assert "domain_data = hass.data.get(DOMAIN, {})" in helper_source
+    assert "entry_domain_data = domain_data.get(entry.entry_id, {})" in helper_source
+    assert 'hass.data[DOMAIN][entry.entry_id].get("amber_nem_region")' not in helper_source
+    assert "if entry.entry_id in domain_data:" in helper_source
+
+
+def test_sigenergy_cloud_region_is_collected_and_persisted():
+    config_flow_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+
+    credentials_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_credentials"):
+        config_flow_source.index("async def async_step_sigenergy_station")
+    ]
+    connection_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_connection"):
+        config_flow_source.index("async def async_step_sungrow_connection")
+    ]
+    init_source = config_flow_source[
+        config_flow_source.index("async def async_step_init_sigenergy"):
+        config_flow_source.index("async def async_step_init_sungrow")
+    ]
+
+    assert "CONF_SIGENERGY_CLOUD_REGION" in credentials_source
+    assert "CONF_SIGENERGY_CLOUD_REGION: cloud_region" in credentials_source
+    assert "CONF_SIGENERGY_CLOUD_REGION" in connection_source
+    assert (
+        "new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region"
+        in connection_source
+    )
+    assert "new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)" in connection_source
+    assert "CONF_SIGENERGY_CLOUD_REGION" in init_source
+    assert (
+        "new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region"
+        in init_source
+    )
+
+
+def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_id():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    helper_source = init_source[
+        init_source.index("async def _sync_tariff_to_sigenergy"):
+        init_source.index("async def _sync_tariff_to_foxess")
+    ]
+
+    assert "CONF_SIGENERGY_TARIFF_STATION_ID" in helper_source
+    assert "CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID" in helper_source
+    assert "new_data[CONF_SIGENERGY_STATION_ID] = tariff_station_id" not in helper_source
+    assert "configured station ID remains" in helper_source
+    assert "station_id=tariff_station_id" in helper_source
+
+
+def test_sigenergy_station_picker_preserves_system_id_and_caches_tariff_id():
+    config_flow_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+    helper_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_station"):
+        config_flow_source.index("async def async_step_sigenergy_modbus")
+    ]
+
+    assert "CONF_SIGENERGY_TARIFF_STATION_ID" in helper_source
+    assert "CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID" in helper_source
+    assert "not value.isdigit()" in helper_source
+    assert "station_tariff_ids[station_id] = tariff_station_id" in helper_source
 
 
 class _FakeTariffResponse:
@@ -334,12 +580,64 @@ class _FakeTariffSession:
     def __init__(self, responses: list[_FakeTariffResponse]):
         self.responses = responses
         self.post_calls = 0
+        self.post_args = []
         self.post_kwargs = []
 
     def post(self, *args, **kwargs):
         self.post_calls += 1
+        self.post_args.append(args)
         self.post_kwargs.append(kwargs)
         return self.responses.pop(0)
+
+
+def test_sigenergy_client_uses_region_specific_base_url(sigenergy_api_module):
+    client = sigenergy_api_module.SigenergyAPIClient(cloud_region="eu")
+
+    assert client.cloud_region == "eu"
+    assert client.api_base_url == "https://api-eu.sigencloud.com"
+    assert (
+        client._url(sigenergy_api_module.SIGENERGY_AUTH_ENDPOINT)
+        == "https://api-eu.sigencloud.com/auth/oauth/token"
+    )
+
+
+def test_sigenergy_client_defaults_unknown_region_to_aus(sigenergy_api_module):
+    client = sigenergy_api_module.SigenergyAPIClient(cloud_region="mars")
+
+    assert client.cloud_region == "aus"
+    assert client.api_base_url == "https://api-aus.sigencloud.com"
+
+
+def test_sigenergy_tariff_region_map_accepts_sa_power_short_name(sigenergy_api_module):
+    source = Path(sigenergy_api_module.__file__).read_text()
+
+    assert '"SA Power Networks": "SA1"' in source
+    assert '"SA Power": "SA1"' in source
+
+
+def test_sigenergy_set_tariff_uses_configured_region_endpoint(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        cloud_region="eu",
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[{"timeRange": "00:00-00:30", "price": 1.0}],
+            sell_prices=[{"timeRange": "00:00-00:30", "price": 0.0}],
+        )
+    )
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert session.post_args[0][0] == (
+        "https://api-eu.sigencloud.com/device/stationelecsetprice/save"
+    )
 
 
 def test_sigenergy_set_tariff_retries_429_with_retry_after(
@@ -382,7 +680,7 @@ def test_sigenergy_set_tariff_retries_429_with_retry_after(
     assert sleeps == [0.25]
 
 
-def test_sigenergy_set_tariff_preserves_alphanumeric_station_id(
+def test_sigenergy_set_tariff_rejects_alphanumeric_system_id(
     sigenergy_api_module,
 ):
     session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
@@ -400,8 +698,46 @@ def test_sigenergy_set_tariff_preserves_alphanumeric_station_id(
         )
     )
 
-    assert result == {"success": True, "message": "Tariff updated"}
-    assert session.post_kwargs[0]["json"]["stationId"] == "TUWXW1774845255"
+    assert "Station ID must be numeric" in result["error"]
+    assert session.post_calls == 0
+
+
+def test_sigenergy_extract_tariff_station_id_prefers_numeric_station_id(
+    sigenergy_api_module,
+):
+    station = {
+        "id": "ERSUO1757055255",
+        "stationId": "102025092300219",
+        "stationName": "Home",
+    }
+
+    assert sigenergy_api_module.extract_tariff_station_id(station) == "102025092300219"
+
+
+def test_sigenergy_resolves_configured_system_id_to_numeric_station_id(
+    sigenergy_api_module,
+):
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+    )
+
+    async def fake_get_stations():
+        return {
+            "stations": [
+                {
+                    "id": "ERSUO1757055255",
+                    "stationId": "102025092300219",
+                    "stationName": "Home",
+                }
+            ]
+        }
+
+    client.get_stations = fake_get_stations
+
+    result = asyncio.run(client.resolve_tariff_station_id(" ERSUO1757055255 "))
+
+    assert result == {"station_id": "102025092300219", "resolved": True}
 
 
 def test_sigenergy_set_tariff_stops_after_repeated_429(

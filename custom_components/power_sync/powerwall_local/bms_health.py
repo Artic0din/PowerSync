@@ -316,7 +316,7 @@ def reconcile_pack_remaining_with_aggregate(
         return packs
 
     if logger:
-        logger.warning(
+        logger.debug(
             "fleet_api_bms: reconciling %d serial-less near-empty expansion pack(s) "
             "from aggregate remaining energy (pack sum %.0f Wh, aggregate %.0f Wh)",
             len(candidates),

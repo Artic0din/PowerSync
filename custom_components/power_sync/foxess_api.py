@@ -30,6 +30,39 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_REQUEST_INTERVAL = 1.0
 _MIN_WRITE_INTERVAL = 2.0
 
+# FoxESS marks success with errno or code; values vary by endpoint/region.
+_FOXESS_SUCCESS_CODES = (0, 200, "0", "200")
+
+
+class FoxESSApiError(Exception):
+    """FoxESS Open API error carrying the numeric/string error code."""
+
+    def __init__(self, message: str, code: object = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _is_scheduler_blocks_work_mode(error: Exception) -> bool:
+    """Detect FoxESS 44096 (WorkMode write blocked by an active schedule)."""
+    if isinstance(error, FoxESSApiError) and str(error.code) == "44096":
+        return True
+    message = str(error).lower()
+    return "44096" in message or "unsupported function code" in message
+
+
+def _is_setting_unsupported(error: Exception) -> bool:
+    """Detect FoxESS errors meaning a device setting key is not supported."""
+    code = str(getattr(error, "code", "") or "")
+    if code in ("40257", "42015"):
+        return True
+    message = str(error)
+    return (
+        "40257" in message
+        or "42015" in message
+        or "does not currently support" in message
+        or "Parameters do not meet expectations" in message
+    )
+
 
 def _extract_device_sn(device: dict) -> str:
     """Return a FoxESS serial number from known Open API response keys."""
@@ -55,22 +88,27 @@ def _schedule_extra_params(
     fd_soc: float = 100,
     fd_pwr: float = 0,
     max_soc: float = 100,
-    import_limit: float = 30000,
-    export_limit: float = 30000,
-    pv_limit: float = 30000,
-    reactive_power: float = 0,
+    import_limit: Optional[float] = None,
+    export_limit: Optional[float] = None,
+    pv_limit: Optional[float] = None,
+    reactive_power: Optional[float] = None,
 ) -> dict:
-    """Return Scheduler V3 extraParam with conservative defaults."""
-    return {
+    """Return Scheduler V3 extraParam without overwriting omitted device limits."""
+    params = {
         "minSocOnGrid": float(min_soc),
         "fdSoc": float(fd_soc),
         "fdPwr": float(fd_pwr),
         "maxSoc": float(max_soc),
-        "importLimit": float(import_limit),
-        "exportLimit": float(export_limit),
-        "pvLimit": float(pv_limit),
-        "reactivePower": float(reactive_power),
     }
+    if import_limit is not None:
+        params["importLimit"] = float(import_limit)
+    if export_limit is not None:
+        params["exportLimit"] = float(export_limit)
+    if pv_limit is not None:
+        params["pvLimit"] = float(pv_limit)
+    if reactive_power is not None:
+        params["reactivePower"] = float(reactive_power)
+    return params
 
 
 class FoxESSCloudClient:
@@ -181,17 +219,23 @@ class FoxESSCloudClient:
         async with session.request(request_method, url, **kwargs) as response:
             if response.status != 200:
                 text = await response.text()
-                raise Exception(f"FoxESS API HTTP {response.status}: {text}")
+                raise FoxESSApiError(
+                    f"FoxESS API HTTP {response.status}: {text}",
+                    f"http_{response.status}",
+                )
 
             data = await response.json()
 
-            # FoxESS API uses errno: 0 = success
-            errno = data.get("errno", -1)
-            if errno != 0:
-                msg = data.get("msg", "Unknown error")
-                raise Exception(f"FoxESS API error {errno}: {msg}")
+            # FoxESS marks success via errno or code; accept 0/200 (and string forms).
+            errno = data.get("errno", data.get("code", 0))
+            if errno not in _FOXESS_SUCCESS_CODES:
+                msg = data.get("msg", data.get("message", "Unknown error"))
+                raise FoxESSApiError(f"FoxESS API error {errno}: {msg}", errno)
 
-            return data.get("result", data)
+            for key in ("result", "data"):
+                if data.get(key) is not None:
+                    return data[key]
+            return data
 
     async def _post(self, path: str, payload: dict, *, write: bool = False) -> dict:
         """Make authenticated POST request to FoxESS API."""
@@ -239,8 +283,12 @@ class FoxESSCloudClient:
                 "pvPower",
                 "gridConsumptionPower",
                 "feedinPower",
+                "meterPower",
                 "loadsPower",
                 "batPower",
+                "invBatPower",
+                "batChargePower",
+                "batDischargePower",
                 "SoC",
                 "workMode",
                 "generationPower",
@@ -287,6 +335,12 @@ class FoxESSCloudClient:
         """Set Scheduler V3 time segment information."""
         return await self.set_scheduler(sn or self.device_sn, groups)
 
+    async def set_scheduler_flag(self, enabled: bool, sn: str = "") -> dict:
+        """Enable or disable the Scheduler V3 flag for a device."""
+        path = "/op/v1/device/scheduler/set/flag"
+        payload = {"deviceSN": sn or self.device_sn, "enable": 1 if enabled else 0}
+        return await self._post(path, payload, write=True)
+
     async def get_device_setting(self, key: str, sn: str = "") -> dict:
         """Get a cloud device setting by key."""
         path = "/op/v0/device/setting/get"
@@ -300,6 +354,39 @@ class FoxESSCloudClient:
             {"sn": sn or self.device_sn, "key": key, "value": value},
             write=True,
         )
+
+    async def set_device_setting_optional(self, key: str, value, sn: str = "") -> bool:
+        """Set a setting, tolerating models that don't support the key.
+
+        Returns True if applied, False if FoxESS rejected the key as unsupported.
+        Other errors propagate.
+        """
+        try:
+            await self.set_device_setting(key, value, sn)
+            return True
+        except FoxESSApiError as err:
+            if _is_setting_unsupported(err):
+                _LOGGER.debug("FoxESS setting %s unsupported on this device: %s", key, err)
+                return False
+            raise
+
+    async def set_work_mode(self, mode: str, sn: str = "") -> dict:
+        """Set device WorkMode, disabling an active schedule on 44096 then retrying.
+
+        FoxESS rejects WorkMode writes with errno 44096 while Mode Scheduler is
+        active. Mirror the cloud worker: disable the scheduler flag, then retry.
+        """
+        device_sn = sn or self.device_sn
+        try:
+            return await self.set_device_setting("WorkMode", mode, device_sn)
+        except FoxESSApiError as err:
+            if not _is_scheduler_blocks_work_mode(err):
+                raise
+            _LOGGER.warning(
+                "FoxESS WorkMode blocked by active scheduler; disabling scheduler and retrying"
+            )
+            await self.set_scheduler_flag(False, device_sn)
+            return await self.set_device_setting("WorkMode", mode, device_sn)
 
     async def get_battery_soc(self, sn: str = "") -> dict:
         """Get min SOC settings for the device battery."""
@@ -431,10 +518,10 @@ def to_scheduler_v3_group(group: dict) -> dict:
             fd_soc=group.get("fdSoc", group.get("fdsoc", 100)),
             fd_pwr=group.get("fdPwr", group.get("fdpwr", 0)),
             max_soc=group.get("maxSoc", group.get("maxsoc", 100)),
-            import_limit=group.get("importLimit", 30000),
-            export_limit=group.get("exportLimit", 30000),
-            pv_limit=group.get("pvLimit", 30000),
-            reactive_power=group.get("reactivePower", 0),
+            import_limit=group.get("importLimit"),
+            export_limit=group.get("exportLimit"),
+            pv_limit=group.get("pvLimit"),
+            reactive_power=group.get("reactivePower"),
         )
 
     return {

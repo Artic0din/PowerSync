@@ -16,7 +16,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
 from .const import (
+    DEFAULT_SIGENERGY_CLOUD_REGION,
     SIGENERGY_API_BASE_URL,
+    SIGENERGY_API_BASE_URLS,
     SIGENERGY_AUTH_ENDPOINT,
     SIGENERGY_SAVE_PRICE_ENDPOINT,
     SIGENERGY_STATIONS_ENDPOINT,
@@ -63,6 +65,7 @@ class SigenergyAPIClient:
         username: Optional[str] = None,
         pass_enc: Optional[str] = None,
         device_id: Optional[str] = None,
+        cloud_region: Optional[str] = None,
         access_token: Optional[str] = None,
         refresh_token: Optional[str] = None,
         token_expires_at: Optional[datetime] = None,
@@ -75,6 +78,7 @@ class SigenergyAPIClient:
             username: Sigenergy account email
             pass_enc: Encrypted password (from browser dev tools)
             device_id: Optional device identifier (13 digits, no longer required by Sigenergy)
+            cloud_region: Sigenergy regional data centre code (aus, eu, us, apac, cn)
             access_token: OAuth access token (if already authenticated)
             refresh_token: OAuth refresh token (for token refresh)
             token_expires_at: Token expiration datetime (if known)
@@ -84,12 +88,31 @@ class SigenergyAPIClient:
         self.username = username
         self.pass_enc = pass_enc
         self.device_id = device_id  # Optional — Sigenergy may no longer require it
+        self.cloud_region = self._normalize_cloud_region(cloud_region)
+        self.api_base_url = SIGENERGY_API_BASE_URLS.get(
+            self.cloud_region,
+            SIGENERGY_API_BASE_URL,
+        )
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.token_expires_at = token_expires_at
         self._session = session
         self._own_session = False
         self._on_token_refresh = on_token_refresh
+
+    @staticmethod
+    def _normalize_cloud_region(cloud_region: Optional[str]) -> str:
+        """Return a supported Sigenergy cloud region, defaulting to AUS."""
+        region = str(cloud_region or DEFAULT_SIGENERGY_CLOUD_REGION).strip().lower()
+        return (
+            region
+            if region in SIGENERGY_API_BASE_URLS
+            else DEFAULT_SIGENERGY_CLOUD_REGION
+        )
+
+    def _url(self, endpoint: str) -> str:
+        """Build a Sigenergy API URL for the configured regional data centre."""
+        return f"{self.api_base_url}{endpoint}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session."""
@@ -113,7 +136,7 @@ class SigenergyAPIClient:
         if not self.username or not self.pass_enc:
             return {"error": "Username and encrypted password are required"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_AUTH_ENDPOINT}"
+        url = self._url(SIGENERGY_AUTH_ENDPOINT)
 
         headers = {
             "Authorization": SIGENERGY_BASIC_AUTH,
@@ -132,7 +155,11 @@ class SigenergyAPIClient:
 
         try:
             session = await self._get_session()
-            _LOGGER.info(f"Authenticating with Sigenergy for user: {self.username}")
+            _LOGGER.info(
+                "Authenticating with Sigenergy for user %s via %s cloud",
+                self.username,
+                self.cloud_region,
+            )
 
             async with session.post(url, headers=headers, data=data, timeout=30) as response:
                 if response.status != 200:
@@ -188,7 +215,7 @@ class SigenergyAPIClient:
         if not self.refresh_token:
             return {"error": "No refresh token available"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_AUTH_ENDPOINT}"
+        url = self._url(SIGENERGY_AUTH_ENDPOINT)
 
         headers = {
             "Authorization": SIGENERGY_BASIC_AUTH,
@@ -282,7 +309,7 @@ class SigenergyAPIClient:
         if not await self._ensure_token():
             return {"error": "Not authenticated"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_STATIONS_ENDPOINT}"
+        url = self._url(SIGENERGY_STATIONS_ENDPOINT)
 
         headers = {
             "Authorization": f"Bearer {self.access_token}",
@@ -333,14 +360,28 @@ class SigenergyAPIClient:
         if not await self._ensure_token():
             return {"error": "Not authenticated"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_SAVE_PRICE_ENDPOINT}"
+        url = self._url(SIGENERGY_SAVE_PRICE_ENDPOINT)
 
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
 
-        station_id = str(station_id).strip()
+        station_id = _normalize_station_id(station_id)
+        if not _is_numeric_station_id(station_id):
+            _LOGGER.error(
+                "Sigenergy tariff sync requires the numeric tariff stationId, "
+                "but configured station ID is %r. Ask SigenAI for 'StationID' "
+                "or reselect the station in PowerSync options.",
+                station_id,
+            )
+            return {
+                "error": (
+                    "Sigenergy tariff Station ID must be numeric. "
+                    "Ask SigenAI for 'StationID' or reselect the station in "
+                    "PowerSync options."
+                )
+            }
 
         # Build the payload in Sigenergy's expected format
         payload = {
@@ -452,6 +493,52 @@ class SigenergyAPIClient:
             _LOGGER.error(f"Set tariff error: {e}")
             return {"error": str(e)}
 
+    async def resolve_tariff_station_id(self, configured_station_id: str) -> dict:
+        """Resolve a configured station identifier to Sigenergy's numeric tariff ID.
+
+        The tariff-save endpoint expects the numeric ``stationId`` used by the
+        mySigen tariff payload. Some station-list responses also expose
+        alphanumeric system IDs (for example ERSUO...), which authenticate fine
+        but fail tariff uploads with a generic cloud 500.
+        """
+        configured = _normalize_station_id(configured_station_id)
+        if _is_numeric_station_id(configured):
+            return {"station_id": configured, "resolved": False}
+
+        stations_result = await self.get_stations()
+        if "error" in stations_result:
+            return {
+                "error": (
+                    "Configured Sigenergy station ID is not numeric and the "
+                    f"station list could not be fetched: {stations_result['error']}"
+                )
+            }
+
+        configured_key = configured.upper()
+        for station in stations_result.get("stations", []):
+            if not isinstance(station, dict):
+                continue
+            if not _station_matches_configured_id(station, configured_key):
+                continue
+
+            resolved = extract_tariff_station_id(station)
+            if resolved:
+                _LOGGER.info(
+                    "Resolved Sigenergy tariff station ID %r to numeric stationId %s",
+                    configured,
+                    resolved,
+                )
+                return {"station_id": resolved, "resolved": True}
+
+        return {
+            "error": (
+                "Configured Sigenergy station ID is not numeric and no matching "
+                "numeric stationId was found in the account station list. Ask "
+                "SigenAI for 'StationID' or reselect the station in PowerSync "
+                "options."
+            )
+        }
+
     async def test_connection(self) -> tuple[bool, str]:
         """Test the connection to Sigenergy API.
 
@@ -494,6 +581,52 @@ def _sigenergy_retry_after(retry_after: str | None, *, attempt: int) -> float:
             pass
 
     return min(5.0 * attempt, 30.0)
+
+
+def _normalize_station_id(station_id: Any) -> str:
+    """Return a trimmed station identifier string."""
+    return "" if station_id is None else str(station_id).strip()
+
+
+def _is_numeric_station_id(station_id: Any) -> bool:
+    """Return True when the value is a tariff endpoint stationId."""
+    return _normalize_station_id(station_id).isdigit()
+
+
+def extract_tariff_station_id(station: dict[str, Any]) -> str | None:
+    """Extract the numeric stationId needed by Sigenergy tariff uploads."""
+    for key in ("stationId", "station_id", "stationID"):
+        value = _normalize_station_id(station.get(key))
+        if _is_numeric_station_id(value):
+            return value
+
+    for key in ("id", "plantId", "systemId"):
+        value = _normalize_station_id(station.get(key))
+        if _is_numeric_station_id(value):
+            return value
+
+    return None
+
+
+def _station_matches_configured_id(station: dict[str, Any], configured_key: str) -> bool:
+    """Return True when a station-list row matches the configured identifier."""
+    for key in (
+        "stationId",
+        "station_id",
+        "stationID",
+        "id",
+        "plantId",
+        "systemId",
+        "stationSn",
+        "stationSN",
+        "stationCode",
+        "stationName",
+        "name",
+    ):
+        value = _normalize_station_id(station.get(key))
+        if value and value.upper() == configured_key:
+            return True
+    return False
 
 
 def convert_tariff_rates_to_sigenergy(rates: dict[str, Any]) -> list[dict]:
@@ -673,6 +806,7 @@ def convert_amber_prices_to_sigenergy(
         "Ergon Energy": "QLD1",
         # SA networks
         "SA Power Networks": "SA1",
+        "SA Power": "SA1",
         # TAS networks
         "TasNetworks": "TAS1",
     }

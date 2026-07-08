@@ -400,6 +400,106 @@ def test_tesla_lifetime_totals_coerces_persisted_values():
     assert totals == {"lifetime_grid_export_kwh": 604.96}
 
 
+def test_tesla_battery_level_preserves_last_valid_soc_when_live_status_omits_it():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    assert tesla._resolve_battery_level_pct({"percentage_charged": 84.3}) == 84.3
+    assert tesla._resolve_battery_level_pct({"wall_connectors": []}) == 84.3
+
+
+def test_tesla_battery_level_missing_without_cache_returns_none():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    assert tesla._resolve_battery_level_pct({"wall_connectors": []}) is None
+
+
+def test_tesla_uses_powerwall_local_snapshot_when_cloud_status_is_empty():
+    snap = SimpleNamespace(
+        soc=76.5,
+        solar_w=5200.0,
+        battery_w=-3100.0,
+        grid_w=400.0,
+        load_w=2500.0,
+        grid_status="SystemGridConnected",
+        total_pack_full_wh=27000.0,
+        total_pack_remaining_wh=20655.0,
+    )
+    hass = _FakeHass(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "powerwall_local": {
+                        "coordinator": SimpleNamespace(data=snap),
+                    },
+                },
+            },
+        },
+    )
+    tesla = coordinator.TeslaEnergyCoordinator(
+        hass,
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    data = tesla._local_powerwall_energy_data()
+
+    assert data["data_source"] == "powerwall_local"
+    assert data["battery_level"] == 76.5
+    assert data["solar_power"] == 5.2
+    assert data["battery_power"] == -3.1
+    assert data["grid_power"] == 0.4
+    assert data["load_power"] == 2.5
+    assert data["grid_status"] == "Active"
+    assert data["total_pack_energy_kwh"] == 27.0
+    assert data["energy_left_kwh"] == 20.66
+
+
+def test_tesla_outage_notification_waits_for_sustained_failure():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    for now in (100.0, 115.0, 130.0, 145.0, 160.0):
+        should_notify, failure_duration = tesla._record_tesla_update_failure(now)
+
+    assert tesla._consecutive_failures == 5
+    assert tesla._failure_streak_start == 100.0
+    assert failure_duration == 60.0
+    assert should_notify is False
+    assert tesla._outage_notified is False
+
+
+def test_tesla_outage_notification_fires_after_sustained_failure():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    for now in (100.0, 115.0, 130.0, 145.0, 401.0):
+        should_notify, failure_duration = tesla._record_tesla_update_failure(now)
+
+    assert tesla._consecutive_failures == 5
+    assert tesla._failure_streak_start == 100.0
+    assert failure_duration == 301.0
+    assert should_notify is True
+
+
 def test_stored_battery_health_capacity_uses_bms_current_capacity():
     hass = _FakeHass(
         data={

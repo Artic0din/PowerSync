@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from .ev_ownership import is_solar_surplus_owner_mode
+
 
 ACTIVE_POWER_THRESHOLD_KW = 0.05
 DEFAULT_LOADPOINT_KEYS = {"default", "genericev", "ev"}
@@ -187,6 +189,41 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
     target["is_charging"] = bool(target.get("is_charging")) or bool(source.get("is_charging"))
 
 
+def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Merge bridge/loadpoint telemetry into a physical Tesla observation.
+
+    Wall Connector power is the loadpoint measurement, so it should replace a
+    stale per-vehicle charger_power value even when the value went down.
+    """
+    source_power = _float_value(
+        source.get("ev_power_kw", source.get("current_power_kw")),
+        0.0,
+    )
+    target_power = _float_value(
+        target.get("ev_power_kw", target.get("current_power_kw")),
+        0.0,
+    )
+    if source_power > ACTIVE_POWER_THRESHOLD_KW or target_power <= ACTIVE_POWER_THRESHOLD_KW:
+        target["ev_power_kw"] = source_power
+        target["current_power_kw"] = source_power
+
+    source_soc = source.get("ev_soc", source.get("current_soc"))
+    if source_soc is not None:
+        target["ev_soc"] = source_soc
+        target["current_soc"] = source_soc
+
+    source_charging = (
+        bool(source.get("is_charging"))
+        or source_power > ACTIVE_POWER_THRESHOLD_KW
+    )
+    target["is_connected"] = (
+        bool(target.get("is_connected"))
+        or bool(source.get("is_connected"))
+        or source_charging
+    )
+    target["is_charging"] = bool(target.get("is_charging")) or source_charging
+
+
 def _physical_tesla_observation_key(observation: Mapping[str, Any]) -> str:
     """Return a stable key for duplicate Fleet/Tesla observations."""
     if not _is_physical_tesla_observation(observation):
@@ -227,6 +264,56 @@ def _merge_duplicate_physical_tesla_observations(
     return merged
 
 
+def _merge_single_bridge_loadpoint(
+    observations: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Collapse a Wall Connector bridge row into the single active Tesla row."""
+    bridge_indexes = [
+        index for index, observation in enumerate(observations)
+        if (
+            _is_bridge_loadpoint(observation)
+            and (
+                bool(observation.get("is_connected"))
+                or bool(observation.get("is_charging"))
+                or _float_value(
+                    observation.get("ev_power_kw", observation.get("current_power_kw")),
+                    0.0,
+                ) > ACTIVE_POWER_THRESHOLD_KW
+            )
+        )
+    ]
+    candidates = [
+        index for index, observation in enumerate(observations)
+        if (
+            index not in bridge_indexes
+            and not _is_generic_observation(observation)
+            and not _is_bridge_loadpoint(observation)
+            and _is_physical_tesla_observation(observation)
+            and (
+                bool(observation.get("is_connected"))
+                or bool(observation.get("is_charging"))
+                or _float_value(
+                    observation.get("ev_power_kw", observation.get("current_power_kw")),
+                    0.0,
+                ) > ACTIVE_POWER_THRESHOLD_KW
+            )
+        )
+    ]
+
+    if len(bridge_indexes) != 1 or len(candidates) != 1:
+        return observations
+
+    merged = [
+        dict(observation) if index == candidates[0] else observation
+        for index, observation in enumerate(observations)
+    ]
+    _merge_bridge_observation_status(merged[candidates[0]], observations[bridge_indexes[0]])
+    return [
+        observation for index, observation in enumerate(merged)
+        if index != bridge_indexes[0]
+    ]
+
+
 def coalesce_vehicle_observations(
     observed_vehicles: Iterable[Mapping[str, Any]] | None,
 ) -> list[Mapping[str, Any]]:
@@ -259,12 +346,12 @@ def coalesce_vehicle_observations(
             for index, observation in enumerate(observations)
         ]
         _merge_observation_status(merged[candidates[0]], observations[ble_indexes[0]])
-        return [
+        return _merge_single_bridge_loadpoint([
             observation for index, observation in enumerate(merged)
             if index != ble_indexes[0]
-        ]
+        ])
 
-    return observations
+    return _merge_single_bridge_loadpoint(observations)
 
 
 def _display_name(vehicle_id: str, state: Mapping[str, Any]) -> str:
@@ -288,6 +375,20 @@ def _status_source(
     if allocated_surplus_kw is not None:
         solar_kw = max(solar_kw, allocated_surplus_kw)
     return "solar" if solar_kw >= power_kw * 0.8 else "grid"
+
+
+def _loadpoint_source(
+    power_kw: float,
+    surplus_kw: float,
+    owner_mode: Any = None,
+    allocated_surplus_kw: float | None = None,
+) -> str:
+    if (
+        power_kw > ACTIVE_POWER_THRESHOLD_KW
+        and is_solar_surplus_owner_mode(owner_mode)
+    ):
+        return "solar"
+    return _status_source(power_kw, surplus_kw, allocated_surplus_kw)
 
 
 def charging_state_plugged_status(value: Any) -> bool | None:
@@ -456,6 +557,27 @@ def _find_observation(
     return None, None
 
 
+def _has_ambiguous_default_observations(
+    observations: list[Mapping[str, Any]],
+    used_indexes: set[int],
+) -> bool:
+    matches = 0
+    for index, observation in enumerate(observations):
+        if index in used_indexes or _is_generic_observation(observation):
+            continue
+        power_kw = _float_value(
+            observation.get("ev_power_kw", observation.get("current_power_kw")),
+            0.0,
+        )
+        charging = bool(observation.get("is_charging")) or power_kw > ACTIVE_POWER_THRESHOLD_KW
+        connected = bool(observation.get("is_connected")) or charging
+        if connected:
+            matches += 1
+            if matches > 1:
+                return True
+    return False
+
+
 def _lookup_alias(
     values: Mapping[str, Mapping[str, Any]] | None,
     *keys: Any,
@@ -519,7 +641,12 @@ def _dynamic_loadpoint(
             loadpoint_id = observation_vehicle_id
 
     current_amps = _int_value(state.get("current_amps"), 0)
+    observed_amps = _int_value((observation or {}).get("current_amps"), 0)
+    if current_amps <= 0 and observed_amps > 0:
+        current_amps = observed_amps
     target_amps = _int_value(state.get("target_amps"), current_amps)
+    if target_amps <= 0 and observed_amps > 0:
+        target_amps = observed_amps
     voltage = _float_value(params.get("voltage"), 240.0)
     phases = _float_value(params.get("phases"), 1.0)
     commanded_power_kw = current_amps * voltage * phases / 1000
@@ -591,7 +718,12 @@ def _dynamic_loadpoint(
         "status": status,
         "owner": owner,
         "owner_mode": owner_mode,
-        "source": _status_source(power_kw, site_surplus_kw, allocated_surplus_kw),
+        "source": _loadpoint_source(
+            power_kw,
+            site_surplus_kw,
+            owner_mode,
+            allocated_surplus_kw,
+        ),
         "current_power_kw": round(power_kw, 2),
         "commanded_power_kw": round(commanded_power_kw, 2),
         "current_amps": current_amps,
@@ -650,7 +782,11 @@ def _observed_loadpoint(
         "status": status,
         "owner": (ownership or {}).get("owner") or "external",
         "owner_mode": (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
-        "source": _status_source(power_kw, site_surplus_kw),
+        "source": _loadpoint_source(
+            power_kw,
+            site_surplus_kw,
+            (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
+        ),
         "current_power_kw": round(power_kw, 2),
         "commanded_power_kw": None,
         "current_amps": current_amps,
@@ -680,22 +816,26 @@ def build_generic_charger_observation(
     switch_state: Any = None,
     amps_value: Any = None,
     status_state: Any = None,
+    power_value: Any = None,
     soc_value: Any = None,
 ) -> dict[str, Any]:
     """Build an observed loadpoint record for a generic HA charger."""
     normalized_status = _normal_key(status_state)
     switch_on = str(switch_state).lower() in ("on", "true", "1", "charging")
     current_amps = _int_value(amps_value, 0)
+    power_kw = _float_value(power_value, 0.0)
+    if power_kw > 100:
+        power_kw /= 1000
 
     status_says_connected = normalized_status in GENERIC_CONNECTED_STATES
     status_says_charging = normalized_status in GENERIC_CHARGING_STATES
 
-    is_connected = switch_on or status_says_connected
-    is_charging = status_says_charging
+    is_connected = switch_on or status_says_connected or power_kw > ACTIVE_POWER_THRESHOLD_KW
+    is_charging = status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
     blocking_reason = None
     if normalized_status in {"paused", "suspendedevse", "suspendedev", "finishing", "faulted"}:
         blocking_reason = str(status_state)
-    elif current_amps > 0 and not is_charging:
+    elif current_amps > 0 and power_kw <= ACTIVE_POWER_THRESHOLD_KW and not status_says_charging:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
 
     return {
@@ -705,7 +845,7 @@ def build_generic_charger_observation(
         "charger_type": "generic",
         "current_amps": current_amps,
         "target_amps": current_amps,
-        "ev_power_kw": 0.0,
+        "ev_power_kw": power_kw,
         "ev_soc": _optional_int(soc_value),
         "is_connected": is_connected,
         "is_charging": is_charging,
@@ -748,6 +888,12 @@ def build_loadpoint_status(
                     if _is_generic_observation(obs):
                         used_indexes.add(obs_index)
         ownership = _lookup_alias(ownerships, vehicle_id)
+        if (
+            index is None
+            and _is_default_loadpoint(vehicle_id, vehicle_name)
+            and _has_ambiguous_default_observations(observations, used_indexes)
+        ):
+            continue
         loadpoints.append(
             _dynamic_loadpoint(vehicle_id, state, observation, site_surplus_kw, ownership)
         )

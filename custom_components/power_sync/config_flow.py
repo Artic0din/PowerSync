@@ -30,6 +30,11 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .history_migration import (
+    apply_history_relink,
+    format_history_relink_summary,
+    preview_history_relink,
+)
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -85,7 +90,14 @@ from .const import (
     BATTERY_SYSTEM_FRONIUS_RESERVA,
     BATTERY_SYSTEM_NEOVOLT,
     BATTERY_SYSTEM_SOLAREDGE,
+    BATTERY_SYSTEM_ANKER_SOLIX,
+    BATTERY_SYSTEM_CUSTOM,
     BATTERY_SYSTEMS,
+    CONF_CUSTOM_BATTERY_LEVEL_ENTITY,
+    CONF_CUSTOM_BATTERY_POWER_ENTITY,
+    CONF_CUSTOM_GRID_POWER_ENTITY,
+    CONF_CUSTOM_SOLAR_POWER_ENTITY,
+    CONF_CUSTOM_LOAD_POWER_ENTITY,
     CONF_ESY_CONFIG_ENTRY_ID,
     # Solax battery system configuration
     CONF_SOLAX_CONFIG_ENTRY_ID,
@@ -104,7 +116,7 @@ from .const import (
     DEFAULT_SAJ_BATTERY_CAPACITY_KWH,
     CONF_SAJ_INVERTER_RATED_KW,
     DEFAULT_SAJ_INVERTER_RATED_KW,
-    # Fronius Reserva battery system configuration
+    # Fronius GEN24 storage battery system configuration
     CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID,
     CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH,
     CONF_FRONIUS_RESERVA_MAX_CHARGE_KW,
@@ -135,6 +147,25 @@ from .const import (
     DEFAULT_SOLAREDGE_PORT,
     DEFAULT_SOLAREDGE_SLAVE_ID,
     DEFAULT_SOLAREDGE_RATED_POWER_W,
+    # Anker Solix battery system configuration
+    CONF_ANKER_SOLIX_CONNECTION_TYPE,
+    CONF_ANKER_SOLIX_MODBUS_HOST,
+    CONF_ANKER_SOLIX_MODBUS_PORT,
+    CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+    CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+    CONF_ANKER_SOLIX_ENTITY_PREFIX,
+    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+    ANKER_SOLIX_CONNECTION_TYPES,
+    ANKER_SOLIX_CONNECTION_MODBUS,
+    ANKER_SOLIX_CONNECTION_OFFICIAL_HA,
+    ANKER_SOLIX_CONNECTION_CLOUD_HA,
+    DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+    DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+    DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+    DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+    DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -165,10 +196,16 @@ from .const import (
     CONF_SIGENERGY_PASSWORD,
     CONF_SIGENERGY_PASS_ENC,
     CONF_SIGENERGY_DEVICE_ID,
+    CONF_SIGENERGY_CLOUD_REGION,
     CONF_SIGENERGY_STATION_ID,
+    CONF_SIGENERGY_TARIFF_STATION_ID,
+    CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID,
     CONF_SIGENERGY_ACCESS_TOKEN,
     CONF_SIGENERGY_REFRESH_TOKEN,
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
+    DEFAULT_SIGENERGY_CLOUD_REGION,
+    SIGENERGY_CLOUD_REGIONS,
+    SERVICE_RESTORE_NORMAL,
     # Sigenergy DC Curtailment via Modbus
     CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
     CONF_SIGENERGY_MODBUS_HOST,
@@ -185,14 +222,44 @@ from .const import (
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
+    CONF_FLOWPOWER_EMAIL,
+    CONF_FLOWPOWER_PASSWORD,
+    CONF_FLOWPOWER_API_KEY,
+    CONF_FLOWPOWER_NMI,
+    CONF_FLOWPOWER_NETWORK_TARIFF,
     CONF_AEMO_SENSOR_ENTITY,
     CONF_AEMO_SENSOR_5MIN,
     CONF_AEMO_SENSOR_30MIN,
     AEMO_SENSOR_5MIN_PATTERN,
     AEMO_SENSOR_30MIN_PATTERN,
     ELECTRICITY_PROVIDERS,
+    CONF_GLOBIRD_EMAIL,
+    CONF_GLOBIRD_PASSWORD,
+    CONF_GLOBIRD_PLAN,
+    GLOBIRD_PLANS,
+    GLOBIRD_PLAN_NOT_ZEROHERO,
+    GLOBIRD_PLAN_ZEROHERO_CUSTOM,
+    CONF_GLOBIRD_ZEROCHARGE_START,
+    CONF_GLOBIRD_ZEROCHARGE_END,
+    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+    CONF_GLOBIRD_ZEROHERO_START,
+    CONF_GLOBIRD_ZEROHERO_END,
+    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    DEFAULT_GLOBIRD_ZEROHERO_START,
+    DEFAULT_GLOBIRD_ZEROHERO_END,
+    DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+    DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+    DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+    DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    DEFAULT_GLOBIRD_ZEROCHARGE_START,
+    DEFAULT_GLOBIRD_ZEROCHARGE_END,
+    DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
+    FLOW_POWER_KWATCH_REGIONS,
     # Flow Power PEA configuration
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
@@ -305,6 +372,7 @@ from .const import (
     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
     CONF_GENERIC_CHARGER_AMPS_ENTITY,
     CONF_GENERIC_CHARGER_STATUS_ENTITY,
+    CONF_GENERIC_CHARGER_POWER_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY_2,
     # Sigenergy EV charger configuration
@@ -313,11 +381,16 @@ from .const import (
     CONF_SIGENERGY_CHARGER_HOST,
     CONF_SIGENERGY_CHARGER_PORT,
     CONF_SIGENERGY_CHARGER_SLAVE_ID,
+    CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+    CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
     DEFAULT_SIGENERGY_CHARGER_PORT,
     DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
     SIGENERGY_CHARGER_TYPES,
     SIGENERGY_CHARGER_EVAC,
     # Solcast Solar Forecast configuration
+    CONF_SOLAR_FORECAST_PROVIDER,
+    DEFAULT_SOLAR_FORECAST_PROVIDER,
+    SOLAR_FORECAST_PROVIDERS,
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
@@ -351,6 +424,8 @@ from .const import (
     CONF_EPEX_SURCHARGE,
     CONF_EPEX_TAX_PERCENT,
     CONF_EPEX_EXPORT_RATE,
+    CONF_EPEX_IMPORT_PRICE_ENTITY,
+    CONF_EPEX_EXPORT_PRICE_ENTITY,
     EPEX_REGIONS,
     # Smart Optimization configuration
     CONF_BATTERY_MANAGEMENT_MODE,
@@ -360,25 +435,38 @@ from .const import (
     BATTERY_MANAGEMENT_MODES,
     CONF_MONITORING_MODE,
     CONF_OPTIMIZATION_ENABLED,
+    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+    CONF_OPTIMIZATION_MANUAL_RESERVE,
     CONF_OPTIMIZATION_EV_INTEGRATION,
+    CONF_OPTIMIZATION_LOAD_ENTITY,
+    CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
     CONF_HARDWARE_BACKUP_RESERVE,
     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+    CONF_OPTIMIZATION_DISABLE_IDLE,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_PROFIT_MAX_ENABLED,
+    CONF_CHARGE_BY_TIME_ENABLED,
+    CONF_CHARGE_BY_TIME_TARGET_TIME,
+    CONF_CHARGE_BY_TIME_TARGET_SOC,
     CONF_PROFIT_MAX_TARGET_TIME,
     CONF_PROFIT_MAX_TARGET_SOC,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
-    DEFAULT_PROFIT_MAX_TARGET_TIME,
-    DEFAULT_PROFIT_MAX_TARGET_SOC,
+    DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+    DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
+    supports_no_idle_mode_provider,
     # Optimization provider selection
     CONF_OPTIMIZATION_PROVIDER,
     OPT_PROVIDER_NATIVE,
@@ -453,6 +541,182 @@ SUNGROW_LEGACY_DUAL_KEYS = (
     CONF_SUNGROW_BATTERY_CAPACITY_1,
     CONF_SUNGROW_BATTERY_CAPACITY_2,
 )
+
+
+def _build_globird_plan_schema(
+    current: dict[str, Any] | None = None,
+    *,
+    rate_unit: str,
+    currency_unit: str,
+) -> vol.Schema:
+    """Build the shared GloBird plan selector schema."""
+    current = current or {}
+    hour_options = [
+        SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+        for h in range(24)
+    ]
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_GLOBIRD_PLAN,
+                default=current.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in GLOBIRD_PLANS.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_START,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    DEFAULT_GLOBIRD_ZEROHERO_START,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_END,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    DEFAULT_GLOBIRD_ZEROHERO_END,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=100.0,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=100.0,
+                    step=0.1,
+                    unit_of_measurement=rate_unit,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    unit_of_measurement=currency_unit,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=5.0,
+                    step=0.001,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_START,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_START,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_START,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_END,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_END,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_END,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=200.0,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+        }
+    )
+
+
+async def _validate_globird_credentials(email: str, password: str) -> str | None:
+    """Validate GloBird portal credentials and return a config-flow error key."""
+    from .globird_api import (
+        GloBirdAuthError,
+        GloBirdCaptchaRequired,
+        GloBirdClient,
+    )
+
+    client = GloBirdClient()
+    try:
+        await client.authenticate(email, password)
+    except GloBirdCaptchaRequired:
+        return "captcha_required"
+    except GloBirdAuthError:
+        return "invalid_globird_auth"
+    except Exception as err:
+        _LOGGER.exception("GloBird portal credential validation failed: %s", err)
+        return "cannot_connect"
+    finally:
+        await client.close()
+    return None
 
 
 def _normalize_neovolt_entry_ids(
@@ -545,6 +809,19 @@ def _stored_w_to_kw(value: Any, default_w: int) -> float:
     return amount / 1000.0 if amount > 100 else amount
 
 
+def _stored_optional_w_to_kw(value: Any) -> float | None:
+    """Convert an optional stored W/kW value to kW for config flow display."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
+    return amount / 1000.0 if amount > 100 else amount
+
+
 def _stored_ratio_to_percent(value: Any, default_ratio: float) -> int:
     """Convert a stored 0-1 ratio or 0-100 percent to a clamped whole percent."""
     try:
@@ -554,6 +831,19 @@ def _stored_ratio_to_percent(value: Any, default_ratio: float) -> int:
     if amount <= 1:
         amount *= 100
     return max(0, min(100, int(round(amount))))
+
+
+def _stored_optional_price_to_cents(value: Any) -> float:
+    """Convert optional stored $/kWh or c/kWh to c/kWh for form display."""
+    if value in (None, "", []):
+        return 0.0
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if amount <= 0:
+        return 0.0
+    return amount * 100.0 if amount <= 1 else amount
 
 
 def _normalize_optional_entity(value: Any) -> str | None:
@@ -619,6 +909,32 @@ def _form_kw_to_w(value: Any, default_kw: float) -> int:
     return int(round(amount * 1000))
 
 
+def _form_optional_kw_to_w(value: Any) -> int | None:
+    """Convert an optional config flow kW field to W, preserving explicit zero."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
+    return int(round(amount * 1000))
+
+
+def _form_optional_cents_to_price(value: Any) -> float | None:
+    """Convert optional c/kWh form input to stored $/kWh."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    return amount / 100.0 if amount > 1 else amount
+
+
 def _form_percent_to_ratio(value: Any, default_ratio: float) -> float:
     """Convert a config flow percent field to a stored 0-1 ratio."""
     try:
@@ -644,6 +960,10 @@ def _optimization_provider_options_for_battery(
     battery_system: str | None,
 ) -> dict[str, str]:
     """Return native and Smart Optimization labels for a battery system."""
+    if battery_system == BATTERY_SYSTEM_CUSTOM:
+        return {
+            OPT_PROVIDER_POWERSYNC: "Smart Optimization planner (monitoring mode)",
+        }
     native_name = OPTIMIZATION_PROVIDER_NATIVE_NAMES.get(
         battery_system or BATTERY_SYSTEM_TESLA,
         "Battery",
@@ -683,6 +1003,109 @@ async def validate_amber_token(hass: HomeAssistant, api_token: str) -> dict[str,
     except Exception as err:
         _LOGGER.exception("Unexpected error validating Amber token: %s", err)
         return {"success": False, "error": "unknown"}
+
+
+async def validate_flow_power_api_key(
+    hass: HomeAssistant,
+    api_key: str,
+    region: str = "NSW1",
+) -> dict[str, Any]:
+    """Validate Flow Power KWatch API key and return residential sites when available."""
+    if not api_key:
+        return {"success": False, "error": "invalid_api_key"}
+
+    site_lookup_error: str | None = None
+    try:
+        from .flow_power_api import FlowPowerAPIClient, FlowPowerAPIError
+
+        client = FlowPowerAPIClient(api_key, async_get_clientsession(hass))
+        sites = await client.get_residential_sites()
+    except FlowPowerAPIError as err:
+        if str(err) == "invalid_api_key":
+            return {"success": False, "error": "invalid_api_key"}
+        site_lookup_error = str(err)
+        sites = []
+    except aiohttp.ClientError:
+        site_lookup_error = "cannot_connect"
+        sites = []
+    except Exception as err:
+        _LOGGER.exception("Flow Power API validation failed: %s", err)
+        site_lookup_error = "cannot_connect"
+        sites = []
+
+    if sites:
+        return {"success": True, "sites": sites}
+
+    api_region = FLOW_POWER_KWATCH_REGIONS.get(region, str(region).lower())
+    try:
+        dispatch = await client.dispatch5mins(api_region, period=60)
+        forecast = await client.predispatch30mins(api_region, period=1)
+    except FlowPowerAPIError as err:
+        if str(err) == "invalid_api_key":
+            return {"success": False, "error": "invalid_api_key"}
+        return {"success": False, "error": "cannot_connect"}
+    except aiohttp.ClientError:
+        return {"success": False, "error": "cannot_connect"}
+    except Exception as err:
+        _LOGGER.exception("Flow Power API price validation failed: %s", err)
+        return {"success": False, "error": "cannot_connect"}
+
+    if dispatch and forecast:
+        return {
+            "success": True,
+            "sites": [],
+            "site_lookup_error": site_lookup_error or "no_sites",
+        }
+    return {"success": False, "error": "cannot_connect" if site_lookup_error else "no_sites"}
+
+
+def _flow_power_site_label(site: dict[str, Any]) -> str:
+    """Return a display label for a Flow Power site."""
+    nmi = site.get("nmi", "")
+    tariff = site.get("networkTariff")
+    return f"{nmi} — {tariff}" if tariff else str(nmi)
+
+
+async def _prefill_flow_power_network_tariff(
+    hass: HomeAssistant,
+    flow_data: dict[str, Any],
+    site: dict[str, Any] | None,
+) -> None:
+    """Prefill Flow Power network tariff from KWatch site metadata when unset."""
+    if not site:
+        return
+    network_tariff = site.get("networkTariff")
+    if network_tariff:
+        flow_data[CONF_FLOWPOWER_NETWORK_TARIFF] = network_tariff
+    if flow_data.get(CONF_FP_NETWORK) or flow_data.get(CONF_FP_TARIFF_CODE):
+        return
+    if not network_tariff:
+        return
+
+    wanted_codes = [
+        part.strip()
+        for part in str(network_tariff).replace(";", ",").split(",")
+        if part.strip()
+    ]
+    if not wanted_codes:
+        return
+
+    from .tariff_utils import get_tariff_codes_for_network
+
+    region = flow_data.get(CONF_FLOW_POWER_STATE, "NSW1")
+    for network_name in REGION_NETWORKS.get(region, []):
+        codes = await hass.async_add_executor_job(
+            get_tariff_codes_for_network,
+            network_name,
+        )
+        for wanted in wanted_codes:
+            if wanted in codes:
+                api_name = NETWORK_API_NAME.get(network_name, network_name.lower())
+                flow_data[CONF_FP_NETWORK] = network_name
+                flow_data[CONF_FP_TARIFF_CODE] = wanted
+                flow_data[CONF_NETWORK_DISTRIBUTOR] = api_name
+                flow_data[CONF_NETWORK_TARIFF_CODE] = wanted
+                return
 
 
 async def validate_localvolts_credentials(
@@ -898,6 +1321,7 @@ async def validate_sigenergy_credentials(
     username: str,
     pass_enc: str,
     device_id: str,
+    cloud_region: str = DEFAULT_SIGENERGY_CLOUD_REGION,
 ) -> dict[str, Any]:
     """Validate Sigenergy credentials and get stations list."""
     from .sigenergy_api import SigenergyAPIClient
@@ -908,6 +1332,7 @@ async def validate_sigenergy_credentials(
             username=username,
             pass_enc=pass_enc,
             device_id=device_id,
+            cloud_region=cloud_region,
             session=session,
         )
 
@@ -1085,6 +1510,22 @@ def validate_goodwe_ems_entity_prefix(
     return None
 
 
+async def resolve_goodwe_entity_telemetry_prefix(
+    hass: HomeAssistant,
+    prefix: str | None,
+) -> str:
+    """Return a validated GoodWe telemetry entity prefix, or empty string."""
+    from .inverters.goodwe_entity import GoodWeEntityTelemetryController
+
+    controller = GoodWeEntityTelemetryController(hass, entity_prefix=prefix or "")
+    try:
+        await controller.connect()
+        return controller.entity_prefix
+    except Exception as err:
+        _LOGGER.debug("GoodWe entity telemetry validation failed: %s", err)
+        return ""
+
+
 def _goodwe_ems_prefix_exists(hass: HomeAssistant, prefix: str) -> bool:
     """Return whether a GoodWe EMS prefix has the required HA entity pair."""
     return (
@@ -1203,7 +1644,7 @@ def resolve_goodwe_port(protocol: str, port: int | None) -> int:
 class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
-    VERSION = 6
+    VERSION = 7
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -1227,7 +1668,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._solaredge_data: dict[str, Any] = {}  # SolarEdge curtailment configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
+        self._globird_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
+        self._flow_power_sites: list[dict[str, Any]] = []
+        self._flow_power_main_options: dict[str, Any] = {}
         self._octopus_data: dict[str, Any] = {}  # Octopus Energy UK configuration
         self._localvolts_data: dict[str, Any] = {}  # Localvolts configuration
         self._epex_data: dict[str, Any] = {}  # EPEX Day-Ahead (EU) configuration
@@ -1399,6 +1843,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Globird/AEMO VPP: AEMO spike only mode (static tariff)
                 self._aemo_only_mode = True
                 self._amber_data = {}
+                if provider == "globird":
+                    return await self.async_step_globird_plan()
                 return await self.async_step_aemo_config()
             elif provider == "localvolts":
                 # Localvolts: Real-time wholesale pricing (Australia)
@@ -1421,10 +1867,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._amber_data = {}
                 return await self.async_step_nz_retailer()
             elif provider == "other":
-                # Other/Custom TOU: AEMO spike optional + custom tariff builder
-                self._aemo_only_mode = True
+                # Other/Custom TOU: collect custom rates directly.
+                self._aemo_only_mode = False
                 self._amber_data = {}
-                return await self.async_step_aemo_config()
+                self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
+                return await self.async_step_custom_tariff()
             else:
                 # Default to Amber
                 self._aemo_only_mode = False
@@ -1455,7 +1902,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             # Apply sensible defaults for fields not shown during initial setup
-            user_input[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"
+            api_key = user_input.get(CONF_FLOWPOWER_API_KEY)
+            user_input[CONF_FLOW_POWER_PRICE_SOURCE] = "kwatch" if api_key else "aemo"
             user_input[CONF_PEA_ENABLED] = True
             user_input[CONF_PEA_CUSTOM_VALUE] = None
             user_input[CONF_NETWORK_USE_MANUAL_RATES] = False
@@ -1469,8 +1917,31 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._amber_data = {}
             self._aemo_only_mode = False
 
+            if api_key:
+                validation_result = await validate_flow_power_api_key(
+                    self.hass,
+                    api_key,
+                    user_input.get(CONF_FLOW_POWER_STATE, "NSW1"),
+                )
+                if not validation_result["success"]:
+                    errors["base"] = validation_result.get("error", "cannot_connect")
+                else:
+                    self._flow_power_sites = validation_result.get("sites", [])
+                    if len(self._flow_power_sites) == 1:
+                        site = self._flow_power_sites[0]
+                        self._flow_power_data[CONF_FLOWPOWER_NMI] = site["nmi"]
+                        await _prefill_flow_power_network_tariff(
+                            self.hass,
+                            self._flow_power_data,
+                            site,
+                        )
+                        return await self.async_step_flow_power_tariff()
+                    if self._flow_power_sites:
+                        return await self.async_step_flow_power_site()
+
             # Route to tariff selection (region-filtered)
-            return await self.async_step_flow_power_tariff()
+            if not errors:
+                return await self.async_step_flow_power_tariff()
 
         return self.async_show_form(
             step_id="flow_power_setup",
@@ -1496,6 +1967,51 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
+                    vol.Optional(CONF_FLOWPOWER_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_flow_power_site(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Select the Flow Power residential site for a KWatch API key."""
+        sites = getattr(self, "_flow_power_sites", [])
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_nmi = user_input.get(CONF_FLOWPOWER_NMI)
+            site = next((item for item in sites if item.get("nmi") == selected_nmi), None)
+            if site:
+                self._flow_power_data[CONF_FLOWPOWER_NMI] = selected_nmi
+                await _prefill_flow_power_network_tariff(
+                    self.hass,
+                    self._flow_power_data,
+                    site,
+                )
+                return await self.async_step_flow_power_tariff()
+            errors["base"] = "invalid_site"
+
+        return self.async_show_form(
+            step_id="flow_power_site",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_FLOWPOWER_NMI): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=site["nmi"],
+                                    label=_flow_power_site_label(site),
+                                )
+                                for site in sites
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
                 }
             ),
             errors=errors,
@@ -1523,7 +2039,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._flow_power_data.pop(CONF_NETWORK_DISTRIBUTOR, None)
                 self._flow_power_data.pop(CONF_NETWORK_TARIFF_CODE, None)
 
-            return await self.async_step_battery_system()
+            if self._flow_power_data.get(CONF_FLOWPOWER_API_KEY):
+                return await self.async_step_battery_system()
+            return await self.async_step_flow_power_portal()
 
         # Build combined network+tariff dropdown for the region — all options loaded at render time
         from .tariff_utils import get_tariff_codes_for_network
@@ -1561,6 +2079,102 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_flow_power_portal(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Offer Flow Power portal connection during initial setup."""
+        if user_input is not None:
+            if user_input.get("connect_portal", True):
+                return await self.async_step_flow_power_portal_login()
+            return await self.async_step_battery_system()
+
+        return self.async_show_form(
+            step_id="flow_power_portal",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("connect_portal", default=True): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_flow_power_portal_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Authenticate with the Flow Power portal during initial setup."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            email = user_input.get(CONF_FLOWPOWER_EMAIL, "")
+            password = user_input.get(CONF_FLOWPOWER_PASSWORD, "")
+            if email and password:
+                try:
+                    from .flow_power_portal import FlowPowerPortalClient
+
+                    self._fp_client = FlowPowerPortalClient()
+                    result = await self._fp_client.authenticate(email, password)
+                    if result.get("status") == "mfa_required":
+                        self._fp_email = email
+                        self._fp_password = password
+                        return await self.async_step_flow_power_portal_mfa()
+                    errors["base"] = "cannot_connect"
+                except ValueError:
+                    errors["base"] = "invalid_credentials"
+                except Exception as err:
+                    _LOGGER.exception("Flow Power portal login failed during setup: %s", err)
+                    errors["base"] = "cannot_connect"
+                    if getattr(self, "_fp_client", None) is not None:
+                        await self._fp_client.close()
+                    self._fp_client = None
+            else:
+                errors["base"] = "invalid_credentials"
+
+        return self.async_show_form(
+            step_id="flow_power_portal_login",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_FLOWPOWER_EMAIL): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.EMAIL)
+                    ),
+                    vol.Required(CONF_FLOWPOWER_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_flow_power_portal_mfa(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Verify Flow Power SMS MFA during initial setup."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            code = user_input.get("mfa_code", "")
+            if code and hasattr(self, "_fp_client"):
+                success = await self._fp_client.verify_mfa(code)
+                if success:
+                    self._flow_power_data[CONF_FLOWPOWER_EMAIL] = self._fp_email
+                    self._flow_power_data[CONF_FLOWPOWER_PASSWORD] = self._fp_password
+                    self.hass.data.setdefault(DOMAIN, {})
+                    self.hass.data[DOMAIN]["_pending_fp_client"] = self._fp_client
+                    return await self.async_step_battery_system()
+                errors["base"] = "invalid_mfa_code"
+            else:
+                errors["base"] = "invalid_mfa_code"
+
+        return self.async_show_form(
+            step_id="flow_power_portal_mfa",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("mfa_code"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
     async def _route_to_battery_setup(self) -> FlowResult:
         """Route to battery system setup based on selection."""
         if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
@@ -1585,6 +2199,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_neovolt_battery()
         elif self._selected_battery_system == BATTERY_SYSTEM_SOLAREDGE:
             return await self.async_step_solaredge()
+        elif self._selected_battery_system == BATTERY_SYSTEM_ANKER_SOLIX:
+            return await self.async_step_anker_solix()
+        elif self._selected_battery_system == BATTERY_SYSTEM_CUSTOM:
+            return await self.async_step_custom_battery()
         else:
             return await self.async_step_tesla_provider()
 
@@ -1600,6 +2218,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._teslemetry_data,
             **self._site_data,
             **self._aemo_data,
+            **self._globird_data,
             **self._flow_power_data,
             **self._octopus_data,
             **self._localvolts_data,
@@ -1615,6 +2234,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_fronius_reserva_data", {}),
             **getattr(self, "_neovolt_data", {}),
             **getattr(self, "_solaredge_data", {}),
+            **getattr(self, "_anker_solix_data", {}),
+            **getattr(self, "_custom_battery_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -1655,9 +2276,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
             BATTERY_SYSTEM_SOLAX: "Solax",
             BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
-            BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva",
+            BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
             BATTERY_SYSTEM_NEOVOLT: "Neovolt",
             BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
+            BATTERY_SYSTEM_ANKER_SOLIX: "Anker Solix",
+            BATTERY_SYSTEM_CUSTOM: "Custom",
         }.get(self._selected_battery_system, "")
 
         if battery_label:
@@ -1670,6 +2293,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title = "PowerSync Localvolts"
         elif self._selected_electricity_provider == "octopus":
             title = "PowerSync Octopus"
+        elif self._selected_electricity_provider == "other":
+            title = "PowerSync Custom TOU"
         else:
             title = "PowerSync Amber"
 
@@ -1890,6 +2515,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             surcharge = user_input.get(CONF_EPEX_SURCHARGE, 0.0)
             tax_percent = user_input.get(CONF_EPEX_TAX_PERCENT, 0.0)
             export_rate = user_input.get(CONF_EPEX_EXPORT_RATE, 0.0)
+            import_price_entity = _normalize_optional_entity(
+                user_input.get(CONF_EPEX_IMPORT_PRICE_ENTITY)
+            )
+            export_price_entity = _normalize_optional_entity(
+                user_input.get(CONF_EPEX_EXPORT_PRICE_ENTITY)
+            )
 
             # Validate by fetching prices from EPEX API
             try:
@@ -1912,13 +2543,21 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_EPEX_TAX_PERCENT: tax_percent,
                     CONF_EPEX_EXPORT_RATE: export_rate,
                 }
+                if import_price_entity:
+                    self._epex_data[CONF_EPEX_IMPORT_PRICE_ENTITY] = (
+                        import_price_entity
+                    )
+                if export_price_entity:
+                    self._epex_data[CONF_EPEX_EXPORT_PRICE_ENTITY] = export_price_entity
 
                 _LOGGER.info(
-                    "EPEX config validated: region=%s, surcharge=%.1f ct, tax=%.1f%%, export=%.1f ct",
+                    "EPEX config validated: region=%s, surcharge=%.1f ct, tax=%.1f%%, export=%.1f ct, import_entity=%s, export_entity=%s",
                     region,
                     surcharge,
                     tax_percent,
                     export_rate,
+                    import_price_entity or "none",
+                    export_price_entity or "none",
                 )
 
                 # Route to battery system selection
@@ -1949,6 +2588,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     NumberSelectorConfig(
                         min=0, max=50, step=0.1, unit_of_measurement="ct/kWh",
                     )
+                ),
+                vol.Optional(CONF_EPEX_IMPORT_PRICE_ENTITY): EntitySelector(
+                    EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_EPEX_EXPORT_PRICE_ENTITY): EntitySelector(
+                    EntitySelectorConfig(domain="sensor")
                 ),
             }
         )
@@ -2004,6 +2649,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
             )
 
+            if self._selected_battery_system == BATTERY_SYSTEM_CUSTOM:
+                self._optimization_provider = OPT_PROVIDER_POWERSYNC
+                return await self.async_step_custom_battery()
+
             # Keep setup and post-setup optimization pages aligned.
             return await self.async_step_ml_options()
 
@@ -2024,6 +2673,185 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                }
+            ),
+        )
+
+    async def async_step_custom_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure a planner-only custom battery system using HA entities."""
+        default_capacity_wh, default_charge_w, default_discharge_w = (
+            _default_optimizer_specs_for(BATTERY_SYSTEM_CUSTOM)
+        )
+        default_capacity_kwh = default_capacity_wh / 1000
+        default_charge_kw = default_charge_w / 1000
+        default_discharge_kw = default_discharge_w / 1000
+
+        if user_input is not None:
+            self._custom_battery_data = {
+                CONF_CUSTOM_BATTERY_LEVEL_ENTITY: user_input[
+                    CONF_CUSTOM_BATTERY_LEVEL_ENTITY
+                ],
+                CONF_CUSTOM_BATTERY_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_BATTERY_POWER_ENTITY
+                ],
+                CONF_CUSTOM_GRID_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_GRID_POWER_ENTITY
+                ],
+                CONF_CUSTOM_SOLAR_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_SOLAR_POWER_ENTITY
+                ],
+                CONF_CUSTOM_LOAD_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_LOAD_POWER_ENTITY
+                ],
+            }
+            backup_reserve = (
+                user_input.get(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                )
+                / 100.0
+            )
+            capacity_wh = _form_kwh_to_wh(
+                user_input.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH),
+                default_capacity_kwh,
+            )
+            charge_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_CHARGE_W),
+                default_charge_kw,
+            )
+            discharge_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
+                default_discharge_kw,
+            )
+            max_grid_export_w = _form_optional_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+            )
+            max_grid_import_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
+                0,
+            )
+            self._optimization_provider = OPT_PROVIDER_POWERSYNC
+            self._ml_options.update(
+                {
+                    CONF_OPTIMIZATION_PROVIDER: OPT_PROVIDER_POWERSYNC,
+                    CONF_OPTIMIZATION_ENABLED: True,
+                    CONF_MONITORING_MODE: True,
+                    CONF_OPTIMIZATION_EV_INTEGRATION: False,
+                    CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
+                    CONF_OPTIMIZATION_BACKUP_RESERVE: backup_reserve,
+                    CONF_OPTIMIZATION_BATTERY_CAPACITY_WH: capacity_wh,
+                    CONF_OPTIMIZATION_MAX_CHARGE_W: charge_w,
+                    CONF_OPTIMIZATION_MAX_DISCHARGE_W: discharge_w,
+                    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W: max_grid_import_w,
+                    CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: bool(
+                        user_input.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True)
+                    ),
+                    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: False,
+                    CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: False,
+                }
+            )
+            if max_grid_export_w is not None:
+                self._ml_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
+                    max_grid_export_w
+                )
+            return self._create_final_entry()
+
+        return self.async_show_form(
+            step_id="custom_battery",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_CUSTOM_BATTERY_LEVEL_ENTITY
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_BATTERY_POWER_ENTITY
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_GRID_POWER_ENTITY
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_SOLAR_POWER_ENTITY
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_LOAD_POWER_ENTITY
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=1,
+                            unit_of_measurement="%",
+                            mode=NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                        default=default_capacity_kwh,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement="kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_CHARGE_W,
+                        default=default_charge_kw,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.1,
+                            max=50,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                        default=default_discharge_kw,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.1,
+                            max=50,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                        default=0,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                        default=True,
+                    ): BooleanSelector(),
                 }
             ),
         )
@@ -2081,6 +2909,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Configure Smart Optimization options."""
         battery_system = self._selected_battery_system or BATTERY_SYSTEM_TESLA
+        is_tesla = battery_system == BATTERY_SYSTEM_TESLA
+        supports_no_idle_mode = supports_no_idle_mode_provider(
+            self._selected_electricity_provider
+        )
         default_capacity_wh, default_charge_w, default_discharge_w = (
             _default_optimizer_specs_for(battery_system)
         )
@@ -2100,21 +2932,56 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             }
             if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                spread_export_enabled = user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
-                spread_import_enabled = user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
+                spread_export_enabled = (
+                    False
+                    if is_tesla
+                    else bool(
+                        user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
+                    )
+                )
+                spread_import_enabled = (
+                    False
+                    if is_tesla
+                    else bool(
+                        user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
+                    )
+                )
+                auto_apply_reserve_enabled = bool(
+                    user_input.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False)
+                )
+                disable_idle = (
+                    bool(user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False))
+                    if supports_no_idle_mode
+                    else False
+                )
+                backup_reserve = (
+                    user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                    )
+                    / 100.0
+                )
                 self._ml_options.update({
                     CONF_OPTIMIZATION_ENABLED: bool(
                         user_input.get(CONF_OPTIMIZATION_ENABLED, True)
                     ),
+                    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE: auto_apply_reserve_enabled,
+                    CONF_OPTIMIZATION_MANUAL_RESERVE: backup_reserve,
                     CONF_OPTIMIZATION_EV_INTEGRATION: bool(
                         user_input.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
                     ),
+                    CONF_OPTIMIZATION_LOAD_ENTITY: (
+                        _normalize_optional_entity(
+                            user_input.get(CONF_OPTIMIZATION_LOAD_ENTITY)
+                        )
+                    ),
+                    CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY: (
+                        _normalize_optional_entity(
+                            user_input.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY)
+                        )
+                    ),
                     CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
-                    CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                    )
-                    / 100.0,
+                    CONF_OPTIMIZATION_BACKUP_RESERVE: backup_reserve,
                     CONF_HARDWARE_BACKUP_RESERVE: user_input.get(
                         CONF_HARDWARE_BACKUP_RESERVE,
                         int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
@@ -2132,151 +2999,253 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
                         default_discharge_kw,
                     ),
+                    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W: _form_kw_to_w(
+                        user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
+                        0,
+                    ),
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE: (
+                        _form_optional_cents_to_price(
+                            user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
+                        )
+                    ),
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: _form_percent_to_ratio(
+                        user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
+                        1.0,
+                    ),
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: user_input.get(
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         True,
                     ),
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: spread_export_enabled,
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: spread_import_enabled,
+                    CONF_OPTIMIZATION_DISABLE_IDLE: disable_idle,
                     CONF_PROFIT_MAX_ENABLED: bool(
                         user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                     ),
-                    CONF_PROFIT_MAX_TARGET_TIME: user_input.get(
-                        CONF_PROFIT_MAX_TARGET_TIME,
-                        DEFAULT_PROFIT_MAX_TARGET_TIME,
+                    CONF_CHARGE_BY_TIME_ENABLED: bool(
+                        user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                     ),
-                    CONF_PROFIT_MAX_TARGET_SOC: _form_percent_to_ratio(
-                        user_input.get(CONF_PROFIT_MAX_TARGET_SOC),
-                        DEFAULT_PROFIT_MAX_TARGET_SOC,
+                    CONF_CHARGE_BY_TIME_TARGET_TIME: user_input.get(
+                        CONF_CHARGE_BY_TIME_TARGET_TIME,
+                        DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+                    ),
+                    CONF_CHARGE_BY_TIME_TARGET_SOC: _form_percent_to_ratio(
+                        user_input.get(CONF_CHARGE_BY_TIME_TARGET_SOC),
+                        DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
                     ),
                 })
+                self._ml_options[CONF_PROFIT_MAX_TARGET_TIME] = self._ml_options[
+                    CONF_CHARGE_BY_TIME_TARGET_TIME
+                ]
+                self._ml_options[CONF_PROFIT_MAX_TARGET_SOC] = self._ml_options[
+                    CONF_CHARGE_BY_TIME_TARGET_SOC
+                ]
+                max_grid_export_w = _form_optional_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+                )
+                if max_grid_export_w is not None:
+                    self._ml_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
+                        max_grid_export_w
+                    )
             # Proceed to battery connection setup
             return await self._route_to_battery_setup()
 
         opt_providers = _optimization_provider_options_for_battery(battery_system)
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_OPTIMIZATION_PROVIDER,
+                default=OPT_PROVIDER_POWERSYNC,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in opt_providers.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_ENABLED,
+                default=True,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_EV_INTEGRATION,
+                default=False,
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            vol.Required(
+                CONF_MONITORING_MODE,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            ),
+            vol.Required(
+                CONF_HARDWARE_BACKUP_RESERVE,
+                default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                default=default_capacity_kwh,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=1,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_MAX_CHARGE_W,
+                default=default_charge_kw,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.1,
+                    max=50,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                default=default_discharge_kw,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.1,
+                    max=50,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                default=0,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                default=True,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                default=0,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                default=100,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            ),
+        }
+        if not is_tesla:
+            schema_fields.update({
+                vol.Required(
+                    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+                    default=False,
+                ): BooleanSelector(),
+                vol.Required(
+                    CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
+                    default=False,
+                ): BooleanSelector(),
+            })
+        if supports_no_idle_mode:
+            schema_fields[
+                vol.Required(
+                    CONF_OPTIMIZATION_DISABLE_IDLE,
+                    default=False,
+                )
+            ] = BooleanSelector()
+        schema_fields.update({
+            vol.Required(
+                CONF_PROFIT_MAX_ENABLED,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_CHARGE_BY_TIME_ENABLED,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
+                default=DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Required(
+                CONF_CHARGE_BY_TIME_TARGET_SOC,
+                default=int(DEFAULT_CHARGE_BY_TIME_TARGET_SOC * 100),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            ),
+        })
 
         return self.async_show_form(
             step_id="ml_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_OPTIMIZATION_PROVIDER,
-                        default=OPT_PROVIDER_POWERSYNC,
-                    ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in opt_providers.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_ENABLED,
-                        default=True,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_OPTIMIZATION_EV_INTEGRATION,
-                        default=False,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_MONITORING_MODE,
-                        default=False,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=100,
-                            step=1,
-                            unit_of_measurement="%",
-                            mode=NumberSelectorMode.SLIDER,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_HARDWARE_BACKUP_RESERVE,
-                        default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=100,
-                            step=1,
-                            unit_of_measurement="%",
-                            mode=NumberSelectorMode.SLIDER,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
-                        default=default_capacity_kwh,
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=1,
-                            max=200,
-                            step=0.1,
-                            unit_of_measurement="kWh",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_MAX_CHARGE_W,
-                        default=default_charge_kw,
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0.1,
-                            max=50,
-                            step=0.1,
-                            unit_of_measurement="kW",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_MAX_DISCHARGE_W,
-                        default=default_discharge_kw,
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0.1,
-                            max=50,
-                            step=0.1,
-                            unit_of_measurement="kW",
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
-                        default=True,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
-                        default=False,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
-                        default=False,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_PROFIT_MAX_ENABLED,
-                        default=False,
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_PROFIT_MAX_TARGET_TIME,
-                        default=DEFAULT_PROFIT_MAX_TARGET_TIME,
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                    vol.Required(
-                        CONF_PROFIT_MAX_TARGET_SOC,
-                        default=int(DEFAULT_PROFIT_MAX_TARGET_SOC * 100),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=100,
-                            step=1,
-                            unit_of_measurement="%",
-                            mode=NumberSelectorMode.SLIDER,
-                        )
-                    ),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             description_placeholders={},
         )
 
@@ -2297,6 +3266,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             plain_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
             pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
             device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+            cloud_region = user_input.get(
+                CONF_SIGENERGY_CLOUD_REGION,
+                DEFAULT_SIGENERGY_CLOUD_REGION,
+            )
 
             # Determine which password to use
             # Priority: pass_enc (explicit override) > password (encode it)
@@ -2316,7 +3289,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 # Validate credentials
                 validation_result = await validate_sigenergy_credentials(
-                    self.hass, username, final_pass_enc, device_id
+                    self.hass, username, final_pass_enc, device_id, cloud_region
                 )
 
                 if validation_result["success"]:
@@ -2324,6 +3297,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_SIGENERGY_USERNAME: username,
                         CONF_SIGENERGY_PASS_ENC: final_pass_enc,  # Always store encoded
                         CONF_SIGENERGY_DEVICE_ID: device_id,
+                        CONF_SIGENERGY_CLOUD_REGION: cloud_region,
                         CONF_SIGENERGY_ACCESS_TOKEN: validation_result.get(
                             "access_token"
                         ),
@@ -2352,6 +3326,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=DEFAULT_SIGENERGY_CLOUD_REGION,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(CONF_SIGENERGY_PASS_ENC): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
@@ -2375,6 +3359,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Strip any whitespace
                 station_id = str(station_id).strip()
                 self._sigenergy_data[CONF_SIGENERGY_STATION_ID] = station_id
+                tariff_station_id = getattr(
+                    self, "_sigenergy_tariff_station_options", {}
+                ).get(station_id)
+                if tariff_station_id:
+                    self._sigenergy_data[CONF_SIGENERGY_TARIFF_STATION_ID] = (
+                        tariff_station_id
+                    )
+                    self._sigenergy_data[CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID] = (
+                        station_id
+                    )
                 # Go to Modbus connection configuration (required for energy data)
                 return await self.async_step_sigenergy_modbus()
             else:
@@ -2382,14 +3376,53 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Build station options from validated stations
         station_options = {}
+        station_tariff_ids = {}
+        try:
+            from .sigenergy_api import extract_tariff_station_id
+        except Exception:
+            extract_tariff_station_id = None
+
         for station in self._sigenergy_stations:
-            station_id = str(station.get("id") or station.get("stationId"))
+            tariff_station_id = (
+                extract_tariff_station_id(station)
+                if extract_tariff_station_id
+                else None
+            )
+            station_identifiers = [
+                str(station.get(key) or "").strip()
+                for key in (
+                    "id",
+                    "plantId",
+                    "systemId",
+                    "stationSn",
+                    "stationSN",
+                    "stationCode",
+                    "stationId",
+                    "station_id",
+                    "stationID",
+                )
+            ]
+            station_id = next(
+                (
+                    value
+                    for value in station_identifiers
+                    if value and not value.isdigit()
+                ),
+                None,
+            )
+            if not station_id:
+                station_id = next((value for value in station_identifiers if value), "")
+            if not station_id:
+                continue
             station_name = (
                 station.get("stationName")
                 or station.get("name")
                 or f"Station {station_id}"
             )
             station_options[station_id] = station_name
+            if tariff_station_id:
+                station_tariff_ids[station_id] = tariff_station_id
+        self._sigenergy_tariff_station_options = station_tariff_ids
 
         # If no stations found via API, show manual entry form
         if not station_options:
@@ -2710,10 +3743,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_solaredge(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure SolarEdge Modbus curtailment.
+        """Configure SolarEdge telemetry, battery dispatch, and curtailment.
 
-        SolarEdge v1 support is curtailment-only. Direct Modbus is preferred;
-        entity fallback is allowed for existing SolarEdge Modbus HA integrations.
+        PowerSync reads SolarEdge Home battery telemetry from HA entities and
+        uses writable HA storage-control entities for battery dispatch. Direct
+        Modbus or entity fallback is used for active-power curtailment.
         """
         errors: dict[str, str] = {}
 
@@ -2820,6 +3854,264 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): BooleanSelector(),
                 }
             ),
+            errors=errors,
+        )
+
+    async def async_step_anker_solix(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Anker Solix direct Modbus or HA integration bridge."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            connection_type = user_input.get(
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                ANKER_SOLIX_CONNECTION_MODBUS,
+            )
+            capacity_kwh = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                    DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                )
+            )
+            max_charge_kw = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+                )
+            )
+            max_discharge_kw = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                )
+            )
+            data = {
+                CONF_ANKER_SOLIX_CONNECTION_TYPE: connection_type,
+                CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH: capacity_kwh,
+                CONF_ANKER_SOLIX_MAX_CHARGE_KW: max_charge_kw,
+                CONF_ANKER_SOLIX_MAX_DISCHARGE_KW: max_discharge_kw,
+            }
+
+            try:
+                if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+                    host = (
+                        user_input.get(CONF_ANKER_SOLIX_MODBUS_HOST) or ""
+                    ).strip()
+                    port = int(
+                        user_input.get(
+                            CONF_ANKER_SOLIX_MODBUS_PORT,
+                            DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+                        )
+                    )
+                    slave_id = int(
+                        user_input.get(
+                            CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                            DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                        )
+                    )
+                    if not host:
+                        errors["base"] = "anker_solix_host_required"
+                    else:
+                        from .inverters.anker_solix import AnkerSolixX1ModbusController
+
+                        controller = AnkerSolixX1ModbusController(
+                            host=host,
+                            port=port,
+                            slave_id=slave_id,
+                            battery_capacity_kwh=capacity_kwh,
+                            max_charge_kw=max_charge_kw,
+                            max_discharge_kw=max_discharge_kw,
+                        )
+                        try:
+                            if not await controller.connect():
+                                errors["base"] = "cannot_connect"
+                        finally:
+                            await controller.disconnect()
+                        data.update(
+                            {
+                                CONF_ANKER_SOLIX_MODBUS_HOST: host,
+                                CONF_ANKER_SOLIX_MODBUS_PORT: port,
+                                CONF_ANKER_SOLIX_MODBUS_SLAVE_ID: slave_id,
+                            }
+                        )
+                else:
+                    domain = (
+                        "anker_solix_official"
+                        if connection_type == ANKER_SOLIX_CONNECTION_OFFICIAL_HA
+                        else "anker_solix"
+                    )
+                    anker_entries = self.hass.config_entries.async_entries(domain)
+                    if not anker_entries:
+                        errors["base"] = "anker_solix_ha_not_installed"
+                    else:
+                        selected_entry_id = (
+                            anker_entries[0].entry_id
+                            if len(anker_entries) == 1
+                            else user_input.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID, "")
+                        )
+                        entity_prefix = (
+                            user_input.get(CONF_ANKER_SOLIX_ENTITY_PREFIX) or ""
+                        ).strip()
+                        from .inverters.anker_solix import AnkerSolixEntityController
+
+                        controller = AnkerSolixEntityController(
+                            self.hass,
+                            integration_domain=domain,
+                            config_entry_id=selected_entry_id,
+                            entity_prefix=entity_prefix,
+                            battery_capacity_kwh=capacity_kwh,
+                            max_charge_kw=max_charge_kw,
+                            max_discharge_kw=max_discharge_kw,
+                        )
+                        await controller.connect()
+                        data.update(
+                            {
+                                CONF_ANKER_SOLIX_CONFIG_ENTRY_ID: selected_entry_id,
+                                CONF_ANKER_SOLIX_ENTITY_PREFIX: entity_prefix,
+                            }
+                        )
+            except Exception as exc:
+                _LOGGER.debug("Anker Solix setup validation failed: %s", exc)
+                errors["base"] = "cannot_connect"
+
+            if not errors:
+                self._anker_solix_data = data
+                return self._create_final_entry()
+
+        current = user_input or getattr(self, "_anker_solix_data", {})
+        connection_type = current.get(
+            CONF_ANKER_SOLIX_CONNECTION_TYPE,
+            ANKER_SOLIX_CONNECTION_MODBUS,
+        )
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                default=connection_type,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in ANKER_SOLIX_CONNECTION_TYPES.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        }
+
+        if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_HOST,
+                    default=current.get(CONF_ANKER_SOLIX_MODBUS_HOST, ""),
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_PORT,
+                    default=current.get(
+                        CONF_ANKER_SOLIX_MODBUS_PORT,
+                        DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+                    ),
+                )
+            ] = NumberSelector(
+                NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
+            )
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                    default=current.get(
+                        CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                        DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                    ),
+                )
+            ] = NumberSelector(
+                NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)
+            )
+        else:
+            domain = (
+                "anker_solix_official"
+                if connection_type == ANKER_SOLIX_CONNECTION_OFFICIAL_HA
+                else "anker_solix"
+            )
+            anker_entries = self.hass.config_entries.async_entries(domain)
+            if len(anker_entries) > 1:
+                schema_fields[
+                    vol.Required(
+                        CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                        default=current.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID, ""),
+                    )
+                ] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=e.entry_id, label=e.title or e.entry_id)
+                            for e in anker_entries
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+            schema_fields[
+                vol.Optional(
+                    CONF_ANKER_SOLIX_ENTITY_PREFIX,
+                    default=current.get(CONF_ANKER_SOLIX_ENTITY_PREFIX, ""),
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                default=current.get(
+                    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                    DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                ),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=1,
+                max=200,
+                step=0.1,
+                unit_of_measurement="kWh",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                default=current.get(
+                    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+                ),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.1,
+                max=50,
+                step=0.1,
+                unit_of_measurement="kW",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                default=current.get(
+                    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                ),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.1,
+                max=50,
+                step=0.1,
+                unit_of_measurement="kW",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+
+        return self.async_show_form(
+            step_id="anker_solix",
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
         )
 
@@ -3067,7 +4359,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_fronius_reserva_battery(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure Fronius Reserva bridge via the fronius_modbus integration."""
+        """Configure Fronius GEN24 storage bridge via the fronius_modbus integration."""
         from .inverters.fronius_reserva import FroniusReservaBatteryController
 
         fronius_entries = self.hass.config_entries.async_entries("fronius_modbus")
@@ -3121,7 +4413,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "fronius_reserva_connect_failed"
             except Exception as exc:
-                _LOGGER.error("Fronius Reserva setup error: %s", exc)
+                _LOGGER.error("Fronius GEN24 storage setup error: %s", exc)
                 errors["base"] = "fronius_reserva_connect_failed"
 
         schema_fields: dict[Any, Any] = {}
@@ -3829,8 +5121,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if ems_error:
                     errors["base"] = ems_error
                 else:
-                    # Test connection
-                    result = await test_goodwe_connection(self.hass, host, port)
+                    entity_telemetry_prefix = ""
+                    if protocol == "tcp" or port == DEFAULT_GOODWE_PORT_TCP:
+                        entity_telemetry_prefix = await resolve_goodwe_entity_telemetry_prefix(
+                            self.hass,
+                            resolved_ems_prefix or ems_prefix,
+                        )
+                    result = (
+                        {"success": True, "has_battery": True}
+                        if entity_telemetry_prefix
+                        else await test_goodwe_connection(self.hass, host, port)
+                    )
 
                     if result.get("success"):
                         if not result.get("has_battery"):
@@ -3847,7 +5148,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     CONF_GOODWE_EMS_ENTITY_PREFIX
                                 ] = resolved_ems_prefix
                             _LOGGER.info(
-                                "GoodWe connection successful: %s (SN: %s, %sW)",
+                                "GoodWe connection successful%s: %s (SN: %s, %sW)",
+                                (
+                                    f" via telemetry entities '{entity_telemetry_prefix}'"
+                                    if entity_telemetry_prefix
+                                    else ""
+                                ),
                                 result.get("model_name"),
                                 result.get("serial_number"),
                                 result.get("rated_power"),
@@ -4228,6 +5534,95 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    def _globird_plan_schema(self, current: dict[str, Any] | None = None) -> vol.Schema:
+        """Build the GloBird plan selector schema."""
+        return _build_globird_plan_schema(
+            current,
+            rate_unit=self._selector_unit(),
+            currency_unit=self._currency(),
+        )
+
+    async def async_step_globird_plan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select the exact GloBird plan before AEMO spike setup."""
+        if user_input is not None:
+            plan = user_input.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
+            self._globird_data = {CONF_GLOBIRD_PLAN: plan}
+            if plan == GLOBIRD_PLAN_ZEROHERO_CUSTOM:
+                for key in (
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    CONF_GLOBIRD_ZEROCHARGE_START,
+                    CONF_GLOBIRD_ZEROCHARGE_END,
+                    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                ):
+                    self._globird_data[key] = user_input.get(key)
+            return await self.async_step_globird_portal()
+
+        return self.async_show_form(
+            step_id="globird_plan",
+            data_schema=self._globird_plan_schema(),
+        )
+
+    async def async_step_globird_portal(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Offer GloBird portal connection during initial setup."""
+        if user_input is not None:
+            if user_input.get("connect_globird_portal", True):
+                return await self.async_step_globird_portal_login()
+            return await self.async_step_aemo_config()
+
+        return self.async_show_form(
+            step_id="globird_portal",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "connect_globird_portal", default=True
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_globird_portal_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Authenticate with the GloBird portal during initial setup."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            email = user_input.get(CONF_GLOBIRD_EMAIL, "")
+            password = user_input.get(CONF_GLOBIRD_PASSWORD, "")
+            if email and password:
+                error = await _validate_globird_credentials(email, password)
+                if error is None:
+                    self._globird_data[CONF_GLOBIRD_EMAIL] = email
+                    self._globird_data[CONF_GLOBIRD_PASSWORD] = password
+                    return await self.async_step_aemo_config()
+                errors["base"] = error
+            else:
+                errors["base"] = "invalid_globird_auth"
+
+        return self.async_show_form(
+            step_id="globird_portal_login",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_GLOBIRD_EMAIL): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.EMAIL)
+                    ),
+                    vol.Required(CONF_GLOBIRD_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_aemo_config(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -4311,6 +5706,228 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "threshold_hint": threshold_hint,
+            },
+        )
+
+    async def async_step_custom_tariff(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure a custom tariff during initial setup."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if user_input.get("skip_tariff", False):
+                self._custom_tariff_data = {}
+                return await self.async_step_battery_system()
+
+            tariff_type = user_input.get("tariff_type", "tou")
+            self._tariff_plan_name = user_input.get("plan_name", "")
+            self._tariff_offpeak_rate = user_input.get("offpeak_rate", 15) / 100
+            self._tariff_fit_rate = user_input.get("fit_rate", 5) / 100
+
+            if tariff_type == "flat":
+                flat_rate = user_input.get("flat_rate", 30) / 100
+                self._custom_tariff_data = self._build_tariff_from_periods(
+                    [
+                        {
+                            "name": "ALL",
+                            "start": 0,
+                            "end": 24,
+                            "days": "all_days",
+                            "import_rate": flat_rate,
+                            "export_rate": self._tariff_fit_rate,
+                        }
+                    ],
+                )
+                return await self.async_step_battery_system()
+
+            self._tariff_periods = []
+            return await self.async_step_tariff_period()
+
+        tariff_type_options = {
+            "flat": "Flat Rate (single rate all day)",
+            "tou": "Time of Use (multiple periods)",
+        }
+
+        return self.async_show_form(
+            step_id="custom_tariff",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("skip_tariff", default=False): BooleanSelector(),
+                    vol.Optional("plan_name", default=""): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Required("tariff_type", default="tou"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in tariff_type_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional("flat_rate", default=30): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required("offpeak_rate", default=15): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required("fit_rate", default=5): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-100,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "info": (
+                    f"Configure your electricity tariff. All rates in "
+                    f"{self._selector_unit()}. For TOU, you'll add time periods "
+                    "in the next step."
+                ),
+                "skip_hint": "You can skip this and configure rates later.",
+            },
+        )
+
+    async def async_step_tariff_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Add a custom tariff period during initial setup."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
+                end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
+            except (ValueError, IndexError):
+                start_hour = 15
+                end_hour = 21
+
+            self._tariff_periods.append(
+                {
+                    "name": user_input.get("period_type", "PEAK"),
+                    "start": start_hour,
+                    "end": end_hour,
+                    "days": user_input.get("period_days", "weekdays"),
+                    "import_rate": user_input.get("import_rate", 45) / 100,
+                    "export_rate": user_input.get("export_rate", 5) / 100,
+                }
+            )
+
+            if user_input.get("add_another", False):
+                return await self.async_step_tariff_period()
+
+            self._custom_tariff_data = self._build_tariff_from_periods(
+                self._tariff_periods,
+            )
+            return await self.async_step_battery_system()
+
+        tariff_hour_options = [
+            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+            for h in range(24)
+        ]
+        day_options = {
+            "weekdays": "Weekdays only (Mon-Fri)",
+            "all_days": "All days (Mon-Sun)",
+        }
+        period_types = {
+            "PEAK": "Peak",
+            "SHOULDER": "Shoulder",
+            "OFF_PEAK": "Off-Peak",
+            "SUPER_OFF_PEAK": "Super Off-Peak",
+        }
+
+        count = len(getattr(self, "_tariff_periods", []))
+        added_desc = ""
+        if count > 0:
+            lines = []
+            minor_unit = self._selector_unit()
+            for idx, period in enumerate(self._tariff_periods, 1):
+                lines.append(
+                    f"{idx}. {period['name']} {period['start']:02d}:00-"
+                    f"{period['end']:02d}:00, import "
+                    f"{period['import_rate'] * 100:.1f}{minor_unit}, export "
+                    f"{period['export_rate'] * 100:.1f}{minor_unit}"
+                )
+            added_desc = "Added periods:\n" + "\n".join(lines) + "\n\n"
+
+        return self.async_show_form(
+            step_id="tariff_period",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("period_type", default="PEAK"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in period_types.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("period_start", default="15:00"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=tariff_hour_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("period_end", default="21:00"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=tariff_hour_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("period_days", default="weekdays"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in day_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("import_rate", default=45): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required("export_rate", default=5): NumberSelector(
+                        NumberSelectorConfig(
+                            min=-100,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional("add_another", default=False): BooleanSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "period_info": added_desc
+                if added_desc
+                else "Add your first tariff period. Remaining hours will be off-peak.",
             },
         )
 
@@ -4716,8 +6333,179 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for PowerSync."""
 
+    async def _restore_owned_curtailment_limits(self) -> None:
+        """Restore curtailment limits PowerSync has marked active."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id, {}
+        )
+        if not entry_data:
+            return
+
+        async def _restore_controller(
+            label: str,
+            coord_key: str,
+            state_key: str,
+            *extra_state_keys: str,
+            restore_when_state_lost: bool = False,
+        ) -> None:
+            was_curtailed = entry_data.get(state_key) == "curtailed"
+            if not was_curtailed and not restore_when_state_lost:
+                return
+
+            coord = entry_data.get(coord_key)
+            controller = getattr(coord, "_controller", coord)
+            if not controller or not hasattr(controller, "restore"):
+                _LOGGER.warning(
+                    "%s curtailment was active but no restore controller is available",
+                    label,
+                )
+                return
+
+            try:
+                success = await controller.restore()
+            except Exception as err:
+                _LOGGER.error("%s curtailment restore failed: %s", label, err)
+                return
+
+            if success:
+                entry_data[state_key] = "normal"
+                for key in extra_state_keys:
+                    entry_data.pop(key, None)
+                if was_curtailed:
+                    _LOGGER.info(
+                        "Solar curtailment disabled - restored %s export limit",
+                        label,
+                    )
+                else:
+                    _LOGGER.info(
+                        "Solar curtailment disabled - restored %s export limit "
+                        "(curtailment state was not marked active)",
+                        label,
+                    )
+            else:
+                _LOGGER.error("%s curtailment restore returned false", label)
+
+        await _restore_controller(
+            "Sigenergy",
+            "sigenergy_coordinator",
+            "sigenergy_curtailment_state",
+            "_last_sigenergy_curtailment_reapply",
+        )
+        await _restore_controller(
+            "AlphaESS",
+            "alphaess_coordinator",
+            "alphaess_curtailment_state",
+        )
+        await _restore_controller(
+            "GoodWe",
+            "goodwe_coordinator",
+            "goodwe_curtailment_state",
+            "_last_goodwe_curtailment_reapply",
+            restore_when_state_lost=True,
+        )
+
+        if entry_data.get("foxess_curtailment_state") == "curtailed":
+            fc = entry_data.get("foxess_coordinator")
+            controller = getattr(fc, "_controller", fc)
+            restore = (
+                getattr(fc, "restore_curtailment", None)
+                or getattr(controller, "restore", None)
+            )
+            if restore:
+                try:
+                    success = await restore()
+                except Exception as err:
+                    _LOGGER.error("FoxESS curtailment restore failed: %s", err)
+                else:
+                    if success:
+                        entry_data["foxess_curtailment_state"] = "normal"
+                        entry_data.pop("_last_foxess_curtailment_reapply", None)
+                        _LOGGER.info(
+                            "Solar curtailment disabled - restored FoxESS export control"
+                        )
+                    else:
+                        _LOGGER.error("FoxESS curtailment restore returned false")
+            else:
+                _LOGGER.warning(
+                    "FoxESS curtailment was active but no restore controller is available"
+                )
+
+        if entry_data.get("solaredge_curtailment_state") == "curtailed":
+            controller = entry_data.get("solaredge_controller")
+            if controller and hasattr(controller, "restore"):
+                try:
+                    success = await controller.restore()
+                except Exception as err:
+                    _LOGGER.error("SolarEdge curtailment restore failed: %s", err)
+                else:
+                    if success:
+                        entry_data["solaredge_curtailment_state"] = "normal"
+                        _LOGGER.info(
+                            "Solar curtailment disabled - restored SolarEdge active power"
+                        )
+                    else:
+                        _LOGGER.error("SolarEdge curtailment restore returned false")
+            else:
+                _LOGGER.warning(
+                    "SolarEdge curtailment was active but no restore controller is available"
+                )
+
+        if entry_data.get("sungrow_curtailment_state") == "curtailed":
+            sungrow_coord = entry_data.get("sungrow_coordinator")
+            if sungrow_coord and hasattr(sungrow_coord, "set_export_limit"):
+                try:
+                    success = await sungrow_coord.set_export_limit(None)
+                except Exception as err:
+                    _LOGGER.error("Sungrow curtailment restore failed: %s", err)
+                else:
+                    if success:
+                        entry_data["sungrow_curtailment_state"] = "normal"
+                        entry_data["sungrow_power_limit_w"] = None
+                        _LOGGER.info(
+                            "Solar curtailment disabled - restored Sungrow export limit"
+                        )
+                    else:
+                        _LOGGER.error("Sungrow curtailment restore returned false")
+            else:
+                _LOGGER.warning(
+                    "Sungrow curtailment was active but no export-limit coordinator is available"
+                )
+
+        if entry_data.get("inverter_last_state") == "curtailed":
+            controller = entry_data.get("inverter_controller")
+            if controller and hasattr(controller, "restore"):
+                try:
+                    import inspect
+
+                    restore_sig = inspect.signature(controller.restore)
+                    if "verify" in restore_sig.parameters:
+                        success = await controller.restore(verify=False)
+                    else:
+                        success = await controller.restore()
+                except Exception as err:
+                    _LOGGER.error("AC inverter curtailment restore failed: %s", err)
+                else:
+                    if success:
+                        entry_data["inverter_last_state"] = "running"
+                        entry_data["inverter_power_limit_w"] = None
+                        _LOGGER.info(
+                            "Solar curtailment disabled - restored AC inverter"
+                        )
+                    else:
+                        _LOGGER.error("AC inverter curtailment restore returned false")
+            else:
+                _LOGGER.warning(
+                    "AC inverter curtailment was active but no restore controller is available"
+                )
+
     async def _restore_export_rule(self) -> None:
-        """Restore Tesla export rule to battery_ok when curtailment is disabled."""
+        """Restore active curtailment controls when curtailment is disabled."""
+        await self._restore_owned_curtailment_limits()
+
+        battery_system = self._get_option(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+        if battery_system != BATTERY_SYSTEM_TESLA:
+            return
+
         site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
         if not site_id:
             _LOGGER.warning("Cannot restore export rule - no Tesla site ID configured")
@@ -4808,6 +6596,46 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             key, self.config_entry.data.get(key, default)
         )
 
+    def _effective_battery_system(self) -> str:
+        """Return the configured battery/control method."""
+        return self._get_option(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+
+    def _schedule_entry_reload(self) -> None:
+        """Reload the entry after structural connection changes."""
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        )
+
+    def _save_battery_system_selection(self, battery_system: str) -> None:
+        """Persist the selected battery/control method in data and options."""
+        new_data = dict(self.config_entry.data)
+        new_options = dict(self.config_entry.options)
+        new_data[CONF_BATTERY_SYSTEM] = battery_system
+        new_options[CONF_BATTERY_SYSTEM] = battery_system
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data=new_data,
+            options=new_options,
+        )
+
+    def _save_connection_and_reload(
+        self,
+        data_updates: dict[str, Any],
+        option_updates: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Persist connection/configuration changes and reload the integration."""
+        new_data = dict(self.config_entry.data)
+        new_options = dict(self.config_entry.options)
+        new_data.update(data_updates)
+        new_options.update(option_updates if option_updates is not None else data_updates)
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data=new_data,
+            options=new_options,
+        )
+        self._schedule_entry_reload()
+        return self.async_create_entry(title="", data=new_options)
+
     def _electricity_provider(self) -> str:
         """Return the configured electricity provider."""
         return self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -4823,6 +6651,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     def _currency(self) -> str:
         """Return the configured currency."""
         return currency_for_provider(self._electricity_provider(), self.hass)
+
+    def _globird_plan_schema(self, current: dict[str, Any] | None = None) -> vol.Schema:
+        """Build the GloBird plan selector schema."""
+        return _build_globird_plan_schema(
+            current,
+            rate_unit=self._selector_unit(),
+            currency_unit=self._currency(),
+        )
 
     def _save_and_finish(self, section_data: dict[str, Any]) -> FlowResult:
         """Save a single section's data merged with existing options and finish."""
@@ -4877,10 +6713,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if not current_weather_entity and not self._has_weather_entities():
             return
 
-        selector_key = (
-            vol.Optional(CONF_WEATHER_ENTITY, default=current_weather_entity)
-            if current_weather_entity
-            else vol.Optional(CONF_WEATHER_ENTITY)
+        selector_key = vol.Optional(
+            CONF_WEATHER_ENTITY,
+            description=(
+                {"suggested_value": current_weather_entity}
+                if current_weather_entity
+                else None
+            ),
         )
         schema_dict[selector_key] = EntitySelector(
             EntitySelectorConfig(domain="weather")
@@ -4890,12 +6729,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Show options menu -- user picks which section to reconfigure."""
-        battery_system = self.config_entry.data.get(
-            CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
-        )
+        battery_system = self._effective_battery_system()
 
         # Build menu options based on current config
-        menu_options = ["pricing"]
+        menu_options = ["pricing", "battery_system"]
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        if current_provider in ("flow_power", "globird"):
+            menu_options.append("provider_portal")
 
         # Battery connection settings
         if battery_system == BATTERY_SYSTEM_TESLA:
@@ -4904,10 +6744,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("sigenergy_connection")
         elif battery_system == BATTERY_SYSTEM_SUNGROW:
             menu_options.append("sungrow_connection")
+            menu_options.append("history_relink")
         elif battery_system == BATTERY_SYSTEM_FOXESS:
             menu_options.append("foxess_connection_options")
         elif battery_system == BATTERY_SYSTEM_GOODWE:
             menu_options.append("goodwe_connection_options")
+        elif battery_system == BATTERY_SYSTEM_ALPHAESS:
+            menu_options.append("alphaess_connection")
         elif battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
             menu_options.append("esy_sunhome_connection")
         elif battery_system == BATTERY_SYSTEM_SOLAX:
@@ -4920,6 +6763,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("neovolt_connection")
         elif battery_system == BATTERY_SYSTEM_SOLAREDGE:
             menu_options.append("solaredge_connection")
+        elif battery_system == BATTERY_SYSTEM_ANKER_SOLIX:
+            menu_options.append("anker_solix")
+        elif battery_system == BATTERY_SYSTEM_CUSTOM:
+            menu_options.append("custom_battery")
 
         menu_options.extend([
             "optimization",
@@ -4934,6 +6781,736 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
+        )
+
+    async def _route_to_battery_options(self, battery_system: str) -> FlowResult:
+        """Route to the selected battery/control method options page."""
+        if battery_system == BATTERY_SYSTEM_TESLA:
+            return await self.async_step_tesla_connection()
+        if battery_system == BATTERY_SYSTEM_SIGENERGY:
+            return await self.async_step_sigenergy_connection()
+        if battery_system == BATTERY_SYSTEM_SUNGROW:
+            return await self.async_step_sungrow_connection()
+        if battery_system == BATTERY_SYSTEM_FOXESS:
+            return await self.async_step_foxess_connection_options()
+        if battery_system == BATTERY_SYSTEM_GOODWE:
+            return await self.async_step_goodwe_connection_options()
+        if battery_system == BATTERY_SYSTEM_ALPHAESS:
+            return await self.async_step_alphaess_connection()
+        if battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
+            return await self.async_step_esy_sunhome_connection()
+        if battery_system == BATTERY_SYSTEM_SOLAX:
+            return await self.async_step_solax_battery_options()
+        if battery_system == BATTERY_SYSTEM_SAJ_H2:
+            return await self.async_step_saj_h2_connection()
+        if battery_system == BATTERY_SYSTEM_FRONIUS_RESERVA:
+            return await self.async_step_fronius_reserva_connection()
+        if battery_system == BATTERY_SYSTEM_NEOVOLT:
+            return await self.async_step_neovolt_connection()
+        if battery_system == BATTERY_SYSTEM_SOLAREDGE:
+            return await self.async_step_solaredge_connection()
+        if battery_system == BATTERY_SYSTEM_ANKER_SOLIX:
+            return await self.async_step_anker_solix()
+        if battery_system == BATTERY_SYSTEM_CUSTOM:
+            return await self.async_step_custom_battery()
+        return await self.async_step_tesla_connection()
+
+    async def async_step_battery_system(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: choose or change battery/control method."""
+        if user_input is not None:
+            battery_system = user_input.get(
+                CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
+            )
+            self._save_battery_system_selection(battery_system)
+            return await self._route_to_battery_options(battery_system)
+
+        return self.async_show_form(
+            step_id="battery_system",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_BATTERY_SYSTEM,
+                        default=self._effective_battery_system(),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in BATTERY_SYSTEMS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_custom_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: custom external-controller entities."""
+        default_capacity_wh, default_charge_w, default_discharge_w = (
+            _default_optimizer_specs_for(BATTERY_SYSTEM_CUSTOM)
+        )
+        default_capacity_kwh = default_capacity_wh / 1000
+        default_charge_kw = default_charge_w / 1000
+        default_discharge_kw = default_discharge_w / 1000
+
+        if user_input is not None:
+            backup_reserve = (
+                user_input.get(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                )
+                / 100.0
+            )
+            capacity_wh = _form_kwh_to_wh(
+                user_input.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH),
+                default_capacity_kwh,
+            )
+            charge_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_CHARGE_W),
+                default_charge_kw,
+            )
+            discharge_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
+                default_discharge_kw,
+            )
+            max_grid_export_w = _form_optional_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+            )
+            max_grid_import_w = _form_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
+                0,
+            )
+            updates = {
+                CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_CUSTOM,
+                CONF_CUSTOM_BATTERY_LEVEL_ENTITY: user_input[
+                    CONF_CUSTOM_BATTERY_LEVEL_ENTITY
+                ],
+                CONF_CUSTOM_BATTERY_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_BATTERY_POWER_ENTITY
+                ],
+                CONF_CUSTOM_GRID_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_GRID_POWER_ENTITY
+                ],
+                CONF_CUSTOM_SOLAR_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_SOLAR_POWER_ENTITY
+                ],
+                CONF_CUSTOM_LOAD_POWER_ENTITY: user_input[
+                    CONF_CUSTOM_LOAD_POWER_ENTITY
+                ],
+                CONF_OPTIMIZATION_PROVIDER: OPT_PROVIDER_POWERSYNC,
+                CONF_OPTIMIZATION_ENABLED: True,
+                CONF_MONITORING_MODE: True,
+                CONF_OPTIMIZATION_EV_INTEGRATION: False,
+                CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
+                CONF_OPTIMIZATION_BACKUP_RESERVE: backup_reserve,
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH: capacity_wh,
+                CONF_OPTIMIZATION_MAX_CHARGE_W: charge_w,
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W: discharge_w,
+                CONF_OPTIMIZATION_MAX_GRID_IMPORT_W: max_grid_import_w,
+                CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: bool(
+                    user_input.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True)
+                ),
+                CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: False,
+                CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: False,
+            }
+            if max_grid_export_w is not None:
+                updates[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
+            return self._save_connection_and_reload(updates)
+
+        current_capacity_kwh = _stored_wh_to_kwh(
+            self._get_option(
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                default_capacity_wh,
+            ),
+            default_capacity_wh,
+        )
+        current_charge_kw = _stored_w_to_kw(
+            self._get_option(CONF_OPTIMIZATION_MAX_CHARGE_W, default_charge_w),
+            default_charge_w,
+        )
+        current_discharge_kw = _stored_w_to_kw(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                default_discharge_w,
+            ),
+            default_discharge_w,
+        )
+        current_max_grid_export_kw = _stored_optional_w_to_kw(
+            self._get_option(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+        )
+        current_max_grid_import_kw = _stored_w_to_kw(
+            self._get_option(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W, 0),
+            0,
+        )
+        current_backup_reserve = _stored_ratio_to_percent(
+            self._get_option(
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+            ),
+            DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+        )
+
+        return self.async_show_form(
+            step_id="custom_battery",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_CUSTOM_BATTERY_LEVEL_ENTITY,
+                        default=self._get_option(
+                            CONF_CUSTOM_BATTERY_LEVEL_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_BATTERY_POWER_ENTITY,
+                        default=self._get_option(
+                            CONF_CUSTOM_BATTERY_POWER_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_GRID_POWER_ENTITY,
+                        default=self._get_option(CONF_CUSTOM_GRID_POWER_ENTITY, ""),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_SOLAR_POWER_ENTITY,
+                        default=self._get_option(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_CUSTOM_LOAD_POWER_ENTITY,
+                        default=self._get_option(CONF_CUSTOM_LOAD_POWER_ENTITY, ""),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=current_backup_reserve,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=1,
+                            unit_of_measurement="%",
+                            mode=NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                        default=current_capacity_kwh,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement="kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_CHARGE_W,
+                        default=current_charge_kw,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.1,
+                            max=50,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                        default=current_discharge_kw,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.1,
+                            max=50,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                        description=(
+                            {"suggested_value": current_max_grid_export_kw}
+                            if current_max_grid_export_kw is not None
+                            else None
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                        default=current_max_grid_import_kw,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                        default=self._get_option(
+                            CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True
+                        ),
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_alphaess_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: AlphaESS Modbus and optional Cloud connection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = (user_input.get(CONF_ALPHAESS_MODBUS_HOST) or "").strip()
+            port = int(
+                user_input.get(
+                    CONF_ALPHAESS_MODBUS_PORT,
+                    DEFAULT_ALPHAESS_MODBUS_PORT,
+                )
+            )
+            slave_id = int(
+                user_input.get(
+                    CONF_ALPHAESS_MODBUS_SLAVE_ID,
+                    DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
+                )
+            )
+            export_limit_kw = user_input.get(CONF_ALPHAESS_EXPORT_LIMIT_KW)
+            app_id = (user_input.get(CONF_ALPHAESS_CLOUD_APP_ID) or "").strip()
+            app_secret = (
+                user_input.get(CONF_ALPHAESS_CLOUD_APP_SECRET) or ""
+            ).strip()
+            serial = (user_input.get(CONF_ALPHAESS_CLOUD_SERIAL) or "").strip()
+
+            if not host:
+                errors["base"] = "alphaess_host_required"
+            else:
+                from .inverters.alphaess import AlphaESSController
+
+                controller = AlphaESSController(
+                    host=host,
+                    port=port,
+                    slave_id=slave_id,
+                    max_export_limit_kw=export_limit_kw,
+                )
+                try:
+                    connected = await controller.connect()
+                    if not connected:
+                        errors["base"] = "alphaess_connection_failed"
+                    else:
+                        state = await controller.get_status()
+                        if (
+                            state.attributes is None
+                            or "battery_soc" not in state.attributes
+                        ):
+                            errors["base"] = "alphaess_no_data"
+                finally:
+                    try:
+                        await controller.disconnect()
+                    except Exception:
+                        pass
+
+            if not errors and (app_id or app_secret):
+                if not app_id or not app_secret:
+                    errors["base"] = "alphaess_cloud_partial"
+                else:
+                    from .alphaess_api import AlphaESSCloudClient
+
+                    client = AlphaESSCloudClient(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        serial=serial,
+                    )
+                    try:
+                        ok, msg = await client.test_connection()
+                        if not ok:
+                            errors["base"] = "alphaess_cloud_invalid"
+                            _LOGGER.warning(
+                                "AlphaESS cloud validation failed: %s", msg
+                            )
+                    finally:
+                        try:
+                            await client.close()
+                        except Exception:
+                            pass
+
+            if not errors:
+                updates = {
+                    CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_ALPHAESS,
+                    CONF_ALPHAESS_MODBUS_HOST: host,
+                    CONF_ALPHAESS_MODBUS_PORT: port,
+                    CONF_ALPHAESS_MODBUS_SLAVE_ID: slave_id,
+                    CONF_ALPHAESS_DC_CURTAILMENT_ENABLED: user_input.get(
+                        CONF_ALPHAESS_DC_CURTAILMENT_ENABLED, False
+                    ),
+                    CONF_ALPHAESS_CLOUD_ENABLED: bool(app_id and app_secret),
+                }
+                if export_limit_kw is not None:
+                    updates[CONF_ALPHAESS_EXPORT_LIMIT_KW] = float(export_limit_kw)
+                if app_id and app_secret:
+                    updates[CONF_ALPHAESS_CLOUD_APP_ID] = app_id
+                    updates[CONF_ALPHAESS_CLOUD_APP_SECRET] = app_secret
+                    updates[CONF_ALPHAESS_CLOUD_SERIAL] = serial
+                option_updates = {
+                    key: value
+                    for key, value in updates.items()
+                    if key != CONF_ALPHAESS_CLOUD_APP_SECRET
+                }
+                return self._save_connection_and_reload(updates, option_updates)
+
+        return self.async_show_form(
+            step_id="alphaess_connection",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ALPHAESS_MODBUS_HOST,
+                        default=self._get_option(CONF_ALPHAESS_MODBUS_HOST, ""),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_ALPHAESS_MODBUS_PORT,
+                        default=self._get_option(
+                            CONF_ALPHAESS_MODBUS_PORT,
+                            DEFAULT_ALPHAESS_MODBUS_PORT,
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=65535, step=1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_MODBUS_SLAVE_ID,
+                        default=self._get_option(
+                            CONF_ALPHAESS_MODBUS_SLAVE_ID,
+                            DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=255, step=1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_EXPORT_LIMIT_KW,
+                        description={
+                            "suggested_value": self._get_option(
+                                CONF_ALPHAESS_EXPORT_LIMIT_KW
+                            )
+                        },
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=100.0,
+                            step=0.1,
+                            mode=NumberSelectorMode.BOX,
+                            unit_of_measurement="kW",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_DC_CURTAILMENT_ENABLED,
+                        default=self._get_option(
+                            CONF_ALPHAESS_DC_CURTAILMENT_ENABLED, False
+                        ),
+                    ): BooleanSelector(),
+                    vol.Optional(
+                        CONF_ALPHAESS_CLOUD_APP_ID,
+                        default=self._get_option(CONF_ALPHAESS_CLOUD_APP_ID, ""),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_ALPHAESS_CLOUD_APP_SECRET,
+                        description={"suggested_value": ""},
+                    ): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_CLOUD_SERIAL,
+                        default=self._get_option(CONF_ALPHAESS_CLOUD_SERIAL, ""),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_anker_solix(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Anker Solix direct Modbus or HA integration bridge."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            connection_type = user_input.get(
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                ANKER_SOLIX_CONNECTION_MODBUS,
+            )
+            capacity_kwh = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                    DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                )
+            )
+            max_charge_kw = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+                )
+            )
+            max_discharge_kw = float(
+                user_input.get(
+                    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                    DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                )
+            )
+            updates = {
+                CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_ANKER_SOLIX,
+                CONF_ANKER_SOLIX_CONNECTION_TYPE: connection_type,
+                CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH: capacity_kwh,
+                CONF_ANKER_SOLIX_MAX_CHARGE_KW: max_charge_kw,
+                CONF_ANKER_SOLIX_MAX_DISCHARGE_KW: max_discharge_kw,
+            }
+
+            try:
+                if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+                    host = (
+                        user_input.get(CONF_ANKER_SOLIX_MODBUS_HOST) or ""
+                    ).strip()
+                    port = int(
+                        user_input.get(
+                            CONF_ANKER_SOLIX_MODBUS_PORT,
+                            DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+                        )
+                    )
+                    slave_id = int(
+                        user_input.get(
+                            CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                            DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                        )
+                    )
+                    if not host:
+                        errors["base"] = "anker_solix_host_required"
+                    else:
+                        from .inverters.anker_solix import AnkerSolixX1ModbusController
+
+                        controller = AnkerSolixX1ModbusController(
+                            host=host,
+                            port=port,
+                            slave_id=slave_id,
+                            battery_capacity_kwh=capacity_kwh,
+                            max_charge_kw=max_charge_kw,
+                            max_discharge_kw=max_discharge_kw,
+                        )
+                        try:
+                            if not await controller.connect():
+                                errors["base"] = "cannot_connect"
+                        finally:
+                            await controller.disconnect()
+                        updates.update(
+                            {
+                                CONF_ANKER_SOLIX_MODBUS_HOST: host,
+                                CONF_ANKER_SOLIX_MODBUS_PORT: port,
+                                CONF_ANKER_SOLIX_MODBUS_SLAVE_ID: slave_id,
+                            }
+                        )
+                else:
+                    domain = (
+                        "anker_solix_official"
+                        if connection_type == ANKER_SOLIX_CONNECTION_OFFICIAL_HA
+                        else "anker_solix"
+                    )
+                    anker_entries = self.hass.config_entries.async_entries(domain)
+                    if not anker_entries:
+                        errors["base"] = "anker_solix_ha_not_installed"
+                    else:
+                        selected_entry_id = (
+                            anker_entries[0].entry_id
+                            if len(anker_entries) == 1
+                            else user_input.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID, "")
+                        )
+                        entity_prefix = (
+                            user_input.get(CONF_ANKER_SOLIX_ENTITY_PREFIX) or ""
+                        ).strip()
+                        from .inverters.anker_solix import AnkerSolixEntityController
+
+                        controller = AnkerSolixEntityController(
+                            self.hass,
+                            integration_domain=domain,
+                            config_entry_id=selected_entry_id,
+                            entity_prefix=entity_prefix,
+                            battery_capacity_kwh=capacity_kwh,
+                            max_charge_kw=max_charge_kw,
+                            max_discharge_kw=max_discharge_kw,
+                        )
+                        await controller.connect()
+                        updates.update(
+                            {
+                                CONF_ANKER_SOLIX_CONFIG_ENTRY_ID: selected_entry_id,
+                                CONF_ANKER_SOLIX_ENTITY_PREFIX: entity_prefix,
+                            }
+                        )
+            except Exception as exc:
+                _LOGGER.debug("Anker Solix options validation failed: %s", exc)
+                errors["base"] = "cannot_connect"
+
+            if not errors:
+                return self._save_connection_and_reload(updates)
+
+        current = {
+            key: self._get_option(key)
+            for key in (
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                CONF_ANKER_SOLIX_MODBUS_HOST,
+                CONF_ANKER_SOLIX_MODBUS_PORT,
+                CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                CONF_ANKER_SOLIX_ENTITY_PREFIX,
+                CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+            )
+        }
+        if user_input is not None:
+            current.update(user_input)
+        connection_type = current.get(
+            CONF_ANKER_SOLIX_CONNECTION_TYPE,
+            ANKER_SOLIX_CONNECTION_MODBUS,
+        )
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                default=connection_type,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in ANKER_SOLIX_CONNECTION_TYPES.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        }
+
+        if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_HOST,
+                    default=current.get(CONF_ANKER_SOLIX_MODBUS_HOST) or "",
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_PORT,
+                    default=current.get(CONF_ANKER_SOLIX_MODBUS_PORT)
+                    or DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+                )
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=1, max=65535, step=1, mode=NumberSelectorMode.BOX
+                )
+            )
+            schema_fields[
+                vol.Required(
+                    CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                    default=current.get(CONF_ANKER_SOLIX_MODBUS_SLAVE_ID)
+                    or DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                )
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=1, max=247, step=1, mode=NumberSelectorMode.BOX
+                )
+            )
+        else:
+            domain = (
+                "anker_solix_official"
+                if connection_type == ANKER_SOLIX_CONNECTION_OFFICIAL_HA
+                else "anker_solix"
+            )
+            anker_entries = self.hass.config_entries.async_entries(domain)
+            if len(anker_entries) > 1:
+                schema_fields[
+                    vol.Required(
+                        CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                        default=current.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID)
+                        or "",
+                    )
+                ] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(
+                                value=e.entry_id,
+                                label=e.title or e.entry_id,
+                            )
+                            for e in anker_entries
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+            schema_fields[
+                vol.Optional(
+                    CONF_ANKER_SOLIX_ENTITY_PREFIX,
+                    default=current.get(CONF_ANKER_SOLIX_ENTITY_PREFIX) or "",
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                default=current.get(CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH)
+                or DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=1,
+                max=200,
+                step=0.1,
+                unit_of_measurement="kWh",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                default=current.get(CONF_ANKER_SOLIX_MAX_CHARGE_KW)
+                or DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.1,
+                max=50,
+                step=0.1,
+                unit_of_measurement="kW",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                default=current.get(CONF_ANKER_SOLIX_MAX_DISCHARGE_KW)
+                or DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.1,
+                max=50,
+                step=0.1,
+                unit_of_measurement="kW",
+                mode=NumberSelectorMode.BOX,
+            )
+        )
+
+        return self.async_show_form(
+            step_id="anker_solix",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
         )
 
     async def async_step_auto_update(
@@ -4999,7 +7576,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if provider == "flow_power":
                 return await self.async_step_flow_power_options()
             if provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                return await self.async_step_globird_options()
+                return await self._async_route_custom_tou_options(provider)
             if provider == "localvolts":
                 return await self.async_step_localvolts_options()
             if provider == "octopus":
@@ -5030,6 +7607,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
         )
+
+    async def async_step_provider_portal(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: configure provider portal account login."""
+        provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        if provider == "flow_power":
+            return await self.async_step_flow_power_portal_options()
+        if provider == "globird":
+            return await self.async_step_globird_portal_options()
+        return await self.async_step_init()
 
     async def async_step_tesla_connection(
         self, user_input: dict[str, Any] | None = None
@@ -5091,6 +7679,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_teslemetry_token()
 
                 # Fleet API -- save directly
+                self._schedule_entry_reload()
                 return self.async_create_entry(
                     title="", data=dict(self.config_entry.options)
                 )
@@ -5183,6 +7772,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 sigen_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
                 sigen_pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
                 sigen_device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+                sigen_cloud_region = user_input.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
                 sigen_station_id = user_input.get(CONF_SIGENERGY_STATION_ID, "").strip()
 
                 if sigen_pass_enc:
@@ -5198,12 +7791,26 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_data[CONF_SIGENERGY_PASS_ENC] = final_pass_enc
                 if sigen_device_id:
                     new_data[CONF_SIGENERGY_DEVICE_ID] = sigen_device_id
+                previous_cloud_region = new_data.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
+                new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region
+                if previous_cloud_region != sigen_cloud_region:
+                    new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_REFRESH_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_TOKEN_EXPIRES_AT, None)
                 if sigen_station_id:
+                    previous_station_id = new_data.get(CONF_SIGENERGY_STATION_ID)
                     new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
+                    if previous_station_id != sigen_station_id:
+                        new_data.pop(CONF_SIGENERGY_TARIFF_STATION_ID, None)
+                        new_data.pop(CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID, None)
 
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
+                self._schedule_entry_reload()
                 return self.async_create_entry(
                     title="", data=dict(self.config_entry.options)
                 )
@@ -5224,6 +7831,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
         current_sigen_device_id = self.config_entry.data.get(
             CONF_SIGENERGY_DEVICE_ID, ""
+        )
+        current_sigen_cloud_region = self.config_entry.data.get(
+            CONF_SIGENERGY_CLOUD_REGION, DEFAULT_SIGENERGY_CLOUD_REGION
         )
         current_sigen_station_id = self.config_entry.data.get(
             CONF_SIGENERGY_STATION_ID, ""
@@ -5278,6 +7888,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default=current_sigen_device_id,
                         description={"suggested_value": current_sigen_device_id},
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=current_sigen_cloud_region,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_STATION_ID,
                         default=current_sigen_station_id,
@@ -5318,6 +7938,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
+                self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=new_options)
 
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
@@ -5349,6 +7970,38 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_history_relink(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: relink mkaiser Sungrow history to PowerSync entities."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if user_input.get("confirm") is not True:
+                errors["base"] = "confirm_required"
+            else:
+                result = apply_history_relink(self.hass, self.config_entry)
+                if result.get("applied_count", 0) > 0:
+                    return self.async_create_entry(
+                        title="",
+                        data=dict(self.config_entry.options),
+                    )
+                errors["base"] = "no_ready_history_relinks"
+
+        preview = preview_history_relink(self.hass, self.config_entry)
+        return self.async_show_form(
+            step_id="history_relink",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("confirm", default=False): BooleanSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "summary": format_history_relink_summary(preview),
+            },
         )
 
     async def async_step_foxess_connection_options(
@@ -5417,6 +8070,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
+                self._schedule_entry_reload()
                 return self.async_create_entry(
                     title="", data=dict(self.config_entry.options)
                 )
@@ -5568,6 +8222,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data
                     )
+                    self._schedule_entry_reload()
                     return self.async_create_entry(
                         title="", data=new_options
                     )
@@ -5653,6 +8308,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
+                self._schedule_entry_reload()
                 return self.async_create_entry(
                     title="", data=dict(self.config_entry.options)
                 )
@@ -5720,6 +8376,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_SOLAX_MAX_CHARGE_CURRENT_A] = float(user_input.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A))
                 new_data[CONF_SOLAX_MAX_DISCHARGE_CURRENT_A] = float(user_input.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A))
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=dict(self.config_entry.options))
             except ValueError as exc:
                 msg = str(exc)
@@ -5819,6 +8476,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_SAJ_BATTERY_CAPACITY_KWH] = float(capacity_kwh)
                 new_data[CONF_SAJ_INVERTER_RATED_KW] = float(inverter_rated_kw)
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=dict(self.config_entry.options))
             except ValueError as exc:
                 if "saj_missing_entities:" in str(exc):
@@ -5895,7 +8553,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_fronius_reserva_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Menu handler: Fronius Reserva bridge settings."""
+        """Menu handler: Fronius GEN24 storage bridge settings."""
         from .inverters.fronius_reserva import FroniusReservaBatteryController
 
         fronius_entries = self.hass.config_entries.async_entries("fronius_modbus")
@@ -5934,6 +8592,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_FRONIUS_RESERVA_MAX_CHARGE_KW] = float(max_charge_kw)
                 new_data[CONF_FRONIUS_RESERVA_MAX_DISCHARGE_KW] = float(max_discharge_kw)
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=dict(self.config_entry.options))
             except ValueError as exc:
                 msg = str(exc)
@@ -5944,7 +8603,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 else:
                     errors["base"] = "fronius_reserva_connect_failed"
             except Exception as exc:
-                _LOGGER.error("Fronius Reserva options error: %s", exc)
+                _LOGGER.error("Fronius GEN24 storage options error: %s", exc)
                 errors["base"] = "fronius_reserva_connect_failed"
 
         entry_options = {e.entry_id: e.title or e.entry_id for e in fronius_entries}
@@ -6117,6 +8776,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_NEOVOLT_SOC_BALANCE_TOLERANCE] = float(
                     soc_balance_tolerance
                 )
+                self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=new_options)
             except ValueError as exc:
                 if "capacity_" in str(exc):
@@ -6313,6 +8973,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         self.config_entry, data=new_data
                     )
                     new_options = {**self.config_entry.options, **updates}
+                    self._schedule_entry_reload()
                     return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
@@ -6368,28 +9029,56 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Menu handler: optimization provider and backup reserve settings."""
-        battery_system = self.config_entry.data.get(
-            CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
+        battery_system = self._effective_battery_system()
+        is_tesla = battery_system == BATTERY_SYSTEM_TESLA
+        is_custom = battery_system == BATTERY_SYSTEM_CUSTOM
+        current_provider = self._get_option(
+            CONF_ELECTRICITY_PROVIDER,
+            self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
         )
+        supports_no_idle_mode = supports_no_idle_mode_provider(current_provider)
         if user_input is not None:
             optimization_provider = user_input.get(
                 CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
             )
+            if is_custom:
+                optimization_provider = OPT_PROVIDER_POWERSYNC
             optimization_enabled = bool(
                 user_input.get(
                     CONF_OPTIMIZATION_ENABLED,
                     optimization_provider == OPT_PROVIDER_POWERSYNC,
                 )
             )
+            auto_apply_reserve_enabled = bool(
+                user_input.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False)
+            )
+            previous_auto_apply_reserve_enabled = bool(
+                self._get_option(
+                    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                    self.config_entry.data.get(
+                        CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False
+                    ),
+                )
+            )
             if optimization_provider != OPT_PROVIDER_POWERSYNC:
                 optimization_enabled = False
+                auto_apply_reserve_enabled = False
+            if is_custom:
+                optimization_enabled = True
             new_data = dict(self.config_entry.data)
             new_options = dict(self.config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
             new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled
+            new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
+            new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
             monitoring_mode = bool(user_input.get(CONF_MONITORING_MODE, False))
+            if is_custom:
+                monitoring_mode = True
             new_data[CONF_MONITORING_MODE] = monitoring_mode
             new_options[CONF_MONITORING_MODE] = monitoring_mode
+            if optimization_provider != OPT_PROVIDER_POWERSYNC:
+                new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = False
+                new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = False
             if battery_system == BATTERY_SYSTEM_NEOVOLT:
                 surplus_balancer_mode = user_input.get(
                     CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
@@ -6421,6 +9110,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     )
                     / 100.0
                 )
+                current_manual_reserve = self._get_option(
+                    CONF_OPTIMIZATION_MANUAL_RESERVE,
+                    self.config_entry.data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+                )
+                if current_manual_reserve is None:
+                    current_manual_reserve = backup_reserve
+                elif current_manual_reserve > 1:
+                    current_manual_reserve = current_manual_reserve / 100.0
+                if (
+                    not auto_apply_reserve_enabled
+                    and previous_auto_apply_reserve_enabled
+                ):
+                    backup_reserve = current_manual_reserve
+                manual_reserve = (
+                    backup_reserve
+                    if auto_apply_reserve_enabled
+                    else current_manual_reserve
+                )
                 hardware_backup_reserve = (
                     user_input.get(
                         CONF_HARDWARE_BACKUP_RESERVE,
@@ -6440,6 +9147,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
                     default_discharge_kw,
                 )
+                max_grid_export_w = _form_optional_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+                )
+                max_grid_import_w = _form_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
+                    0,
+                )
+                max_grid_charge_price = _form_optional_cents_to_price(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
+                )
+                grid_charge_soc_cap = _form_percent_to_ratio(
+                    user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
+                    1.0,
+                )
                 allow_grid_charge = user_input.get(
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     True,
@@ -6447,18 +9168,28 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 profit_max_enabled = bool(
                     user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                 )
-                profit_max_target_time = user_input.get(
-                    CONF_PROFIT_MAX_TARGET_TIME,
-                    DEFAULT_PROFIT_MAX_TARGET_TIME,
+                charge_by_time_enabled = bool(
+                    user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                 )
-                profit_max_target_soc = _form_percent_to_ratio(
-                    user_input.get(CONF_PROFIT_MAX_TARGET_SOC),
-                    DEFAULT_PROFIT_MAX_TARGET_SOC,
+                charge_by_time_target_time = user_input.get(
+                    CONF_CHARGE_BY_TIME_TARGET_TIME,
+                    DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+                )
+                charge_by_time_target_soc = _form_percent_to_ratio(
+                    user_input.get(CONF_CHARGE_BY_TIME_TARGET_SOC),
+                    DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
+                )
+                disable_idle = (
+                    bool(user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False))
+                    if supports_no_idle_mode
+                    else False
                 )
                 new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_options[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = backup_reserve
                 new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = backup_reserve
+                new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_reserve
+                new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = manual_reserve
                 new_data[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve
                 new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve
                 new_options.pop("_user_backup_reserve", None)
@@ -6468,33 +9199,174 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_MAX_CHARGE_W] = charge_w
                 new_data[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = discharge_w
                 new_options[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = discharge_w
+                if max_grid_export_w is None:
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                else:
+                    new_data[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
+                    new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
+                new_data[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
+                new_options[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
+                if max_grid_charge_price is None:
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                else:
+                    new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = (
+                        max_grid_charge_price
+                    )
+                    new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = (
+                        max_grid_charge_price
+                    )
+                new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
+                new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
-                spread_export_enabled = bool(
-                    user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
+                spread_export_enabled = (
+                    False
+                    if is_tesla
+                    else bool(
+                        user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
+                    )
                 )
-                spread_import_enabled = bool(
-                    user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
+                spread_import_enabled = (
+                    False
+                    if is_tesla
+                    else bool(
+                        user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
+                    )
                 )
                 ev_integration_enabled = bool(
                     user_input.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
+                )
+                load_entity = _normalize_optional_entity(
+                    user_input.get(CONF_OPTIMIZATION_LOAD_ENTITY)
+                )
+                planned_ev_load_entity = _normalize_optional_entity(
+                    user_input.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY)
                 )
                 new_data[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled
                 new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled
                 new_data[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled
                 new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled
+                new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
+                new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
+                new_data[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
+                new_options[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
                 new_data[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled
                 new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled
+                new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity
+                new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity
                 new_data[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
-                new_data[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
-                new_options[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
-                new_data[CONF_PROFIT_MAX_TARGET_SOC] = profit_max_target_soc
-                new_options[CONF_PROFIT_MAX_TARGET_SOC] = profit_max_target_soc
+                new_data[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
+                new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
+                new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
+                new_options[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
+                new_data[CONF_CHARGE_BY_TIME_TARGET_SOC] = charge_by_time_target_soc
+                new_options[CONF_CHARGE_BY_TIME_TARGET_SOC] = charge_by_time_target_soc
+                new_data[CONF_PROFIT_MAX_TARGET_TIME] = charge_by_time_target_time
+                new_options[CONF_PROFIT_MAX_TARGET_TIME] = charge_by_time_target_time
+                new_data[CONF_PROFIT_MAX_TARGET_SOC] = charge_by_time_target_soc
+                new_options[CONF_PROFIT_MAX_TARGET_SOC] = charge_by_time_target_soc
 
+            entry_data = self.hass.data.get(DOMAIN, {}).get(
+                self.config_entry.entry_id
+            )
+            coordinator = (
+                entry_data.get("optimization_coordinator")
+                if isinstance(entry_data, dict)
+                else None
+            )
+
+            # Decide — before persisting — whether anything STRUCTURAL changed.
+            # Pure optimiser tunables are pushed into the running coordinator in
+            # place (the same path the mobile app uses via set_settings), so the
+            # change applies in well under a second. Structural changes —
+            # provider, enable/disable, auto-apply toggle, monitoring mode, the
+            # No Idle toggle, or the Neovolt surplus mode — still rebuild
+            # the integration with a full reload.
+            def _opt_changed(key: str, default: Any = None) -> bool:
+                current = self._get_option(
+                    key, self.config_entry.data.get(key, default)
+                )
+                updated = new_options.get(key, new_data.get(key, default))
+                return current != updated
+
+            structural_change = (
+                coordinator is None
+                or not hasattr(coordinator, "set_settings")
+                or _opt_changed(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+                or _opt_changed(CONF_OPTIMIZATION_ENABLED, False)
+                or _opt_changed(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False)
+                or _opt_changed(CONF_MONITORING_MODE, False)
+                or _opt_changed(CONF_OPTIMIZATION_DISABLE_IDLE, False)
+                # EV integration must reload: set_settings only flips the
+                # load-overlay flag, it does NOT start/stop the EV coordinator
+                # that schedules charging — that happens during setup/enable.
+                or _opt_changed(CONF_OPTIMIZATION_EV_INTEGRATION, False)
+                or _opt_changed(CONF_NEOVOLT_SURPLUS_BALANCER_MODE)
+            )
+
+            if isinstance(entry_data, dict):
+                entry_data["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data, options=new_options
             )
+            if battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode:
+                try:
+                    await self.hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_RESTORE_NORMAL,
+                        {"source": "manual", "_native_control": True},
+                        blocking=True,
+                    )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Monitoring mode enabled but Sigenergy native/VPP restore failed: %s",
+                        err,
+                    )
+
+            if structural_change:
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                )
+            elif optimization_provider == OPT_PROVIDER_POWERSYNC:
+                live_settings = {
+                    "auto_apply_reserve_enabled": auto_apply_reserve_enabled,
+                    "backup_reserve": backup_reserve,
+                    "hardware_backup_reserve": hardware_backup_reserve,
+                    "battery_capacity_wh": capacity_wh,
+                    "max_charge_w": charge_w,
+                    "max_discharge_w": discharge_w,
+                    "max_grid_export_w": max_grid_export_w,
+                    "max_grid_import_w": max_grid_import_w,
+                    "max_grid_charge_price": max_grid_charge_price,
+                    "grid_charge_soc_cap": grid_charge_soc_cap,
+                    "allow_grid_charge": allow_grid_charge,
+                    "cost_function": COST_FUNCTION_COST,
+                    "profit_max_enabled": profit_max_enabled,
+                    "charge_by_time_enabled": charge_by_time_enabled,
+                    "charge_by_time_target_time": charge_by_time_target_time,
+                    "charge_by_time_target_soc": charge_by_time_target_soc,
+                    "spread_export_enabled": spread_export_enabled,
+                    "spread_import_enabled": spread_import_enabled,
+                    "ev_integration": ev_integration_enabled,
+                    "load_entity": load_entity,
+                    "planned_ev_load_entity": planned_ev_load_entity,
+                }
+                try:
+                    await coordinator.set_settings(live_settings)
+                except Exception as err:  # never leave settings half-applied
+                    _LOGGER.warning(
+                        "Live optimiser settings apply failed (%s) — reloading entry",
+                        err,
+                    )
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_reload(
+                            self.config_entry.entry_id
+                        )
+                    )
+
             return self.async_create_entry(
                 title="", data=dict(self.config_entry.options)
             )
@@ -6505,6 +9377,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_optimization_enabled = self.config_entry.options.get(
             CONF_OPTIMIZATION_ENABLED,
             current_opt_provider == OPT_PROVIDER_POWERSYNC,
+        )
+        current_auto_apply_reserve = self._get_option(
+            CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+            self.config_entry.data.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False),
         )
         current_monitoring_mode = self._get_option(
             CONF_MONITORING_MODE,
@@ -6523,6 +9399,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_BACKUP_RESERVE,
                 DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
             ),
+        )
+        current_manual_reserve = self._get_option(
+            CONF_OPTIMIZATION_MANUAL_RESERVE,
+            self.config_entry.data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+        )
+        if current_manual_reserve is not None and current_manual_reserve > 1:
+            current_manual_reserve = current_manual_reserve / 100.0
+        display_backup_reserve = (
+            current_manual_reserve
+            if current_auto_apply_reserve and current_manual_reserve is not None
+            else current_backup_reserve
         )
         current_hardware_backup_reserve = self._get_option(
             CONF_HARDWARE_BACKUP_RESERVE,
@@ -6561,9 +9448,38 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             default_discharge_w,
         )
+        current_max_grid_export_kw = _stored_optional_w_to_kw(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                self.config_entry.data.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W),
+            )
+        )
+        current_max_grid_import_kw = _stored_w_to_kw(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                    0,
+                ),
+            ),
+            0,
+        )
         current_allow_grid_charge = self._get_option(
             CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
             self.config_entry.data.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True),
+        )
+        current_max_grid_charge_price = _stored_optional_price_to_cents(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                self.config_entry.data.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE),
+            )
+        )
+        current_grid_charge_soc_cap = _stored_ratio_to_percent(
+            self._get_option(
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                self.config_entry.data.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP, 1.0),
+            ),
+            1.0,
         )
         current_spread_export_enabled = self._get_option(
             CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -6573,30 +9489,59 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
             self.config_entry.data.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False),
         )
+        current_disable_idle = self._get_option(
+            CONF_OPTIMIZATION_DISABLE_IDLE,
+            self.config_entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
+        )
         current_ev_integration_enabled = self._get_option(
             CONF_OPTIMIZATION_EV_INTEGRATION,
             self.config_entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
+        )
+        current_load_entity = _normalize_optional_entity(
+            self._get_option(
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+                self.config_entry.data.get(CONF_OPTIMIZATION_LOAD_ENTITY),
+            )
+        )
+        current_planned_ev_load_entity = _normalize_optional_entity(
+            self._get_option(
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                self.config_entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
+            )
         )
         current_profit_max_enabled = self._get_option(
             CONF_PROFIT_MAX_ENABLED,
             self.config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
         )
-        current_profit_max_target_time = self._get_option(
-            CONF_PROFIT_MAX_TARGET_TIME,
+        current_charge_by_time_enabled = self._get_option(
+            CONF_CHARGE_BY_TIME_ENABLED,
             self.config_entry.data.get(
-                CONF_PROFIT_MAX_TARGET_TIME,
-                DEFAULT_PROFIT_MAX_TARGET_TIME,
+                CONF_CHARGE_BY_TIME_ENABLED,
+                bool(current_profit_max_enabled),
             ),
         )
-        current_profit_max_target_soc = _stored_ratio_to_percent(
-            self._get_option(
-                CONF_PROFIT_MAX_TARGET_SOC,
+        current_charge_by_time_target_time = self._get_option(
+            CONF_CHARGE_BY_TIME_TARGET_TIME,
+            self.config_entry.data.get(
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
                 self.config_entry.data.get(
-                    CONF_PROFIT_MAX_TARGET_SOC,
-                    DEFAULT_PROFIT_MAX_TARGET_SOC,
+                    CONF_PROFIT_MAX_TARGET_TIME,
+                    DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
                 ),
             ),
-            DEFAULT_PROFIT_MAX_TARGET_SOC,
+        )
+        current_charge_by_time_target_soc = _stored_ratio_to_percent(
+            self._get_option(
+                CONF_CHARGE_BY_TIME_TARGET_SOC,
+                self.config_entry.data.get(
+                    CONF_CHARGE_BY_TIME_TARGET_SOC,
+                    self.config_entry.data.get(
+                        CONF_PROFIT_MAX_TARGET_SOC,
+                        DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
+                    ),
+                ),
+            ),
+            DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
         )
 
         opt_providers = _optimization_provider_options_for_battery(battery_system)
@@ -6616,9 +9561,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=bool(current_optimization_enabled),
             ): BooleanSelector(),
             vol.Required(
+                CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                default=bool(current_auto_apply_reserve),
+            ): BooleanSelector(),
+            vol.Required(
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 default=bool(current_ev_integration_enabled),
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+                description=(
+                    {"suggested_value": current_load_entity}
+                    if current_load_entity
+                    else None
+                ),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                description=(
+                    {"suggested_value": current_planned_ev_load_entity}
+                    if current_planned_ev_load_entity
+                    else None
+                ),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             vol.Required(
                 CONF_MONITORING_MODE,
                 default=bool(current_monitoring_mode),
@@ -6643,9 +9608,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             {
                 vol.Required(
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
-                    default=int(current_backup_reserve * 100)
-                    if current_backup_reserve < 1
-                    else int(current_backup_reserve),
+                    default=int(display_backup_reserve * 100)
+                    if display_backup_reserve < 1
+                    else int(display_backup_reserve),
                 ): NumberSelector(NumberSelectorConfig(
                     min=0, max=100, step=1, unit_of_measurement="%",
                     mode=NumberSelectorMode.SLIDER,
@@ -6680,10 +9645,46 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     min=0.1, max=50, step=0.1, unit_of_measurement="kW",
                     mode=NumberSelectorMode.BOX,
                 )),
+                vol.Optional(
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    description=(
+                        {"suggested_value": current_max_grid_export_kw}
+                        if current_max_grid_export_kw is not None
+                        else None
+                    ),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=100, step=0.1, unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                    default=current_max_grid_import_kw,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=100, step=0.1, unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )),
                 vol.Required(
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     default=bool(current_allow_grid_charge),
                 ): BooleanSelector(),
+                vol.Required(
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                    default=current_max_grid_charge_price,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                    default=current_grid_charge_soc_cap,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=100, step=1, unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )),
+            }
+        )
+        if not is_tesla:
+            schema_fields.update({
                 vol.Required(
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
                     default=bool(current_spread_export_enabled),
@@ -6692,17 +9693,31 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
                     default=bool(current_spread_import_enabled),
                 ): BooleanSelector(),
+            })
+        if supports_no_idle_mode:
+            schema_fields[
+                vol.Required(
+                    CONF_OPTIMIZATION_DISABLE_IDLE,
+                    default=bool(current_disable_idle),
+                )
+            ] = BooleanSelector()
+        schema_fields.update(
+            {
                 vol.Required(
                     CONF_PROFIT_MAX_ENABLED,
                     default=bool(current_profit_max_enabled),
                 ): BooleanSelector(),
                 vol.Required(
-                    CONF_PROFIT_MAX_TARGET_TIME,
-                    default=current_profit_max_target_time,
+                    CONF_CHARGE_BY_TIME_ENABLED,
+                    default=bool(current_charge_by_time_enabled),
+                ): BooleanSelector(),
+                vol.Required(
+                    CONF_CHARGE_BY_TIME_TARGET_TIME,
+                    default=current_charge_by_time_target_time,
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Required(
-                    CONF_PROFIT_MAX_TARGET_SOC,
-                    default=current_profit_max_target_soc,
+                    CONF_CHARGE_BY_TIME_TARGET_SOC,
+                    default=current_charge_by_time_target_soc,
                 ): NumberSelector(NumberSelectorConfig(
                     min=0, max=100, step=1, unit_of_measurement="%",
                     mode=NumberSelectorMode.SLIDER,
@@ -6746,7 +9761,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init_tesla(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1 for Tesla users: Select electricity provider, Tesla Energy/EV API providers, and optimization provider."""
+        """Step 1 for Tesla users: select electricity provider and Tesla API providers."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -6754,9 +9769,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
             self._tesla_provider = user_input.get(
                 CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
-            )
-            optimization_provider = user_input.get(
-                CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
             )
 
             # Tesla EV provider — independent from energy provider
@@ -6781,11 +9793,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self._pending_init_tesla_input = dict(user_input)
                 return await self.async_step_options_tesla_ev_token()
 
-            # Check if switching providers and need a fresh token
             current_tesla_provider = self.config_entry.data.get(
                 CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
             )
-            current_token = self.config_entry.data.get(CONF_TESLEMETRY_API_TOKEN)
 
             if not errors:
                 # Persist the EV provider choice now (before any sub-step
@@ -6812,17 +9822,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 if self._tesla_provider != current_tesla_provider:
                     new_data[CONF_TESLA_API_PROVIDER] = self._tesla_provider
                 new_data[CONF_TESLA_EV_API_PROVIDER] = ev_choice
-                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-                # If Smart Optimization, store ML options
-                if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
-                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
-                        user_input.get(
-                            CONF_OPTIMIZATION_BACKUP_RESERVE,
-                            int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                        )
-                        / 100.0
-                    )  # Convert from % to decimal
 
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
@@ -6834,7 +9833,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "localvolts":
                     return await self.async_step_localvolts_options()
                 elif self._provider == "octopus":
@@ -6847,12 +9846,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_tesla_provider = self.config_entry.data.get(
             CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
-        )
-        current_opt_provider = self.config_entry.data.get(
-            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-        )
-        current_backup_reserve = self.config_entry.data.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
         )
         current_ev_provider = self.config_entry.data.get(
             CONF_TESLA_EV_API_PROVIDER, TESLA_EV_API_PROVIDER_NONE
@@ -6867,12 +9860,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         # Tesla EV provider choices (with detection annotations)
         tesla_ev_providers = _build_tesla_ev_provider_choices(self.hass)
-
-        # Build optimization provider choices
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: "Tesla Powerwall built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
 
         return self.async_show_form(
             step_id="init_tesla",
@@ -6907,25 +9894,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             for k, v in tesla_ev_providers.items()
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_PROVIDER,
-                        default=current_opt_provider,
-                    ): SelectSelector(SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(value=k, label=v)
-                            for k, v in opt_providers.items()
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        default=int(current_backup_reserve * 100)
-                        if current_backup_reserve < 1
-                        else int(current_backup_reserve),
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=1, unit_of_measurement="%",
-                        mode=NumberSelectorMode.SLIDER,
                     )),
                 }
             ),
@@ -7018,6 +9986,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 sigen_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
                 sigen_pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
                 sigen_device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+                sigen_cloud_region = user_input.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
                 sigen_station_id = user_input.get(CONF_SIGENERGY_STATION_ID, "").strip()
 
                 # Determine final pass_enc: explicit pass_enc > encoded password
@@ -7034,23 +10006,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_data[CONF_SIGENERGY_PASS_ENC] = final_pass_enc
                 if sigen_device_id:
                     new_data[CONF_SIGENERGY_DEVICE_ID] = sigen_device_id
-                if sigen_station_id:
-                    new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
-
-                # Optimization provider settings
-                optimization_provider = user_input.get(
-                    CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
+                previous_cloud_region = new_data.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
                 )
-                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-                if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
-                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
-                        user_input.get(
-                            CONF_OPTIMIZATION_BACKUP_RESERVE,
-                            int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                        )
-                        / 100.0
-                    )
+                new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region
+                if previous_cloud_region != sigen_cloud_region:
+                    new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_REFRESH_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_TOKEN_EXPIRES_AT, None)
+                if sigen_station_id:
+                    previous_station_id = new_data.get(CONF_SIGENERGY_STATION_ID)
+                    new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
+                    if previous_station_id != sigen_station_id:
+                        new_data.pop(CONF_SIGENERGY_TARIFF_STATION_ID, None)
+                        new_data.pop(CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID, None)
 
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
@@ -7062,7 +10032,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
                 elif self._provider == "epex":
@@ -7084,28 +10054,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_export_limit = self.config_entry.data.get(
             CONF_SIGENERGY_EXPORT_LIMIT_KW
         )
-        current_opt_provider = self.config_entry.data.get(
-            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-        )
-        current_backup_reserve = self.config_entry.data.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
-        )
-
         # Get current Sigenergy Cloud credentials (for display, show empty if not set)
         current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
         current_sigen_device_id = self.config_entry.data.get(
             CONF_SIGENERGY_DEVICE_ID, ""
         )
+        current_sigen_cloud_region = self.config_entry.data.get(
+            CONF_SIGENERGY_CLOUD_REGION, DEFAULT_SIGENERGY_CLOUD_REGION
+        )
         current_sigen_station_id = self.config_entry.data.get(
             CONF_SIGENERGY_STATION_ID, ""
         )
         # Don't show current password for security - user must re-enter if changing
-
-        # Build optimization provider choices
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: "Sigenergy built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
 
         return self.async_show_form(
             step_id="init_sigenergy",
@@ -7120,25 +10080,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             for k, v in ELECTRICITY_PROVIDERS.items()
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_PROVIDER,
-                        default=current_opt_provider,
-                    ): SelectSelector(SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(value=k, label=v)
-                            for k, v in opt_providers.items()
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        default=int(current_backup_reserve * 100)
-                        if current_backup_reserve < 1
-                        else int(current_backup_reserve),
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=1, unit_of_measurement="%",
-                        mode=NumberSelectorMode.SLIDER,
                     )),
                     vol.Required(
                         CONF_SIGENERGY_MODBUS_HOST,
@@ -7186,6 +10127,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default=current_sigen_device_id,
                         description={"suggested_value": current_sigen_device_id},
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=current_sigen_cloud_region,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_STATION_ID,
                         default=current_sigen_station_id,
@@ -7229,21 +10180,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
                 if not errors:
-                    # Optimization provider settings
-                    optimization_provider = user_input.get(
-                        CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-                    )
-                    new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-                    if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                        new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
-                        new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
-                            user_input.get(
-                                CONF_OPTIMIZATION_BACKUP_RESERVE,
-                                int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                            )
-                            / 100.0
-                        )
-
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data, options=new_options
                     )
@@ -7254,7 +10190,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     elif self._provider == "flow_power":
                         return await self.async_step_flow_power_options()
                     elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                        return await self.async_step_globird_options()
+                        return await self._async_route_custom_tou_options(self._provider)
                     elif self._provider == "octopus":
                         return await self.async_step_octopus_options()
                     elif self._provider == "epex":
@@ -7268,19 +10204,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_slave_id = self._get_option(
             CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
         )
-        current_opt_provider = self.config_entry.data.get(
-            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-        )
-        current_backup_reserve = self.config_entry.data.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
-        )
-
-        # Build optimization provider choices
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: "Sungrow built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
-
         return self.async_show_form(
             step_id="init_sungrow",
             data_schema=vol.Schema(
@@ -7294,25 +10217,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             for k, v in ELECTRICITY_PROVIDERS.items()
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_PROVIDER,
-                        default=current_opt_provider,
-                    ): SelectSelector(SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(value=k, label=v)
-                            for k, v in opt_providers.items()
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        default=int(current_backup_reserve * 100)
-                        if current_backup_reserve < 1
-                        else int(current_backup_reserve),
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=1, unit_of_measurement="%",
-                        mode=NumberSelectorMode.SLIDER,
                     )),
                     vol.Required(
                         CONF_SUNGROW_HOST,
@@ -7338,7 +10242,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init_foxess(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1 for FoxESS users: Configure Modbus connection and optimization settings."""
+        """Step 1 for FoxESS users: configure connection settings."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -7403,21 +10307,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID
                 )
 
-                # Optimization provider settings
-                optimization_provider = user_input.get(
-                    CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-                )
-                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-                if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
-                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
-                        user_input.get(
-                            CONF_OPTIMIZATION_BACKUP_RESERVE,
-                            int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                        )
-                        / 100.0
-                    )
-
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
@@ -7428,7 +10317,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
                 elif self._provider == "epex":
@@ -7453,18 +10342,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_cloud_device_sn = self._get_option(CONF_FOXESS_CLOUD_DEVICE_SN, "")
         current_entity_entry_id = self._get_option(CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID, "")
         current_entity_prefix = self._get_option(CONF_FOXESS_ENTITY_PREFIX, "")
-        current_opt_provider = self.config_entry.data.get(
-            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-        )
-        current_backup_reserve = self.config_entry.data.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
-        )
-
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: "FoxESS built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
-
         foxess_conn_types_legacy = {
             FOXESS_CONNECTION_TCP: "Modbus TCP",
             FOXESS_CONNECTION_SERIAL: "RS485 Serial",
@@ -7482,25 +10359,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     for k, v in ELECTRICITY_PROVIDERS.items()
                 ],
                 mode=SelectSelectorMode.DROPDOWN,
-            )),
-            vol.Required(
-                CONF_OPTIMIZATION_PROVIDER,
-                default=current_opt_provider,
-            ): SelectSelector(SelectSelectorConfig(
-                options=[
-                    SelectOptionDict(value=k, label=v)
-                    for k, v in opt_providers.items()
-                ],
-                mode=SelectSelectorMode.DROPDOWN,
-            )),
-            vol.Required(
-                CONF_OPTIMIZATION_BACKUP_RESERVE,
-                default=int(current_backup_reserve * 100)
-                if current_backup_reserve < 1
-                else int(current_backup_reserve),
-            ): NumberSelector(NumberSelectorConfig(
-                min=0, max=100, step=1, unit_of_measurement="%",
-                mode=NumberSelectorMode.SLIDER,
             )),
             vol.Required(
                 CONF_FOXESS_CONNECTION_TYPE,
@@ -7573,7 +10431,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init_goodwe(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1 for GoodWe users: Configure connection and optimization settings."""
+        """Step 1 for GoodWe users: configure connection settings."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -7618,21 +10476,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     else:
                         new_data.pop(CONF_GOODWE_EMS_ENTITY_PREFIX, None)
 
-                    # Optimization provider settings
-                    optimization_provider = user_input.get(
-                        CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-                    )
-                    new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-                    if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                        new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
-                        new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
-                            user_input.get(
-                                CONF_OPTIMIZATION_BACKUP_RESERVE,
-                                int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                            )
-                            / 100.0
-                        )
-
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data
                     )
@@ -7643,7 +10486,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     elif self._provider == "flow_power":
                         return await self.async_step_flow_power_options()
                     elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                        return await self.async_step_globird_options()
+                        return await self._async_route_custom_tou_options(self._provider)
                     elif self._provider == "octopus":
                         return await self.async_step_octopus_options()
                     elif self._provider == "epex":
@@ -7663,18 +10506,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._get_option(CONF_GOODWE_EMS_CONTROL_MODE, None),
             current_ems_prefix_init,
         )
-        current_opt_provider = self.config_entry.data.get(
-            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
-        )
-        current_backup_reserve = self.config_entry.data.get(
-            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
-        )
-
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: "GoodWe built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
-
         goodwe_protocols_legacy = {
             "udp": "UDP direct control (port 8899)",
             "tcp": "TCP / LAN Kit-20 (port 502)",
@@ -7693,25 +10524,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             for k, v in ELECTRICITY_PROVIDERS.items()
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_PROVIDER,
-                        default=current_opt_provider,
-                    ): SelectSelector(SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(value=k, label=v)
-                            for k, v in opt_providers.items()
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )),
-                    vol.Required(
-                        CONF_OPTIMIZATION_BACKUP_RESERVE,
-                        default=int(current_backup_reserve * 100)
-                        if current_backup_reserve < 1
-                        else int(current_backup_reserve),
-                    ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=1, unit_of_measurement="%",
-                        mode=NumberSelectorMode.SLIDER,
                     )),
                     vol.Required(
                         CONF_GOODWE_HOST,
@@ -7752,6 +10564,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def _async_route_custom_tou_options(self, provider: str) -> FlowResult:
+        """Route custom/static TOU providers to their relevant options step."""
+        if provider in ("other", "tou_only"):
+            return await self.async_step_custom_tariff_options()
+        return await self.async_step_globird_options()
+
     async def _async_route_to_provider_options(self) -> FlowResult:
         """Continue the options flow into the electricity-provider-specific step.
 
@@ -7772,7 +10590,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if provider == "flow_power":
             return await self.async_step_flow_power_options()
         if provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-            return await self.async_step_globird_options()
+            return await self._async_route_custom_tou_options(provider)
         if provider == "localvolts":
             return await self.async_step_localvolts_options()
         if provider == "octopus":
@@ -8270,7 +11088,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Dedicated step for Solar Curtailment configuration."""
-        battery_system = self.config_entry.data.get(
+        battery_system = self._get_option(
             CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
         )
         is_sigenergy = battery_system == BATTERY_SYSTEM_SIGENERGY
@@ -8308,11 +11126,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ac_enabled = user_input.get(
                     CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
                 )
-                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = (
+                    ac_enabled
+                )
                 if is_tesla:
                     self._curtailment_options[CONF_POWERWALL_OFFGRID_AS_CURTAILMENT] = (
                         user_input.get(CONF_POWERWALL_OFFGRID_AS_CURTAILMENT, False)
                     )
+                else:
+                    self._curtailment_options[CONF_POWERWALL_OFFGRID_AS_CURTAILMENT] = False
                 if ac_enabled:
                     return await self.async_step_inverter_brand()
                 return self._save_and_finish(self._curtailment_options)
@@ -8349,7 +11171,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 if ac_enabled:
                     return await self.async_step_inverter_brand()
                 return await self.async_step_weather_options()
-            else:
+            elif is_tesla:
                 # Tesla - check if AC inverter curtailment needs configuration
                 ac_enabled = user_input.get(
                     CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
@@ -8367,12 +11189,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
                 # No AC inverter - route to weather options
                 return await self.async_step_weather_options()
+            else:
+                ac_enabled = user_input.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                )
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = (
+                    ac_enabled
+                )
+                self._curtailment_options[CONF_POWERWALL_OFFGRID_AS_CURTAILMENT] = False
+                if ac_enabled:
+                    return await self.async_step_inverter_brand()
+                return await self.async_step_weather_options()
 
         # Build schema based on battery system
         schema_dict: dict[vol.Marker, Any] = {
             vol.Optional(
                 CONF_BATTERY_CURTAILMENT_ENABLED,
                 default=self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                default=self._get_option(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                ),
             ): BooleanSelector(),
         }
 
@@ -8386,36 +11225,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                 )
             ] = BooleanSelector()
-            # AC-coupled inverter curtailment (e.g. Enphase microinverters)
-            schema_dict[
-                vol.Optional(
-                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                    default=self._get_option(
-                        CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
-                    ),
-                )
-            ] = BooleanSelector()
-        elif is_sungrow:
-            # Separate SG-series PV inverters are not part of the SH battery
-            # Modbus coordinator, so expose the AC inverter path for them.
-            schema_dict[
-                vol.Optional(
-                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                    default=self._get_option(
-                        CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
-                    ),
-                )
-            ] = BooleanSelector()
-        else:
-            # Tesla AC inverter curtailment option
-            schema_dict[
-                vol.Optional(
-                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                    default=self._get_option(
-                        CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
-                    ),
-                )
-            ] = BooleanSelector()
+        if is_tesla:
+            # Tesla Powerwall off-grid fallback option
             schema_dict[
                 vol.Optional(
                     CONF_POWERWALL_OFFGRID_AS_CURTAILMENT,
@@ -8435,6 +11246,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Weather and solar forecast configuration in options flow."""
         if user_input is not None:
+            solar_forecast_provider = user_input.get(
+                CONF_SOLAR_FORECAST_PROVIDER,
+                DEFAULT_SOLAR_FORECAST_PROVIDER,
+            )
+            if solar_forecast_provider not in SOLAR_FORECAST_PROVIDERS:
+                solar_forecast_provider = DEFAULT_SOLAR_FORECAST_PROVIDER
+
             # Store weather and Solcast settings
             weather_options = {
                 CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
@@ -8444,6 +11262,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_WEATHER_ENTITY: _normalize_optional_entity(
                     user_input.get(CONF_WEATHER_ENTITY)
                 ),
+                CONF_SOLAR_FORECAST_PROVIDER: solar_forecast_provider,
                 CONF_SOLCAST_ENABLED: user_input.get(CONF_SOLCAST_ENABLED, False),
                 CONF_SOLCAST_API_KEY: (
                     user_input.get(CONF_SOLCAST_API_KEY) or ""
@@ -8461,6 +11280,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_SOLCAST_API_KEY,
                     CONF_SOLCAST_RESOURCE_ID,
                     CONF_SOLCAST_ESTIMATE_TYPE,
+                    CONF_SOLAR_FORECAST_PROVIDER,
                 )
             )
 
@@ -8501,6 +11321,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self._add_weather_entity_selector(schema_dict)
         schema_dict.update(
             {
+                vol.Optional(
+                    CONF_SOLAR_FORECAST_PROVIDER,
+                    default=self._get_option(
+                        CONF_SOLAR_FORECAST_PROVIDER,
+                        DEFAULT_SOLAR_FORECAST_PROVIDER,
+                    ),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in SOLAR_FORECAST_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Optional(
                     CONF_SOLCAST_ENABLED,
                     default=self._get_option(CONF_SOLCAST_ENABLED, False),
@@ -8940,6 +11775,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
+                CONF_GENERIC_CHARGER_POWER_ENTITY,
+                default=self._get_option(CONF_GENERIC_CHARGER_POWER_ENTITY, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
                 CONF_GENERIC_CHARGER_SOC_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -8985,8 +11824,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
                 ),
             ): NumberSelector(NumberSelectorConfig(
-                min=1, max=246, step=1, mode=NumberSelectorMode.BOX,
+                min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
             )),
+            vol.Optional(
+                CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+                default=self._get_option(
+                    CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+                    "",
+                ),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
+                default=self._get_option(
+                    CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
+                    "",
+                ),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         }
 
         return self.async_show_form(
@@ -9043,21 +11896,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_GENERIC_CHARGER_ENABLED] = ev_input.get(
             CONF_GENERIC_CHARGER_ENABLED, False
         )
-        generic_switch = ev_input.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY, "")
-        if generic_switch:
-            final_data[CONF_GENERIC_CHARGER_SWITCH_ENTITY] = generic_switch
-        generic_amps = ev_input.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, "")
-        if generic_amps:
-            final_data[CONF_GENERIC_CHARGER_AMPS_ENTITY] = generic_amps
-        generic_status = ev_input.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
-        if generic_status:
-            final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = generic_status
-        generic_soc = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
-        if generic_soc:
-            final_data[CONF_GENERIC_CHARGER_SOC_ENTITY] = generic_soc
-        generic_soc_2 = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY_2, "")
-        if generic_soc_2:
-            final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = generic_soc_2
+        final_data[CONF_GENERIC_CHARGER_SWITCH_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_AMPS_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_AMPS_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_STATUS_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_POWER_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_POWER_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_SOC_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_SOC_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = ev_input.get(
+            CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""
+        ).strip()
 
         # Add Sigenergy EV charger settings
         final_data[CONF_SIGENERGY_CHARGER_ENABLED] = ev_input.get(
@@ -9075,6 +11931,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_SIGENERGY_CHARGER_SLAVE_ID] = ev_input.get(
             CONF_SIGENERGY_CHARGER_SLAVE_ID, DEFAULT_SIGENERGY_CHARGER_SLAVE_ID
         )
+        final_data[CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY] = ev_input.get(
+            CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY, ""
+        ).strip()
+        final_data[CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY] = ev_input.get(
+            CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY, ""
+        ).strip()
 
         self._apply_legacy_data_key_removals()
         return self.async_create_entry(title="", data=final_data)
@@ -9146,16 +12008,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             # Store main options temporarily
             self._flow_power_main_options = user_input
 
-            # Portal re-auth requested?
-            if user_input.pop("connect_portal", False):
-                return await self.async_step_flow_power_portal_reauth()
-
             # If switching to Amber and no token exists, collect it first
             price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "aemo")
             if price_source == "amber" and not self.config_entry.data.get(
                 CONF_AMBER_API_TOKEN
             ):
                 return await self.async_step_flow_power_amber_token()
+            if price_source == "kwatch" and not self._get_option(CONF_FLOWPOWER_API_KEY):
+                return await self.async_step_flow_power_api_key_options()
 
             return await self.async_step_flow_power_network_options()
 
@@ -9210,12 +12070,31 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
             ): BooleanSelector(),
-            vol.Optional("connect_portal", default=False): BooleanSelector(),
         }
 
         return self.async_show_form(
             step_id="flow_power_options",
             data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_flow_power_portal_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dedicated Flow Power portal account section (options flow)."""
+        if user_input is not None:
+            if user_input.get("connect_portal", True):
+                return await self.async_step_flow_power_portal_reauth()
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
+
+        return self.async_show_form(
+            step_id="flow_power_portal_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("connect_portal", default=True): BooleanSelector(),
+                }
+            ),
         )
 
     async def async_step_flow_power_portal_reauth(
@@ -9247,8 +12126,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             except ValueError:
                 errors["base"] = "invalid_credentials"
                 self._fp_client = None
-            except Exception:
+            except Exception as err:
+                _LOGGER.exception(
+                    "Flow Power portal stored-credential login failed: %s", err
+                )
                 errors["base"] = "cannot_connect"
+                if getattr(self, "_fp_client", None) is not None:
+                    await self._fp_client.close()
                 self._fp_client = None
 
         if user_input is not None:
@@ -9266,8 +12150,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         return await self.async_step_flow_power_portal_mfa_options()
                 except ValueError:
                     errors["base"] = "invalid_credentials"
-                except Exception:
+                except Exception as err:
+                    _LOGGER.exception(
+                        "Flow Power portal login failed from options: %s", err
+                    )
                     errors["base"] = "cannot_connect"
+                    if getattr(self, "_fp_client", None) is not None:
+                        await self._fp_client.close()
+                    self._fp_client = None
             else:
                 errors["base"] = "invalid_credentials"
 
@@ -9302,15 +12192,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 success = await self._fp_client.verify_mfa(code)
                 if success:
                     # Store credentials and stash client
-                    opts = dict(self.config_entry.options)
-                    opts[CONF_FLOWPOWER_EMAIL] = self._fp_email
-                    opts[CONF_FLOWPOWER_PASSWORD] = self._fp_password
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry, options=opts
-                    )
                     self.hass.data.setdefault(DOMAIN, {})
                     self.hass.data[DOMAIN]["_pending_fp_client"] = self._fp_client
-                    return await self.async_step_flow_power_network_options()
+                    return self._save_and_finish(
+                        {
+                            CONF_FLOWPOWER_EMAIL: self._fp_email,
+                            CONF_FLOWPOWER_PASSWORD: self._fp_password,
+                        }
+                    )
                 else:
                     errors["base"] = "invalid_mfa_code"
             else:
@@ -9363,6 +12252,95 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
+    async def async_step_flow_power_api_key_options(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Collect Flow Power KWatch API key from the options flow."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            api_key = user_input.get(CONF_FLOWPOWER_API_KEY, "")
+            region = self._flow_power_main_options.get(
+                CONF_FLOW_POWER_STATE,
+                self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
+            )
+            validation_result = await validate_flow_power_api_key(
+                self.hass,
+                api_key,
+                region,
+            )
+            if validation_result["success"]:
+                self._flow_power_main_options[CONF_FLOWPOWER_API_KEY] = api_key
+                self._flow_power_sites = validation_result.get("sites", [])
+                if len(self._flow_power_sites) == 1:
+                    site = self._flow_power_sites[0]
+                    self._flow_power_main_options[CONF_FLOWPOWER_NMI] = site["nmi"]
+                    await _prefill_flow_power_network_tariff(
+                        self.hass,
+                        self._flow_power_main_options,
+                        site,
+                    )
+                    return await self.async_step_flow_power_network_options()
+                if self._flow_power_sites:
+                    return await self.async_step_flow_power_site_options()
+                return await self.async_step_flow_power_network_options()
+            errors["base"] = validation_result.get("error", "cannot_connect")
+
+        return self.async_show_form(
+            step_id="flow_power_api_key_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_FLOWPOWER_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_flow_power_site_options(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Select Flow Power KWatch site in the options flow."""
+        sites = getattr(self, "_flow_power_sites", [])
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_nmi = user_input.get(CONF_FLOWPOWER_NMI)
+            site = next((item for item in sites if item.get("nmi") == selected_nmi), None)
+            if site:
+                self._flow_power_main_options[CONF_FLOWPOWER_NMI] = selected_nmi
+                await _prefill_flow_power_network_tariff(
+                    self.hass,
+                    self._flow_power_main_options,
+                    site,
+                )
+                return await self.async_step_flow_power_network_options()
+            errors["base"] = "invalid_site"
+
+        return self.async_show_form(
+            step_id="flow_power_site_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_FLOWPOWER_NMI): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=site["nmi"],
+                                    label=_flow_power_site_label(site),
+                                )
+                                for site in sites
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_flow_power_network_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -9397,7 +12375,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._amber_options = merged
             return await self.async_step_demand_charge_options()
 
-        current_region = self._get_option(CONF_FLOW_POWER_STATE, "NSW1")
+        pending_main = getattr(self, "_flow_power_main_options", {})
+        current_region = pending_main.get(
+            CONF_FLOW_POWER_STATE,
+            self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
+        )
         default_markup = DEFAULT_FP_AMBER_MARKUP.get(current_region, 4.0)
 
         # Build combined network+tariff dropdown for the region — all options in one pass
@@ -9412,8 +12394,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 fp_combined_options[f"{network_name}:{code}"] = f"{network_name} — {desc}"
 
         # Reconstruct current stored selection as combined key
-        stored_network = self._get_option(CONF_FP_NETWORK, "")
-        stored_tariff = self._get_option(CONF_FP_TARIFF_CODE, "")
+        stored_network = pending_main.get(
+            CONF_FP_NETWORK,
+            self._get_option(CONF_FP_NETWORK, ""),
+        )
+        stored_tariff = pending_main.get(
+            CONF_FP_TARIFF_CODE,
+            self._get_option(CONF_FP_TARIFF_CODE, ""),
+        )
         current_combined = f"{stored_network}:{stored_tariff}" if (stored_network and stored_tariff) else ""
         if current_combined not in fp_combined_options:
             current_combined = ""
@@ -9548,29 +12536,45 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step 2c: Globird specific options."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            # Add provider to the data
-            user_input[CONF_ELECTRICITY_PROVIDER] = getattr(
-                self,
-                "_provider",
-                self._get_option(CONF_ELECTRICITY_PROVIDER, "globird"),
-            )
+            if not errors:
+                # Add provider to the data
+                user_input[CONF_ELECTRICITY_PROVIDER] = getattr(
+                    self,
+                    "_provider",
+                    self._get_option(CONF_ELECTRICITY_PROVIDER, "globird"),
+                )
 
-            # If spike not enabled, ensure region/threshold don't cause issues
-            if not user_input.get(CONF_AEMO_SPIKE_ENABLED, False):
-                user_input.pop(CONF_AEMO_REGION, None)
-                user_input.pop(CONF_AEMO_SPIKE_THRESHOLD, None)
+                # If spike not enabled, ensure region/threshold don't cause issues
+                if not user_input.get(CONF_AEMO_SPIKE_ENABLED, False):
+                    user_input.pop(CONF_AEMO_REGION, None)
+                    user_input.pop(CONF_AEMO_SPIKE_THRESHOLD, None)
 
-            # Check if user wants to configure custom tariff
-            configure_tariff = user_input.pop("configure_custom_tariff", False)
+                if user_input.get(CONF_GLOBIRD_PLAN) != GLOBIRD_PLAN_ZEROHERO_CUSTOM:
+                    for key in (
+                        CONF_GLOBIRD_ZEROHERO_START,
+                        CONF_GLOBIRD_ZEROHERO_END,
+                        CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                        CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                        CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                        CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                        CONF_GLOBIRD_ZEROCHARGE_START,
+                        CONF_GLOBIRD_ZEROCHARGE_END,
+                        CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                    ):
+                        user_input.pop(key, None)
 
-            # Store options and route accordingly
-            self._amber_options = user_input
+                # Check if user wants to configure custom tariff
+                self._globird_configure_custom_tariff = user_input.pop(
+                    "configure_custom_tariff", False
+                )
 
-            if configure_tariff:
-                return await self.async_step_custom_tariff_options()
+                # Store options and route accordingly
+                self._amber_options = user_input
 
-            return await self.async_step_demand_charge_options()
+                return await self._route_after_globird_portal_options()
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
@@ -9581,7 +12585,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             == BATTERY_SYSTEM_TESLA
         )
 
-        schema_fields: dict[Any, Any] = {
+        current_globird_settings = dict(self.config_entry.data or {})
+        current_globird_settings.update(self.config_entry.options or {})
+        schema_fields: dict[Any, Any] = dict(
+            self._globird_plan_schema(current_globird_settings).schema
+        )
+        schema_fields.update({
             vol.Optional(
                 CONF_AEMO_SPIKE_ENABLED,
                 default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
@@ -9603,7 +12612,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 min=0.0, max=20000.0, step=1.0, unit_of_measurement=self._selector_unit("market_rate"),
                 mode=NumberSelectorMode.BOX,
             )),
-        }
+        })
 
         # Tesla users get tariff from the Tesla API — no need for manual configuration
         if not is_tesla:
@@ -9612,7 +12621,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "**Custom Tariff (recommended):** Non-Tesla systems, including "
                 "Sigenergy and FoxESS cloud, should configure the Globird/TOU rates "
                 "inside PowerSync. These rates are needed for accurate price sensors, "
-                "battery optimisation, and EV charging."
+                "battery optimisation, and EV charging. For ZeroHero, enter the base "
+                "feed-in tariff here; PowerSync models the capped Super Export bonus "
+                "separately from your TOU tariff."
             )
         else:
             tariff_hint = (
@@ -9620,15 +12631,90 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "the tariff already stored on your Powerwall. Set the correct "
                 "Globird/TOU tariff in the Tesla app before saving these settings. "
                 "After changing the Tesla tariff, restart Home Assistant or reload "
-                "PowerSync so the scheduler refreshes its cached baseline."
+                "PowerSync so the scheduler refreshes its cached baseline. Select "
+                "your ZeroHero plan here so PowerSync can model the export cap and "
+                "no-import credit on top of the Tesla tariff."
             )
 
         return self.async_show_form(
             step_id="globird_options",
             data_schema=vol.Schema(schema_fields),
+            errors=errors,
             description_placeholders={
                 "tariff_hint": tariff_hint,
             },
+        )
+
+    async def _route_after_globird_portal_options(self) -> FlowResult:
+        """Continue the GloBird options flow after the portal section."""
+        configure_tariff = getattr(self, "_globird_configure_custom_tariff", False)
+        self._globird_configure_custom_tariff = False
+        if configure_tariff:
+            return await self.async_step_custom_tariff_options()
+        return await self.async_step_demand_charge_options()
+
+    async def async_step_globird_portal_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dedicated GloBird portal account section (options flow)."""
+        if user_input is not None:
+            if user_input.get("connect_globird_portal", True):
+                return await self.async_step_globird_portal_login_options()
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
+
+        return self.async_show_form(
+            step_id="globird_portal_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "connect_globird_portal", default=True
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_globird_portal_login_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Authenticate with the GloBird portal from options."""
+        errors: dict[str, str] = {}
+        current = {**self.config_entry.data, **self.config_entry.options}
+
+        if user_input is not None:
+            email = (user_input.get(CONF_GLOBIRD_EMAIL) or "").strip()
+            password = user_input.get(CONF_GLOBIRD_PASSWORD) or ""
+            password_for_validation = password or current.get(CONF_GLOBIRD_PASSWORD, "")
+            if email and password_for_validation:
+                error = await _validate_globird_credentials(
+                    email, password_for_validation
+                )
+                if error is None:
+                    return self._save_and_finish(
+                        {
+                            CONF_GLOBIRD_EMAIL: email,
+                            CONF_GLOBIRD_PASSWORD: password_for_validation,
+                        }
+                    )
+                errors["base"] = error
+            else:
+                errors["base"] = "invalid_globird_auth"
+
+        return self.async_show_form(
+            step_id="globird_portal_login_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_GLOBIRD_EMAIL,
+                        default=current.get(CONF_GLOBIRD_EMAIL, ""),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
+                    vol.Optional(CONF_GLOBIRD_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_localvolts_options(
@@ -9706,6 +12792,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             surcharge = user_input.get(CONF_EPEX_SURCHARGE, 0.0)
             tax_percent = user_input.get(CONF_EPEX_TAX_PERCENT, 0.0)
             export_rate = user_input.get(CONF_EPEX_EXPORT_RATE, 0.0)
+            import_price_entity = _normalize_optional_entity(
+                user_input.get(CONF_EPEX_IMPORT_PRICE_ENTITY)
+            )
+            export_price_entity = _normalize_optional_entity(
+                user_input.get(CONF_EPEX_EXPORT_PRICE_ENTITY)
+            )
 
             # Validate by fetching prices
             try:
@@ -9734,12 +12826,28 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_BATTERY_CURTAILMENT_ENABLED, False
                     ),
                 }
+                if import_price_entity:
+                    self._amber_options[CONF_EPEX_IMPORT_PRICE_ENTITY] = (
+                        import_price_entity
+                    )
+                else:
+                    self._amber_options[CONF_EPEX_IMPORT_PRICE_ENTITY] = None
+                if export_price_entity:
+                    self._amber_options[CONF_EPEX_EXPORT_PRICE_ENTITY] = export_price_entity
+                else:
+                    self._amber_options[CONF_EPEX_EXPORT_PRICE_ENTITY] = None
                 return await self.async_step_demand_charge_options()
 
         current_region = self._get_option(CONF_EPEX_REGION, "DE")
         current_surcharge = self._get_option(CONF_EPEX_SURCHARGE, 0.0)
         current_tax = self._get_option(CONF_EPEX_TAX_PERCENT, 0.0)
         current_export = self._get_option(CONF_EPEX_EXPORT_RATE, 0.0)
+        current_import_price_entity = _normalize_optional_entity(
+            self._get_option(CONF_EPEX_IMPORT_PRICE_ENTITY, None)
+        )
+        current_export_price_entity = _normalize_optional_entity(
+            self._get_option(CONF_EPEX_EXPORT_PRICE_ENTITY, None)
+        )
 
         return self.async_show_form(
             step_id="epex_options",
@@ -9772,6 +12880,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         min=0.0, max=100.0, step=0.01, unit_of_measurement="ct/kWh",
                         mode=NumberSelectorMode.BOX,
                     )),
+                    vol.Optional(
+                        CONF_EPEX_IMPORT_PRICE_ENTITY,
+                        description=(
+                            {"suggested_value": current_import_price_entity}
+                            if current_import_price_entity
+                            else None
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Optional(
+                        CONF_EPEX_EXPORT_PRICE_ENTITY,
+                        description=(
+                            {"suggested_value": current_export_price_entity}
+                            if current_export_price_entity
+                            else None
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED,
                         default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
@@ -10257,7 +13381,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             for k, v in sell_charges.items():
                 if k.startswith("OFF_PEAK") or k == "ALL":
                     if isinstance(v, (int, float)):
-                        default_fit = int(v * 100)
+                        default_fit = round(v * 100, 1)
                         break
 
         tariff_type_options = {
@@ -10295,7 +13419,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                     vol.Required("fit_rate", default=default_fit): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
+                            min=-100, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
@@ -10419,7 +13543,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                     vol.Required("export_rate", default=5): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
+                            min=-100, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
