@@ -18,6 +18,7 @@ jobs:
         with:
           script: |
             const body = context.payload.pull_request?.body || "";
+            const normalizedBody = body.toLowerCase();
             const requiredSections = [
               "## Summary",
               "## Type of change",
@@ -26,7 +27,9 @@ jobs:
               "## Checklist"
             ];
 
-            const missing = requiredSections.filter((section) => !body.includes(section));
+            const missing = requiredSections.filter(
+              (section) => !normalizedBody.includes(section.toLowerCase())
+            );
             if (missing.length > 0) {
               core.setFailed(`PR body is missing required sections: ${missing.join(", ")}`);
               return;
@@ -38,7 +41,7 @@ jobs:
               return;
             }
 
-            const checkedBoxes = [...typeSectionMatch[1].matchAll(/- \[[xX]\] /g)].length;
+            const checkedBoxes = [...typeSectionMatch[1].matchAll(/- \[[xX]\]\s*/g)].length;
             if (checkedBoxes !== 1) {
               core.setFailed(`Exactly one type-of-change checkbox must be selected. Found ${checkedBoxes}.`);
               return;
