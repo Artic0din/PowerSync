@@ -16,5 +16,8 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          # HACS relies on GitHub license detection, which does not currently
+          # identify PolyForm Noncommercial as an SPDX license.
+          ignore: license
       - name: Hassfest
         uses: home-assistant/actions/hassfest@master
