@@ -1,0 +1,25 @@
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "README.md"
+          - "docs/**"
+          - "CHANGELOG.md"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/**"
+          - ".github/dependabot.yml"
+          - ".github/labeler.yml"
+          - ".github/pull_request_template.md"
+          - ".github/ISSUE_TEMPLATE/**"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/**"
+
+integration:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "custom_components/**"

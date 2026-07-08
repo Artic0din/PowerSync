@@ -1,0 +1,77 @@
+name: PR Automation
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-pr-body:
+    name: Validate PR template usage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate pull request body
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const body = context.payload.pull_request?.body || "";
+            const requiredSections = [
+              "## Summary",
+              "## Type of change",
+              "## Validation",
+              "## Docs impact"
+            ];
+
+            const missing = requiredSections.filter((section) => !body.includes(section));
+            if (missing.length > 0) {
+              core.setFailed(`PR body is missing required sections: ${missing.join(", ")}`);
+              return;
+            }
+
+            const typeSectionMatch = body.match(/##\s*Type of change\s*([\s\S]*?)(?:\n##\s|$)/i);
+            if (!typeSectionMatch) {
+              core.setFailed("Type of change section was not found.");
+              return;
+            }
+
+            const checkedBoxes = [...typeSectionMatch[1].matchAll(/- \[[xX]\] /g)].length;
+            if (checkedBoxes !== 1) {
+              core.setFailed(`Exactly one type-of-change checkbox must be selected. Found ${checkedBoxes}.`);
+              return;
+            }
+
+  docs-gate:
+    name: Docs/README/CHANGELOG gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce documentation updates for code/config changes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                per_page: 100
+              }
+            );
+
+            const changed = files.map((file) => file.filename);
+            const isDocsFile = (path) =>
+              path === "README.md" ||
+              path === "CHANGELOG.md" ||
+              path.startsWith("docs/");
+
+            const hasNonDocsChanges = changed.some((path) => !isDocsFile(path));
+            const hasDocsUpdate = changed.some((path) => isDocsFile(path));
+
+            if (hasNonDocsChanges && !hasDocsUpdate) {
+              core.setFailed(
+                "Code/config changes detected without README/docs/CHANGELOG updates."
+              );
+            }
