@@ -11,6 +11,7 @@ permissions:
 jobs:
   validate-pr-body:
     name: Validate PR template usage
+    if: ${{ github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate pull request body
@@ -49,6 +50,7 @@ jobs:
 
   docs-gate:
     name: Docs/README/CHANGELOG gate
+    if: ${{ github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - name: Enforce documentation updates for code/config changes
