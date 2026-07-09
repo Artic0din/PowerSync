@@ -76,7 +76,9 @@ jobs:
               path === "CONTRIBUTING.md" ||
               path === "CODE_OF_CONDUCT.md" ||
               path === "SECURITY.md" ||
-              path === "AGENTS.md";
+              path === "AGENTS.md" ||
+              path === ".github/CODEOWNERS" ||
+              path === ".github/copilot-instructions.md";
 
             const hasNonDocsChanges = changed.some(
               (path) => !isRequiredDocsFile(path) && !isGovernanceFile(path)
