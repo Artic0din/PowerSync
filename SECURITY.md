@@ -11,7 +11,7 @@ Please do **not** open public issues for security vulnerabilities.
 Report vulnerabilities privately via:
 
 1. GitHub Security Advisories (preferred):  
-   `/security/advisories/new`
+   `https://github.com/Artic0din/PowerSync/security/advisories/new`
 2. If needed, contact the maintainer through GitHub with a private report.
 
 Include:

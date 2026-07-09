@@ -68,17 +68,20 @@ jobs:
             );
 
             const changed = files.map((file) => file.filename);
-            const isDocsFile = (path) =>
+            const isRequiredDocsFile = (path) =>
               path === "README.md" ||
               path === "CHANGELOG.md" ||
+              path.startsWith("docs/");
+            const isGovernanceFile = (path) =>
               path === "CONTRIBUTING.md" ||
               path === "CODE_OF_CONDUCT.md" ||
               path === "SECURITY.md" ||
-              path === "AGENTS.md" ||
-              path.startsWith("docs/");
+              path === "AGENTS.md";
 
-            const hasNonDocsChanges = changed.some((path) => !isDocsFile(path));
-            const hasDocsUpdate = changed.some((path) => isDocsFile(path));
+            const hasNonDocsChanges = changed.some(
+              (path) => !isRequiredDocsFile(path) && !isGovernanceFile(path)
+            );
+            const hasDocsUpdate = changed.some((path) => isRequiredDocsFile(path));
 
             if (hasNonDocsChanges && !hasDocsUpdate) {
               core.setFailed(
