@@ -4,6 +4,10 @@ All notable changes to this repository are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- CI workflow now skips Hassfest when a run is cancelled while still executing Hassfest after earlier step failures.
+
 ### Added
 
 - Repository governance and community files:
