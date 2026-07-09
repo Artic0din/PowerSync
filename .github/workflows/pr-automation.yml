@@ -71,6 +71,10 @@ jobs:
             const isDocsFile = (path) =>
               path === "README.md" ||
               path === "CHANGELOG.md" ||
+              path === "CONTRIBUTING.md" ||
+              path === "CODE_OF_CONDUCT.md" ||
+              path === "SECURITY.md" ||
+              path === "AGENTS.md" ||
               path.startsWith("docs/");
 
             const hasNonDocsChanges = changed.some((path) => !isDocsFile(path));
