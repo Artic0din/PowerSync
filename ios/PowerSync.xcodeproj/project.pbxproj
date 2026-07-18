@@ -1,0 +1,622 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		D7EF407F75373E9B0B6F1CB9 /* PowerSyncApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B5562B64C30EF85CBCA56E3 /* PowerSyncApp.swift */; };
+		25EA25836EBFD402437BC4F6 /* EnergyModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F67170B0E8F73EE6EA05A8D /* EnergyModels.swift */; };
+		D6F736ABB78ECECC780A1C94 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CF6771CFCD19BE5C17BE7D7 /* AppModel.swift */; };
+		14766151AC9D6B39C990C80D /* DemoDataFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C3D207C3468664F942867B0 /* DemoDataFactory.swift */; };
+		EF66632869FAC3BB40C931B0 /* Formatters.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1026C06BF3F372FED595F69 /* Formatters.swift */; };
+		D96281A8B4E4EF20FD9E9315 /* HomeAssistantClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28B00E271DCFFA845F213719 /* HomeAssistantClient.swift */; };
+		142595FE69FDBE60E5B8292B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F93CDAB945690AC8E460C201 /* KeychainStore.swift */; };
+		380F5DA73DA61D3412D45F38 /* LiveActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C13BABD40C840227C6708E4 /* LiveActivityManager.swift */; };
+		A6E5646EDAD1863A3AEE88DB /* SharedSnapshotWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6552A52E208B8C17439C7C97 /* SharedSnapshotWriter.swift */; };
+		1AE752C888C0B994B149577C /* OptimizationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B26D081902F77789E6F65DB /* OptimizationActivityAttributes.swift */; };
+		47687F7F4DD4EDB4AEDB015C /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 363F589FBBBD5DB18EBB06E2 /* RootView.swift */; };
+		4CB24BC91E0EBF8AAC2C4F42 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0BEBA5BD2B775FC7DB30143 /* MainTabView.swift */; };
+		52892DBBC1C6BECC21CFA497 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86F112B478043F68E5781727 /* DashboardView.swift */; };
+		41542A3D9AFFCBE0925647CD /* EnergyFlowSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B658526EDC052BD1665AA17 /* EnergyFlowSection.swift */; };
+		CB21890117F6E987A925AC47 /* OptimizationGlanceCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F47D97C5EB662B32658E974 /* OptimizationGlanceCard.swift */; };
+		639DF51FBC4F9A619AB1CC22 /* OptimizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B4405662D35B00F783D687D /* OptimizationView.swift */; };
+		D289DDD1C177521553861878 /* PricesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F2264B581D63BE63EBA773F /* PricesView.swift */; };
+		9B6EEAE17C54881802A0D81D /* ControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5FD9A3C941113E2E6048545 /* ControlsView.swift */; };
+		5C55401E4941FC1798315BB4 /* EVChargingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F3D3C36378E569965C70D88 /* EVChargingView.swift */; };
+		2EFC68C1A23B7D90CD880307 /* AutomationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAE5A0313F8570FAA2295B3A /* AutomationsView.swift */; };
+		F9063CC723020A2DDEDD58F1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E944D7B1DD7B0F83B06F247B /* SettingsView.swift */; };
+		02DBBDF73614BC7753DEE108 /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F0D832C437B8B609088745 /* ConnectionSettingsView.swift */; };
+		CF72ADC5D057A0E961A7A67B /* BatteryHealthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87AEB27A78A823B7EF101A9A /* BatteryHealthView.swift */; };
+		CE35846D7EB89A5A6702EFDC /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7489F11930EC2A2AD5D0C62 /* OnboardingView.swift */; };
+		8C71832E9285BF01D9D423E0 /* PowerSyncWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6991356CBFCD9A39C1C6534E /* PowerSyncWidgetsBundle.swift */; };
+		4741C473C97DFB643D97B7EB /* SharedSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920FD5FC43868A24C50A9CA7 /* SharedSnapshot.swift */; };
+		C5CE70EA68CD85F1D0EC418B /* BatteryGaugeWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D3096C12F0D57BFC4E65B3C /* BatteryGaugeWidget.swift */; };
+		266F3E36D253D47D4EF02387 /* ImportPriceWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8EDB5A2BD7D6F6924783F1D /* ImportPriceWidget.swift */; };
+		9E937A8CCBC7E72E2CC22AC5 /* StatusLockScreenWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A5D7BA6288C5C4EC5A7C8F /* StatusLockScreenWidget.swift */; };
+		9E2F7364C0B8C26A9AE48AF2 /* OptimizationLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 120A0A973E11ACD10FE86D10 /* OptimizationLiveActivity.swift */; };
+		7D1DBA83F5517888388F38D2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F4520D96AC0EDB42E750BB2B /* Assets.xcassets */; };
+		7195C6D27FC5EE139DEDF118 /* PowerSyncWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B18A9DE95CE70DF7EFEEB183 /* PowerSyncWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		30BF4E4C9B66BE95F408794E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B145ADCFC4953DCA4F78A1CA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EA81B60A6C3B647913612564;
+			remoteInfo = PowerSyncWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		BABBFDC77217754D2D195F4C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				7195C6D27FC5EE139DEDF118 /* PowerSyncWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		CAEAE7A46C0030115978683F /* PowerSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PowerSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B18A9DE95CE70DF7EFEEB183 /* PowerSyncWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PowerSyncWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B5562B64C30EF85CBCA56E3 /* PowerSyncApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerSyncApp.swift; sourceTree = "<group>"; };
+		0F67170B0E8F73EE6EA05A8D /* EnergyModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnergyModels.swift; sourceTree = "<group>"; };
+		0CF6771CFCD19BE5C17BE7D7 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		9C3D207C3468664F942867B0 /* DemoDataFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDataFactory.swift; sourceTree = "<group>"; };
+		F1026C06BF3F372FED595F69 /* Formatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatters.swift; sourceTree = "<group>"; };
+		28B00E271DCFFA845F213719 /* HomeAssistantClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeAssistantClient.swift; sourceTree = "<group>"; };
+		F93CDAB945690AC8E460C201 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		1C13BABD40C840227C6708E4 /* LiveActivityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityManager.swift; sourceTree = "<group>"; };
+		6552A52E208B8C17439C7C97 /* SharedSnapshotWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSnapshotWriter.swift; sourceTree = "<group>"; };
+		6B26D081902F77789E6F65DB /* OptimizationActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimizationActivityAttributes.swift; sourceTree = "<group>"; };
+		363F589FBBBD5DB18EBB06E2 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		B0BEBA5BD2B775FC7DB30143 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		86F112B478043F68E5781727 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		1B658526EDC052BD1665AA17 /* EnergyFlowSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnergyFlowSection.swift; sourceTree = "<group>"; };
+		6F47D97C5EB662B32658E974 /* OptimizationGlanceCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimizationGlanceCard.swift; sourceTree = "<group>"; };
+		9B4405662D35B00F783D687D /* OptimizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimizationView.swift; sourceTree = "<group>"; };
+		8F2264B581D63BE63EBA773F /* PricesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PricesView.swift; sourceTree = "<group>"; };
+		B5FD9A3C941113E2E6048545 /* ControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlsView.swift; sourceTree = "<group>"; };
+		2F3D3C36378E569965C70D88 /* EVChargingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EVChargingView.swift; sourceTree = "<group>"; };
+		DAE5A0313F8570FAA2295B3A /* AutomationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsView.swift; sourceTree = "<group>"; };
+		E944D7B1DD7B0F83B06F247B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B3F0D832C437B8B609088745 /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
+		87AEB27A78A823B7EF101A9A /* BatteryHealthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryHealthView.swift; sourceTree = "<group>"; };
+		B7489F11930EC2A2AD5D0C62 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		6991356CBFCD9A39C1C6534E /* PowerSyncWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerSyncWidgetsBundle.swift; sourceTree = "<group>"; };
+		920FD5FC43868A24C50A9CA7 /* SharedSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSnapshot.swift; sourceTree = "<group>"; };
+		5D3096C12F0D57BFC4E65B3C /* BatteryGaugeWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGaugeWidget.swift; sourceTree = "<group>"; };
+		D8EDB5A2BD7D6F6924783F1D /* ImportPriceWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportPriceWidget.swift; sourceTree = "<group>"; };
+		78A5D7BA6288C5C4EC5A7C8F /* StatusLockScreenWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusLockScreenWidget.swift; sourceTree = "<group>"; };
+		120A0A973E11ACD10FE86D10 /* OptimizationLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimizationLiveActivity.swift; sourceTree = "<group>"; };
+		F4520D96AC0EDB42E750BB2B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
+		5E99ADF6C518322EFDC33164 /* PowerSync.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PowerSync.entitlements; sourceTree = "<group>"; };
+		0F1356BE5B363E272BF4DDE1 /* PowerSyncWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PowerSyncWidgets.entitlements; sourceTree = "<group>"; };
+		BD2BDFCB2F0FE3A44C09384C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		518DA81DB9B99529C0C0AEBE = {
+			isa = PBXGroup;
+			children = (
+				F782074A2F5F6377DEE0F84D /* PowerSync */,
+				FD739104711B44B3C30F076E /* PowerSyncWidgets */,
+				547D009064F7C3F13BEF3460 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		547D009064F7C3F13BEF3460 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CAEAE7A46C0030115978683F /* PowerSync.app */,
+				B18A9DE95CE70DF7EFEEB183 /* PowerSyncWidgets.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F782074A2F5F6377DEE0F84D /* PowerSync */ = {
+			isa = PBXGroup;
+			children = (
+				6A666EE83D48D5AE10269886 /* LiveActivity */,
+				1A1A77B8EC98E2AA0D4FAEA0 /* Models */,
+				C5705566841616AFE775C86B /* Services */,
+				59B9DBB3442C094F826FEF64 /* Views */,
+				0B5562B64C30EF85CBCA56E3 /* PowerSyncApp.swift */,
+				F4520D96AC0EDB42E750BB2B /* Assets.xcassets */,
+				5E99ADF6C518322EFDC33164 /* PowerSync.entitlements */,
+			);
+			path = PowerSync;
+			sourceTree = "<group>";
+		};
+		6A666EE83D48D5AE10269886 /* LiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				6B26D081902F77789E6F65DB /* OptimizationActivityAttributes.swift */,
+			);
+			path = LiveActivity;
+			sourceTree = "<group>";
+		};
+		1A1A77B8EC98E2AA0D4FAEA0 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				0F67170B0E8F73EE6EA05A8D /* EnergyModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		C5705566841616AFE775C86B /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				0CF6771CFCD19BE5C17BE7D7 /* AppModel.swift */,
+				9C3D207C3468664F942867B0 /* DemoDataFactory.swift */,
+				F1026C06BF3F372FED595F69 /* Formatters.swift */,
+				28B00E271DCFFA845F213719 /* HomeAssistantClient.swift */,
+				F93CDAB945690AC8E460C201 /* KeychainStore.swift */,
+				1C13BABD40C840227C6708E4 /* LiveActivityManager.swift */,
+				6552A52E208B8C17439C7C97 /* SharedSnapshotWriter.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		59B9DBB3442C094F826FEF64 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				9F1D4D1328932D8E6300D131 /* Automations */,
+				5469937CAFC8AB3C9491082B /* Controls */,
+				133DDE3B75A1EAE59EC2B16D /* Dashboard */,
+				7094660285F584454B9A686F /* EV */,
+				AB78AFA3043FB04A7DFE4340 /* Onboarding */,
+				CAD7F5686B307932E3E3C923 /* Optimization */,
+				C294D63FEB8324B48684EE4A /* Prices */,
+				A41B5ECF37554A82E18FC07C /* Settings */,
+				363F589FBBBD5DB18EBB06E2 /* RootView.swift */,
+				B0BEBA5BD2B775FC7DB30143 /* MainTabView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		9F1D4D1328932D8E6300D131 /* Automations */ = {
+			isa = PBXGroup;
+			children = (
+				DAE5A0313F8570FAA2295B3A /* AutomationsView.swift */,
+			);
+			path = Automations;
+			sourceTree = "<group>";
+		};
+		5469937CAFC8AB3C9491082B /* Controls */ = {
+			isa = PBXGroup;
+			children = (
+				B5FD9A3C941113E2E6048545 /* ControlsView.swift */,
+			);
+			path = Controls;
+			sourceTree = "<group>";
+		};
+		133DDE3B75A1EAE59EC2B16D /* Dashboard */ = {
+			isa = PBXGroup;
+			children = (
+				86F112B478043F68E5781727 /* DashboardView.swift */,
+				1B658526EDC052BD1665AA17 /* EnergyFlowSection.swift */,
+				6F47D97C5EB662B32658E974 /* OptimizationGlanceCard.swift */,
+			);
+			path = Dashboard;
+			sourceTree = "<group>";
+		};
+		7094660285F584454B9A686F /* EV */ = {
+			isa = PBXGroup;
+			children = (
+				2F3D3C36378E569965C70D88 /* EVChargingView.swift */,
+			);
+			path = EV;
+			sourceTree = "<group>";
+		};
+		AB78AFA3043FB04A7DFE4340 /* Onboarding */ = {
+			isa = PBXGroup;
+			children = (
+				B7489F11930EC2A2AD5D0C62 /* OnboardingView.swift */,
+			);
+			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		CAD7F5686B307932E3E3C923 /* Optimization */ = {
+			isa = PBXGroup;
+			children = (
+				9B4405662D35B00F783D687D /* OptimizationView.swift */,
+			);
+			path = Optimization;
+			sourceTree = "<group>";
+		};
+		C294D63FEB8324B48684EE4A /* Prices */ = {
+			isa = PBXGroup;
+			children = (
+				8F2264B581D63BE63EBA773F /* PricesView.swift */,
+			);
+			path = Prices;
+			sourceTree = "<group>";
+		};
+		A41B5ECF37554A82E18FC07C /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				E944D7B1DD7B0F83B06F247B /* SettingsView.swift */,
+				B3F0D832C437B8B609088745 /* ConnectionSettingsView.swift */,
+				87AEB27A78A823B7EF101A9A /* BatteryHealthView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		FD739104711B44B3C30F076E /* PowerSyncWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				6991356CBFCD9A39C1C6534E /* PowerSyncWidgetsBundle.swift */,
+				920FD5FC43868A24C50A9CA7 /* SharedSnapshot.swift */,
+				5D3096C12F0D57BFC4E65B3C /* BatteryGaugeWidget.swift */,
+				D8EDB5A2BD7D6F6924783F1D /* ImportPriceWidget.swift */,
+				78A5D7BA6288C5C4EC5A7C8F /* StatusLockScreenWidget.swift */,
+				120A0A973E11ACD10FE86D10 /* OptimizationLiveActivity.swift */,
+				0F1356BE5B363E272BF4DDE1 /* PowerSyncWidgets.entitlements */,
+				BD2BDFCB2F0FE3A44C09384C /* Info.plist */,
+			);
+			path = PowerSyncWidgets;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9500E97C0FDB7FEA248027AC /* PowerSync */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1D97B77EAD2380603A3F2A82 /* Build configuration list for PBXNativeTarget "PowerSync" */;
+			buildPhases = (
+				16638C22425C41C957584CBF /* Sources */,
+				6ABF66CB94B78BFF9DD9A883 /* Frameworks */,
+				9EF16A3A57CC9AD87868BACD /* Resources */,
+				BABBFDC77217754D2D195F4C /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9706422E609BDF93EE214442 /* PBXTargetDependency */,
+			);
+			name = PowerSync;
+			productName = PowerSync;
+			productReference = CAEAE7A46C0030115978683F /* PowerSync.app */;
+			productType = "com.apple.product-type.application";
+		};
+		EA81B60A6C3B647913612564 /* PowerSyncWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B429FCF8E65333911689421 /* Build configuration list for PBXNativeTarget "PowerSyncWidgets" */;
+			buildPhases = (
+				6D82E229E63AE9F8EC4480B0 /* Sources */,
+				5ED73F1F094E0A478B777378 /* Frameworks */,
+				84541F16C339AD136A2DB8D0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PowerSyncWidgets;
+			productName = PowerSyncWidgets;
+			productReference = B18A9DE95CE70DF7EFEEB183 /* PowerSyncWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B145ADCFC4953DCA4F78A1CA /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					9500E97C0FDB7FEA248027AC = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					EA81B60A6C3B647913612564 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 1F4E3D13C2320EDA50221924 /* Build configuration list for PBXProject "PowerSync" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 518DA81DB9B99529C0C0AEBE;
+			productRefGroup = 547D009064F7C3F13BEF3460 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9500E97C0FDB7FEA248027AC /* PowerSync */,
+				EA81B60A6C3B647913612564 /* PowerSyncWidgets */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9EF16A3A57CC9AD87868BACD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7D1DBA83F5517888388F38D2 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		84541F16C339AD136A2DB8D0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		6ABF66CB94B78BFF9DD9A883 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5ED73F1F094E0A478B777378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		16638C22425C41C957584CBF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7EF407F75373E9B0B6F1CB9 /* PowerSyncApp.swift in Sources */,
+				25EA25836EBFD402437BC4F6 /* EnergyModels.swift in Sources */,
+				D6F736ABB78ECECC780A1C94 /* AppModel.swift in Sources */,
+				14766151AC9D6B39C990C80D /* DemoDataFactory.swift in Sources */,
+				EF66632869FAC3BB40C931B0 /* Formatters.swift in Sources */,
+				D96281A8B4E4EF20FD9E9315 /* HomeAssistantClient.swift in Sources */,
+				142595FE69FDBE60E5B8292B /* KeychainStore.swift in Sources */,
+				380F5DA73DA61D3412D45F38 /* LiveActivityManager.swift in Sources */,
+				A6E5646EDAD1863A3AEE88DB /* SharedSnapshotWriter.swift in Sources */,
+				1AE752C888C0B994B149577C /* OptimizationActivityAttributes.swift in Sources */,
+				47687F7F4DD4EDB4AEDB015C /* RootView.swift in Sources */,
+				4CB24BC91E0EBF8AAC2C4F42 /* MainTabView.swift in Sources */,
+				52892DBBC1C6BECC21CFA497 /* DashboardView.swift in Sources */,
+				41542A3D9AFFCBE0925647CD /* EnergyFlowSection.swift in Sources */,
+				CB21890117F6E987A925AC47 /* OptimizationGlanceCard.swift in Sources */,
+				639DF51FBC4F9A619AB1CC22 /* OptimizationView.swift in Sources */,
+				D289DDD1C177521553861878 /* PricesView.swift in Sources */,
+				9B6EEAE17C54881802A0D81D /* ControlsView.swift in Sources */,
+				5C55401E4941FC1798315BB4 /* EVChargingView.swift in Sources */,
+				2EFC68C1A23B7D90CD880307 /* AutomationsView.swift in Sources */,
+				F9063CC723020A2DDEDD58F1 /* SettingsView.swift in Sources */,
+				02DBBDF73614BC7753DEE108 /* ConnectionSettingsView.swift in Sources */,
+				CF72ADC5D057A0E961A7A67B /* BatteryHealthView.swift in Sources */,
+				CE35846D7EB89A5A6702EFDC /* OnboardingView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6D82E229E63AE9F8EC4480B0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8C71832E9285BF01D9D423E0 /* PowerSyncWidgetsBundle.swift in Sources */,
+				4741C473C97DFB643D97B7EB /* SharedSnapshot.swift in Sources */,
+				C5CE70EA68CD85F1D0EC418B /* BatteryGaugeWidget.swift in Sources */,
+				266F3E36D253D47D4EF02387 /* ImportPriceWidget.swift in Sources */,
+				9E937A8CCBC7E72E2CC22AC5 /* StatusLockScreenWidget.swift in Sources */,
+				9E2F7364C0B8C26A9AE48AF2 /* OptimizationLiveActivity.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9706422E609BDF93EE214442 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EA81B60A6C3B647913612564 /* PowerSyncWidgets */;
+			targetProxy = 30BF4E4C9B66BE95F408794E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		92E165A9035A603BE73D2E62 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+			};
+			name = Debug;
+		};
+		E1D3BBA94590957B0374D6E9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = NO;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+			};
+			name = Release;
+		};
+		82000B87E0EC13AD7FD6DA43 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PowerSync/PowerSync.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = PowerSync;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.powersync.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		16ACE556BD5CA3C51FD3F043 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PowerSync/PowerSync.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = PowerSync;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.powersync.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		FD2DD70200319FF7456A87FC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PowerSyncWidgets/PowerSyncWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PowerSyncWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PowerSync;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.powersync.mobile.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		CC75E1056C3F0D7E633EEBD6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PowerSyncWidgets/PowerSyncWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PowerSyncWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PowerSync;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cc.powersync.mobile.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1F4E3D13C2320EDA50221924 /* Build configuration list for PBXProject "PowerSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				92E165A9035A603BE73D2E62 /* Debug */,
+				E1D3BBA94590957B0374D6E9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1D97B77EAD2380603A3F2A82 /* Build configuration list for PBXNativeTarget "PowerSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				82000B87E0EC13AD7FD6DA43 /* Debug */,
+				16ACE556BD5CA3C51FD3F043 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8B429FCF8E65333911689421 /* Build configuration list for PBXNativeTarget "PowerSyncWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FD2DD70200319FF7456A87FC /* Debug */,
+				CC75E1056C3F0D7E633EEBD6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B145ADCFC4953DCA4F78A1CA /* Project object */;
+}

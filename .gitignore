@@ -24,6 +24,15 @@ app.db
 *.swo
 *~
 
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+*.hmap
+*.ipa
+timeline.xctimeline
+playground.xcworkspace
+
 # OS
 .DS_Store
 Thumbs.db
