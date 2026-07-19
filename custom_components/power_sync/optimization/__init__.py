@@ -13,7 +13,8 @@ from .executor import ScheduleExecutor, BatteryAction, ExecutionStatus, CostFunc
 from .coordinator import OptimizationCoordinator, OptimizationConfig
 
 # Built-in LP optimizer
-from .battery_optimizer import BatteryOptimizer, OptimizerResult
+from .battery_optimizer import BatteryOptimizer
+from .results import OptimizerResult
 
 # Schedule data models
 from .schedule_reader import OptimizationSchedule, ScheduleAction

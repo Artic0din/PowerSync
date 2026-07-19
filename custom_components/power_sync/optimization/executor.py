@@ -206,11 +206,22 @@ class ScheduleExecutor:
     ) -> None:
         """Execute a battery action.
 
+        .. deprecated::
+            Live optimizer dispatch uses
+            ``OptimizationCoordinator._execute_optimizer_action``
+            (``action_executor.ActionExecutorMixin``). This path is retained
+            only for status-bookkeeping compatibility and must not be used for
+            new hardware commands.
+
         Args:
             action: Battery action to execute
             power_w: Power level in watts
             duration_minutes: Duration in minutes (defaults to interval + buffer)
         """
+        _LOGGER.warning(
+            "ScheduleExecutor.execute_action is deprecated; "
+            "live dispatch is ActionExecutorMixin._execute_optimizer_action"
+        )
         if isinstance(action, str):
             action = BatteryAction(action)
 

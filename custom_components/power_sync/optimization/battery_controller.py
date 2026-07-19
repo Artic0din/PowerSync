@@ -5,6 +5,9 @@ Provides unified interface for controlling different battery systems:
 - Tesla: Uses TOU tariff trick (upload fake rates to incentivize charge/discharge)
 - Sigenergy: Uses Modbus commands
 - Sungrow: Uses Modbus commands
+
+Architecture refactor: force/restore/reserve writes go through BatteryPort
+instead of calling hass.services directly from the optimizer path.
 """
 from __future__ import annotations
 
@@ -16,7 +19,9 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from ..batteries import get_battery_port
 from ..const import TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+from ..control import BatteryPort
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -86,6 +91,7 @@ class BatteryControllerWrapper:
         self,
         hass: HomeAssistant,
         battery_system: str,  # "tesla", "sigenergy", "sungrow", "foxess"
+        battery_port: BatteryPort | None = None,
     ):
         """
         Initialize the battery controller wrapper.
@@ -93,9 +99,11 @@ class BatteryControllerWrapper:
         Args:
             hass: Home Assistant instance
             battery_system: Type of battery system
+            battery_port: Optional BatteryPort (defaults to service-backed port)
         """
         self.hass = hass
         self.battery_system = battery_system
+        self._port: BatteryPort = battery_port or get_battery_port(hass, battery_system)
 
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False) -> bool:
         """
@@ -113,17 +121,12 @@ class BatteryControllerWrapper:
         """
         try:
             _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
-
-            service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
-            if _extend_hardware:
-                service_data["_extend_hardware"] = True
-            await self.hass.services.async_call(
-                "power_sync", "force_charge",
-                service_data,
-                blocking=True,
+            return await self._port.force_charge(
+                power_w=power_w,
+                duration_minutes=duration_minutes,
+                source="optimizer",
+                extend_hardware=_extend_hardware,
             )
-            return True
-
         except Exception as e:
             _LOGGER.error(f"Force charge failed: {e}", exc_info=True)
             return False
@@ -150,19 +153,13 @@ class BatteryControllerWrapper:
         """
         try:
             _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
-
-            service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
-            if _extend_hardware:
-                service_data["_extend_hardware"] = True
-            if _tariff_duration is not None:
-                service_data["_tariff_duration"] = _tariff_duration
-            await self.hass.services.async_call(
-                "power_sync", "force_discharge",
-                service_data,
-                blocking=True,
+            return await self._port.force_discharge(
+                power_w=power_w,
+                duration_minutes=duration_minutes,
+                source="optimizer",
+                extend_hardware=_extend_hardware,
+                tariff_duration=_tariff_duration,
             )
-            return True
-
         except Exception as e:
             _LOGGER.error(f"Force discharge failed: {e}", exc_info=True)
             return False
@@ -179,14 +176,10 @@ class BatteryControllerWrapper:
         """
         try:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
-
-            await self.hass.services.async_call(
-                "power_sync", "restore_normal",
-                {"source": "optimizer", "_allow_monitoring_restore": True},
-                blocking=True,
+            return await self._port.restore_normal(
+                source="optimizer",
+                allow_monitoring_restore=True,
             )
-            return True
-
         except Exception as e:
             _LOGGER.error(f"Restore normal failed: {e}", exc_info=True)
             return False
@@ -209,14 +202,7 @@ class BatteryControllerWrapper:
         """
         try:
             _LOGGER.info("🔋 Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
-
-            await self.hass.services.async_call(
-                "power_sync", "set_self_consumption",
-                {"source": "optimizer"},
-                blocking=True,
-            )
-            return True
-
+            return await self._port.set_self_consumption_mode()
         except Exception as e:
             _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
             return False
@@ -380,13 +366,7 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            await self.hass.services.async_call(
-                "power_sync", "set_backup_reserve",
-                {"percent": percent, "source": "optimizer"},
-                blocking=True,
-            )
-            return True
-
+            return await self._port.set_backup_reserve(percent)
         except Exception as e:
             _LOGGER.error(f"Set backup reserve failed: {e}", exc_info=True)
             return False

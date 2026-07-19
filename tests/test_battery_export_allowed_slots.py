@@ -185,7 +185,35 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_CHIP_MODE_START = "22:00"
     const_module.DEFAULT_CHIP_MODE_END = "06:00"
     const_module.DEFAULT_CHIP_MODE_THRESHOLD = 30.0
+    const_module.CONF_DEMAND_CHARGE_DAYS = "demand_charge_days"
+    const_module.CONF_DEMAND_CHARGE_ENABLED = "demand_charge_enabled"
+    const_module.CONF_DEMAND_CHARGE_END_TIME = "demand_charge_end_time"
+    const_module.CONF_DEMAND_CHARGE_RATE = "demand_charge_rate"
+    const_module.CONF_DEMAND_CHARGE_START_TIME = "demand_charge_start_time"
+    const_module.CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
+    const_module.CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
+    const_module.CONF_FP_NETWORK = "fp_network"
+    const_module.CONF_FP_TARIFF_CODE = "fp_tariff_code"
+    const_module.CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
+    const_module.CONF_PEA_ENABLED = "pea_enabled"
+    const_module.CONF_SPIKE_PROTECTION_ENABLED = "spike_protection_enabled"
+    const_module.FLOW_POWER_DEFAULT_BASE_RATE = 0.0
+    const_module.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
+    const_module.CONF_POWERWALL_OFFGRID_AS_CURTAILMENT = (
+        "powerwall_offgrid_as_curtailment"
+    )
+    const_module.DEFAULT_POWERWALL_OFFGRID_AS_CURTAILMENT = False
     const_module.DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240]
+
+    def _const_getattr(name: str):
+        # Architecture-refactor mixins may import additional CONF_* symbols.
+        if name.startswith("CONF_") or name.startswith("DEFAULT_"):
+            value = name.lower()
+            setattr(const_module, name, value)
+            return value
+        raise AttributeError(name)
+
+    const_module.__getattr__ = _const_getattr  # type: ignore[attr-defined]
     const_module.TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
         "goodwe", "sigenergy", "sungrow", "foxess",
         "alphaess", "solax", "saj_h2", "fronius_reserva", "neovolt",
