@@ -8301,24 +8301,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_calibration_check_unsub": None,
     }
 
-    # Architecture refactor Phase 0/1: dual-write typed EntryRuntime + BatteryPort
-    from .runtime import store_entry_runtime
-    from .batteries import get_battery_port
-    from .capabilities import get_brand_capabilities
-    from .ev import LoadpointArbiter
+    # Architecture refactor Phase 0/1/7: dual-write typed EntryRuntime + BatteryPort
+    from .bootstrap.lifecycle import attach_runtime
 
     _battery_system_key = (
         entry.options.get(CONF_BATTERY_SYSTEM)
         or entry.data.get(CONF_BATTERY_SYSTEM)
         or "tesla"
     )
-    _entry_runtime = store_entry_runtime(hass, DOMAIN, entry, hass.data[DOMAIN][entry.entry_id])
-    _brand_caps = get_brand_capabilities(str(_battery_system_key))
-    _battery_port = get_battery_port(hass, str(_battery_system_key))
-    _loadpoint_arbiter = LoadpointArbiter()
-    _entry_runtime["brand_capabilities"] = _brand_caps
-    _entry_runtime["battery_port"] = _battery_port
-    _entry_runtime["loadpoint_arbiter"] = _loadpoint_arbiter
+    attach_runtime(
+        hass,
+        DOMAIN,
+        entry,
+        hass.data[DOMAIN][entry.entry_id],
+        battery_system=str(_battery_system_key),
+    )
 
     if electricity_provider == "covau":
         from .const import (

@@ -8535,6 +8535,8 @@ class EVChargingModeCoordinator:
         self._active_modes: List[str] = []
         self._last_reason = ""
         self._last_external_scheduled_stop: Optional[Tuple[Optional[str], str, float]] = None
+        # Phase 5: optional LoadpointArbiter reference (wired in set_ev_charging_coordinator).
+        self.loadpoint_arbiter = None
 
     async def _start_charging(self, modes: List[str], reason: str) -> bool:
         """Start EV charging."""
@@ -8823,3 +8825,29 @@ def set_ev_charging_coordinator(coordinator: EVChargingModeCoordinator) -> None:
     """Set the global EV charging mode coordinator instance."""
     global _ev_charging_coordinator
     _ev_charging_coordinator = coordinator
+    # Phase 5: attach entry loadpoint_arbiter onto the coordinator when present.
+    try:
+        from ..const import DOMAIN
+        from ..ev.bridge import attach_arbiter_to_entry
+        from ..runtime import get_entry_runtime
+
+        runtime = get_entry_runtime(
+            coordinator.hass, DOMAIN, coordinator.config_entry.entry_id
+        )
+        arbiter = getattr(runtime, "loadpoint_arbiter", None) if runtime else None
+        if arbiter is None:
+            bag = (coordinator.hass.data.get(DOMAIN) or {}).get(
+                coordinator.config_entry.entry_id
+            )
+            if isinstance(bag, dict):
+                arbiter = bag.get("loadpoint_arbiter")
+        if arbiter is not None:
+            attach_arbiter_to_entry(
+                coordinator.hass, coordinator.config_entry.entry_id, arbiter
+            )
+            coordinator.loadpoint_arbiter = arbiter
+    except Exception:  # pragma: no cover - never break existing EV setup
+        _LOGGER.debug(
+            "EV coordinator: loadpoint_arbiter attach skipped",
+            exc_info=True,
+        )
