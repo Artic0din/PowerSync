@@ -109,7 +109,7 @@ struct SettingsView: View {
             }
 
             Section("About") {
-                LabeledContent("PowerSync", value: "2.12")
+                LabeledContent("PowerSync", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                 Link("Documentation", destination: URL(string: "https://github.com/bolagnaise/PowerSync")!)
                 Link("Privacy Policy", destination: URL(string: "https://bolagnaise.github.io/PowerSync/privacy.html")!)
             }

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -558,10 +557,22 @@ def main() -> None:
     # Simplest fix: change assets path to Resources/Assets.xcassets and put it in app group children with name.
 
     # Rewrite assets file reference to include Resources/ path from PowerSync root
-    text = text.replace(
-        f"{assets_ref} /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = \"<group>\"; }};",
-        f"{assets_ref} /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Resources/Assets.xcassets; sourceTree = \"<group>\"; }};",
+    old_assets_line = (
+        f"{assets_ref} /* Assets.xcassets */ = {{isa = PBXFileReference;"
+        f" lastKnownFileType = folder.assetcatalog; path = Assets.xcassets;"
+        f" sourceTree = \"<group>\"; }};"
     )
+    new_assets_line = (
+        f"{assets_ref} /* Assets.xcassets */ = {{isa = PBXFileReference;"
+        f" lastKnownFileType = folder.assetcatalog; name = Assets.xcassets;"
+        f" path = Resources/Assets.xcassets; sourceTree = \"<group>\"; }};"
+    )
+    if old_assets_line not in text:
+        raise RuntimeError(
+            "Could not patch Assets.xcassets PBXFileReference: expected line not found. "
+            "The generator output may have changed; update the patch strings above."
+        )
+    text = text.replace(old_assets_line, new_assets_line)
 
     PROJECT.parent.mkdir(parents=True, exist_ok=True)
     PROJECT.write_text(text)

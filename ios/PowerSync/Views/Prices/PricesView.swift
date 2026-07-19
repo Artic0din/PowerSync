@@ -86,6 +86,20 @@ struct PricesView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 24))
     }
 
+    private var activeTOUIndex: Int? {
+        let now = Date()
+        var bestIndex: Int?
+        var bestDiff = Double.infinity
+        for (i, slot) in model.touSlots.enumerated() {
+            let diff = now.timeIntervalSince(slot.time)
+            if diff >= 0 && diff < bestDiff {
+                bestDiff = diff
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+
     private var touCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Time-of-Use Schedule")
@@ -94,6 +108,7 @@ struct PricesView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(Array(model.touSlots.enumerated()), id: \.element.id) { index, slot in
+                        let isActive = index == activeTOUIndex
                         VStack(spacing: 6) {
                             Text(slot.time.formatted(Formatters.time))
                                 .font(.caption.weight(.semibold))
@@ -105,9 +120,9 @@ struct PricesView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(12)
-                        .glassEffect(index == 2 ? .regular : .identity, in: .rect(cornerRadius: 16))
+                        .glassEffect(isActive ? .regular : .identity, in: .rect(cornerRadius: 16))
                         .overlay {
-                            if index == 2 {
+                            if isActive {
                                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                                     .strokeBorder(.mint, lineWidth: 2)
                             }

@@ -9,6 +9,7 @@
 import Foundation
 
 enum HomeAssistantClientError: LocalizedError, Sendable {
+    case notConfigured
     case invalidURL
     case unauthorized
     case badStatus(Int)
@@ -17,6 +18,8 @@ enum HomeAssistantClientError: LocalizedError, Sendable {
 
     var errorDescription: String? {
         switch self {
+        case .notConfigured:
+            "The Home Assistant client is not configured. Please enter a URL and access token."
         case .invalidURL:
             "The Home Assistant URL is invalid."
         case .unauthorized:
@@ -124,7 +127,7 @@ actor HomeAssistantClient {
 
     private func makeRequest(path: String) throws -> URLRequest {
         guard let baseURL, let token, !token.isEmpty else {
-            throw HomeAssistantClientError.invalidURL
+            throw HomeAssistantClientError.notConfigured
         }
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw HomeAssistantClientError.invalidURL

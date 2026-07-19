@@ -123,6 +123,8 @@ final class AppModel {
         } catch {
             connectionError = error.localizedDescription
             // Keep the UI usable with demo data if live fetch fails.
+            usesDemoMode = true
+            UserDefaults.standard.set(true, forKey: demoKey)
             reloadDemo()
         }
     }
