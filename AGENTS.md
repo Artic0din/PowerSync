@@ -15,7 +15,7 @@ PowerSync is a Home Assistant custom integration (`custom_components/power_sync`
 Before opening a PR that changes code:
 
 ```bash
-python -m pytest tests/ -q
+python3.12 -m pytest tests/ -q
 ```
 
 CI also runs HACS validation and hassfest (`.github/workflows/validate.yml`). Prefer small, focused changes. Do not change public config-flow options, entity unique IDs, or service schemas without a clear migration path and maintainer approval.
