@@ -5,7 +5,6 @@ Treat controller, tariff, scheduling, reserve, and device-command changes as saf
 Read the current README, tests, contribution guidance, workflows, and pull-request template before changing behaviour.
 Run focused tests first and the complete repository test suite before pushing.
 Never test control commands against live Home Assistant or real hardware without explicit authorization.
-+
 ## Work tracking
 
 - GitHub Issues are canonical for planned, multi-session, or backlog work; small one-PR fixes do not require an issue.
