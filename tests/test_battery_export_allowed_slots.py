@@ -6088,6 +6088,84 @@ def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(op
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
 
 
+def test_spread_export_schedule_stops_at_export_price_boundary(opt_module):
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 7, 25, 17, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=5000 if idx < 2 else 0,
+            battery_discharge_w=5000 if idx < 2 else 0,
+        )
+        for idx in range(6)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True] * 6,
+        export_prices=[0.27, 0.27, 0.27, 0.02, 0.02, 0.02],
+    )
+
+    assert [action.action for action in spread.actions] == [
+        "export",
+        "export",
+        "export",
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+    ]
+    assert [action.power_w for action in spread.actions] == [
+        3333.3,
+        3333.3,
+        3333.3,
+        0,
+        0,
+        0,
+    ]
+
+
+def test_spread_export_schedule_falls_back_for_non_finite_prices(opt_module):
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 7, 25, 17, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx == 0 else "self_consumption",
+            power_w=3000 if idx == 0 else 0,
+            battery_discharge_w=3000 if idx == 0 else 0,
+        )
+        for idx in range(3)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True] * 3,
+        export_prices=[0.27, float("nan"), 0.02],
+    )
+
+    assert [action.action for action in spread.actions] == ["export"] * 3
+    assert [action.power_w for action in spread.actions] == [1000.0] * 3
+
+
 def test_spread_export_schedule_caps_target_at_grid_export_limit(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"

@@ -4432,6 +4432,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule,
                     battery_export_allowed,
                     export_reserve_floor=reference_reserve_floor,
+                    export_prices=export_prices,
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
@@ -4510,6 +4511,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         schedule,
                         battery_export_allowed,
                         export_reserve_floor=applied_reserve_floor,
+                        export_prices=export_prices,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
@@ -7571,8 +7573,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule: OptimizationSchedule,
         allowed_slots: bool | list[bool],
         export_reserve_floor: float | list[float] | None = None,
+        *,
+        export_prices: list[float] | None = None,
     ) -> OptimizationSchedule:
-        """Spread planned export energy across each contiguous allowed window."""
+        """Spread planned export energy across each same-price allowed window."""
         actions = list(schedule.actions or [])
         if not actions:
             return schedule
@@ -7584,6 +7588,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             allowed = [bool(v) for v in allowed_slots[:n]]
             if len(allowed) < n:
                 allowed.extend([False] * (n - len(allowed)))
+
+        prices: list[float] | None = None
+        if export_prices is not None:
+            try:
+                candidate_prices = [float(price) for price in export_prices[:n]]
+            except (TypeError, ValueError):
+                candidate_prices = []
+            if (
+                len(candidate_prices) == n
+                and all(math.isfinite(price) for price in candidate_prices)
+            ):
+                prices = candidate_prices
 
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
         capacity_wh = max(0.0, float(self._config.battery_capacity_wh or 0))
@@ -7668,7 +7684,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             start = idx
-            while idx < n and allowed[idx]:
+            window_price = prices[idx] if prices is not None else 0.0
+            while (
+                idx < n
+                and allowed[idx]
+                and (
+                    prices is None
+                    or abs(prices[idx] - window_price) <= 1e-6
+                )
+            ):
                 idx += 1
             end = idx
             window_floor = min_export_floor
