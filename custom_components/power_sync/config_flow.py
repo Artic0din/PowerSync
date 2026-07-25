@@ -6031,9 +6031,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
                 )
             )
+            daily_supply_charge = float(
+                user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+            )
+            monthly_supply_charge = float(
+                user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
+            )
             self._agl_data = {
                 CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE: peak_rate,
                 CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE: offpeak_rate,
+                CONF_DAILY_SUPPLY_CHARGE: daily_supply_charge,
+                CONF_MONTHLY_SUPPLY_CHARGE: monthly_supply_charge,
             }
             self._agl_peak_export_rate = peak_rate
             self._agl_offpeak_export_rate = offpeak_rate
@@ -6064,6 +6072,30 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             max=200,
                             step=0.1,
                             unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_DAILY_SUPPLY_CHARGE,
+                        default=0.0,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=500.0,
+                            step=0.01,
+                            unit_of_measurement=self._selector_unit("daily"),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MONTHLY_SUPPLY_CHARGE,
+                        default=0.0,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=500.0,
+                            step=0.01,
+                            unit_of_measurement=self._selector_unit("monthly"),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
@@ -11944,12 +11976,26 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
                 )
             )
+            daily_supply_charge = float(
+                user_input.get(
+                    CONF_DAILY_SUPPLY_CHARGE,
+                    self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                )
+            )
+            monthly_supply_charge = float(
+                user_input.get(
+                    CONF_MONTHLY_SUPPLY_CHARGE,
+                    self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+                )
+            )
             self._agl_peak_export_rate = peak_rate
             self._agl_offpeak_export_rate = offpeak_rate
             self._amber_options = {
                 CONF_ELECTRICITY_PROVIDER: "agl",
                 CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE: peak_rate,
                 CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE: offpeak_rate,
+                CONF_DAILY_SUPPLY_CHARGE: daily_supply_charge,
+                CONF_MONTHLY_SUPPLY_CHARGE: monthly_supply_charge,
             }
             return await self.async_step_custom_tariff_options()
 
@@ -11984,6 +12030,30 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             max=200,
                             step=0.1,
                             unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_DAILY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=500.0,
+                            step=0.01,
+                            unit_of_measurement=self._selector_unit("daily"),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MONTHLY_SUPPLY_CHARGE,
+                        default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=500.0,
+                            step=0.01,
+                            unit_of_measurement=self._selector_unit("monthly"),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),

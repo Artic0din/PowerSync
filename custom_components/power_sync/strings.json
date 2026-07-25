@@ -19,14 +19,18 @@
       },
       "agl": {
         "title": "AGL Battery Rewards",
-        "description": "PowerSync models AGL as a static retail tariff. Enter the total feed-in rates from your current offer; the evening rate applies every day from 17:00 to 21:00. AGL VPP events are separate and are not controlled by this supplier integration.",
+        "description": "PowerSync models AGL as a static retail tariff. Enter the total feed-in rates and supply charge from your current offer; the evening rate applies every day from 17:00 to 21:00. AGL VPP events are separate and are not controlled by this supplier integration.",
         "data": {
           "agl_battery_rewards_peak_export_rate": "17:00-21:00 feed-in tariff",
-          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff"
+          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff",
+          "daily_supply_charge": "Daily supply charge ($)",
+          "monthly_supply_charge": "Monthly supply charge ($)"
         },
         "data_description": {
           "agl_battery_rewards_peak_export_rate": "Total export rate, not a bonus added to the off-peak rate. AGL currently advertises 28c/kWh; confirm your offer.",
-          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer."
+          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer.",
+          "daily_supply_charge": "Fixed daily supply charge from your current AGL offer. This is also used by demand-charge cost tracking.",
+          "monthly_supply_charge": "Fixed monthly supply charge from your current AGL offer. Leave at 0 if your bill only has a daily charge."
         },
         "submit": "Next"
       },
@@ -1331,14 +1335,18 @@
       },
       "agl_options": {
         "title": "AGL Battery Rewards",
-        "description": "Update the total AGL feed-in rates from your current offer. PowerSync applies the evening rate every day from 17:00 to 21:00, then opens your address-specific import tariff for review.",
+        "description": "Update the total AGL feed-in rates and supply charge from your current offer. PowerSync applies the evening rate every day from 17:00 to 21:00, then opens your address-specific import tariff for review.",
         "data": {
           "agl_battery_rewards_peak_export_rate": "17:00-21:00 feed-in tariff",
-          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff"
+          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff",
+          "daily_supply_charge": "Daily supply charge ($)",
+          "monthly_supply_charge": "Monthly supply charge ($)"
         },
         "data_description": {
           "agl_battery_rewards_peak_export_rate": "Total export rate, not a bonus added to the off-peak rate. AGL currently advertises 28c/kWh; confirm your offer.",
-          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer."
+          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer.",
+          "daily_supply_charge": "Fixed daily supply charge from your current AGL offer. This is also used by demand-charge cost tracking.",
+          "monthly_supply_charge": "Fixed monthly supply charge from your current AGL offer. Leave at 0 if your bill only has a daily charge."
         },
         "submit": "Next"
       },

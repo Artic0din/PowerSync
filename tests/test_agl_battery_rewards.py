@@ -269,6 +269,8 @@ def test_agl_is_wired_as_a_first_class_static_provider():
     assert '"agl": "AGL Battery Rewards' in const_source
     assert 'elif provider == "agl":' in config_source
     assert "return await self.async_step_agl()" in config_source
+    assert "CONF_DAILY_SUPPLY_CHARGE: daily_supply_charge" in config_source
+    assert "CONF_MONTHLY_SUPPLY_CHARGE: monthly_supply_charge" in config_source
     assert 'provider == "agl"' in config_source
     assert '"agl", "globird", "aemo_vpp", "other", "tou_only", "nz"' in runtime_source
     assert '"agl",' in optimizer_source
@@ -340,6 +342,11 @@ def test_agl_setup_and_options_strings_stay_aligned():
         setup = payload["config"]["step"]["agl"]
         options = payload["options"]["step"]["agl_options"]
         assert setup["data"] == options["data"]
+        assert setup["data_description"] == options["data_description"]
+        assert setup["data"]["daily_supply_charge"] == "Daily supply charge ($)"
+        assert setup["data"]["monthly_supply_charge"] == "Monthly supply charge ($)"
+        assert "supply charge" in setup["description"]
+        assert "supply charge" in options["description"]
         assert "17:00" in setup["description"]
         assert "21:00" in setup["description"]
         assert "VPP" in setup["description"]
