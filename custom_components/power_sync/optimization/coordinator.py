@@ -739,17 +739,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return True
 
-        if self.battery_system == "goodwe" and not preserve_charge:
-            if hasattr(battery, "set_self_consumption_mode"):
-                await battery.set_self_consumption_mode()
-            elif hasattr(battery, "restore_normal"):
-                await battery.restore_normal()
-            _LOGGER.info(
-                "Optimizer: IDLE — GoodWe self-consumption without DOD hold "
-                "(current_soc=%d%%, optimizer_floor=%d%%)",
-                soc_pct,
-                configured_idle_floor,
-            )
+        if self.battery_system == "goodwe":
+            if preserve_charge:
+                if not self.energy_coordinator or not hasattr(
+                    self.energy_coordinator, "set_backup_mode"
+                ):
+                    _LOGGER.warning(
+                        "Optimizer: GoodWe IDLE conserve control is unavailable"
+                    )
+                    return False
+                if await self.energy_coordinator.set_backup_mode() is False:
+                    return False
+                _LOGGER.info(
+                    "Optimizer: IDLE — GoodWe conserve hold at %d%% SOC "
+                    "(DOD unchanged)",
+                    soc_pct,
+                )
+            else:
+                if hasattr(battery, "set_self_consumption_mode"):
+                    await battery.set_self_consumption_mode()
+                elif hasattr(battery, "restore_normal"):
+                    await battery.restore_normal()
+                _LOGGER.info(
+                    "Optimizer: IDLE — GoodWe self-consumption without DOD hold "
+                    "(current_soc=%d%%, optimizer_floor=%d%%)",
+                    soc_pct,
+                    configured_idle_floor,
+                )
             self._idle_hold_reserve = None
             return True
 

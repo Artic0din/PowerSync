@@ -4310,6 +4310,43 @@ def test_goodwe_idle_does_not_write_dod_reserve_hold(opt_module):
     assert coordinator._last_executed_action == "idle"
 
 
+def test_goodwe_no_idle_exempt_hold_uses_conserve_without_dod_reserve_write(
+    opt_module,
+):
+    class GoodWeEnergyCoordinator:
+        def __init__(self):
+            self.backup_mode_calls = 0
+            self.restore_work_mode_from_idle_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return True
+
+        async def restore_work_mode_from_idle(self):
+            self.restore_work_mode_from_idle_calls += 1
+
+    battery = _FakeBattery(backup_reserve=20)
+    energy_coordinator = GoodWeEnergyCoordinator()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.92)
+    coordinator.battery_system = "goodwe"
+    coordinator.energy_coordinator = energy_coordinator
+    coordinator._config.disable_idle_enabled = True
+    coordinator._startup_backup_reserve = 15
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
 def test_tesla_idle_holds_current_soc_when_below_optimizer_floor(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.32)
