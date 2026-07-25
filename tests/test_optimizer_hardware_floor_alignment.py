@@ -961,7 +961,7 @@ def test_disable_idle_deadline_reachability_respects_grid_charge_soc_cap(
     battery_optimizer_module,
     monkeypatch,
 ):
-    """Grid charge above its SOC cap cannot justify replacing a deadline hold."""
+    """No Idle still self-consumes when the charge cap makes the target unreachable."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -991,15 +991,16 @@ def test_disable_idle_deadline_reachability_respects_grid_charge_soc_cap(
     assert result.solver_used == "highs"
     assert result.feasible is True
     assert result.lp_stats["mode_converged"] is True
-    assert result.schedule.actions[0].action == "idle"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(1000.0)
     assert result.schedule.actions[1].soc <= 0.5001
 
 
-def test_disable_idle_holds_after_last_charge_to_protect_deadline(
+def test_disable_idle_self_consumes_after_last_charge_despite_deadline(
     battery_optimizer_module,
     monkeypatch,
 ):
-    """A post-charge home-load slot cannot consume the explicit SOC target."""
+    """No Idle takes precedence over preserving an explicit SOC target."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -1026,10 +1027,14 @@ def test_disable_idle_holds_after_last_charge_to_protect_deadline(
 
     assert result.solver_used == "highs"
     assert result.feasible is True
-    assert result.lp_stats["mode_converged"] is True
+    assert result.lp_stats["mode_converged"] is False
+    assert result.lp_stats["fallback_reason"] == (
+        "mode_projection_infeasible_projected_highs"
+    )
     assert result.schedule.actions[0].action == "charge"
-    assert result.schedule.actions[2].action == "idle"
-    assert result.schedule.actions[2].soc >= 0.595
+    assert result.schedule.actions[2].action == "self_consumption"
+    assert result.schedule.actions[2].battery_discharge_w == pytest.approx(1000.0)
+    assert result.schedule.actions[2].soc < 0.595
 
 
 def test_disable_idle_does_not_hold_for_export_capped_at_reserve(

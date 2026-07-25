@@ -4958,9 +4958,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the action that runtime execution will apply."""
         if action_name != "idle":
             return action_name
-        # No Idle is modeled into the emitted trajectory. Any IDLE that remains
-        # is an explicit solver exemption (for example a Charge By Time deadline
-        # or below-reserve recovery hold) and must remain executable.
+        # No Idle takes precedence over every optimizer hold, including Charge
+        # By Time reachability holds. Keep this runtime guard even though the
+        # emitted trajectory is modeled the same way, so a stale schedule
+        # cannot publish IDLE after the setting is enabled.
+        if self._should_disable_idle_schedule():
+            return "self_consumption"
         if timestamp is not None and self._is_in_demand_window_at(timestamp):
             return "self_consumption"
         return action_name
@@ -5028,12 +5031,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if soc_cursor is not None:
             self_consumption_floor = min(soc_cursor, self_consumption_floor)
-        charge_by_time_target_slot = self._next_charge_by_time_target_slot()
-        charge_by_time_target_soc = (
-            self._charge_by_time_target_soc()
-            if charge_by_time_target_slot is not None
-            else 0.0
-        )
         def _forecast_w(values: list[float] | None, index: int) -> float:
             if not values or index >= len(values):
                 return 0.0
@@ -5080,50 +5077,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and action_charge_w <= 0
                 and action_discharge_w <= 0
             )
-            projected_deadline_soc = _advance_soc(
-                soc_cursor,
-                0.0,
-                _natural_discharge_w(index, soc_cursor),
-            )
-            if (
-                projected_deadline_soc is not None
-                and charge_by_time_target_slot is not None
-            ):
-                for future_index in range(
-                    index + 1,
-                    min(len(actions), charge_by_time_target_slot),
-                ):
-                    future_action = actions[future_index]
-                    projected_deadline_soc = _advance_soc(
-                        projected_deadline_soc,
-                        float(
-                            getattr(future_action, "battery_charge_w", 0.0) or 0.0
-                        ),
-                        float(
-                            getattr(future_action, "battery_discharge_w", 0.0)
-                            or 0.0
-                        ),
-                    )
-            should_preserve_charge_by_time_hold = (
-                charge_by_time_target_slot is not None
-                and index < charge_by_time_target_slot
-                and (action_name == "idle" or should_simulate_self_use)
-                and projected_deadline_soc is not None
-                and projected_deadline_soc
-                < charge_by_time_target_soc - 0.0001
-            )
-            if should_preserve_charge_by_time_hold:
-                new_actions.append(
-                    ScheduleAction(
-                        timestamp=action.timestamp,
-                        action=action.action,
-                        power_w=0.0,
-                        soc=round(soc_cursor, 4),
-                        battery_charge_w=0.0,
-                        battery_discharge_w=0.0,
-                    )
-                )
-                continue
             if action_name != "idle" and not should_simulate_self_use:
                 next_soc = _advance_soc(
                     soc_cursor,
@@ -6208,11 +6161,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._executor or not self._executor.battery_controller:
             return
 
+        runtime_action = self._effective_runtime_action(
+            getattr(action, "action", None),
+        )
+
         # Monitoring mode — log what would happen but don't execute
         if self._monitoring_mode_active():
             _LOGGER.info(
                 "[MONITORING] Optimizer would execute: %s (power=%sW) — blocked by monitoring mode",
-                action.action, getattr(action, 'power_w', 'N/A'),
+                runtime_action, getattr(action, 'power_w', 'N/A'),
             )
             return
 
@@ -6602,7 +6559,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Self-consumption lets the battery discharge to cover home load,
             # minimizing grid import during the demand window.
             planned_action = action.action
-            effective_action = planned_action
+            effective_action = runtime_action
 
             # --- Off-grid transition handling ---
             # If we're currently off-grid and the new action needs the grid,

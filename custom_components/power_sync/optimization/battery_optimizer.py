@@ -577,8 +577,8 @@ class BatteryOptimizer:
                 allow_battery_export.
             priority_export_enabled: Mark provider settlement windows where
                 modeled export bonuses may make battery export economic.
-            disable_idle: Require ordinary non-forced slots to use the battery
-                naturally rather than holding SOC for a later opportunity.
+            disable_idle: Require non-forced slots to use the battery naturally
+                rather than holding SOC for a later opportunity.
             grid_export_limits_w: Optional per-slot site export caps. A numeric
                 zero is a valid no-export limit; None falls back to the scalar
                 configured cap for that slot.
@@ -5009,7 +5009,8 @@ class BatteryOptimizer:
                 # avoiding expensive grid import.
                 meaningful_hold = soc > self.backup_reserve + 0.05
                 preserve_charge_by_time_hold = (
-                    _charge_by_time_hold_required(t, soc)
+                    not disable_idle
+                    and _charge_by_time_hold_required(t, soc)
                 )
                 preserve_recovery_hold = (
                     not disable_idle

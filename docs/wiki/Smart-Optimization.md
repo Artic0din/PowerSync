@@ -204,11 +204,12 @@ same-price import windows instead of using maximum charge power immediately.
 ## No Idle mode
 
 For every electricity provider, No Idle mode replaces optimizer idle hold actions
-with self-consumption. If Charge By Time is active and the battery is below the
-target SOC before the target time, PowerSync preserves the hold behavior needed to
-meet the deadline. The 24-hour Action Plan and battery-power graph show the final
-modeled behavior: ordinary No Idle periods appear as self-consumption and
-battery-to-home power, while an explicit Charge By Time hold remains IDLE.
+with self-consumption. No Idle takes precedence over Charge By Time, so PowerSync
+does not retain an IDLE hold solely to keep the target SOC reachable. As a result,
+the battery may miss the configured Charge By Time target when serving forecast
+home load leaves too little charging time or headroom. The 24-hour Action Plan and
+battery-power graph show those periods as self-consumption and battery-to-home
+power.
 
 ## App and API fields
 

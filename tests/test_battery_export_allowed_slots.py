@@ -2817,7 +2817,7 @@ def test_api_current_action_uses_effective_runtime_action(opt_module):
     assert data["next_action"] == "self_consumption"
 
 
-def test_api_no_idle_publishes_modeled_self_use_and_exempt_idle(opt_module):
+def test_api_no_idle_never_publishes_or_executes_residual_idle(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._config.disable_idle_enabled = True
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
@@ -2878,13 +2878,13 @@ def test_api_no_idle_publishes_modeled_self_use_and_exempt_idle(opt_module):
     data = coordinator.get_api_data()
 
     assert data["planned_current_action"] == "idle"
-    assert data["effective_current_action"] == "idle"
-    assert data["current_action"] == "idle"
+    assert data["effective_current_action"] == "self_consumption"
+    assert data["current_action"] == "self_consumption"
     assert data["current_power_w"] == -300
     assert data["next_action"] == "charge"
     assert data["next_action_power_w"] == 5000
-    assert data["next_actions"][0]["action"] == "idle"
-    assert "planned_action" not in data["next_actions"][0]
+    assert data["next_actions"][0]["action"] == "self_consumption"
+    assert data["next_actions"][0]["planned_action"] == "idle"
 
     # Ordinary No Idle slots are modeled as self-consumption before
     # publication, so the 24-hour Action Plan must show that same action.
@@ -4310,7 +4310,7 @@ def test_goodwe_idle_does_not_write_dod_reserve_hold(opt_module):
     assert coordinator._last_executed_action == "idle"
 
 
-def test_goodwe_no_idle_exempt_hold_uses_conserve_without_dod_reserve_write(
+def test_goodwe_no_idle_overrides_residual_hold_without_entering_conserve(
     opt_module,
 ):
     class GoodWeEnergyCoordinator:
@@ -4339,12 +4339,12 @@ def test_goodwe_no_idle_exempt_hold_uses_conserve_without_dod_reserve_write(
         )
     )
 
-    assert energy_coordinator.backup_mode_calls == 1
+    assert energy_coordinator.backup_mode_calls == 0
     assert battery.self_consumption_calls == 0
     assert battery.backup_reserve_calls == []
     assert coordinator._pre_idle_backup_reserve is None
     assert coordinator._idle_hold_reserve is None
-    assert coordinator._last_executed_action == "idle"
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_tesla_idle_holds_current_soc_when_below_optimizer_floor(opt_module):
@@ -5350,7 +5350,7 @@ def test_no_idle_uses_self_consumption_at_hardware_floor_before_recovery_charge(
     assert converted.actions[1].battery_discharge_w == 0
 
 
-def test_no_idle_preserves_charge_by_time_prefill_hold(opt_module):
+def test_no_idle_overrides_charge_by_time_prefill_hold(opt_module):
     coordinator = _coordinator(
         opt_module,
         "octopus",
@@ -5398,10 +5398,13 @@ def test_no_idle_preserves_charge_by_time_prefill_hold(opt_module):
     assert coordinator._next_charge_by_time_target_slot() == 90
     assert [action.action for action in converted.actions] == [
         "self_consumption",
-        "idle",
+        "self_consumption",
     ]
-    assert [action.battery_discharge_w for action in converted.actions] == [0.0, 0.0]
-    assert [action.soc for action in converted.actions] == [0.80, 0.80]
+    assert all(
+        action.battery_discharge_w == 2000.0 for action in converted.actions
+    )
+    assert converted.actions[0].soc < 0.80
+    assert converted.actions[1].soc < converted.actions[0].soc
 
 
 def test_flow_power_no_idle_schedule_fills_zero_self_consumption_after_export(opt_module):
@@ -5635,7 +5638,7 @@ def test_no_idle_setting_reconciles_stale_runtime_without_stuck_reload_flag(
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
-def test_flow_power_no_idle_executor_preserves_solver_exempt_idle(opt_module):
+def test_flow_power_no_idle_executor_overrides_residual_idle(opt_module):
     battery = _FakeBattery(backup_reserve=20)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator._entry.options["electricity_provider"] = "flow_power"
@@ -5649,13 +5652,13 @@ def test_flow_power_no_idle_executor_preserves_solver_exempt_idle(opt_module):
     )
 
     assert battery.self_consumption_calls == 1
-    assert battery.backup_reserve_calls == [80]
-    assert coordinator._idle_hold_reserve == 80
-    assert coordinator._last_executed_action == "idle"
+    assert battery.backup_reserve_calls == [20]
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_sigenergy_no_idle_exempt_hold_allows_solar_charge_and_restores(opt_module):
-    """A retained No Idle hold must cap discharge without entering standby."""
+def test_sigenergy_no_idle_overrides_residual_idle_without_discharge_hold(opt_module):
+    """No Idle must not turn a residual action into a Sigenergy hold."""
     battery = _FakeBattery(backup_reserve=20)
     energy_coordinator = _FakeEnergyCoordinator()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.37)
@@ -5671,9 +5674,9 @@ def test_sigenergy_no_idle_exempt_hold_allows_solar_charge_and_restores(opt_modu
         )
     )
 
-    assert energy_coordinator.no_discharge_calls == 1
+    assert energy_coordinator.no_discharge_calls == 0
     assert battery.backup_reserve_calls == []
-    assert coordinator._last_executed_action == "idle"
+    assert coordinator._last_executed_action == "self_consumption"
 
     asyncio.run(
         coordinator._execute_optimizer_action(
@@ -5681,13 +5684,13 @@ def test_sigenergy_no_idle_exempt_hold_allows_solar_charge_and_restores(opt_modu
         )
     )
 
-    assert energy_coordinator.restore_no_discharge_calls == 1
+    assert energy_coordinator.restore_no_discharge_calls == 0
     assert energy_coordinator.restore_work_mode_from_idle_calls == 0
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_sigenergy_no_idle_exempt_hold_retries_failed_restore(opt_module):
-    """A failed no-discharge release must keep the IDLE marker for retry."""
+def test_sigenergy_stale_no_idle_hold_retries_failed_restore(opt_module):
+    """An upgrade must still retry release of a previously retained hold."""
     battery = _FakeBattery(backup_reserve=20)
     energy_coordinator = _FakeEnergyCoordinator()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.37)
@@ -5696,11 +5699,8 @@ def test_sigenergy_no_idle_exempt_hold_retries_failed_restore(opt_module):
     coordinator.battery_system = "sigenergy"
     coordinator.energy_coordinator = energy_coordinator
 
-    asyncio.run(
-        coordinator._execute_optimizer_action(
-            SimpleNamespace(action="idle", power_w=0)
-        )
-    )
+    coordinator._idle_no_discharge_active = True
+    coordinator._last_executed_action = "idle"
     energy_coordinator.restore_no_discharge_result = False
 
     asyncio.run(
@@ -5796,7 +5796,10 @@ def test_sigenergy_failed_disable_cleanup_retries_before_enable(opt_module):
     asyncio.run(_run())
 
 
-def test_flow_power_no_idle_monitoring_reports_solver_exempt_idle(opt_module, caplog):
+def test_flow_power_no_idle_monitoring_reports_effective_self_consumption(
+    opt_module,
+    caplog,
+):
     battery = _FakeBattery(backup_reserve=20)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator._entry.data["monitoring_mode"] = True
@@ -5813,8 +5816,8 @@ def test_flow_power_no_idle_monitoring_reports_solver_exempt_idle(opt_module, ca
 
     assert battery.self_consumption_calls == 0
     assert coordinator._last_executed_action == "export"
-    assert "Optimizer would execute: idle" in caplog.text
-    assert "Optimizer would execute: self_consumption" not in caplog.text
+    assert "Optimizer would execute: idle" not in caplog.text
+    assert "Optimizer would execute: self_consumption" in caplog.text
 
 
 def test_single_slot_export_gap_with_price_change_is_not_bridged(opt_module):
