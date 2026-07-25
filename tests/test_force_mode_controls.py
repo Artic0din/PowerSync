@@ -1034,9 +1034,71 @@ def test_tesla_force_modes_persist_grid_charging_baseline():
     assert "target_grid_charging_enabled," in restore
     assert "_mark_tesla_restore_failed(" in restore
     assert "No observable or remembered grid charging preference" in restore
-    assert "target_grid_charging_enabled = False" in restore
+    assert "leaving the current Tesla setting unchanged" in restore
+    assert "restoring disabled as the safe fallback" not in restore
     assert "_tesla_force_result_all_grid_field_absent_safe(" in restore
-    assert "_persist_tesla_grid_charging_preference(" in restore
+
+
+def test_tesla_force_modes_require_grid_charging_baseline_before_state_changes():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    force_discharge = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+    force_charge = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+
+    assert force_discharge is not None
+    assert force_charge is not None
+    for force_source in (force_discharge, force_charge):
+        baseline_guard = force_source.index(
+            "await _require_tesla_force_grid_charging_baselines("
+        )
+        state_change = force_source.index("_cancel_all_force_timers(")
+        assert baseline_guard < state_change
+        assert "inherited_grid_charging" in force_source[
+            baseline_guard - 400:baseline_guard
+        ]
+        assert "inheritance_required=" in force_source[
+            baseline_guard:baseline_guard + 300
+        ]
+
+
+def test_tesla_force_grid_baseline_prefers_local_then_cloud_then_memory():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = ast.get_source_segment(
+        source,
+        _find_function(tree, "_unknown_tesla_grid_charging_baselines"),
+    )
+
+    assert helper is not None
+    local_read = helper.index('"grid_charging_enabled"')
+    cloud_read = helper.index("session.get(")
+    remembered = helper.index("_remember_tesla_grid_charging_preference(")
+    assert local_read < cloud_read < remembered
+    assert "TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS" in helper
+    assert "unknown_sites.append(site_id)" in helper
+    assert "return unknown_sites" in helper
+
+
+def test_tesla_unknown_force_baseline_has_actionable_rejection():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = ast.get_source_segment(
+        source,
+        _find_function(tree, "_require_tesla_force_grid_charging_baselines"),
+    )
+
+    assert helper is not None
+    assert "if inheritance_required and inherited_grid_charging is None:" in helper
+    assert "if inherited_grid_charging is not None:" in helper
+    assert "Cannot start Tesla force mode because the current Grid" in helper
+    assert "Set the PowerSync Grid" in helper
+    assert "Cannot switch Tesla force modes because the original Grid" in helper
 
 
 def test_tesla_self_consumption_clears_force_toggle_state():
@@ -1571,7 +1633,10 @@ def test_aemo_vpp_restore_uses_saved_tariff_not_dynamic_sync():
         )
     ]
     assert dynamic_assignments == ['dynamic_providers = ("amber", "flow_power", "octopus")']
-    assert 'if electricity_provider in ("globird", "aemo_vpp"):' in function_source
+    assert (
+        'if electricity_provider in ("agl", "globird", "aemo_vpp"):'
+        in function_source
+    )
 
 
 def test_aemo_vpp_tariff_price_view_uses_tariff_schedule_path():

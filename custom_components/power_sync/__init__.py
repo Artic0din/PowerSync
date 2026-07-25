@@ -385,6 +385,7 @@ from .const import (
     CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_POWERWALL_OFFGRID_AS_CURTAILMENT,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     CONF_TESLA_API_PROVIDER,
     CONF_FLEET_API_ACCESS_TOKEN,
     TESLA_PROVIDER_TESLEMETRY,
@@ -26092,6 +26093,109 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 store_err,
             )
 
+    async def _unknown_tesla_grid_charging_baselines(
+        site_configs: list[tuple[str, str, str]],
+    ) -> list[str]:
+        """Return Tesla sites whose pre-force grid setting is not observable."""
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        local_coordinator = (
+            entry_data.get("powerwall_local", {}).get("coordinator")
+            if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
+            else None
+        )
+        local_snapshot = getattr(local_coordinator, "data", None)
+        local_last_success = getattr(
+            local_coordinator,
+            "last_success_monotonic",
+            None,
+        )
+        local_snapshot_fresh = (
+            local_snapshot is not None
+            and local_last_success is not None
+            and time.monotonic() - local_last_success
+            <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+        )
+        session = async_get_clientsession(hass)
+        unknown_sites: list[str] = []
+
+        for index, (site_id, current_token, provider) in enumerate(site_configs):
+            observed_grid_charging = None
+            if index == 0 and local_snapshot_fresh:
+                local_enabled = getattr(
+                    local_snapshot,
+                    "grid_charging_enabled",
+                    None,
+                )
+                if local_enabled is not None:
+                    observed_grid_charging = bool(local_enabled)
+
+            if observed_grid_charging is None:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = get_tesla_api_base_url(
+                    provider,
+                    entry.data.get(CONF_FLEET_API_BASE_URL),
+                )
+                try:
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            site_info = data.get("response", {})
+                            observed_grid_charging = (
+                                _tesla_grid_charging_enabled_from_site_info(
+                                    site_info
+                                )
+                            )
+                except Exception as baseline_err:
+                    _LOGGER.warning(
+                        "Could not read Tesla grid charging baseline for site "
+                        "%s: %s",
+                        site_id,
+                        baseline_err,
+                    )
+
+            resolved_grid_charging = (
+                _remember_tesla_grid_charging_preference(
+                    site_id,
+                    observed_grid_charging,
+                )
+            )
+            if resolved_grid_charging is None:
+                unknown_sites.append(site_id)
+
+        return unknown_sites
+
+    async def _require_tesla_force_grid_charging_baselines(
+        site_configs: list[tuple[str, str, str]],
+        inherited_grid_charging: Any = None,
+        *,
+        inheritance_required: bool = False,
+    ) -> None:
+        """Reject a force transition that cannot restore grid charging."""
+        if inheritance_required and inherited_grid_charging is None:
+            raise HomeAssistantError(
+                "Cannot switch Tesla force modes because the original Grid "
+                "Charging setting is unavailable. Restore normal operation, "
+                "set the PowerSync Grid Charging control once, then retry."
+            )
+        if inherited_grid_charging is not None:
+            return
+        unknown_sites = await _unknown_tesla_grid_charging_baselines(
+            site_configs
+        )
+        if unknown_sites:
+            raise HomeAssistantError(
+                "Cannot start Tesla force mode because the current Grid "
+                "Charging setting is unavailable. Set the PowerSync Grid "
+                "Charging control once, then retry."
+            )
+
     def _coerce_force_power_w(value: Any) -> int:
         """Normalize service/store force-power values to a non-negative watt value."""
         try:
@@ -27910,6 +28014,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes (source={source})")
 
+        tesla_preflight_sites = _get_tesla_site_configs(hass, entry)
+        if tesla_preflight_sites and not force_discharge_state.get("active"):
+            inherited_grid_charging = None
+            transitioning_from_force_charge = force_charge_state.get("active")
+            if transitioning_from_force_charge:
+                inherited_grid_charging = _optional_bool(
+                    force_charge_state.get("saved_grid_charging_enabled")
+                )
+            await _require_tesla_force_grid_charging_baselines(
+                tesla_preflight_sites,
+                inherited_grid_charging,
+                inheritance_required=bool(transitioning_from_force_charge),
+            )
+
         # Cancel any pending expiry timers and advance the generation counter
         # synchronously — before any await — so that a queued restore callback
         # from a previous command cannot fire during this command's I/O window.
@@ -29563,6 +29681,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     dc_coordinator.start_time, dc_coordinator.end_time,
                 )
                 return
+
+        tesla_preflight_sites = _get_tesla_site_configs(hass, entry)
+        if tesla_preflight_sites and not force_charge_state.get("active"):
+            inherited_grid_charging = None
+            transitioning_from_force_discharge = force_discharge_state.get(
+                "active"
+            )
+            if transitioning_from_force_discharge:
+                inherited_grid_charging = _optional_bool(
+                    force_discharge_state.get("saved_grid_charging_enabled")
+                )
+            await _require_tesla_force_grid_charging_baselines(
+                tesla_preflight_sites,
+                inherited_grid_charging,
+                inheritance_required=bool(
+                    transitioning_from_force_discharge
+                ),
+            )
 
         # Cancel any pending expiry timers and advance the generation counter
         # synchronously — before any await — so that a queued restore callback
@@ -32418,7 +32554,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _remember_tesla_grid_charging_preference(site_id, None)
                     )
 
-                used_safe_grid_charging_fallback = False
                 if in_peak:
                     _LOGGER.info(
                         "Restore normal: still in demand peak period — keeping grid charging disabled"
@@ -32428,11 +32563,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 elif target_grid_charging_enabled is None:
                     _LOGGER.warning(
                         "No observable or remembered grid charging preference for "
-                        "site %s; restoring disabled as the safe fallback",
+                        "site %s; leaving the current Tesla setting unchanged",
                         site_id,
                     )
-                    target_grid_charging_enabled = False
-                    used_safe_grid_charging_fallback = True
+                    continue
 
                 restore_grid_result = await _tesla_force_apply_grid_charging(
                     [(site_id, current_token, provider)],
@@ -32472,12 +32606,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "enabled" if target_grid_charging_enabled else "disabled",
                         site_id,
                     )
-                    if used_safe_grid_charging_fallback:
-                        await _persist_tesla_grid_charging_preference(
-                            [(site_id, current_token, provider)],
-                            False,
-                            source="safe force restore fallback",
-                        )
                 else:
                     _mark_tesla_restore_failed(
                         f"grid charging restore failed for site {site_id}"
