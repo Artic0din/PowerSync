@@ -4290,6 +4290,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 load_forecast,
                 soc,
             )
+            price_cap = self._coerce_optional_price(
+                self._config.max_grid_charge_price
+            )
+            eligible_grid_charge_slots = (
+                sum(bool(slot) for slot in grid_charge_allowed)
+                if self._config.allow_grid_charge
+                else 0
+            )
+            _LOGGER.debug(
+                "Grid charge eligibility: %d/%d slots allowed "
+                "(enabled=%s, max_price=%s, soc_cap=%.0f%%)",
+                eligible_grid_charge_slots,
+                len(grid_charge_allowed),
+                self._config.allow_grid_charge,
+                (
+                    f"{price_cap * 100:.1f}c/kWh"
+                    if price_cap is not None
+                    else "disabled"
+                ),
+                self._soc_ratio(self._config.grid_charge_soc_cap, 1.0) * 100,
+            )
             spread_import_blocked = [
                 bool(blocked) or not bool(allowed)
                 for blocked, allowed in zip(
@@ -9032,6 +9053,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = self._get_energy_data()
         if not data:
             return solar_forecast
+        if data.get("solar_power_valid") is False:
+            _LOGGER.debug(
+                "Solar forecast nowcast: ignoring unavailable live solar telemetry"
+            )
+            return solar_forecast
 
         try:
             actual_kw = max(0.0, float(data.get("solar_power", 0) or 0))
@@ -9059,8 +9085,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._solar_nowcast_derate,
                 (self._solar_nowcast_derate * 0.35) + (target * 0.65),
             )
-        elif ratio >= 0.9:
-            self._solar_nowcast_derate = min(1.0, self._solar_nowcast_derate + 0.08)
+        else:
+            # A prior transient can leave the derate below the level supported
+            # by current production. Recover through the 75-90% deadband
+            # instead of freezing the stale factor indefinitely. Do not learn
+            # a new derate here: only raise an already-lower factor toward the
+            # live ratio plus the same 10% forecast buffer used above.
+            recovery_target = min(1.0, ratio + 0.10)
+            if self._solar_nowcast_derate < recovery_target:
+                self._solar_nowcast_derate = min(
+                    recovery_target,
+                    self._solar_nowcast_derate + 0.08,
+                )
 
         if self._solar_nowcast_derate >= 0.98:
             return solar_forecast

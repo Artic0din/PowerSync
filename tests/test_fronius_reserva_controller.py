@@ -166,6 +166,7 @@ def test_connect_discovers_reserva_entities_and_reads_status():
     assert status["battery_power"] == -1.2
     assert status["grid_power"] == 0.5
     assert status["solar_power"] == 3.2
+    assert status["solar_power_valid"] is True
     assert status["backup_reserve"] == 20.0
     assert status["battery_max_charge_power_w"] == 5000.0
 
@@ -182,6 +183,58 @@ def test_status_keeps_unavailable_soc_unknown_instead_of_zero():
     status = controller.get_status()
 
     assert status["battery_level"] is None
+
+
+def test_status_marks_unavailable_solar_as_invalid_instead_of_real_zero():
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "sensor.pv_power_2":
+            state.state = "unavailable"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == 0.0
+    assert status["solar_power_valid"] is False
+
+
+def test_status_marks_all_zero_startup_power_snapshot_as_invalid():
+    states = _reserva_states()
+    power_entities = {
+        "sensor.storage_charging_power",
+        "sensor.storage_discharging_power",
+        "sensor.meter_1_power",
+        "sensor.pv_power_2",
+        "sensor.load_2",
+    }
+    for state in states:
+        if state.entity_id in power_entities:
+            state.state = "0"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == 0.0
+    assert status["solar_power_valid"] is False
+
+
+def test_status_keeps_real_zero_solar_valid_when_site_power_is_active():
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "sensor.pv_power_2":
+            state.state = "0"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == 0.0
+    assert status["solar_power_valid"] is True
 
 
 def test_connect_discovers_callifo_byd_entities_and_reads_status():

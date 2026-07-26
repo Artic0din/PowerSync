@@ -252,12 +252,28 @@ class FroniusReservaBatteryController:
         if not self._entity_map:
             self._discover_entities()
 
-        charge_w = self._read_float("battery_charge_power") or 0.0
-        discharge_w = self._read_float("battery_discharge_power") or 0.0
+        raw_charge_w = self._read_float("battery_charge_power")
+        raw_discharge_w = self._read_float("battery_discharge_power")
+        raw_grid_w = self._read_float("grid_power")
+        raw_solar_w = self._read_float("solar_power")
+        raw_load_w = self._read_float("load_power")
+        site_power_has_signal = any(
+            value is not None and abs(value) > 1.0
+            for value in (
+                raw_charge_w,
+                raw_discharge_w,
+                raw_grid_w,
+                raw_solar_w,
+                raw_load_w,
+            )
+        )
+
+        charge_w = raw_charge_w or 0.0
+        discharge_w = raw_discharge_w or 0.0
         battery_kw = (discharge_w - charge_w) / 1000.0
-        grid_kw = (self._read_float("grid_power") or 0.0) / 1000.0
-        solar_kw = max(0.0, (self._read_float("solar_power") or 0.0) / 1000.0)
-        load_kw = max(0.0, (self._read_float("load_power") or 0.0) / 1000.0)
+        grid_kw = (raw_grid_w or 0.0) / 1000.0
+        solar_kw = max(0.0, (raw_solar_w or 0.0) / 1000.0)
+        load_kw = max(0.0, (raw_load_w or 0.0) / 1000.0)
 
         if load_kw <= 0:
             balanced_load_kw = solar_kw + grid_kw + battery_kw
@@ -275,6 +291,14 @@ class FroniusReservaBatteryController:
             "battery_power": battery_kw,
             "grid_power": grid_kw,
             "solar_power": solar_kw,
+            # Preserve the distinction between a real zero and HA entities
+            # that are unavailable or still initialized to an all-zero
+            # snapshot during integration reload. A genuine zero-solar sample
+            # remains valid when load, grid, or battery telemetry has signal.
+            "solar_power_valid": (
+                raw_solar_w is not None
+                and (abs(raw_solar_w) > 1.0 or site_power_has_signal)
+            ),
             "load_power": load_kw,
             "battery_temperature": self._read_float("battery_temperature"),
             "battery_capacity_kwh": (

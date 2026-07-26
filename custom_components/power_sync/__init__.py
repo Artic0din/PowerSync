@@ -37912,6 +37912,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 optimization_coordinator._config.max_discharge_w / 1000,
                 optimization_coordinator._battery_specs_source,
             )
+            grid_charge_price_cap = (
+                optimization_coordinator._config.max_grid_charge_price
+            )
+            grid_charge_price_cap_text = (
+                f"{grid_charge_price_cap * 100:.1f}c/kWh"
+                if grid_charge_price_cap is not None
+                else "disabled"
+            )
+            _LOGGER.info(
+                "Smart Optimization grid charge policy: enabled=%s, "
+                "max_price=%s, soc_cap=%.0f%%",
+                optimization_coordinator._config.allow_grid_charge,
+                grid_charge_price_cap_text,
+                optimization_coordinator._config.grid_charge_soc_cap * 100,
+            )
 
             # Load hardware backup reserve (user-configured restore target)
             from .const import CONF_HARDWARE_BACKUP_RESERVE

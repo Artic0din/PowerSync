@@ -2260,3 +2260,54 @@ def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_modul
         coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
 
     assert coordinator._solar_nowcast_derate == pytest.approx(1.0)
+
+
+def test_solar_nowcast_ignores_explicitly_unavailable_live_telemetry(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._get_energy_data = lambda: {
+        "solar_power": 0.0,
+        "solar_power_valid": False,
+    }
+    solar_forecast = [8.8] * 12
+
+    adjusted = coordinator._apply_solar_nowcast_derate(
+        solar_forecast,
+        soc=0.5,
+    )
+
+    assert adjusted == solar_forecast
+    assert coordinator._solar_nowcast_derate == pytest.approx(1.0)
+    assert coordinator._last_solar_nowcast_ratio is None
+
+
+def test_solar_nowcast_recovers_through_live_ratio_deadband(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 0.43
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._get_energy_data = lambda: {
+        "solar_power": 7.76,
+        "solar_power_valid": True,
+    }
+    solar_forecast = [8.8] * 12
+
+    first_adjusted = coordinator._apply_solar_nowcast_derate(
+        solar_forecast,
+        soc=0.5,
+    )
+
+    assert coordinator._last_solar_nowcast_ratio == pytest.approx(7.76 / 8.8)
+    assert coordinator._solar_nowcast_derate == pytest.approx(0.51)
+    assert first_adjusted[0] == pytest.approx(8.8 * 0.51)
+
+    for _ in range(10):
+        coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
+
+    assert coordinator._solar_nowcast_derate == pytest.approx(
+        min(1.0, (7.76 / 8.8) + 0.10)
+    )

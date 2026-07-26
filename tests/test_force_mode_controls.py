@@ -701,6 +701,20 @@ def test_provider_config_monitoring_enable_forces_restore_normal():
     assert "SERVICE_RESTORE_NORMAL" not in method_source
 
 
+def test_monitoring_switch_preserves_grid_charge_policy_options():
+    source = SWITCH_PATH.read_text()
+    tree = ast.parse(source)
+
+    for method_name in ("async_turn_on", "async_turn_off"):
+        method = _find_class_method(tree, "MonitoringModeSwitch", method_name)
+        method_source = ast.get_source_segment(source, method)
+
+        assert method_source is not None
+        assert "new_options = {**self._entry.options}" in method_source
+        assert "new_options[CONF_MONITORING_MODE]" in method_source
+        assert "options=new_options" in method_source
+
+
 def test_restore_normal_force_restore_releases_tesla_even_without_saved_state():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

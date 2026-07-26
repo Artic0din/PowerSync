@@ -7958,6 +7958,7 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
 
         return {
             "solar_power": solar_kw,
+            "solar_power_valid": status.get("solar_power_valid", True),
             "grid_power": grid_kw,
             "battery_power": battery_kw,
             "load_power": load_kw,
