@@ -180,3 +180,16 @@ def test_auto_apply_bridge_uses_one_frozen_reference_across_both_solves():
     assert "authoritative_reserve_floor=applied_reserve_floor" in second_chain
     assert method_source.count("self._set_forecast_bridge_reserve_recommendation(") == 1
     assert "final_recommendation.update(reference_reserve_semantics)" in second_chain
+
+
+def test_spread_export_uses_effective_bonus_prices_in_both_solve_chains():
+    """Ticket #319: post-solve spreading must retain provider bonus boundaries."""
+    method_source = _run_optimization_source()
+    chains = _chain_blocks(method_source)
+
+    derivation = method_source.index(
+        "spread_export_prices = self._spread_export_prices_for_run("
+    )
+    assert derivation < method_source.index("schedule = result.schedule")
+    for chain in chains:
+        assert chain.count("export_prices=spread_export_prices") == 1

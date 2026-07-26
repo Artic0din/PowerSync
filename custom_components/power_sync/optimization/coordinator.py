@@ -4333,6 +4333,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(import_prices),
                 export_prices,
             )
+            spread_export_prices = self._spread_export_prices_for_run(
+                export_prices,
+            )
             quota_group_setter = getattr(
                 self._optimizer,
                 "set_quota_bonus_groups",
@@ -4448,7 +4451,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule,
                     battery_export_allowed,
                     export_reserve_floor=reference_reserve_floor,
-                    export_prices=export_prices,
+                    export_prices=spread_export_prices,
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
@@ -4527,7 +4530,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         schedule,
                         battery_export_allowed,
                         export_reserve_floor=applied_reserve_floor,
-                        export_prices=export_prices,
+                        export_prices=spread_export_prices,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
@@ -7344,6 +7347,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 n,
             )
         return allowed
+
+    def _spread_export_prices_for_run(
+        self,
+        export_prices: list[float],
+    ) -> list[float]:
+        """Return slot prices including any bounded provider export bonus."""
+        bonus_prices = list(self._last_zerohero_bonus_prices or [])
+        return [
+            float(base_price or 0.0)
+            + (
+                float(bonus_prices[idx] or 0.0)
+                if idx < len(bonus_prices)
+                else 0.0
+            )
+            for idx, base_price in enumerate(export_prices)
+        ]
 
     def _should_spread_export_schedule(self) -> bool:
         """Return True when optimizer export actions should be flattened."""

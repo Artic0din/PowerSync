@@ -6174,6 +6174,74 @@ def test_spread_export_schedule_stops_at_export_price_boundary(opt_module):
     ]
 
 
+def test_spread_export_schedule_preserves_covau_bonus_price_window(opt_module):
+    coordinator = _coordinator(opt_module, "covau")
+    coordinator.battery_system = "saj_h2"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    coordinator._last_zerohero_bonus_prices = [
+        0.0,
+        0.0,
+        0.0,
+        0.10,
+        0.10,
+        0.10,
+        0.0,
+        0.0,
+        0.0,
+        0.50,
+    ]
+    start = datetime(2026, 7, 26, 17, 45, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx in (3, 4) else "self_consumption",
+            power_w=5000 if idx in (3, 4) else 0,
+            battery_discharge_w=5000 if idx in (3, 4) else 0,
+        )
+        for idx in range(9)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread_prices = coordinator._spread_export_prices_for_run([0.05] * 9)
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True] * 9,
+        export_prices=spread_prices,
+    )
+
+    assert spread_prices == pytest.approx(
+        [0.05] * 3 + [0.15] * 3 + [0.05] * 3
+    )
+    assert [action.action for action in spread.actions] == [
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+        "export",
+        "export",
+        "export",
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+    ]
+    assert [action.power_w for action in spread.actions] == [
+        0,
+        0,
+        0,
+        3333.3,
+        3333.3,
+        3333.3,
+        0,
+        0,
+        0,
+    ]
+
+
 def test_spread_export_schedule_falls_back_for_non_finite_prices(opt_module):
     coordinator = _coordinator(opt_module, "agl")
     coordinator.battery_system = "goodwe"
