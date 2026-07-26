@@ -2105,9 +2105,106 @@ def test_optimizer_restart_restore_is_hidden_from_force_getter():
     assert function_source is not None
     assert "hass.data.get(DOMAIN, {}).get(entry.entry_id, {})" in function_source
     assert '"optimizer_force_restart_restore_pending"' in function_source
+    assert 'hold_soc_state.get("active")' in function_source
+    assert '"type": "hold_soc"' in function_source
     assert 'self_consumption_state.get("active")' in function_source
     assert '"type": "self_consumption"' in function_source
     assert 'return {"active": False}' in function_source
+
+
+def test_active_hold_soc_blocks_optimizer_and_reserve_write_generation():
+    """An active user hold owns dispatch, including the reserve service boundary."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    force_getter = _find_function(tree, "get_force_state")
+    force_namespace = {
+        "hass": SimpleNamespace(
+            data={"power_sync": {"entry": {}}},
+        ),
+        "DOMAIN": "power_sync",
+        "entry": SimpleNamespace(entry_id="entry"),
+        "force_charge_state": {"active": False},
+        "force_discharge_state": {"active": False},
+        "hold_soc_state": {
+            "active": True,
+            "expires_at": "2026-07-26T04:30:00+00:00",
+        },
+        "self_consumption_state": {"active": False},
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(
+                    body=[
+                        ast.ImportFrom(
+                            module="__future__",
+                            names=[ast.alias(name="annotations")],
+                            level=0,
+                        ),
+                        force_getter,
+                    ],
+                    type_ignores=[],
+                )
+            ),
+            str(INIT_PATH),
+            "exec",
+        ),
+        force_namespace,
+    )
+    assert force_namespace["get_force_state"]() == {
+        "active": True,
+        "type": "hold_soc",
+        "expires_at": "2026-07-26T04:30:00+00:00",
+        "source": "user",
+    }
+
+    reserve_handler = _find_function(tree, "handle_set_backup_reserve")
+    reserve_generation = [7]
+    messages: list[str] = []
+    reserve_namespace = {
+        "ServiceCall": object,
+        "_LOGGER": SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda message, *args, **_kwargs: messages.append(
+                message % args if args else message
+            ),
+        ),
+        "_monitoring_mode_should_block_control": lambda _call: False,
+        "_tesla_reserve_generation": reserve_generation,
+        "hold_soc_state": {"active": True},
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(
+                    body=[
+                        ast.ImportFrom(
+                            module="__future__",
+                            names=[ast.alias(name="annotations")],
+                            level=0,
+                        ),
+                        reserve_handler,
+                    ],
+                    type_ignores=[],
+                )
+            ),
+            str(INIT_PATH),
+            "exec",
+        ),
+        reserve_namespace,
+    )
+    asyncio.run(
+        reserve_namespace["handle_set_backup_reserve"](
+            SimpleNamespace(
+                data={"percent": 72, "source": "optimizer"},
+            )
+        )
+    )
+    assert reserve_generation == [7]
+    assert messages == [
+        "Hold SoC active — skipping optimizer backup reserve write to 72%"
+    ]
 
 
 def test_optimizer_startup_ignores_stale_force_restore_window():

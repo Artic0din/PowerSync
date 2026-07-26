@@ -32884,8 +32884,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or _tesla_reserve_generation[0]
                     != restore_reserve_generation
                 ):
-                    _LOGGER.debug(
-                        "Hold SoC timer superseded — clearing stale tracking"
+                    _LOGGER.warning(
+                        "Hold SoC timer superseded by a newer user control — "
+                        "clearing stale tracking without restoring"
                     )
                     _clear_hold_soc_state()
                     await persist_force_mode_state()
@@ -33813,6 +33814,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        reserve_source = call.data.get("source")
+        if (
+            reserve_source == "optimizer"
+            and hold_soc_state.get("active")
+        ):
+            _LOGGER.info(
+                "Hold SoC active — skipping optimizer backup reserve write to %d%%",
+                percent,
+            )
+            return
+
         _tesla_reserve_generation[0] += 1
         backup_reserve_kick_generation = _supersede_tesla_charge_kick(
             "set backup reserve"
@@ -34194,7 +34206,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             opt_coord = entry_data.get("optimization_coordinator")
-            reserve_source = call.data.get("source")
             optimizer_is_idle = (
                 opt_coord is not None
                 and getattr(opt_coord, "_idle_reserve_adjustment", False)
@@ -37671,6 +37682,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "type": "discharge",
                         "expires_at": force_discharge_state.get("expires_at"),
                         "source": force_discharge_state.get("source", "user"),
+                    }
+                if hold_soc_state.get("active"):
+                    return {
+                        "active": True,
+                        "type": "hold_soc",
+                        "expires_at": hold_soc_state.get("expires_at"),
+                        "source": "user",
                     }
                 if self_consumption_state.get("active"):
                     return {
