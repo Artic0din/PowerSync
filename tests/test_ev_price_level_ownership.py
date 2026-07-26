@@ -4545,3 +4545,65 @@ def test_mixed_tesla_ble_keeps_second_configured_vehicle_actionable(
         for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
     }
     assert started_vins == {VIN, second_ble_vin}
+
+
+def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
+    plugged_vin = "XP7YGCEL7NB001704"
+    unplugged_vin = "LRWYHCEKXTC687964"
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        return vehicle_vin == plugged_vin
+
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+
+    selected = asyncio.run(
+        ev_planner.get_solar_surplus_start_configs(
+            _FakeHass(),
+            _FakeConfigEntry(),
+            [
+                {
+                    "vehicle_id": unplugged_vin,
+                    "display_name": "Tesla 2",
+                    "priority": 1,
+                },
+                {
+                    "vehicle_id": plugged_vin,
+                    "display_name": "Tesla 1",
+                    "priority": 2,
+                },
+            ],
+            set(),
+            allow_parallel=False,
+        )
+    )
+
+    assert [config["vehicle_id"] for config in selected] == [plugged_vin]
+
+
+def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
+    monkeypatch,
+):
+    active_vin = "5YJ3E1EA7KF000001"
+    unplugged_vin = "5YJ3E1EA7KF000002"
+    plugged_vin = "5YJ3E1EA7KF000003"
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        return vehicle_vin != unplugged_vin
+
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+
+    selected = asyncio.run(
+        ev_planner.get_solar_surplus_start_configs(
+            _FakeHass(),
+            _FakeConfigEntry(),
+            [
+                {"vehicle_id": active_vin, "priority": 1},
+                {"vehicle_id": unplugged_vin, "priority": 2},
+                {"vehicle_id": plugged_vin, "priority": 3},
+            ],
+            {active_vin},
+            allow_parallel=True,
+        )
+    )
+
+    assert [config["vehicle_id"] for config in selected] == [plugged_vin]

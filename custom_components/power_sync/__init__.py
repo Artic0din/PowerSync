@@ -37317,7 +37317,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     get_solar_surplus_min_battery_soc,
                     normalize_solar_surplus_config,
                 )
-                from .automations.ev_charging_planner import get_solar_surplus_vehicle_configs
+                from .automations.ev_charging_planner import (
+                    get_solar_surplus_start_configs,
+                    get_solar_surplus_vehicle_configs,
+                )
 
                 automation_store_ref = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("automation_store")
                 if automation_store_ref:
@@ -37337,19 +37340,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if surplus_enabled and live_status:
                         # Get vehicle charger config from store
                         vehicle_configs = get_solar_surplus_vehicle_configs(hass, entry, stored)
-                        sorted_configs = sorted(vehicle_configs, key=lambda c: c.get("priority", 999))
                         allow_parallel = surplus_config.get("allow_parallel_charging", False)
 
-                        # Determine which vehicles need sessions started
-                        configs_to_start = []
-                        for vc in sorted_configs:
-                            vid = vc.get("vehicle_id")
-                            # Skip vehicles that already have active surplus sessions
-                            if vid and vid in active_surplus_vids:
-                                continue
-                            configs_to_start.append(vc)
-                            if not allow_parallel:
-                                break  # Only start one vehicle when parallel is disabled
+                        # Choose available vehicles by priority. An unplugged
+                        # higher-priority EV must not prevent Solar Surplus from
+                        # starting a lower-priority plugged-in EV.
+                        configs_to_start = await get_solar_surplus_start_configs(
+                            hass,
+                            entry,
+                            vehicle_configs,
+                            active_surplus_vids,
+                            allow_parallel=allow_parallel,
+                        )
 
                         # Don't start new vehicles if parallel is disabled and one is already active
                         if not allow_parallel and surplus_session_active:

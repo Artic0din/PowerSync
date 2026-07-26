@@ -7081,6 +7081,35 @@ def get_solar_surplus_vehicle_configs(
     return [config]
 
 
+async def get_solar_surplus_start_configs(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_configs: list[dict[str, Any]],
+    active_vehicle_ids: set[str],
+    *,
+    allow_parallel: bool,
+) -> list[dict[str, Any]]:
+    """Select plugged-in Solar Surplus vehicles in configured priority order."""
+    configs_to_start: list[dict[str, Any]] = []
+    for config in sorted(
+        vehicle_configs,
+        key=lambda candidate: candidate.get("priority", 999),
+    ):
+        vehicle_id = config.get("vehicle_id")
+        if vehicle_id and vehicle_id in active_vehicle_ids:
+            continue
+        if vehicle_id and not await is_ev_plugged_in(
+            hass,
+            config_entry,
+            vehicle_vin=vehicle_id,
+        ):
+            continue
+        configs_to_start.append(config)
+        if not allow_parallel:
+            break
+    return configs_to_start
+
+
 def _build_dynamic_charging_params(
     hass: "HomeAssistant",
     domain: str,
