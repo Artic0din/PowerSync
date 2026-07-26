@@ -259,6 +259,10 @@ def test_dashboard_ev_departure_editor_uses_auto_schedule_settings_api():
     assert "EV_PANEL_PATHS.autoSettings" in source
     assert ": (vehicle.display_name || vehicleId);" in source
     assert "`Vehicle ${index + 1}`" not in source
+    assert "grid-column: 1 / -1;" in source
+    assert "repeat(auto-fit, minmax(145px, 1fr))" in source
+    assert 'class="smart-details"' in source
+    assert '</button>\n          <div class="departure-editor">' in source
 
 
 def test_ev_panel_hides_zero_amps_while_charging_without_amp_telemetry():

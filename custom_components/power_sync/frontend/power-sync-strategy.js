@@ -3769,7 +3769,7 @@ class PowerSyncEVPanel extends HTMLElement {
           font-size: 11px;
         }
         .departure-editor {
-          margin-top: 9px;
+          grid-column: 1 / -1;
           padding-top: 8px;
           border-top: 1px solid var(--divider-color);
         }
@@ -3782,7 +3782,7 @@ class PowerSyncEVPanel extends HTMLElement {
         }
         .departure-grid {
           display: grid;
-          grid-template-columns: repeat(4, minmax(68px, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
           gap: 6px;
         }
         .departure-grid label {
@@ -3795,6 +3795,7 @@ class PowerSyncEVPanel extends HTMLElement {
         .departure-grid input {
           box-sizing: border-box;
           width: 100%;
+          min-width: 0;
           min-height: 32px;
           padding: 5px 6px;
           border: 1px solid var(--divider-color);
@@ -4050,7 +4051,7 @@ class PowerSyncEVPanel extends HTMLElement {
       const sourceLabel = capacitySource === 'manual' ? 'configured' : this._title(capacitySource);
       return `
         <div class="smart-row">
-          <div>
+          <div class="smart-details">
             <div class="smart-name">${this._escHtml(name)}</div>
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
             <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sourceLabel)}</div>
@@ -4061,24 +4062,24 @@ class PowerSyncEVPanel extends HTMLElement {
               <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
               <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
             </div>
-            <div class="departure-editor">
-              <div class="departure-title">Departure times</div>
-              <div class="departure-grid">
-                ${dayLabels.map((day, dayIndex) => `
-                  <label>${day}
-                    <input type="time" data-departure-time="${this._escAttr(vehicleId)}" data-departure-day="${dayIndex}" value="${this._escAttr(departureTimes[String(dayIndex)] || '')}">
-                  </label>
-                `).join('')}
-              </div>
-              <div class="departure-actions">
-                <button class="command" data-departure-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save times</button>
-                <button class="command" data-departure-clear="${this._escAttr(vehicleId)}" ${this._savingKey || !Object.keys(departureTimes).length ? 'disabled' : ''}>Clear all</button>
-              </div>
-            </div>
           </div>
           <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
             <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
           </button>
+          <div class="departure-editor">
+            <div class="departure-title">Departure times</div>
+            <div class="departure-grid">
+              ${dayLabels.map((day, dayIndex) => `
+                <label>${day}
+                  <input type="time" data-departure-time="${this._escAttr(vehicleId)}" data-departure-day="${dayIndex}" value="${this._escAttr(departureTimes[String(dayIndex)] || '')}">
+                </label>
+              `).join('')}
+            </div>
+            <div class="departure-actions">
+              <button class="command" data-departure-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save times</button>
+              <button class="command" data-departure-clear="${this._escAttr(vehicleId)}" ${this._savingKey || !Object.keys(departureTimes).length ? 'disabled' : ''}>Clear all</button>
+            </div>
+          </div>
         </div>
       `;
     }).join('') : '<div class="notice">No smart schedule vehicles configured.</div>';
