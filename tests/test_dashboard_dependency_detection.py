@@ -223,6 +223,7 @@ def test_dashboard_ev_panel_is_registered_and_api_cached():
     assert "power_sync/ev/price_level_charging/settings" in source
     assert "power_sync/ev/scheduled_charging/settings" in source
     assert "power_sync/ev/auto_schedule/status" in source
+    assert "power_sync/ev/auto_schedule/settings" in source
     assert "power_sync/ev/auto_schedule/toggle" in source
     assert "power_sync/ev/vehicle_config" in source
     assert "power_sync/ev/boost" in source
@@ -243,6 +244,21 @@ def test_dashboard_ev_capacity_editor_uses_vehicle_config_api():
     assert "data-capacity-clear" in source
     assert "battery_capacity_kwh: value" in source
     assert "value < 1 || value > 250" in source
+
+
+def test_dashboard_ev_departure_editor_uses_auto_schedule_settings_api():
+    """Each Smart Schedule row should expose editable per-day departure times."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];" in source
+    assert "data-departure-time" in source
+    assert "data-departure-day" in source
+    assert "data-departure-save" in source
+    assert "data-departure-clear" in source
+    assert "departure_times: departureTimes" in source
+    assert "EV_PANEL_PATHS.autoSettings" in source
+    assert ": (vehicle.display_name || vehicleId);" in source
+    assert "`Vehicle ${index + 1}`" not in source
 
 
 def test_ev_panel_hides_zero_amps_while_charging_without_amp_telemetry():

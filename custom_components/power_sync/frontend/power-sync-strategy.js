@@ -3112,6 +3112,7 @@ const EV_PANEL_PATHS = {
   price: 'power_sync/ev/price_level_charging/settings',
   scheduled: 'power_sync/ev/scheduled_charging/settings',
   autoStatus: 'power_sync/ev/auto_schedule/status',
+  autoSettings: 'power_sync/ev/auto_schedule/settings',
   autoToggle: 'power_sync/ev/auto_schedule/toggle',
   vehicleConfig: 'power_sync/ev/vehicle_config',
   boost: 'power_sync/ev/boost',
@@ -3767,6 +3768,51 @@ class PowerSyncEVPanel extends HTMLElement {
           padding: 5px 8px;
           font-size: 11px;
         }
+        .departure-editor {
+          margin-top: 9px;
+          padding-top: 8px;
+          border-top: 1px solid var(--divider-color);
+        }
+        .departure-title {
+          margin-bottom: 6px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 800;
+          text-transform: uppercase;
+        }
+        .departure-grid {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(68px, 1fr));
+          gap: 6px;
+        }
+        .departure-grid label {
+          display: grid;
+          gap: 3px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .departure-grid input {
+          box-sizing: border-box;
+          width: 100%;
+          min-height: 32px;
+          padding: 5px 6px;
+          border: 1px solid var(--divider-color);
+          border-radius: 7px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+        }
+        .departure-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 7px;
+        }
+        .departure-actions .command {
+          min-height: 32px;
+          padding: 5px 8px;
+          font-size: 11px;
+        }
         @media (max-width: 560px) {
           .status,
           .control-row,
@@ -3779,6 +3825,9 @@ class PowerSyncEVPanel extends HTMLElement {
           }
           .segment {
             grid-template-columns: 1fr;
+          }
+          .departure-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
           }
         }
       </style>
@@ -3984,11 +4033,15 @@ class PowerSyncEVPanel extends HTMLElement {
     const settings = this._data?.autoStatus?.settings || {};
     const vehicleConfigs = this._data?.vehicleConfigs || [];
     const entries = Object.entries(settings);
-    const rows = entries.length ? entries.map(([vehicleId, vehicle], index) => {
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const rows = entries.length ? entries.map(([vehicleId, vehicle]) => {
       const enabled = !!vehicle.enabled;
       const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
-      const name = loadpoint ? this._loadpointLabel(loadpoint) : `Vehicle ${index + 1}`;
+      const name = loadpoint
+        ? this._loadpointLabel(loadpoint)
+        : (vehicle.display_name || vehicleId);
       const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
+      const departureTimes = vehicle.departure_times || {};
       const config = vehicleConfigs.find((item) => item.vehicle_id === vehicleId) || {};
       const effectiveCapacity = config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh;
       const capacitySource = config.battery_capacity_source || vehicle.battery_capacity_source || 'default_estimate';
@@ -4007,6 +4060,20 @@ class PowerSyncEVPanel extends HTMLElement {
               </label>
               <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
               <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
+            </div>
+            <div class="departure-editor">
+              <div class="departure-title">Departure times</div>
+              <div class="departure-grid">
+                ${dayLabels.map((day, dayIndex) => `
+                  <label>${day}
+                    <input type="time" data-departure-time="${this._escAttr(vehicleId)}" data-departure-day="${dayIndex}" value="${this._escAttr(departureTimes[String(dayIndex)] || '')}">
+                  </label>
+                `).join('')}
+              </div>
+              <div class="departure-actions">
+                <button class="command" data-departure-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save times</button>
+                <button class="command" data-departure-clear="${this._escAttr(vehicleId)}" ${this._savingKey || !Object.keys(departureTimes).length ? 'disabled' : ''}>Clear all</button>
+              </div>
             </div>
           </div>
           <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
@@ -4059,6 +4126,12 @@ class PowerSyncEVPanel extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll('[data-capacity-clear]').forEach((button) => {
       button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacityClear, true));
+    });
+    this.shadowRoot.querySelectorAll('[data-departure-save]').forEach((button) => {
+      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureSave, false));
+    });
+    this.shadowRoot.querySelectorAll('[data-departure-clear]').forEach((button) => {
+      button.addEventListener('click', () => this._saveDepartureTimes(button.dataset.departureClear, true));
     });
   }
 
@@ -4142,6 +4215,23 @@ class PowerSyncEVPanel extends HTMLElement {
       EV_PANEL_PATHS.vehicleConfig,
       { vehicle_id: vehicleId, battery_capacity_kwh: value },
       clear ? 'Capacity override cleared' : 'Capacity updated',
+    );
+  }
+
+  async _saveDepartureTimes(vehicleId, clear) {
+    const departureTimes = {};
+    if (!clear) {
+      this.shadowRoot.querySelectorAll(`[data-departure-time="${CSS.escape(vehicleId)}"]`).forEach((input) => {
+        if (input.value) {
+          departureTimes[input.dataset.departureDay] = input.value;
+        }
+      });
+    }
+    await this._runCommand(
+      `departure:${vehicleId}`,
+      EV_PANEL_PATHS.autoSettings,
+      { vehicle_id: vehicleId, departure_times: departureTimes },
+      clear ? 'Departure times cleared' : 'Departure times updated',
     );
   }
 

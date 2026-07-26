@@ -17651,6 +17651,7 @@ class AutoScheduleStatusView(HomeAssistantView):
                     legacy_departure_time = next(iter(vehicle_settings.departure_times.values()), None)
                 settings[vehicle_id] = {
                     "enabled": vehicle_settings.enabled,
+                    "display_name": vehicle_settings.display_name,
                     "priority": vehicle_settings.priority.value,
                     "target_soc": vehicle_settings.target_soc,
                     "battery_capacity_kwh": vehicle_settings.battery_capacity_kwh,

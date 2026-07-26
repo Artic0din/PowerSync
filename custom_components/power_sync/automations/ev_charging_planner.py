@@ -4142,25 +4142,7 @@ class AutoScheduleExecutor:
                 soc_summary = ', '.join(f"{v}={d.get('soc')}%" for v, d in self._cached_soc.items())
                 _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: {soc_summary}")
 
-            # Migrate: if VIN-based vehicle entries exist, disable any stale
-            # sequential-number entries (legacy from pre-VIN era).  These
-            # orphaned entries cause the app to show Smart Schedule as "On"
-            # even when the user disabled it for their real vehicle.
-            vin_entries = [
-                vid for vid in self._settings
-                if not vid.isdigit() and vid != "_default"
-            ]
             needs_save = storage_changed
-            if vin_entries:
-                for vid in list(self._settings):
-                    if vid.isdigit() and self._settings[vid].enabled:
-                        _LOGGER.info(
-                            "Disabling stale sequential vehicle entry '%s' "
-                            "(superseded by VIN-based entries: %s)",
-                            vid, vin_entries,
-                        )
-                        self._settings[vid].enabled = False
-                        needs_save = True
             if needs_save:
                 await self.save_settings(store)
 
@@ -6728,51 +6710,73 @@ def _normalize_stored_auto_schedule_ids(
     config_entry: "ConfigEntry",
     stored_data: dict[str, Any],
 ) -> bool:
-    """Migrate legacy non-Tesla default settings to one canonical loadpoint."""
+    """Migrate legacy schedule IDs to the configured stable loadpoint IDs."""
+    changed = False
+    auto_schedule_data = dict(stored_data.get("auto_schedule_settings", {}) or {})
+    cached_soc = dict(stored_data.get("cached_vehicle_soc", {}) or {})
+
+    stable_ids = [
+        vehicle_id
+        for vehicle_id in auto_schedule_data
+        if vehicle_id != "_default" and not vehicle_id.isdigit()
+    ]
+    stale_ids = [
+        vehicle_id
+        for vehicle_id in auto_schedule_data
+        if vehicle_id == "_default" or vehicle_id.isdigit()
+    ]
+    if stable_ids and stale_ids:
+        for vehicle_id in stale_ids:
+            auto_schedule_data.pop(vehicle_id, None)
+            cached_soc.pop(vehicle_id, None)
+        _LOGGER.info(
+            "Removed stale legacy auto-schedule entries %s "
+            "(superseded by stable vehicle entries: %s)",
+            stale_ids,
+            stable_ids,
+        )
+        changed = True
+
     canonical_id = _canonical_auto_schedule_vehicle_id(
         hass,
         config_entry,
         "_default",
     )
-    if canonical_id == "_default":
-        return False
-
-    changed = False
-    auto_schedule_data = dict(stored_data.get("auto_schedule_settings", {}) or {})
-    if "_default" in auto_schedule_data:
-        default_settings = auto_schedule_data.pop("_default")
-        if canonical_id not in auto_schedule_data:
-            auto_schedule_data[canonical_id] = {
-                **default_settings,
-                "vehicle_id": canonical_id,
-            }
-        changed = True
-    configured_charger_type = _configured_charger_type(
-        {
-            **getattr(config_entry, "data", {}),
-            **getattr(config_entry, "options", {}),
-        }
-    )
-    canonical_settings = auto_schedule_data.get(canonical_id)
-    if isinstance(canonical_settings, Mapping):
-        normalized_settings = {
-            **canonical_settings,
-            "vehicle_id": canonical_id,
-            "charger_type": configured_charger_type,
-        }
-        if normalized_settings != canonical_settings:
-            auto_schedule_data[canonical_id] = normalized_settings
+    if canonical_id != "_default":
+        if "_default" in auto_schedule_data:
+            default_settings = auto_schedule_data.pop("_default")
+            if canonical_id not in auto_schedule_data:
+                auto_schedule_data[canonical_id] = {
+                    **default_settings,
+                    "vehicle_id": canonical_id,
+                }
             changed = True
+        configured_charger_type = _configured_charger_type(
+            {
+                **getattr(config_entry, "data", {}),
+                **getattr(config_entry, "options", {}),
+            }
+        )
+        canonical_settings = auto_schedule_data.get(canonical_id)
+        if isinstance(canonical_settings, Mapping):
+            normalized_settings = {
+                **canonical_settings,
+                "vehicle_id": canonical_id,
+                "charger_type": configured_charger_type,
+            }
+            if normalized_settings != canonical_settings:
+                auto_schedule_data[canonical_id] = normalized_settings
+                changed = True
+
+        if "_default" in cached_soc:
+            default_soc = cached_soc.pop("_default")
+            if canonical_id not in cached_soc:
+                cached_soc[canonical_id] = default_soc
+            changed = True
+
     if changed:
         stored_data["auto_schedule_settings"] = auto_schedule_data
-
-    cached_soc = dict(stored_data.get("cached_vehicle_soc", {}) or {})
-    if "_default" in cached_soc:
-        default_soc = cached_soc.pop("_default")
-        if canonical_id not in cached_soc:
-            cached_soc[canonical_id] = default_soc
         stored_data["cached_vehicle_soc"] = cached_soc
-        changed = True
 
     return changed
 

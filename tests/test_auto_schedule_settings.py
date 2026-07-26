@@ -576,6 +576,35 @@ def test_tesla_default_settings_remain_backward_compatible():
     assert "_default" in stored_data["auto_schedule_settings"]
 
 
+def test_stable_vehicle_settings_remove_legacy_phantom_rows():
+    entry = types.SimpleNamespace(data={}, options={})
+    stored_data = {
+        "auto_schedule_settings": {
+            "_default": {"enabled": False, "charger_type": "tesla"},
+            "1": {"enabled": False, "charger_type": "tesla"},
+            "LRWYHCEK3PC907290": {
+                "enabled": True,
+                "charger_type": "tesla",
+            },
+        },
+        "cached_vehicle_soc": {
+            "_default": {"soc": 40},
+            "1": {"soc": 45},
+            "LRWYHCEK3PC907290": {"soc": 50},
+        },
+    }
+
+    changed = ev_planner._normalize_stored_auto_schedule_ids(
+        None,
+        entry,
+        stored_data,
+    )
+
+    assert changed is True
+    assert set(stored_data["auto_schedule_settings"]) == {"LRWYHCEK3PC907290"}
+    assert set(stored_data["cached_vehicle_soc"]) == {"LRWYHCEK3PC907290"}
+
+
 def test_missing_vehicle_id_updates_canonical_generic_settings():
     entry = types.SimpleNamespace(
         data={},
