@@ -907,6 +907,7 @@ class AutomationEngine:
             "time_window_start": trigger.get("time_window_start"),
             "time_window_end": trigger.get("time_window_end"),
             "timezone": current_state.get("user_timezone", "UTC"),
+            "ev_vehicle_id": current_state.get("ev_state", {}).get("vehicle_id"),
         }
 
         result = await execute_actions(
@@ -997,6 +998,7 @@ class AutomationEngine:
             "battery_level": None,
             "charging_state": "",
             "location": "unknown",  # home, work, or zone name
+            "vehicle_id": None,
         }
 
         # Check Zaptec standalone FIRST — if configured with cached state, use it
@@ -1044,9 +1046,17 @@ class AutomationEngine:
             _LOGGER.debug("No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)")
             return ev_state
 
-        # Check if this is a BLE integration (prefix contains "ble")
+        # Check if this is a BLE integration. ESPHome prefixes are user-defined,
+        # so they do not necessarily contain "ble"; the companion BLE status
+        # entity is the authoritative discriminator.
         # Location will be deferred to after the second pass so Teslemetry device_tracker takes priority
-        is_ble = "ble" in vehicle_prefix.lower()
+        is_ble = (
+            "ble" in vehicle_prefix.lower()
+            or self._hass.states.get(f"binary_sensor.{vehicle_prefix}_ble_status") is not None
+            or self._hass.states.get(f"switch.{vehicle_prefix}_charger") is not None
+        )
+        if is_ble:
+            ev_state["vehicle_id"] = f"ble_{vehicle_prefix}"
 
         # Second pass: find related sensors using the vehicle prefix
         # Support Tesla Fleet, Teslemetry, and Tesla BLE naming conventions

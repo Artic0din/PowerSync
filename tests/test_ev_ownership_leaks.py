@@ -543,6 +543,38 @@ def test_explicit_vin_stop_is_unaffected_by_resolver(monkeypatch):
     assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_B) is None
 
 
+def test_automation_stop_uses_ble_vehicle_from_trigger_context(monkeypatch):
+    """An EV trigger must stop the BLE vehicle it observed, not an unrelated
+    Fleet/Teslemetry vehicle returned first by registry order."""
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
+
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._execute_single_action(
+            hass,
+            entry,
+            "stop_ev_charging",
+            {},
+            {"ev_vehicle_id": "ble_tesla_yf88"},
+        )
+    )
+
+    assert result is True
+    assert stop.await_args.args[2]["vehicle_vin"] == "ble_tesla_yf88"
+    assert (
+        ev_ownership.manual_stop_hold_reason(
+            hass,
+            entry,
+            "ble_tesla_yf88",
+        )
+        is not None
+    )
+
+
 def test_ocpp_stop_canonicalizes_matching_generic_solar_session(monkeypatch):
     """An OCPP charger exposed through generic entities is one loadpoint.
 

@@ -481,8 +481,9 @@ async def _get_tesla_ev_entity(
                 else:
                     _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
 
-    # Fallback: if no VIN-based devices found, check for devices with EV entities
-    if not tesla_devices and all_tesla_domain_devices:
+    # Fallback only when no explicit vehicle was requested. An explicit VIN or
+    # BLE pseudo-id must never degrade to an arbitrary Tesla-domain device.
+    if not tesla_devices and all_tesla_domain_devices and vehicle_vin is None:
         _LOGGER.debug(f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities")
         for device, domain, id_str in all_tesla_domain_devices:
             if _device_has_ev_entities(device.id):
@@ -1963,6 +1964,13 @@ async def _execute_single_action(
             context,
         )
     elif action_type == "stop_ev_charging":
+        context_vehicle_id = context.get("ev_vehicle_id") if context else None
+        if (
+            context_vehicle_id
+            and not params.get("vehicle_id")
+            and not params.get("vehicle_vin")
+        ):
+            params = {**params, "vehicle_vin": context_vehicle_id}
         success = await _action_stop_ev_charging(hass, config_entry, params)
         if success and not params.get("skip_ownership"):
             from .ev_ownership import record_manual_stop_hold

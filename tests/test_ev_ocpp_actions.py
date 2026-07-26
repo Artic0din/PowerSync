@@ -51,7 +51,11 @@ def _install_ha_stubs() -> None:
     ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     ha_er.async_get = lambda hass: hass.entity_registry
-    ha_dr.async_get = lambda hass: SimpleNamespace(devices={})
+    ha_dr.async_get = lambda hass: getattr(
+        hass,
+        "device_registry",
+        SimpleNamespace(devices={}),
+    )
     ha_storage.Store = type("Store", (), {"__init__": lambda self, *args, **kwargs: None})
     ha_update.DataUpdateCoordinator = type(
         "DataUpdateCoordinator",
@@ -130,11 +134,17 @@ class _Services:
 
 
 class _Hass:
-    def __init__(self, states: list[_State], registry_entities: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        states: list[_State],
+        registry_entities: dict[str, object] | None = None,
+        registry_devices: dict[str, object] | None = None,
+    ) -> None:
         self.data = {"power_sync": {"entry-1": {}}}
         self.states = _States(states)
         self.services = _Services()
         self.entity_registry = SimpleNamespace(entities=registry_entities or {})
+        self.device_registry = SimpleNamespace(devices=registry_devices or {})
 
 
 class _Entry:
@@ -3453,6 +3463,75 @@ def test_sigenergy_charger_stop_routes_to_modbus_controller(monkeypatch):
         ),
         ("stop_charging",),
         ("disconnect",),
+    ]
+
+
+def test_automation_stop_context_routes_to_charging_ble_tesla():
+    """A BLE EV trigger must not report success from another stopped Tesla."""
+    registry_entities = {
+        "sensor.tesla_flinn_charging": SimpleNamespace(
+            entity_id="sensor.tesla_flinn_charging",
+            device_id="fleet-a",
+        ),
+        "switch.tesla_flinn_charge": SimpleNamespace(
+            entity_id="switch.tesla_flinn_charge",
+            device_id="fleet-a",
+        ),
+        "sensor.tesla_yf88_charging": SimpleNamespace(
+            entity_id="sensor.tesla_yf88_charging",
+            device_id="fleet-b",
+        ),
+        "switch.tesla_yf88_charge": SimpleNamespace(
+            entity_id="switch.tesla_yf88_charge",
+            device_id="fleet-b",
+        ),
+    }
+    registry_devices = {
+        "fleet-a": SimpleNamespace(
+            id="fleet-a",
+            name="Tesla Flinn",
+            identifiers={("teslemetry", "XP7YHCEL7TB811704")},
+        ),
+        "fleet-b": SimpleNamespace(
+            id="fleet-b",
+            name="Tesla YF88",
+            identifiers={("teslemetry", "LRWYHCEKXTC687964")},
+        ),
+    }
+    hass = _Hass(
+        [
+            _State("sensor.tesla_flinn_charging", "stopped"),
+            _State("sensor.tesla_yf88_charging_state", "Charging"),
+            _State("binary_sensor.tesla_yf88_ble_status", "on"),
+            _State("binary_sensor.tesla_yf88_asleep", "off"),
+            _State("button.tesla_yf88_wake_up", "unknown"),
+            _State("switch.tesla_yf88_charger", "on"),
+        ],
+        registry_entities=registry_entities,
+        registry_devices=registry_devices,
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "tesla_yf88",
+        },
+    )
+
+    result = asyncio.run(
+        actions._execute_single_action(
+            hass,
+            entry,
+            "stop_ev_charging",
+            {},
+            {"ev_vehicle_id": "ble_tesla_yf88"},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.tesla_yf88_charger"})
     ]
 
 
