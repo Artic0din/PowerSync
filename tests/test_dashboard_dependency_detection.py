@@ -146,6 +146,10 @@ def test_optimizer_action_plan_renders_full_scrollable_list():
         source.index("        .actions {"):
         source.index("        .action-row {")
     ]
+    action_ranges_source = source[
+        source.index("  _actionRangesFromApi() {"):
+        source.index("  _fallbackActionRanges() {")
+    ]
 
     assert "overflow-y: auto;" in actions_css
     assert "max-height: min(58vh, 620px);" in actions_css
@@ -153,7 +157,34 @@ def test_optimizer_action_plan_renders_full_scrollable_list():
     assert "overscroll-behavior: contain;" not in actions_css
     assert "actions.map(action =>" in source
     assert "actions.slice(0, 10)" not in source
+    assert ".slice(0, 24)" not in action_ranges_source
     assert "more actions" not in source
+
+
+def test_optimizer_action_plan_keeps_every_backend_24h_range():
+    """A busy 24-hour plan must retain actions beyond the 24th range."""
+    source = STRATEGY_PATH.read_text()
+    method = re.search(
+        r"  _actionRangesFromApi\(\) \{(?P<body>.*?)\n  \}\n\n"
+        r"  _fallbackActionRanges\(\)",
+        source,
+        re.DOTALL,
+    )
+    assert method is not None
+
+    runtime = f"""
+      const actionRangesFromApi = function() {{{method.group("body")}}};
+      const actions = Array.from({{ length: 26 }}, (_, index) => ({{
+        action: index === 25 ? 'charge' : 'self_consumption',
+        timestamp: `2026-07-${{String(24 + Math.floor(index / 24)).padStart(2, '0')}}`
+          + `T${{String(index % 24).padStart(2, '0')}}:00:00+10:00`,
+      }}));
+      const result = actionRangesFromApi.call({{ _data: {{ next_actions: actions }} }});
+      if (result.length !== 26 || result[25]?.action !== 'charge') {{
+        throw new Error('the 25th and later 24-hour action ranges were truncated');
+      }}
+    """
+    subprocess.run(["node", "-e", runtime], check=True)
 
 
 def test_optimizer_plan_gets_are_browser_cached():

@@ -2810,8 +2810,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const actions = Array.isArray(this._data?.next_actions) ? this._data.next_actions : [];
     return actions
       .filter(action => action?.timestamp)
-      .map(action => ({ ...action }))
-      .slice(0, 24);
+      .map(action => ({ ...action }));
   }
 
   _fallbackActionRanges() {
