@@ -996,6 +996,34 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+def test_explicit_fleet_schedule_does_not_borrow_multi_ble_soc():
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        },
+    )
+    hass = _FakeHass(
+        states={
+            "sensor.tesla_yf88_charge_level": "77",
+            "sensor.tesla_flinn_charge_level": "46",
+        },
+        entries=[entry],
+    )
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        entry,
+        planner=SimpleNamespace(),
+    )
+
+    soc = asyncio.run(executor._get_vehicle_soc("XP7YHCEL7TB811704"))
+
+    assert soc == 50
+    assert executor._cached_soc == {}
+
+
 def test_ble_discovery_accepts_connection_status_without_optional_node_status():
     """Configured BLE vehicles remain discoverable when ESPHome node status is omitted."""
     hass = _FakeHass(

@@ -1026,21 +1026,55 @@ class AutomationEngine:
         all_states = self._hass.states.async_all()
         vehicle_prefix = None
 
-        # First pass: find Tesla EV charging sensor to identify the vehicle prefix
+        # First pass: find the most active Tesla EV charging sensor to identify
+        # the vehicle prefix. Multi-vehicle installs can expose an unavailable
+        # or stopped bridge before the vehicle that is actually charging; using
+        # entity-registry order would make a global "charging starts" trigger
+        # miss that vehicle and lose the BLE id needed by the stop action.
         # Tesla Fleet uses: sensor.tessy_charging (no _state suffix)
         # Some versions use: sensor.tessy_charging_state
+        best_charging_rank = (-1, -1)
         for state in all_states:
             entity_id = state.entity_id
             # Try both patterns: _charging$ and _charging_state$
             match = re.match(r"sensor\.(\w+)_charging(?:_state)?$", entity_id)
             if match:
-                vehicle_prefix = match.group(1)
+                candidate_prefix = match.group(1)
                 state_value = state.state
-                if state_value not in ("unavailable", "unknown"):
-                    ev_state["charging_state"] = state_value.lower()
-                    ev_state["is_charging"] = state_value.lower() == "charging"
-                    _LOGGER.debug(f"EV charging state from {entity_id}: {state_value}")
-                break
+                normalized_state = str(state_value or "").lower()
+                activity_rank = (
+                    2
+                    if normalized_state == "charging"
+                    else 1
+                    if normalized_state not in ("", "none", "unavailable", "unknown")
+                    else 0
+                )
+                targetable_rank = int(
+                    "ble" in candidate_prefix.lower()
+                    or self._hass.states.get(
+                        f"binary_sensor.{candidate_prefix}_ble_status"
+                    )
+                    is not None
+                    or self._hass.states.get(
+                        f"switch.{candidate_prefix}_charger"
+                    )
+                    is not None
+                )
+                rank = (activity_rank, targetable_rank)
+                if rank <= best_charging_rank:
+                    continue
+                best_charging_rank = rank
+                vehicle_prefix = candidate_prefix
+                ev_state["charging_state"] = (
+                    normalized_state if activity_rank > 0 else ""
+                )
+                ev_state["is_charging"] = activity_rank == 2
+                _LOGGER.debug(
+                    "EV charging state candidate from %s: %s (rank=%s)",
+                    entity_id,
+                    state_value,
+                    rank,
+                )
 
         if not vehicle_prefix:
             _LOGGER.debug("No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)")

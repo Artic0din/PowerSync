@@ -4391,6 +4391,15 @@ class AutoScheduleExecutor:
         if live_soc is None:
             if vehicle_vin and vehicle_vin.startswith("ble_"):
                 ble_prefixes = [vehicle_vin[4:]]
+            elif (
+                vehicle_vin
+                and len(vehicle_vin) == 17
+                and vehicle_vin.isalnum()
+            ):
+                # BLE prefixes are user-defined and have no authoritative
+                # relationship to a Fleet VIN. Borrowing one here can build
+                # and execute a different car's Smart Schedule.
+                ble_prefixes = []
             else:
                 raw_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
                 # Scan every configured BLE prefix — in dual-car setups the old

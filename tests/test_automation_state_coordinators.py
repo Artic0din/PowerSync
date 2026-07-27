@@ -178,3 +178,117 @@ def test_automation_ev_state_recognizes_user_named_ble_prefix():
     assert state["is_plugged_in"] is True
     assert state["location"] == "home"
     assert state["vehicle_id"] == "ble_tesla_yf88"
+
+
+def test_automation_ev_state_prefers_active_second_ble_vehicle():
+    """A sleeping first bridge must not hide another BLE Tesla charging."""
+
+    class _States:
+        def __init__(self):
+            self._states = {
+                "sensor.tesla_yf88_charging_state": SimpleNamespace(
+                    entity_id="sensor.tesla_yf88_charging_state",
+                    state="Unknown",
+                ),
+                "binary_sensor.tesla_yf88_ble_status": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_yf88_ble_status",
+                    state="off",
+                ),
+                "sensor.tesla_flinn_charging_state": SimpleNamespace(
+                    entity_id="sensor.tesla_flinn_charging_state",
+                    state="Charging",
+                ),
+                "binary_sensor.tesla_flinn_charge_flap": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_charge_flap",
+                    state="on",
+                ),
+                "binary_sensor.tesla_flinn_ble_status": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_ble_status",
+                    state="on",
+                ),
+                "sensor.tesla_flinn_charge_level": SimpleNamespace(
+                    entity_id="sensor.tesla_flinn_charge_level",
+                    state="46",
+                ),
+            }
+
+        def async_all(self):
+            return list(self._states.values())
+
+        def get(self, entity_id):
+            return self._states.get(entity_id)
+
+    engine_class = _load_engine_method(
+        "_async_get_ev_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=_States(),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+        data={},
+    )
+
+    state = asyncio.run(engine._async_get_ev_state())
+
+    assert state["is_charging"] is True
+    assert state["is_plugged_in"] is True
+    assert state["battery_level"] == 46
+    assert state["vehicle_id"] == "ble_tesla_flinn"
+
+
+def test_automation_ev_state_prefers_targetable_ble_when_activity_ties():
+    """A Fleet duplicate must not hide the BLE id needed by the stop action."""
+
+    class _States:
+        def __init__(self):
+            self._states = {
+                "sensor.tesla_fleet_charging": SimpleNamespace(
+                    entity_id="sensor.tesla_fleet_charging",
+                    state="Charging",
+                ),
+                "sensor.tesla_flinn_charging_state": SimpleNamespace(
+                    entity_id="sensor.tesla_flinn_charging_state",
+                    state="Charging",
+                ),
+                "binary_sensor.tesla_flinn_charge_flap": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_charge_flap",
+                    state="on",
+                ),
+                "binary_sensor.tesla_flinn_ble_status": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_ble_status",
+                    state="on",
+                ),
+            }
+
+        def async_all(self):
+            return list(self._states.values())
+
+        def get(self, entity_id):
+            return self._states.get(entity_id)
+
+    engine_class = _load_engine_method(
+        "_async_get_ev_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=_States(),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+        data={},
+    )
+
+    state = asyncio.run(engine._async_get_ev_state())
+
+    assert state["is_charging"] is True
+    assert state["vehicle_id"] == "ble_tesla_flinn"
