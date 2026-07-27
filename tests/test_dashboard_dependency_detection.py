@@ -300,6 +300,129 @@ def test_generic_dashboard_charts_do_not_rerender_on_unrelated_state_ticks():
     assert "cache: mode === 'history' ? this._historyCacheSignature(seriesConfig.entity) : undefined" in render_signature
 
 
+def test_energy_history_overlays_battery_soc_on_a_secondary_axis():
+    """The power-flow history should pair kW flows with a readable SOC percentage."""
+    source = STRATEGY_PATH.read_text()
+    chart_source = source[
+        source.index("class PowerSyncChart extends HTMLElement"):
+        source.index("if (!customElements.get('power-sync-chart'))")
+    ]
+    energy_chart = source[
+        source.index("function _combinedEnergyChart"):
+        source.index("function _demandCharge")
+    ]
+
+    assert "_combinedEnergyChart(e, hasE('home_load'), hasE('battery_level'))" in source
+    assert "axis: 'right'" in energy_chart
+    assert "entity: e('battery_level')" in energy_chart
+    assert "name: 'Battery SOC'" in energy_chart
+    assert "rightYUnit: '%'" in energy_chart
+    assert "rightYMin: 0" in energy_chart
+    assert "rightYMax: 100" in energy_chart
+    assert "const rightAxisSeries = chartSeries.filter" in chart_source
+    assert "const primaryAxisSeries = chartSeries.filter" in chart_source
+    assert "const seriesYScale = series.axis === 'right' ? rightYScale : yScale;" in chart_source
+    assert 'text-anchor="start"' in chart_source
+
+    prelude = """
+      global.HTMLElement = class {
+        attachShadow() {
+          this.shadowRoot = {
+            innerHTML: '',
+            querySelectorAll() { return []; },
+            querySelector() { return null; },
+          };
+        }
+        getBoundingClientRect() { return { width: this.testWidth || 640 }; }
+      };
+    """
+
+    runtime = r"""
+      const now = Date.now();
+      const states = {
+        'sensor.solar': { state: '4.5', last_updated: new Date(now).toISOString() },
+        'sensor.grid': { state: '-1.5', last_updated: new Date(now).toISOString() },
+        'sensor.battery': { state: '2.0', last_updated: new Date(now).toISOString() },
+        'sensor.home': { state: '5.0', last_updated: new Date(now).toISOString() },
+        'sensor.battery_soc': { state: '55', last_updated: new Date(now).toISOString() },
+      };
+      const config = {
+        mode: 'history',
+        historyHours: 24,
+        yUnit: 'kW',
+        rightYUnit: '%',
+        rightYUnitCompact: true,
+        rightYMin: 0,
+        rightYMax: 100,
+        zeroBaseline: true,
+        series: [
+          { entity: 'sensor.solar', name: 'Solar', color: '#ffd700' },
+          { entity: 'sensor.grid', name: 'Grid', color: '#f44336' },
+          { entity: 'sensor.battery', name: 'Battery', color: '#2196f3' },
+          { entity: 'sensor.home', name: 'Home', color: '#9c27b0' },
+          {
+            entity: 'sensor.battery_soc',
+            name: 'Battery SOC',
+            color: '#009688',
+            axis: 'right',
+            minValue: 0,
+            maxValue: 100,
+          },
+        ],
+      };
+
+      function rendered(width, { hideSoc = false, missingSoc = false } = {}) {
+        const chart = new PowerSyncChart();
+        chart.testWidth = width;
+        chart._config = config;
+        chart._hass = { states: { ...states } };
+        const points = (a, b) => [[now - 3600000, a], [now, b]];
+        chart._historyCache.set('sensor.solar', points(1, 4.5));
+        chart._historyCache.set('sensor.grid', points(-2, -1.5));
+        chart._historyCache.set('sensor.battery', points(3, 2));
+        chart._historyCache.set('sensor.home', points(2, 5));
+        if (missingSoc) {
+          chart._hass.states['sensor.battery_soc'] = { state: 'unknown' };
+        } else {
+          chart._historyCache.set('sensor.battery_soc', points(40, 55));
+        }
+        if (hideSoc) chart._hiddenSeries.add('sensor.battery_soc');
+        chart._render();
+        return chart.shadowRoot.innerHTML;
+      }
+
+      function rightAxisLabels(html) {
+        return [...html.matchAll(
+          /<text x="([0-9.]+)"[^>]*text-anchor="start"[^>]*>([^<]+)<\/text>/g
+        )];
+      }
+
+      const narrow = rendered(360);
+      if (!narrow.includes('Battery SOC') || !narrow.includes('100%')) {
+        throw new Error('SOC series or fixed percentage axis missing');
+      }
+      const rightLabels = rightAxisLabels(narrow);
+      if (!rightLabels.some(([, x, label]) => Number(x) >= 0 && Number(x) <= 330 && label === '100%')) {
+        throw new Error('right-axis labels clip outside the narrow chart');
+      }
+
+      const chart = new PowerSyncChart();
+      if (chart._seriesDisplayValue({ axis: 'right' }, 55, 1, 1, config) !== '55.0%') {
+        throw new Error('SOC tooltip/legend value has the wrong unit');
+      }
+      if (chart._seriesDisplayValue({}, 5, 1, 1, config) !== '5.00 kW') {
+        throw new Error('power tooltip/legend value lost its kW unit');
+      }
+      if (rightAxisLabels(rendered(360, { hideSoc: true })).length !== 0) {
+        throw new Error('hidden SOC still reserves or renders the right axis');
+      }
+      if (rightAxisLabels(rendered(360, { missingSoc: true })).length !== 0) {
+        throw new Error('missing SOC still reserves or renders the right axis');
+      }
+    """
+    subprocess.run(["node", "-e", f"{prelude}\n{chart_source}\n{runtime}"], check=True)
+
+
 def test_dashboard_chart_tooltips_stay_visibly_transparent():
     """Tooltip surfaces should not blur the graph into an opaque panel."""
     source = STRATEGY_PATH.read_text()

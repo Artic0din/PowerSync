@@ -107,6 +107,7 @@ class PowerSyncChart extends HTMLElement {
       color: seriesConfig.color,
       fill: !!seriesConfig.fill,
       strokeWidth: seriesConfig.strokeWidth,
+      axis: seriesConfig.axis,
       minValue: seriesConfig.minValue,
       maxValue: seriesConfig.maxValue,
       state: this._chartEntitySignature(mode, seriesConfig, config),
@@ -125,6 +126,11 @@ class PowerSyncChart extends HTMLElement {
       yMultiplier: config.yMultiplier,
       yMin: config.yMin,
       yMax: config.yMax,
+      rightYUnit: config.rightYUnit,
+      rightYUnitCompact: config.rightYUnitCompact,
+      rightYMultiplier: config.rightYMultiplier,
+      rightYMin: config.rightYMin,
+      rightYMax: config.rightYMax,
       zeroBaseline: config.zeroBaseline,
       hideZeroTickLabel: config.hideZeroTickLabel,
       stepLine: config.stepLine,
@@ -200,6 +206,9 @@ class PowerSyncChart extends HTMLElement {
     }));
     const visibleSeries = allSeries.filter((series) => !series.hidden);
     const chartSeries = visibleSeries;
+    const rightAxisSeries = chartSeries.filter((series) => series.axis === 'right');
+    const primaryAxisSeries = chartSeries.filter((series) => series.axis !== 'right');
+    const hasRightAxis = rightAxisSeries.some((series) => series.data.length > 0);
 
     const box = this.getBoundingClientRect();
     const W = Math.max(320, Math.round(box.width || config.width || 640));
@@ -207,9 +216,13 @@ class PowerSyncChart extends HTMLElement {
     const H = Math.max(190, Math.round(config.height || (compact ? 220 : 250)));
     const yUnit = String(config.yUnit || '');
     const needsWideYAxis = /\/kWh$/i.test(yUnit) || yUnit.length >= 5;
+    const rightYUnit = String(config.rightYUnit || '');
+    const needsWideRightYAxis = /\/kWh$/i.test(rightYUnit) || rightYUnit.length >= 5;
     const pad = {
       top: 16,
-      right: compact ? 12 : 20,
+      right: hasRightAxis
+        ? (needsWideRightYAxis ? (compact ? 68 : 82) : (compact ? 48 : 56))
+        : (compact ? 12 : 20),
       bottom: compact ? 34 : 42,
       left: needsWideYAxis ? (compact ? 68 : 82) : (compact ? 42 : 56),
     };
@@ -237,8 +250,12 @@ class PowerSyncChart extends HTMLElement {
     const yMultiplier = Number.isFinite(configuredYMultiplier) && configuredYMultiplier !== 0
       ? configuredYMultiplier
       : 1;
+    const configuredRightYMultiplier = Number(config.rightYMultiplier ?? 1);
+    const rightYMultiplier = Number.isFinite(configuredRightYMultiplier) && configuredRightYMultiplier !== 0
+      ? configuredRightYMultiplier
+      : 1;
     let rawMin = Infinity, rawMax = -Infinity;
-    for (const s of chartSeries) {
+    for (const s of primaryAxisSeries) {
       for (const [, v] of s.data) {
         const scaled = v * yMultiplier;
         if (scaled < rawMin) rawMin = scaled;
@@ -259,6 +276,23 @@ class PowerSyncChart extends HTMLElement {
     if (config.yMin !== undefined) rawMin = config.yMin * yMultiplier;
     if (config.yMax !== undefined) rawMax = config.yMax * yMultiplier;
 
+    let rightRawMin = Infinity, rightRawMax = -Infinity;
+    for (const s of rightAxisSeries) {
+      for (const [, v] of s.data) {
+        const scaled = v * rightYMultiplier;
+        if (scaled < rightRawMin) rightRawMin = scaled;
+        if (scaled > rightRawMax) rightRawMax = scaled;
+      }
+    }
+    if (!isFinite(rightRawMin)) { rightRawMin = 0; rightRawMax = 1; }
+    if (rightRawMin === rightRawMax) { rightRawMin -= 1; rightRawMax += 1; }
+
+    const rightDataRange = rightRawMax - rightRawMin;
+    rightRawMin -= rightDataRange * 0.08;
+    rightRawMax += rightDataRange * 0.08;
+    if (config.rightYMin !== undefined) rightRawMin = config.rightYMin * rightYMultiplier;
+    if (config.rightYMax !== undefined) rightRawMax = config.rightYMax * rightYMultiplier;
+
     const niceStep = this._niceStep((rawMax - rawMin) / (compact ? 4 : 5));
     const yMin = Math.floor(rawMin / niceStep) * niceStep;
     const yMax = Math.ceil(rawMax / niceStep) * niceStep;
@@ -268,8 +302,18 @@ class PowerSyncChart extends HTMLElement {
     }
     if (ticks.length > 20) ticks.length = 20;
 
+    const rightNiceStep = this._niceStep((rightRawMax - rightRawMin) / (compact ? 4 : 5));
+    const rightYMin = Math.floor(rightRawMin / rightNiceStep) * rightNiceStep;
+    const rightYMax = Math.ceil(rightRawMax / rightNiceStep) * rightNiceStep;
+    const rightTicks = [];
+    for (let v = rightYMin; v <= rightYMax + rightNiceStep * 0.01; v += rightNiceStep) {
+      rightTicks.push(Math.round(v * 1000) / 1000);
+    }
+    if (rightTicks.length > 20) rightTicks.length = 20;
+
     const xScale = (t) => pad.left + ((t - xMin) / (xMax - xMin)) * chartW;
     const yScale = (v) => pad.top + chartH - ((v - yMin) / (yMax - yMin)) * chartH;
+    const rightYScale = (v) => pad.top + chartH - ((v - rightYMin) / (rightYMax - rightYMin)) * chartH;
 
     let svg = '';
 
@@ -282,6 +326,17 @@ class PowerSyncChart extends HTMLElement {
       const label = this._formatValue(tick, unit, compactUnit);
       if (!(config.hideZeroTickLabel && isZero)) {
         svg += `<text x="${pad.left - 6}" y="${y + 4}" text-anchor="end" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
+      }
+    }
+
+    if (hasRightAxis) {
+      for (const tick of rightTicks) {
+        const y = rightYScale(tick);
+        const unit = config.rightYUnit || '';
+        const compactUnit = config.rightYUnitCompact || unit === '%';
+        const label = this._formatValue(tick, unit, compactUnit);
+        svg += `<line x1="${W - pad.right}" y1="${y}" x2="${W - pad.right + 4}" y2="${y}" stroke="var(--secondary-text-color, #888)" stroke-width="0.6" opacity="0.7"/>`;
+        svg += `<text x="${W - pad.right + 6}" y="${y + 4}" text-anchor="start" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
       }
     }
 
@@ -315,17 +370,20 @@ class PowerSyncChart extends HTMLElement {
     for (const series of chartSeries) {
       if (series.data.length === 0) continue;
       const step = config.stepLine !== undefined ? config.stepLine : mode === 'history';
+      const seriesYScale = series.axis === 'right' ? rightYScale : yScale;
+      const seriesYMultiplier = series.axis === 'right' ? rightYMultiplier : yMultiplier;
+      const seriesYMin = series.axis === 'right' ? rightYMin : yMin;
       let pathD = '';
 
       for (let i = 0; i < series.data.length; i++) {
         const [t, v] = series.data[i];
         const x = xScale(t);
-        const y = yScale(v * yMultiplier);
+        const y = seriesYScale(v * seriesYMultiplier);
         if (i === 0) {
           pathD += `M${x},${y}`;
         } else if (step) {
           const prevX = xScale(series.data[i - 1][0]);
-          const prevY = yScale(series.data[i - 1][1] * yMultiplier);
+          const prevY = seriesYScale(series.data[i - 1][1] * seriesYMultiplier);
           pathD += `H${x}V${y}`;
         } else {
           pathD += `L${x},${y}`;
@@ -333,7 +391,7 @@ class PowerSyncChart extends HTMLElement {
       }
 
       if (series.fill) {
-        const baseline = yScale(Math.max(0, yMin));
+        const baseline = seriesYScale(Math.max(0, seriesYMin));
         const first = series.data[0];
         const last = series.data[series.data.length - 1];
         const fillD = pathD + `L${xScale(last[0])},${baseline}L${xScale(first[0])},${baseline}Z`;
@@ -346,7 +404,7 @@ class PowerSyncChart extends HTMLElement {
         ? this._pointAt(series.data, Date.now())
         : series.data[series.data.length - 1];
       if (marker) {
-        svg += `<circle cx="${xScale(marker[0])}" cy="${yScale(marker[1] * yMultiplier)}" r="${compact ? 3 : 4}" fill="${series.color}" stroke="var(--ha-card-background, var(--card-background-color, white))" stroke-width="2"/>`;
+        svg += `<circle cx="${xScale(marker[0])}" cy="${seriesYScale(marker[1] * seriesYMultiplier)}" r="${compact ? 3 : 4}" fill="${series.color}" stroke="var(--ha-card-background, var(--card-background-color, white))" stroke-width="2"/>`;
       }
     }
 
@@ -358,7 +416,7 @@ class PowerSyncChart extends HTMLElement {
     }
 
     const title = config.title || '';
-    const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, config)).join('');
+    const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, rightYMultiplier, config)).join('');
     const empty = chartSeries.length === 0 || chartSeries.every(s => s.data.length === 0);
     const accent = (chartSeries.find(s => s.color) || allSeries.find(s => s.color))?.color || 'var(--primary-color, #03a9f4)';
 
@@ -560,11 +618,12 @@ class PowerSyncChart extends HTMLElement {
         xMax,
         xMin,
         yMultiplier,
+        rightYMultiplier,
       });
     }
   }
 
-  _attachTooltip({ allSeries, chartW, config, pad, spanHours, W, xMax, xMin, yMultiplier }) {
+  _attachTooltip({ allSeries, chartW, config, pad, spanHours, W, xMax, xMin, yMultiplier, rightYMultiplier }) {
     const wrap = this.shadowRoot.querySelector('.chart-wrap');
     const svg = this.shadowRoot.querySelector('svg');
     const line = this.shadowRoot.querySelector('.tooltip-line');
@@ -618,7 +677,7 @@ class PowerSyncChart extends HTMLElement {
             <span class="tooltip-dot" style="background:${series.color}"></span>
             <span>${this._escHtml(series.name || '')}</span>
           </span>
-          <span class="tooltip-value">${this._escHtml(this._formatValue(point[1] * yMultiplier, config.yUnit, config.yUnitCompact))}</span>
+          <span class="tooltip-value">${this._escHtml(this._seriesDisplayValue(series, point[1], yMultiplier, rightYMultiplier, config))}</span>
         </div>
       `).join('');
 
@@ -663,11 +722,13 @@ class PowerSyncChart extends HTMLElement {
     return d.toLocaleString([], options);
   }
 
-  _legendItem(series, yMultiplier, config) {
+  _legendItem(series, yMultiplier, rightYMultiplier, config) {
     const rawValue = config.mode === 'tou' || config.mode === 'forecast'
       ? this._currentValue(series.data)
       : this._lastValue(series.data);
-    const value = rawValue === null ? '' : this._formatValue(rawValue * yMultiplier, config.yUnit, config.yUnitCompact);
+    const value = rawValue === null
+      ? ''
+      : this._seriesDisplayValue(series, rawValue, yMultiplier, rightYMultiplier, config);
     const pressed = series.hidden ? 'false' : 'true';
     return `
       <button class="legend-item${series.hidden ? ' is-hidden' : ''}" type="button" data-series-key="${this._escAttr(series._key)}" aria-pressed="${pressed}">
@@ -676,6 +737,14 @@ class PowerSyncChart extends HTMLElement {
         ${value ? `<span class="value">${this._escHtml(value)}</span>` : ''}
       </button>
     `;
+  }
+
+  _seriesDisplayValue(series, rawValue, yMultiplier, rightYMultiplier, config) {
+    const rightAxis = series.axis === 'right';
+    const multiplier = rightAxis ? rightYMultiplier : yMultiplier;
+    const unit = rightAxis ? config.rightYUnit : config.yUnit;
+    const compactUnit = rightAxis ? config.rightYUnitCompact : config.yUnitCompact;
+    return this._formatValue(rawValue * multiplier, unit, compactUnit);
   }
 
   _seriesKey(series, index) {
@@ -731,7 +800,7 @@ class PowerSyncChart extends HTMLElement {
   _getTouData(config, hass) {
     const entityId = config.entity;
     const stateObj = entityId ? hass.states[entityId] : null;
-    if (!stateObj) return (config.series || []).map(s => ({ name: s.name, color: s.color, fill: false, data: [] }));
+    if (!stateObj) return (config.series || []).map(s => ({ entity: s.entity, key: s.key, name: s.name, color: s.color, fill: false, axis: s.axis, data: [] }));
 
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -753,7 +822,7 @@ class PowerSyncChart extends HTMLElement {
         if (data.length > 0) {
           data.push([endOfDay, data[data.length - 1][1]]);
         }
-        return { name: s.name, color: s.color, fill: false, data };
+        return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: false, axis: s.axis, data };
       }
 
       // Format 2: tou_schedule array with periods and windows
@@ -783,7 +852,7 @@ class PowerSyncChart extends HTMLElement {
           data.push([today.getTime() + h * 3600000, hourlyPrices[h]]);
         }
         data.push([endOfDay, hourlyPrices[23]]);
-        return { name: s.name, color: s.color, fill: false, data };
+        return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: false, axis: s.axis, data };
       }
 
       // Format 3: flat price attribute
@@ -795,7 +864,7 @@ class PowerSyncChart extends HTMLElement {
         ];
       }
 
-      return { name: s.name, color: s.color, fill: false, data };
+      return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: false, axis: s.axis, data };
     });
   }
 
@@ -812,7 +881,7 @@ class PowerSyncChart extends HTMLElement {
       if (Array.isArray(values)) {
         data = values.map((v, i) => [start + i * interval, v]);
       }
-      return { name: s.name, color: s.color, fill: !!s.fill, data };
+      return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: !!s.fill, axis: s.axis, data };
     });
   }
 
@@ -829,7 +898,7 @@ class PowerSyncChart extends HTMLElement {
         : this._statePoint(stateObj, now);
       const data = this._projectHistoryToNow(rawData, stateObj, now, start, end);
       const filtered = this._filterSeriesData(data, s);
-      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: filtered.filter(([t]) => t >= start && t <= end) };
+      return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, axis: s.axis, data: filtered.filter(([t]) => t >= start && t <= end) };
     });
   }
 
@@ -5684,7 +5753,7 @@ class PowerSyncStrategy {
 
     // --- Controls Column: Combined Energy Chart ---
     if (hasE('solar_power')) {
-      left.push(_combinedEnergyChart(e, hasE('home_load')));
+      left.push(_combinedEnergyChart(e, hasE('home_load'), hasE('battery_level')));
     }
 
     // --- Center Column: Daily Energy Summary ---
@@ -7439,7 +7508,7 @@ function _batteryHealth(e, hass) {
   };
 }
 
-function _combinedEnergyChart(e, hasHome) {
+function _combinedEnergyChart(e, hasHome, hasBatterySoc) {
   const series = [
     { entity: e('solar_power'), name: 'Solar', color: '#FFD700', fill: true },
     { entity: e('grid_power'), name: 'Grid', color: '#F44336' },
@@ -7447,6 +7516,17 @@ function _combinedEnergyChart(e, hasHome) {
   ];
   if (hasHome) {
     series.push({ entity: e('home_load'), name: 'Home', color: '#9C27B0', minValue: 0 });
+  }
+  if (hasBatterySoc) {
+    series.push({
+      entity: e('battery_level'),
+      name: 'Battery SOC',
+      color: '#009688',
+      axis: 'right',
+      minValue: 0,
+      maxValue: 100,
+      strokeWidth: 2.5,
+    });
   }
   return {
     type: 'custom:power-sync-chart',
@@ -7456,6 +7536,10 @@ function _combinedEnergyChart(e, hasHome) {
     historyRange: 'today',
     height: 275,
     yUnit: 'kW',
+    rightYUnit: '%',
+    rightYUnitCompact: true,
+    rightYMin: 0,
+    rightYMax: 100,
     zeroBaseline: true,
     series,
   };
