@@ -2908,6 +2908,18 @@ def test_api_no_idle_never_publishes_or_executes_residual_idle(opt_module):
     assert data["current_action"] == "self_consumption"
     assert data["next_actions"][0]["action"] == "self_consumption"
 
+    # Startup, expired-schedule, and failed-solve states must not fall back to
+    # displaying IDLE while No Idle is enabled.
+    coordinator._current_schedule = None
+    coordinator._get_current_action = lambda: None
+
+    data = coordinator.get_api_data()
+
+    assert data["planned_current_action"] == "self_consumption"
+    assert data["effective_current_action"] == "self_consumption"
+    assert data["current_action"] == "self_consumption"
+    assert data["next_action"] == "self_consumption"
+
 
 def test_get_current_action_returns_none_past_schedule_end(opt_module):
     """HD-4: a schedule whose slots have all elapsed must not pin the final action forever."""
@@ -3301,6 +3313,78 @@ def test_cached_force_is_refreshed_once_when_same_action_crosses_boundary(opt_mo
         "action": "charge",
         "was_forced": True,
     }
+
+
+def test_cached_no_idle_releases_stale_goodwe_charge_by_time_hold(opt_module):
+    """A stale planned IDLE must not deduplicate the effective self-use action."""
+
+    class SuccessfulGoodWeBattery(_FakeBattery):
+        async def set_self_consumption_mode(self):
+            self.self_consumption_calls += 1
+            return True
+
+    battery = SuccessfulGoodWeBattery(backup_reserve=15)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.92)
+    coordinator.battery_system = "goodwe"
+    coordinator.energy_coordinator = SimpleNamespace(data={})
+    coordinator._config.disable_idle_enabled = True
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_planned_action = "idle"
+    coordinator._last_executed_action = "idle"
+    coordinator._idle_hold_reserve = None
+    boundary = datetime(2026, 7, 25, 15, 45, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="idle", power_w=0, timestamp=boundary)
+    coordinator._get_current_action = lambda: action
+
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_planned_action == "idle"
+    assert coordinator._last_executed_action == "self_consumption"
+    assert coordinator._boundary_execution == {
+        "slot_start": boundary,
+        "slot_end": boundary + timedelta(minutes=5),
+        "action": "self_consumption",
+        "was_forced": False,
+    }
+
+
+def test_cached_no_idle_retries_failed_goodwe_charge_by_time_hold_release(opt_module):
+    """A failed GoodWe restore must keep the stale IDLE marker retryable."""
+
+    class FailingGoodWeBattery(_FakeBattery):
+        async def set_self_consumption_mode(self):
+            self.self_consumption_calls += 1
+            return False
+
+    battery = FailingGoodWeBattery(backup_reserve=15)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.92)
+    coordinator.battery_system = "goodwe"
+    coordinator.energy_coordinator = SimpleNamespace(data={})
+    coordinator._config.disable_idle_enabled = True
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_planned_action = "idle"
+    coordinator._last_executed_action = "idle"
+    coordinator._idle_hold_reserve = None
+    action = SimpleNamespace(
+        action="idle",
+        power_w=0,
+        timestamp=datetime(2026, 7, 25, 15, 45, tzinfo=timezone.utc),
+    )
+    coordinator._get_current_action = lambda: action
+
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_planned_action == "idle"
+    assert coordinator._last_executed_action == "idle"
+    assert getattr(coordinator, "_boundary_execution", None) is None
 
 
 def test_periodic_slow_solve_defers_new_force_until_next_boundary(opt_module):

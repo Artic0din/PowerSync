@@ -33309,10 +33309,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info("GoodWe self-consumption mode set (GENERAL)")
                 else:
                     _LOGGER.error("Failed to set GoodWe self-consumption mode")
+                    raise HomeAssistantError(
+                        "GoodWe self-consumption restore failed"
+                    )
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error setting GoodWe self-consumption: {e}", exc_info=True)
-                return
+                raise HomeAssistantError(
+                    "GoodWe self-consumption restore failed"
+                ) from e
 
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))

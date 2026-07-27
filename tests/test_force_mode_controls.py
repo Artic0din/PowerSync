@@ -3213,6 +3213,22 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
     assert "fallback_option" in ems_source
 
 
+def test_goodwe_self_consumption_restore_failure_propagates_to_optimizer():
+    """A failed GoodWe restore must remain visible to the optimizer executor."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_self_consumption")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    goodwe_branch = function_source.split("# Check if this is a GoodWe system", 1)[1]
+    goodwe_branch = goodwe_branch.split("# Check if this is a Sungrow system", 1)[0]
+    assert "success = await _guarded_self_consumption_write(" in goodwe_branch
+    assert "goodwe_coord.restore_normal" in goodwe_branch
+    assert '"GoodWe self-consumption restore failed"' in goodwe_branch
+    assert "except HomeAssistantError:" in goodwe_branch
+
+
 def test_goodwe_hold_soc_dispatches_conserve_and_rejects_unverified_udp_path():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

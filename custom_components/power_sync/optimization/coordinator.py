@@ -4775,9 +4775,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         current_action = self._get_current_action()
-        action_name = getattr(current_action, "action", None)
-        if not current_action or not action_name:
+        planned_action = getattr(current_action, "action", None)
+        if not current_action or not planned_action:
             return
+        action_name = self._effective_runtime_action(
+            planned_action,
+            getattr(current_action, "timestamp", None),
+        )
         if (
             action_name == getattr(self, "_last_executed_action", None)
             and (
@@ -12114,14 +12118,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             status_message = "Optimizer not initialized"
 
         # Get current action info
-        current_action = "idle"
+        default_action = (
+            "self_consumption"
+            if self._should_disable_idle_schedule()
+            else "idle"
+        )
+        current_action = default_action
         actual_battery_power_w = self._get_actual_battery_power_w()
         current_power_w = actual_battery_power_w
         planned_current_action = current_action
         planned_current_power_w = current_power_w
         effective_current_action = current_action
         current_action_end_time = None  # When the current scheduled action segment ends
-        next_action = "idle"
+        next_action = default_action
         next_action_time = None
         next_action_power_w = 0
 
