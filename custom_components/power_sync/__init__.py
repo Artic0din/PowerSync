@@ -4286,7 +4286,66 @@ def _get_tesla_site_configs(
     return configs
 
 
-def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dict | None:
+def _find_calendar_tariff_schedule(hass: HomeAssistant) -> dict | None:
+    """Return the first stored tariff schedule with usable import rates."""
+    for entry_data in hass.data.get(DOMAIN, {}).values():
+        if not isinstance(entry_data, dict):
+            continue
+        tariff_schedule = entry_data.get("tariff_schedule")
+        if not isinstance(tariff_schedule, dict):
+            continue
+        buy_rates = (
+            tariff_schedule.get("buy_rates")
+            or tariff_schedule.get("buy_prices")
+        )
+        if isinstance(buy_rates, dict) and buy_rates:
+            return tariff_schedule
+    return None
+
+
+def _calendar_tou_periods_from_price_keys(
+    price_rates: dict[str, Any],
+) -> dict[str, dict[str, list[dict[str, int]]]]:
+    """Build half-hour TOU definitions from ``PERIOD_HH_MM`` rate keys."""
+    tou_periods: dict[str, dict[str, list[dict[str, int]]]] = {}
+    for period_name in price_rates:
+        try:
+            prefix, hour_text, minute_text = str(period_name).rsplit("_", 2)
+            if prefix != "PERIOD":
+                continue
+            from_hour = int(hour_text)
+            from_minute = int(minute_text)
+            if not 0 <= from_hour <= 23 or from_minute not in (0, 30):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        end_minutes = from_hour * 60 + from_minute + 30
+        period = {
+            "fromHour": from_hour,
+            "fromMinute": from_minute,
+            "toHour": end_minutes // 60,
+            "toMinute": end_minutes % 60,
+            "fromDayOfWeek": 0,
+            "toDayOfWeek": 6,
+        }
+        tou_periods[str(period_name)] = {"periods": [period]}
+    return tou_periods
+
+
+def _calendar_time_series_is_subdaily(
+    parsed_entries: list[tuple[dict[str, Any], Any]],
+) -> bool:
+    """Return True when more than one row belongs to the same calendar day."""
+    dates = [timestamp.date() for _entry, timestamp in parsed_entries]
+    return len(dates) != len(set(dates))
+
+
+def _calculate_cost_from_tariff(
+    tariff_schedule: dict,
+    time_series: list,
+    period: str | None = None,
+) -> dict | None:
     """Calculate import/export costs from tariff schedule and time_series energy data.
 
     For hourly entries (Tesla day period): matches each entry's timestamp to a TOU period
@@ -4297,16 +4356,32 @@ def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dic
 
     Returns cost summary dict or None if calculation fails.
     """
-    from datetime import datetime as dt
+    from datetime import datetime as dt, timedelta
 
     try:
-        buy_rates = tariff_schedule.get("buy_rates", {})
-        sell_rates = tariff_schedule.get("sell_rates", {})
+        buy_rates = (
+            tariff_schedule.get("buy_rates")
+            or tariff_schedule.get("buy_prices")
+            or {}
+        )
+        sell_rates = (
+            tariff_schedule.get("sell_rates")
+            or tariff_schedule.get("sell_prices")
+            or {}
+        )
         seasons = tariff_schedule.get("seasons", {})
         tou_periods = tariff_schedule.get("tou_periods", {})
 
-        if not buy_rates:
+        if not isinstance(buy_rates, dict) or not buy_rates:
             return None
+        if not isinstance(sell_rates, dict):
+            sell_rates = {}
+        if not isinstance(seasons, dict):
+            seasons = {}
+        if not isinstance(tou_periods, dict):
+            tou_periods = {}
+        if not tou_periods:
+            tou_periods = _calendar_tou_periods_from_price_keys(buy_rates)
 
         def _parse_ts(ts_str: str) -> dt | None:
             """Parse ISO timestamp, handling Z suffix."""
@@ -4315,25 +4390,27 @@ def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dic
             except (ValueError, TypeError):
                 return None
 
-        # Detect hourly vs daily: >7 entries for what would be a single day = hourly
-        is_hourly = len(time_series) > 7
+        parsed_entries = []
+        for entry in time_series:
+            ts = _parse_ts(entry.get("timestamp", ""))
+            if ts is not None:
+                parsed_entries.append((entry, ts))
+
+        if period in ("week", "month", "year"):
+            is_hourly = False
+        elif period == "day":
+            is_hourly = _calendar_time_series_is_subdaily(parsed_entries)
+        else:
+            is_hourly = _calendar_time_series_is_subdaily(parsed_entries)
 
         total_import_cost = 0.0
         total_export_earnings = 0.0
 
         if is_hourly:
-            # Hourly entries: match each timestamp to a TOU period
-            for entry in time_series:
-                ts_str = entry.get("timestamp", "")
-                if not ts_str:
-                    continue
-                ts = _parse_ts(ts_str)
-                if ts is None:
-                    continue
-
-                hour = ts.hour
-                dow = ts.weekday()  # 0=Monday
-                tesla_dow = (dow + 1) % 7  # 0=Sunday
+            # Recorder/Tesla day rows are hourly energy buckets. Dynamic
+            # provider tariffs can change on the half-hour, so price each row
+            # from both half-hour slots rather than only its start timestamp.
+            for entry, ts in parsed_entries:
                 month = ts.month
 
                 # Find season for this entry's month
@@ -4341,17 +4418,33 @@ def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dic
                 # Get TOU periods for that season
                 season_tou = seasons.get(entry_season, {}).get("tou_periods", tou_periods)
 
-                # Match to TOU period
-                matched_period = _match_tou_period(
-                    season_tou,
-                    hour,
-                    tesla_dow,
-                    buy_rates=buy_rates,
-                    sell_rates=sell_rates,
-                )
+                slot_buy_rates = []
+                slot_sell_rates = []
+                for slot_ts in (ts, ts + timedelta(minutes=30)):
+                    tesla_dow = (slot_ts.weekday() + 1) % 7
+                    matched_period = _match_tou_period(
+                        season_tou,
+                        slot_ts.hour,
+                        tesla_dow,
+                        minute=slot_ts.minute,
+                        buy_rates=buy_rates,
+                        sell_rates=sell_rates,
+                    )
+                    slot_buy_rates.append(
+                        buy_rates.get(
+                            matched_period,
+                            buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)),
+                        )
+                    )
+                    slot_sell_rates.append(
+                        sell_rates.get(
+                            matched_period,
+                            sell_rates.get("ALL", 0),
+                        )
+                    )
 
-                buy_rate = buy_rates.get(matched_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
-                sell_rate = sell_rates.get(matched_period, sell_rates.get("ALL", 0))
+                buy_rate = sum(slot_buy_rates) / len(slot_buy_rates)
+                sell_rate = sum(slot_sell_rates) / len(slot_sell_rates)
 
                 grid_import_wh = entry.get("grid_import", 0)
                 grid_export_wh = entry.get("grid_export", 0)
@@ -4360,14 +4453,7 @@ def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dic
                 total_export_earnings += (grid_export_wh / 1000.0) * sell_rate
         else:
             # Daily entries: use weighted average rate for each day
-            for entry in time_series:
-                ts_str = entry.get("timestamp", "")
-                if not ts_str:
-                    continue
-                ts = _parse_ts(ts_str)
-                if ts is None:
-                    continue
-
+            for entry, ts in parsed_entries:
                 month = ts.month
                 entry_season = _find_season_for_month(seasons, month)
                 season_tou = seasons.get(entry_season, {}).get("tou_periods", tou_periods)
@@ -4411,6 +4497,7 @@ def _match_tou_period(
     hour: int,
     tesla_dow: int,
     *,
+    minute: int = 0,
     buy_rates: dict | None = None,
     sell_rates: dict | None = None,
 ) -> str:
@@ -4423,7 +4510,7 @@ def _match_tou_period(
     from .tariff_time import find_matching_tou_period
 
     # 2024-01-07 was a Sunday, matching Tesla day 0.
-    when = datetime(2024, 1, 7, hour) + timedelta(days=tesla_dow % 7)
+    when = datetime(2024, 1, 7, hour, minute) + timedelta(days=tesla_dow % 7)
     return find_matching_tou_period(
         tou_periods,
         when,
@@ -4450,14 +4537,17 @@ def _weighted_avg_rates(tou_periods: dict, buy_rates: dict, sell_rates: dict) ->
             continue
         for p in periods_list:
             from_hour = p.get("fromHour", 0)
+            from_minute = p.get("fromMinute", 0)
             to_hour = p.get("toHour", 24)
+            to_minute = p.get("toMinute", 0)
             from_dow = p.get("fromDayOfWeek", 0)
             to_dow = p.get("toDayOfWeek", 6)
-            num_days = to_dow - from_dow + 1
-            if from_hour <= to_hour:
-                hours = (to_hour - from_hour) * num_days / 7.0
-            else:
-                hours = (24 - from_hour + to_hour) * num_days / 7.0
+            num_days = max(0, to_dow - from_dow + 1)
+            start_minutes = from_hour * 60 + from_minute
+            end_minutes = to_hour * 60 + to_minute
+            if end_minutes <= start_minutes:
+                end_minutes += 24 * 60
+            hours = (end_minutes - start_minutes) / 60 * num_days / 7.0
             period_hours[period_name] = period_hours.get(period_name, 0) + hours
             total_hours += hours
 
@@ -5306,18 +5396,26 @@ async def _calendar_result_from_energy_summary(
     if period == "day":
         cost_summary = await _calculate_cost_from_statistics(hass, period, end_date)
         if not cost_summary and tariff_schedule:
-            cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+            cost_summary = _calculate_cost_from_tariff(
+                tariff_schedule,
+                time_series,
+                period,
+            )
     else:
         # Non-Tesla energy-summary systems expose daily-reset cost sensors. For
         # week/month/year those recorder statistics can be reset-skewed, so use
         # the same period energy rows returned to the mobile app.
         cost_summary = (
-            _calculate_cost_from_tariff(tariff_schedule, time_series)
+            _calculate_cost_from_tariff(tariff_schedule, time_series, period)
             if tariff_schedule
             else await _calculate_cost_from_statistics(hass, period, end_date)
         )
     if not cost_summary and tariff_schedule:
-        cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+        cost_summary = _calculate_cost_from_tariff(
+            tariff_schedule,
+            time_series,
+            period,
+        )
     if cost_summary:
         load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
         if load_kwh > 0:
@@ -5451,7 +5549,11 @@ class CalendarHistoryView(HomeAssistantView):
         }
         cost_summary = await _calculate_cost_from_statistics(self._hass, period, end_date)
         if not cost_summary and tariff_schedule:
-            cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+            cost_summary = _calculate_cost_from_tariff(
+                tariff_schedule,
+                time_series,
+                period,
+            )
         if cost_summary:
             load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
             if load_kwh > 0:
@@ -5491,13 +5593,7 @@ class CalendarHistoryView(HomeAssistantView):
                     break  # Found it, no need to continue
 
         # Look up tariff schedule for cost calculation (shared across all battery types)
-        tariff_schedule = None
-        for _eid, _data in self._hass.data.get(DOMAIN, {}).items():
-            if isinstance(_data, dict):
-                ts = _data.get("tariff_schedule")
-                if ts and ts.get("buy_rates"):
-                    tariff_schedule = ts
-                    break
+        tariff_schedule = _find_calendar_tariff_schedule(self._hass)
 
         summary_system, summary_coordinator, summary_entry_id = _find_calendar_energy_summary_source(self._hass)
         if summary_coordinator and not tesla_coordinator:

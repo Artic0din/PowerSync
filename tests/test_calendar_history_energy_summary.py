@@ -42,6 +42,9 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_time_series_from_state_history_rows",
         "_calendar_time_series_from_state_history",
         "_calendar_time_series_totals_kwh",
+        "_find_calendar_tariff_schedule",
+        "_calendar_tou_periods_from_price_keys",
+        "_calendar_time_series_is_subdaily",
         "_calculate_cost_from_tariff",
         "_find_season_for_month",
         "_weighted_avg_rates",
@@ -857,3 +860,207 @@ def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
     assert result["cost_summary"]["import_cost"] == 60.0
     assert result["cost_summary"]["export_earnings"] == 2.5
     assert result["cost_summary"]["net_cost"] == 57.5
+
+
+def test_sigenergy_dynamic_display_tariff_is_available_for_calendar_costs():
+    namespace = _calendar_namespace()
+    tariff_schedule = {
+        "buy_prices": {"PERIOD_00_00": 0.40},
+        "sell_prices": {"PERIOD_00_00": 0.10},
+    }
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "tariff_schedule": tariff_schedule,
+                }
+            }
+        }
+    )
+
+    assert namespace["_find_calendar_tariff_schedule"](hass) is tariff_schedule
+
+
+def test_sigenergy_dynamic_display_tariff_prices_period_energy_rows():
+    namespace = _calendar_namespace()
+    buy_prices = {
+        f"PERIOD_{hour:02d}_{minute:02d}": 0.40
+        for hour in range(24)
+        for minute in (0, 30)
+    }
+    sell_prices = {period: 0.10 for period in buy_prices}
+    time_series = [
+        {
+            "timestamp": "2026-07-01T00:00:00+10:00",
+            "grid_import": 100_000,
+            "grid_export": 20_000,
+        },
+        {
+            "timestamp": "2026-07-02T00:00:00+10:00",
+            "grid_import": 50_000,
+            "grid_export": 5_000,
+        },
+    ]
+
+    result = namespace["_calculate_cost_from_tariff"](
+        {
+            "buy_prices": buy_prices,
+            "sell_prices": sell_prices,
+        },
+        time_series,
+    )
+
+    assert result is not None
+    assert result["import_cost"] == 60.0
+    assert result["export_earnings"] == 2.5
+    assert result["net_cost"] == 57.5
+
+
+def test_month_with_more_than_seven_daily_rows_uses_daily_average_rates():
+    namespace = _calendar_namespace()
+    time_series = [
+        {
+            "timestamp": f"2026-07-{day:02d}T00:00:00+10:00",
+            "grid_import": 100_000,
+            "grid_export": 0,
+        }
+        for day in range(1, 11)
+    ]
+    tariff_schedule = {
+        "buy_rates": {
+            "CHEAP": 0.01,
+            "STANDARD": 0.41,
+        },
+        "sell_rates": {"ALL": 0},
+        "seasons": {},
+        "tou_periods": {
+            "CHEAP": {
+                "periods": [
+                    {
+                        "fromHour": 0,
+                        "toHour": 1,
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                    }
+                ]
+            },
+            "STANDARD": {
+                "periods": [
+                    {
+                        "fromHour": 1,
+                        "toHour": 24,
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                    }
+                ]
+            },
+        },
+    }
+
+    result = namespace["_calculate_cost_from_tariff"](tariff_schedule, time_series)
+
+    assert result is not None
+    assert result["import_cost"] == 393.33
+
+
+def test_weighted_average_rates_include_half_hour_boundaries():
+    namespace = _calendar_namespace()
+    tou_periods = {
+        "FIRST_HALF": {
+            "periods": [
+                {
+                    "fromHour": 0,
+                    "fromMinute": 0,
+                    "toHour": 0,
+                    "toMinute": 30,
+                    "fromDayOfWeek": 0,
+                    "toDayOfWeek": 6,
+                }
+            ]
+        },
+        "SECOND_HALF": {
+            "periods": [
+                {
+                    "fromHour": 0,
+                    "fromMinute": 30,
+                    "toHour": 1,
+                    "toMinute": 0,
+                    "fromDayOfWeek": 0,
+                    "toDayOfWeek": 6,
+                }
+            ]
+        },
+    }
+
+    avg_buy, avg_sell = namespace["_weighted_avg_rates"](
+        tou_periods,
+        {"FIRST_HALF": 0.10, "SECOND_HALF": 0.30},
+        {"FIRST_HALF": 0.02, "SECOND_HALF": 0.06},
+    )
+
+    assert avg_buy == 0.20
+    assert avg_sell == 0.04
+
+
+def test_dynamic_tariff_builds_final_half_hour_through_midnight():
+    namespace = _calendar_namespace()
+
+    tou_periods = namespace["_calendar_tou_periods_from_price_keys"](
+        {"PERIOD_23_30": 0.40}
+    )
+
+    assert tou_periods["PERIOD_23_30"]["periods"] == [
+        {
+            "fromHour": 23,
+            "fromMinute": 30,
+            "toHour": 24,
+            "toMinute": 0,
+            "fromDayOfWeek": 0,
+            "toDayOfWeek": 6,
+        }
+    ]
+
+
+def test_subdaily_hour_averages_both_half_hour_tariff_rates():
+    namespace = _calendar_namespace()
+    namespace["_match_tou_period"] = (
+        lambda _tou, hour, _dow, *, minute=0, **_kwargs:
+        f"PERIOD_{hour:02d}_{minute:02d}"
+    )
+    time_series = [
+        {
+            "timestamp": "2026-07-10T22:00:00+10:00",
+            "grid_import": 0,
+            "grid_export": 0,
+        },
+        {
+            "timestamp": "2026-07-10T23:00:00+10:00",
+            "grid_import": 100_000,
+            "grid_export": 20_000,
+        },
+    ]
+    tariff_schedule = {
+        "buy_prices": {
+            "PERIOD_22_00": 0.10,
+            "PERIOD_22_30": 0.10,
+            "PERIOD_23_00": 0.20,
+            "PERIOD_23_30": 0.40,
+        },
+        "sell_prices": {
+            "PERIOD_22_00": 0.02,
+            "PERIOD_22_30": 0.02,
+            "PERIOD_23_00": 0.06,
+            "PERIOD_23_30": 0.10,
+        },
+    }
+
+    result = namespace["_calculate_cost_from_tariff"](
+        tariff_schedule,
+        time_series,
+        "day",
+    )
+
+    assert result is not None
+    assert result["import_cost"] == 30.0
+    assert result["export_earnings"] == 1.6
+    assert result["net_cost"] == 28.4
