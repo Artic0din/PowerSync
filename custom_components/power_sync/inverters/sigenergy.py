@@ -111,8 +111,6 @@ class SigenergyController(InverterController):
     EXPORT_LIMIT_INVALID = 0xFFFFFFFF    # Invalid register value (per Sigenergy Modbus docs)
     PV_POWER_LIMIT_ZERO = 0       # Set PV limit to 0 kW (full shutdown - not used)
     ACTIVE_POWER_PCT_ZERO = 0     # 0% active power
-    FORCE_DISCHARGE_LOAD_HEADROOM_KW = 0.25
-
     # Default Modbus settings
     # Sigenergy uses different slave IDs for different register levels:
     # - Plant-level registers (30001-30099): Slave ID 247
@@ -1432,26 +1430,20 @@ class SigenergyController(InverterController):
                 )
 
             scaled_value = int(effective_kw * self.GAIN_POWER)
-            load_kw = self._estimate_load_power_kw(attrs)
-            ess_limit_kw = effective_kw
-            if load_kw is not None and load_kw > 0:
-                ess_limit_kw += load_kw + self.FORCE_DISCHARGE_LOAD_HEADROOM_KW
             ess_cap_kw = rated_discharge_kw
             if self._configured_discharge_rate_limit_kw is not None:
                 ess_cap_kw = min(
                     ess_cap_kw,
                     self._configured_discharge_rate_limit_kw,
                 )
-            if ess_limit_kw > ess_cap_kw:
+            if effective_kw > ess_cap_kw:
                 _LOGGER.info(
-                    "Sigenergy ESS discharge requirement %.2f kW exceeds effective "
-                    "rated/configured cap %.2f kW — clamping the ESS limit while preserving the %.2f "
-                    "kW grid-export ceiling",
-                    ess_limit_kw,
-                    ess_cap_kw,
+                    "Sigenergy grid-export target %.2f kW exceeds effective "
+                    "rated/configured ESS discharge cap %.2f kW",
                     effective_kw,
+                    ess_cap_kw,
                 )
-                ess_limit_kw = ess_cap_kw
+            ess_limit_kw = ess_cap_kw
 
             # 1. Install the grid-export ceiling before enabling discharge mode,
             # preventing the existing ESS limit from causing a transient overshoot.
@@ -1465,9 +1457,11 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Sigenergy grid export limit set to %.2f kW", effective_kw)
 
-            # 2. Modes 5/6 use register 40034 as their ESS discharge command
-            # limit. Include current site load so it does not consume the desired
-            # grid-export allowance; register 40038 above prevents overshoot.
+            # 2. Modes 5/6 use register 40034 as the maximum ESS discharge
+            # capability, not a fixed grid-export target. Leave the full
+            # rated/configured headroom available so changing site load does not
+            # consume the desired export allowance. The grid-point ceiling in
+            # register 40038 above prevents export overshoot.
             ess_limit_value = int(ess_limit_kw * self.GAIN_POWER)
             discharge_result = await self._write_holding_registers(
                 self.REG_ESS_MAX_DISCHARGE_LIMIT,
@@ -1481,15 +1475,10 @@ class SigenergyController(InverterController):
                 await self._rollback_force_discharge_registers(snapshot)
                 return False
             _LOGGER.info(
-                "Sigenergy ESS max discharge limit set to %.2f kW for %.2f kW "
-                "grid export%s",
+                "Sigenergy ESS max discharge limit set to %.2f kW with %.2f kW "
+                "grid-export ceiling",
                 ess_limit_kw,
                 effective_kw,
-                (
-                    f" plus {load_kw:.2f} kW observed site load"
-                    if load_kw is not None and load_kw > 0
-                    else ""
-                ),
             )
 
             # 3. Enable Remote EMS only after both safety limits are installed.
@@ -1522,33 +1511,6 @@ class SigenergyController(InverterController):
             return False
         finally:
             await transaction.__aexit__(None, None, None)
-
-    @staticmethod
-    def _estimate_load_power_kw(attrs: dict) -> Optional[float]:
-        """Estimate site load from raw Sigenergy telemetry sign conventions."""
-        explicit_load = attrs.get("load_power_kw")
-        if explicit_load is not None:
-            try:
-                return max(0.0, float(explicit_load))
-            except (TypeError, ValueError):
-                pass
-
-        if "grid_power_kw" not in attrs or "battery_power_kw" not in attrs:
-            return None
-
-        try:
-            solar_kw = max(0.0, float(attrs.get("pv_power_kw", 0) or 0))
-            solar_kw += max(
-                0.0,
-                float(attrs.get("third_party_pv_power_kw", 0) or 0),
-            )
-            grid_kw = float(attrs.get("grid_power_kw", 0) or 0)
-            battery_kw = float(attrs.get("battery_power_kw", 0) or 0)
-        except (TypeError, ValueError):
-            return None
-
-        # Sigenergy reports grid import and battery charging as positive.
-        return max(0.0, solar_kw + grid_kw - battery_kw)
 
     async def _restore_ess_max_limits_to_rated(
         self,
