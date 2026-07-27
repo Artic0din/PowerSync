@@ -36,6 +36,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_find_calendar_statistic_entity_ids",
         "_calendar_residual_entry",
         "_calendar_reconcile_current_day_rows",
+        "_calendar_period_range",
         "_calendar_range_includes_today",
         "_calendar_statistics_end_dt",
         "_calendar_history_bucket_timestamp",
@@ -48,6 +49,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calculate_cost_from_tariff",
         "_find_season_for_month",
         "_weighted_avg_rates",
+        "_calendar_current_optimizer_cost_summary",
         "_calendar_result_from_energy_summary",
     }
     body: list[ast.stmt] = []
@@ -82,6 +84,7 @@ def _calendar_namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = {
         "Any": Any,
         "datetime": datetime,
+        "timedelta": timedelta,
         "DOMAIN": "power_sync",
         "HomeAssistant": object,
         "dt_util": SimpleNamespace(
@@ -860,6 +863,146 @@ def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
     assert result["cost_summary"]["import_cost"] == 60.0
     assert result["cost_summary"]["export_earnings"] == 2.5
     assert result["cost_summary"]["net_cost"] == 57.5
+
+
+def test_current_week_starting_today_uses_mobile_day_optimizer_costs():
+    namespace = _calendar_namespace()
+    namespace["dt_util"].now = lambda: datetime(
+        2026, 7, 27, 17, 11, tzinfo=timezone(timedelta(hours=10))
+    )
+
+    monday_row = {
+        "timestamp": "2026-07-27T17:11:00+10:00",
+        "grid_import": 46_400,
+        "grid_export": 99,
+        "home_consumption": 0,
+        "solar_generation": 2_300,
+        "battery_discharge": 0,
+        "battery_charge": 0,
+    }
+
+    async def monday_only_statistics(
+        *_args: Any, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
+        return [monday_row]
+
+    cost_periods: list[str] = []
+
+    async def unexpected_recorder_costs(
+        _hass: Any, period: str, _end_date: str | None
+    ) -> dict[str, Any]:
+        cost_periods.append(period)
+        raise AssertionError("optimizer cost source should win")
+
+    namespace["_calendar_time_series_from_statistics"] = monday_only_statistics
+    namespace["_calculate_cost_from_statistics"] = unexpected_recorder_costs
+
+    tariff_schedule = {
+        "buy_rates": {"ALL": 12.93 / 46.4},
+        "sell_rates": {"ALL": 0.0},
+        "seasons": {},
+        "tou_periods": {},
+    }
+    assert namespace["_calculate_cost_from_tariff"](
+        tariff_schedule,
+        [monday_row],
+        "week",
+    )["import_cost"] == 12.93
+
+    optimizer = SimpleNamespace(
+        get_api_data=lambda: {
+            "daily_cost_breakdown": {
+                "actual_import_cost": 8.10,
+                "actual_export_earnings": 0.0,
+                "actual_cost": 8.10,
+            }
+        }
+    )
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": optimizer,
+                }
+            }
+        }
+    )
+
+    result = namespace["_calendar_result_from_energy_summary"](
+        hass,
+        "week",
+        None,
+        SimpleNamespace(),
+        "entry-1",
+        tariff_schedule,
+        "Sigenergy",
+    )
+    result = asyncio.run(result)
+
+    assert cost_periods == []
+    assert result["cost_summary"]["import_cost"] == 8.10
+    assert result["cost_summary"]["net_cost"] == 8.10
+    assert result["cost_summary"]["estimated"] is True
+
+
+def test_current_week_future_end_date_does_not_use_today_optimizer_costs():
+    namespace = _calendar_namespace()
+    namespace["dt_util"].now = lambda: datetime(
+        2026, 7, 27, 17, 11, tzinfo=timezone(timedelta(hours=10))
+    )
+
+    async def period_statistics(
+        *_args: Any, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "timestamp": "2026-07-27T17:11:00+10:00",
+                "grid_import": 46_400,
+                "grid_export": 0,
+                "home_consumption": 0,
+                "solar_generation": 0,
+                "battery_discharge": 0,
+                "battery_charge": 0,
+            }
+        ]
+
+    namespace["_calendar_time_series_from_statistics"] = period_statistics
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": SimpleNamespace(
+                        get_api_data=lambda: {
+                            "daily_cost_breakdown": {
+                                "actual_import_cost": 8.10,
+                                "actual_export_earnings": 0.0,
+                                "actual_cost": 8.10,
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    result = namespace["_calendar_result_from_energy_summary"](
+        hass,
+        "week",
+        "2026-07-31",
+        SimpleNamespace(),
+        "entry-1",
+        {
+            "buy_rates": {"ALL": 12.93 / 46.4},
+            "sell_rates": {"ALL": 0.0},
+            "seasons": {},
+            "tou_periods": {},
+        },
+        "Sigenergy",
+    )
+    result = asyncio.run(result)
+
+    assert result["cost_summary"]["import_cost"] == 12.93
+    assert result["cost_summary"]["estimated"] is True
 
 
 def test_sigenergy_dynamic_display_tariff_is_available_for_calendar_costs():

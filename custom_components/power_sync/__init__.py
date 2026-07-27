@@ -5356,6 +5356,51 @@ async def _calendar_time_series_from_statistics(
     return rows
 
 
+def _calendar_current_optimizer_cost_summary(
+    hass: HomeAssistant,
+    preferred_entry_id: str | None,
+) -> dict[str, Any] | None:
+    """Return the live cost source used by the mobile Day summary."""
+    domain_data = hass.data.get(DOMAIN, {})
+    ordered_entry_data: list[dict[str, Any]] = []
+    if preferred_entry_id:
+        preferred_data = domain_data.get(preferred_entry_id)
+        if isinstance(preferred_data, dict):
+            ordered_entry_data.append(preferred_data)
+    for entry_id, entry_data in domain_data.items():
+        if entry_id == preferred_entry_id or not isinstance(entry_data, dict):
+            continue
+        ordered_entry_data.append(entry_data)
+
+    for entry_data in ordered_entry_data:
+        coordinator = entry_data.get("optimization_coordinator")
+        api_data_getter = getattr(coordinator, "get_api_data", None)
+        if not callable(api_data_getter):
+            continue
+        try:
+            breakdown = (api_data_getter() or {}).get("daily_cost_breakdown")
+            if not isinstance(breakdown, dict):
+                continue
+            import_cost = float(breakdown["actual_import_cost"])
+            export_earnings = float(breakdown["actual_export_earnings"])
+            net_cost = float(
+                breakdown.get(
+                    "actual_cost",
+                    import_cost - export_earnings,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        return {
+            "import_cost": round(import_cost, 2),
+            "export_earnings": round(export_earnings, 2),
+            "net_cost": round(net_cost, 2),
+            "estimated": True,
+        }
+
+    return None
+
+
 async def _calendar_result_from_energy_summary(
     hass: HomeAssistant,
     period: str,
@@ -5403,14 +5448,52 @@ async def _calendar_result_from_energy_summary(
                 period,
             )
     else:
+        range_result = _calendar_period_range(period, end_date)
+        now = dt_util.now()
+        requested_end_is_today = (
+            not end_date or end_date == now.date().isoformat()
+        )
+        current_period_contains_only_today = bool(
+            requested_end_is_today
+            and range_result
+            and range_result[0].date() == now.date()
+            and _calendar_range_includes_today(
+                range_result[0],
+                range_result[1],
+                now,
+            )
+        )
         # Non-Tesla energy-summary systems expose daily-reset cost sensors. For
         # week/month/year those recorder statistics can be reset-skewed, so use
-        # the same period energy rows returned to the mobile app.
-        cost_summary = (
-            _calculate_cost_from_tariff(tariff_schedule, time_series, period)
-            if tariff_schedule
-            else await _calculate_cost_from_statistics(hass, period, end_date)
-        )
+        # the same period energy rows returned to the mobile app. On the first
+        # day of a live period, however, the period and day contain identical
+        # energy. Reuse the mobile Day card's live optimizer cost source so
+        # identical intervals cannot display different costs.
+        if current_period_contains_only_today:
+            cost_summary = _calendar_current_optimizer_cost_summary(
+                hass,
+                entry_id,
+            )
+            if not cost_summary:
+                cost_summary = await _calculate_cost_from_statistics(
+                    hass,
+                    "day",
+                    now.date().isoformat(),
+                )
+        else:
+            cost_summary = (
+                _calculate_cost_from_tariff(
+                    tariff_schedule,
+                    time_series,
+                    period,
+                )
+                if tariff_schedule
+                else await _calculate_cost_from_statistics(
+                    hass,
+                    period,
+                    end_date,
+                )
+            )
     if not cost_summary and tariff_schedule:
         cost_summary = _calculate_cost_from_tariff(
             tariff_schedule,
