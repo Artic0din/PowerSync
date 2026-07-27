@@ -996,6 +996,33 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+def test_ble_discovery_accepts_connection_status_without_optional_node_status():
+    """Configured BLE vehicles remain discoverable when ESPHome node status is omitted."""
+    hass = _FakeHass(
+        states={
+            "binary_sensor.tesla_yf88_status": "on",
+            "binary_sensor.tesla_yf88_ble_status": "off",
+            "binary_sensor.tesla_flinn_ble_status": "off",
+            "sensor.tesla_flinn_charging_state": "Unknown",
+        }
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88, tesla_flinn",
+        },
+    )
+
+    vehicles = asyncio.run(ev_planner.discover_all_tesla_vehicles(hass, entry))
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [
+        "ble_tesla_yf88",
+        "ble_tesla_flinn",
+    ]
+
+
 class _FakeTeslaResponse:
     def __init__(self, status: int = 200, payload: dict | None = None, text: str = "") -> None:
         self.status = status

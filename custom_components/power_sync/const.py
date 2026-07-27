@@ -118,7 +118,10 @@ TESLA_BLE_SENSOR_CHARGE_POWER = "sensor.{prefix}_charge_power"
 TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
 # Binary sensors
 TESLA_BLE_BINARY_ASLEEP = "binary_sensor.{prefix}_asleep"
+# Optional ESPHome node-status entity from the example bridge YAML.
 TESLA_BLE_BINARY_STATUS = "binary_sensor.{prefix}_status"
+# Tesla connection status exposed by the esphome-tesla-ble component itself.
+TESLA_BLE_BINARY_CONNECTION_STATUS = "binary_sensor.{prefix}_ble_status"
 TESLA_BLE_BINARY_CHARGE_FLAP = "binary_sensor.{prefix}_charge_flap"
 # Controls
 TESLA_BLE_SWITCH_CHARGER = "switch.{prefix}_charger"

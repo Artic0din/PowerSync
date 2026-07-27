@@ -746,7 +746,6 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGE_POWER,
     TESLA_BLE_BINARY_ASLEEP,
     TESLA_BLE_BINARY_CHARGE_FLAP,
-    TESLA_BLE_BINARY_STATUS,
     TESLA_BLE_SWITCH_CHARGER,
     TESLA_BLE_NUMBER_CHARGING_AMPS,
     TESLA_BLE_NUMBER_CHARGING_LIMIT,
@@ -824,6 +823,7 @@ from .currency import (
 )
 from .inverters import get_inverter_controller
 from .tariff_utils import with_hysteresis
+from .tesla_ble import get_tesla_ble_status_state
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .network_envelope import (
     ExportGuard,
@@ -934,8 +934,7 @@ def _resolve_ble_prefixes(hass, config: dict) -> list[str]:
 
     resolved = []
     for prefix in prefixes:
-        status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-        if hass.states.get(status_entity) is not None:
+        if get_tesla_ble_status_state(hass, prefix) is not None:
             resolved.append(prefix)
             continue
         # Auto-detect fallback only for single-prefix configs
@@ -1487,8 +1486,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
             continue
 
-        status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-        if hass.states.get(status_entity) is None:
+        if get_tesla_ble_status_state(hass, prefix) is None:
             continue
 
         ev_power_kw = 0.0
@@ -12270,8 +12268,7 @@ class EVStatusView(HomeAssistantView):
         any_available = False
         any_connected = False
         for prefix in prefixes:
-            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-            state = self._hass.states.get(status_entity)
+            state = get_tesla_ble_status_state(self._hass, prefix)
             if state is not None:
                 any_available = True
                 if state.state == "on":
@@ -12562,8 +12559,7 @@ def _get_available_ev_vehicles(hass: HomeAssistant) -> list[dict]:
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         ble_prefixes = _resolve_ble_prefixes(hass, config)
         for index, prefix in enumerate(ble_prefixes):
-            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-            if hass.states.get(status_entity) is not None:
+            if get_tesla_ble_status_state(hass, prefix) is not None:
                 ble_id = f"ble_{prefix}"
                 if ev_provider == EV_PROVIDER_BOTH and index < len(vehicles):
                     continue
@@ -12642,12 +12638,14 @@ class EVVehiclesView(HomeAssistantView):
 
     def _get_tesla_ble_vehicle(self, prefix: str, vehicle_index: int = 1) -> dict | None:
         """Get vehicle data from Tesla BLE entities."""
-        # Check if BLE status entity exists
-        status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-        status_state = self._hass.states.get(status_entity)
+        # Accept either the optional ESPHome node status or Tesla BLE status.
+        status_state = get_tesla_ble_status_state(self._hass, prefix)
 
         if status_state is None:
-            _LOGGER.debug(f"EV BLE: Status entity {status_entity} not found")
+            _LOGGER.debug(
+                "EV BLE: No supported status entity found for prefix %s",
+                prefix,
+            )
             return None
 
         # Get charge level

@@ -56,6 +56,7 @@ def _install_import_stubs() -> None:
     ha_device_registry.async_get = lambda hass: hass.device_registry
     ha_entity_registry.async_get = lambda hass: hass.entity_registry
     ha_event.async_track_utc_time_change = lambda *args, **kwargs: (lambda: None)
+    ha_event.async_track_time_change = lambda *args, **kwargs: (lambda: None)
     ha_event.async_track_time_interval = lambda *args, **kwargs: (lambda: None)
     ha_event.async_track_point_in_time = lambda *args, **kwargs: (lambda: None)
     ha_event.async_track_point_in_utc_time = lambda *args, **kwargs: (lambda: None)
@@ -117,6 +118,10 @@ def _install_import_stubs() -> None:
 
     optimization_coordinator = types.ModuleType("power_sync.optimization.coordinator")
     optimization_coordinator.OptimizationCoordinator = type("OptimizationCoordinator", (), {})
+    optimization_coordinator.OptimizationConfig = type("OptimizationConfig", (), {})
+    optimization_coordinator.sigenergy_capped_optimizer_limit_w = (
+        lambda *args, **kwargs: None
+    )
     sys.modules["power_sync.optimization.coordinator"] = optimization_coordinator
 
     coordinator = types.ModuleType("power_sync.coordinator")
@@ -129,6 +134,7 @@ def _install_import_stubs() -> None:
         "DualSungrowCoordinator",
         "FoxESSEnergyCoordinator",
         "FoxESSEntityEnergyCoordinator",
+        "CustomEntityEnergyCoordinator",
         "FoxESSCloudEnergyCoordinator",
         "GoodWeEnergyCoordinator",
         "AlphaESSEnergyCoordinator",
@@ -261,6 +267,34 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     assert vehicles[0]["is_connected"] is True
     assert vehicles[0]["is_charging"] is True
     assert vehicles[0]["ev_soc"] == 73
+
+
+def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_status():
+    """Mobile Sync must show a configured BLE bridge that exposes BLE Status."""
+    power_sync = _power_sync_module()
+    hass = _Hass([
+        _State("binary_sensor.tesla_flinn_ble_status", "off"),
+        _State("sensor.tesla_flinn_charging_state", "Unknown"),
+        _State("sensor.tesla_flinn_charge_level", "79"),
+    ])
+
+    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("tesla_flinn")
+
+    assert vehicle is not None
+    assert vehicle["id"] == "ble_tesla_flinn"
+    assert vehicle["battery_level"] == 79
+    assert vehicle["is_online"] is False
+
+    canonical_hass = _Hass([
+        _State("binary_sensor.tesla_flinn_status", "off"),
+        _State("binary_sensor.tesla_flinn_ble_status", "on"),
+    ])
+    canonical_vehicle = power_sync.EVVehiclesView(
+        canonical_hass
+    )._get_tesla_ble_vehicle("tesla_flinn")
+
+    assert canonical_vehicle is not None
+    assert canonical_vehicle["is_online"] is False
 
 
 def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesla():
