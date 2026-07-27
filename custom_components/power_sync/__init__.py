@@ -861,6 +861,7 @@ from .tesla_grid_control import (
     TeslaGridWriteStatus,
     async_set_tesla_grid_charging_confirmed,
     tesla_grid_charging_enabled_from_site_info,
+    tesla_site_info_has_structure,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 import re
@@ -34331,7 +34332,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 api_base: str,
                 site_id: str,
                 headers: dict[str, str],
-            ) -> str | None:
+            ) -> tuple[str | None, bool, bool]:
                 try:
                     async with session.get(
                         f"{api_base}/api/1/energy_sites/{site_id}/site_info",
@@ -34346,16 +34347,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 response.status,
                                 text[:200],
                             )
-                            return None
+                            return None, False, False
                         data = await response.json()
-                        return data.get("response", {}).get("default_real_mode")
+                        site_info = (
+                            data.get("response", data)
+                            if isinstance(data, dict)
+                            else None
+                        )
+                        if (
+                            not isinstance(site_info, dict)
+                            or not tesla_site_info_has_structure(site_info)
+                        ):
+                            return None, False, False
+                        return (
+                            site_info.get("default_real_mode"),
+                            "default_real_mode" in site_info,
+                            True,
+                        )
                 except Exception as err:
                     _LOGGER.warning(
                         "Tesla operation mode readback error for site %s: %s",
                         site_id,
                         err,
                     )
-                    return None
+                    return None, False, False
 
             async def _confirm_mode(
                 api_base: str,
@@ -34365,11 +34380,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 *,
                 attempts: int = 4,
                 delay_seconds: float = 2.0,
-            ) -> bool:
+            ) -> str:
+                valid_site_info_reads = 0
+                field_absent_reads = 0
+                invalid_site_info_read = False
                 for attempt in range(1, attempts + 1):
                     if attempt > 1:
                         await asyncio.sleep(delay_seconds)
-                    observed_mode = await _read_mode(api_base, site_id, headers)
+                    (
+                        observed_mode,
+                        field_present,
+                        valid_site_info,
+                    ) = await _read_mode(api_base, site_id, headers)
+                    if valid_site_info:
+                        valid_site_info_reads += 1
+                        if not field_present:
+                            field_absent_reads += 1
+                    else:
+                        invalid_site_info_read = True
                     if observed_mode == expected_mode:
                         _LOGGER.info(
                             "Confirmed Tesla operation mode %s for site %s (attempt %d/%d)",
@@ -34378,7 +34406,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             attempt,
                             attempts,
                         )
-                        return True
+                        return "confirmed"
                     _LOGGER.warning(
                         "Tesla operation mode readback for site %s is %s, expected %s (attempt %d/%d)",
                         site_id,
@@ -34387,7 +34415,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         attempt,
                         attempts,
                     )
-                return False
+                if (
+                    expected_mode == "self_consumption"
+                    and valid_site_info_reads >= 2
+                    and field_absent_reads == valid_site_info_reads
+                    and not invalid_site_info_read
+                ):
+                    return "accepted_field_absent"
+                return "unconfirmed"
 
             async def _bounce_to_autonomous(
                 api_base: str,
@@ -34422,7 +34457,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         text[:200],
                     )
                     return False
-                return await _confirm_mode(api_base, site_id, headers, "autonomous")
+                return (
+                    await _confirm_mode(
+                        api_base,
+                        site_id,
+                        headers,
+                        "autonomous",
+                    )
+                    == "confirmed"
+                )
 
             for site_id, current_token, provider in site_configs:
                 headers = {
@@ -34439,7 +34482,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ok, status, text = await _post_mode(api_base, site_id, headers, mode)
                     if ok:
                         _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
-                        if await _confirm_mode(api_base, site_id, headers, mode):
+                        confirmation = await _confirm_mode(
+                            api_base,
+                            site_id,
+                            headers,
+                            mode,
+                        )
+                        if confirmation == "accepted_field_absent":
+                            _LOGGER.warning(
+                                "Tesla accepted self_consumption for site %s "
+                                "and every valid site_info readback omitted "
+                                "default_real_mode",
+                                site_id,
+                            )
+                        if confirmation in (
+                            "confirmed",
+                            "accepted_field_absent",
+                        ):
                             any_ok = True
                             break
                         if mode == "autonomous":
