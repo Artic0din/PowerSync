@@ -51,3 +51,15 @@ def test_coordinator_data_to_ev_live_status_handles_missing_values():
     assert live_status["load_power"] == 0.0
     assert live_status["ev_power"] == 0.0
     assert live_status["is_curtailed"] is False
+
+
+def test_ev_live_status_uses_combined_sungrow_site_solar():
+    live_status = coordinator_data_to_ev_live_status(
+        {
+            "solar_power": 7.669,
+            "battery_inverter_solar_power": 4.55,
+            "ac_inverter_solar_power": 3.119,
+        }
+    )
+
+    assert live_status["solar_power"] == 7669.0

@@ -353,6 +353,72 @@ def _sungrow_ac_inverter_matches_battery(entry: ConfigEntry) -> bool:
     )
 
 
+def _merge_inverter_status_attributes(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    current_date: str,
+    current_source_id: str | None = None,
+) -> dict[str, Any]:
+    """Keep a same-day daily yield when a sleeping inverter omits it."""
+    merged = dict(current)
+    if current_source_id:
+        merged["inverter_source_id"] = current_source_id
+    if "daily_pv_generation" in merged:
+        merged["daily_pv_generation_date"] = current_date
+    elif (
+        previous.get("daily_pv_generation_date") == current_date
+        and previous.get("daily_pv_generation") is not None
+        and (
+            current_source_id is None
+            or previous.get("inverter_source_id") == current_source_id
+        )
+    ):
+        merged["daily_pv_generation"] = previous["daily_pv_generation"]
+        merged["daily_pv_generation_date"] = current_date
+    return merged
+
+
+def _restored_inverter_daily_attributes(
+    restored: dict[str, Any],
+    current_date: str,
+    current_source_id: str | None,
+) -> dict[str, Any]:
+    """Restore only a same-day daily yield, never stale instantaneous power."""
+    restored_daily = _merge_inverter_status_attributes(
+        restored,
+        {},
+        current_date,
+        current_source_id,
+    )
+    return (
+        restored_daily
+        if "daily_pv_generation" in restored_daily
+        else {}
+    )
+
+
+def _sungrow_inverter_source_id(
+    brand: Any,
+    host: Any,
+    port: Any,
+    slave_id: Any,
+) -> str | None:
+    """Return a stable identity for a configured Sungrow AC inverter."""
+    if str(brand or "").strip().lower() != "sungrow":
+        return None
+    normalized_host = str(host or "").strip()
+    if not normalized_host:
+        return None
+    try:
+        normalized_port = int(port)
+        normalized_slave_id = int(slave_id)
+    except (TypeError, ValueError):
+        return None
+    return (
+        f"sungrow:{normalized_host}:{normalized_port}:{normalized_slave_id}"
+    )
+
+
 def _home_load_power_kw(data: Any) -> float | None:
     """Return Home Load in kW, clamped to its physical lower bound."""
     if not data:
@@ -2774,6 +2840,10 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
             if (
                 self.entity_description.key == SENSOR_TYPE_SOLAR_POWER
                 and value is not None
+                and (
+                    not self.coordinator.data
+                    or "ac_inverter_solar_power" not in self.coordinator.data
+                )
             ):
                 value += _sungrow_ac_inverter_power_kw(self._entry, self.hass)
             return value if value is not None else self._restored_numeric_value(self.entity_description.key)
@@ -2805,20 +2875,31 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         else:
             attrs = {}
         if self.entity_description.key == SENSOR_TYPE_SOLAR_POWER:
-            battery_solar_kw = (
-                self.coordinator.data.get("solar_power")
-                if self.coordinator.data
-                else None
+            coordinator_data = self.coordinator.data or {}
+            has_coordinator_breakdown = (
+                "ac_inverter_solar_power" in coordinator_data
             )
-            ac_solar_kw = _sungrow_ac_inverter_power_kw(self._entry, self.hass)
+            ac_solar_kw = (
+                coordinator_data.get("ac_inverter_solar_power")
+                if has_coordinator_breakdown
+                else _sungrow_ac_inverter_power_kw(self._entry, self.hass)
+            )
+            battery_solar_kw = coordinator_data.get(
+                "battery_inverter_solar_power"
+            )
+            if battery_solar_kw is None:
+                battery_solar_kw = coordinator_data.get("solar_power")
+            total_solar_kw = (
+                coordinator_data.get("solar_power")
+                if has_coordinator_breakdown
+                else float(battery_solar_kw or 0) + float(ac_solar_kw or 0)
+            )
             if ac_solar_kw > 0:
                 attrs.update(
                     {
                         "battery_inverter_solar_power_kw": battery_solar_kw,
                         "ac_inverter_solar_power_kw": round(ac_solar_kw, 3),
-                        "total_solar_power_kw": round(
-                            float(battery_solar_kw or 0) + ac_solar_kw, 3
-                        ),
+                        "total_solar_power_kw": round(float(total_solar_kw or 0), 3),
                     }
                 )
         return _entity_currency_attrs(self, attrs)
@@ -4489,7 +4570,7 @@ class SolarCurtailmentSensor(SensorEntity):
         }
 
 
-class InverterStatusSensor(SensorEntity):
+class InverterStatusSensor(RestoreEntity, SensorEntity):
     """Sensor for displaying AC-coupled inverter status.
 
     Actively polls the inverter to get real-time status rather than
@@ -4524,6 +4605,30 @@ class InverterStatusSensor(SensorEntity):
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
         _LOGGER.info("InverterStatusSensor added to hass - setting up polling")
+
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            source_id = _sungrow_inverter_source_id(
+                self._get_config_value(CONF_INVERTER_BRAND, "sungrow"),
+                self._get_config_value(CONF_INVERTER_HOST, ""),
+                self._get_config_value(
+                    CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT
+                ),
+                self._get_config_value(
+                    CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
+                ),
+            )
+            restored_attrs = _restored_inverter_daily_attributes(
+                getattr(last_state, "attributes", {}) or {},
+                dt_util.now().date().isoformat(),
+                source_id,
+            )
+            if restored_attrs:
+                self._cached_attrs = restored_attrs
+                _LOGGER.debug(
+                    "Restored same-day AC inverter generation: %.2f kWh",
+                    restored_attrs["daily_pv_generation"],
+                )
 
         @callback
         def _handle_curtailment_update():
@@ -4600,6 +4705,12 @@ class InverterStatusSensor(SensorEntity):
         )
         inverter_port = self._get_config_value(CONF_INVERTER_PORT, 502)
         inverter_slave_id = self._get_config_value(CONF_INVERTER_SLAVE_ID, 1)
+        inverter_source_id = _sungrow_inverter_source_id(
+            inverter_brand,
+            inverter_host,
+            inverter_port,
+            inverter_slave_id,
+        )
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
         inverter_token = self._get_config_value(CONF_INVERTER_TOKEN)  # For Enphase JWT
         fronius_load_following = self._get_config_value(CONF_FRONIUS_LOAD_FOLLOWING, False)
@@ -4697,8 +4808,16 @@ class InverterStatusSensor(SensorEntity):
                     self._cached_state = "running"
                 self._offline_count = 0  # Reset backoff on successful poll
 
-            # Store attributes from inverter
-            self._cached_attrs = state.attributes or {}
+            # Store attributes from inverter. Preserve today's last good daily
+            # counter when a sleeping inverter omits registers, but never carry
+            # yesterday's value across midnight.
+            today = dt_util.now().date().isoformat()
+            self._cached_attrs = _merge_inverter_status_attributes(
+                self._cached_attrs,
+                state.attributes or {},
+                today,
+                inverter_source_id,
+            )
             self._cached_attrs["power_limit_percent"] = state.power_limit_percent
             self._cached_attrs["power_output_w"] = state.power_output_w
             self._cached_attrs["brand"] = inverter_brand
@@ -4728,7 +4847,17 @@ class InverterStatusSensor(SensorEntity):
         except Exception as e:
             _LOGGER.warning(f"Error polling inverter {inverter_host}: {e}")
             self._cached_state = "error"
-            self._cached_attrs = {"error": str(e), "brand": inverter_brand}
+            self._cached_attrs = _merge_inverter_status_attributes(
+                self._cached_attrs,
+                {"error": str(e), "brand": inverter_brand},
+                dt_util.now().date().isoformat(),
+                inverter_source_id,
+            )
+            entry_data = self.hass.data.get(DOMAIN, {}).get(
+                self._entry.entry_id, {}
+            )
+            if entry_data:
+                entry_data["inverter_attributes"] = self._cached_attrs
             self._offline_count += 1  # Increment backoff counter on error
 
         self.async_write_ha_state()

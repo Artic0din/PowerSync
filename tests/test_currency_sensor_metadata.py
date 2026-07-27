@@ -428,7 +428,7 @@ def test_foxess_battery_energy_sensor_names_are_distinct_from_generic_totals():
     assert foxess_names["daily_battery_discharge_foxess"] == "FoxESS Daily Battery Discharge"
 
 
-def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
+def test_sungrow_solar_sensor_does_not_double_count_coordinator_ac_output():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "solar_power")
     entry = SimpleNamespace(
@@ -443,7 +443,13 @@ def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
         options={},
     )
     entity = sensor.TeslaEnergySensor(
-        SimpleNamespace(data={"solar_power": 4.2}),
+        SimpleNamespace(
+            data={
+                "solar_power": 9.3,
+                "battery_inverter_solar_power": 4.2,
+                "ac_inverter_solar_power": 5.1,
+            }
+        ),
         desc,
         entry,
     )

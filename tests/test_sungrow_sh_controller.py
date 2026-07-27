@@ -36,6 +36,7 @@ def _install_const_stub() -> None:
     const.TESLEMETRY_API_BASE_URL = "https://example.test"
     const.FLEET_API_BASE_URL = "https://example.test"
     const.POWERSYNC_API_BASE_URL = "https://example.test"
+    const.POWERSYNC_AUTH_ME_URL = "https://example.test/auth/me"
     const.TESLA_PROVIDER_TESLEMETRY = "teslemetry"
     const.TESLA_PROVIDER_FLEET_API = "fleet_api"
     const.TESLA_PROVIDER_POWERSYNC = "powersync"
@@ -50,6 +51,7 @@ def _install_const_stub() -> None:
     const.FLOW_POWER_KWATCH_REGIONS = {}
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
     const.CONF_MONITORING_MODE = "monitoring_mode"
+    const.CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
     const.CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"
@@ -691,10 +693,15 @@ def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator._total_import_baseline = None
     coordinator._total_export_baseline = None
     coordinator._baseline_date = None
+    coordinator._ac_inverter_source_id = "sungrow:192.0.2.20:502:1"
+    coordinator._ac_inverter_energy_store = None
+    coordinator._ac_inverter_daily_energy_restored = False
+    coordinator._ac_inverter_daily_energy_kwh = None
+    coordinator._ac_inverter_daily_energy_date = None
     return coordinator
 
 
-def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
+def test_sungrow_coordinator_combines_separate_ac_inverter_solar_telemetry():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
     class FakeController:
@@ -708,6 +715,11 @@ def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
                 "battery_soh": 98.0,
                 "battery_temp": 20.8,
                 "inverter_temperature": 31.2,
+                "daily_pv_generation": 27.9,
+                "daily_import": 10.0,
+                "daily_export": 17.0,
+                "daily_battery_discharge": 20.0,
+                "daily_battery_charge": 5.0,
             }
 
     async def run_update():
@@ -719,7 +731,12 @@ def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
                 "power_sync": {
                     "entry-1": {
                         "inverter_attributes": {
+                            "brand": "sungrow",
+                            "inverter_source_id": "sungrow:192.0.2.20:502:1",
                             "power_output_w": 3119,
+                            "daily_pv_generation": 18.2,
+                            "daily_pv_generation_date": "2026-05-20",
+                            "last_poll": "2026-05-20T10:00:00",
                         },
                     },
                 },
@@ -735,12 +752,339 @@ def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
     finally:
         restore()
 
-    assert data["solar_power"] == 4.55
+    assert data["battery_inverter_solar_power"] == 4.55
     assert data["ac_inverter_solar_power"] == 3.119
+    assert round(data["solar_power"], 3) == 7.669
+    assert data["energy_summary"]["pv_today_kwh"] == 46.1
+    assert data["energy_summary"]["load_today_kwh"] == 54.1
     assert data["battery_temp"] == 20.8
     assert data["inverter_temperature"] == 31.2
     assert round(data["load_power"], 3) == 1.979
+    assert round(energy_acc.updates[-1][0], 3) == 7.669
     assert round(energy_acc.updates[-1][3], 3) == 1.979
+
+
+def test_sungrow_coordinator_ignores_stale_ac_power_but_keeps_today_energy():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": -500,
+                "load_power": 4050,
+                "pv_power": 4550,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "brand": "sungrow",
+                            "inverter_source_id": "sungrow:192.0.2.20:502:1",
+                            "power_output_w": 3119,
+                            "daily_pv_generation": 18.2,
+                            "daily_pv_generation_date": "2026-05-20",
+                            "last_poll": "2026-05-20T09:55:00",
+                        },
+                    },
+                }
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["battery_inverter_solar_power"] == 4.55
+    assert data["ac_inverter_solar_power"] == 0
+    assert data["solar_power"] == 4.55
+    assert data["energy_summary"]["pv_today_kwh"] == 46.1
+
+
+def test_sungrow_coordinator_drops_previous_day_ac_energy():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "brand": "sungrow",
+                            "inverter_source_id": "sungrow:192.0.2.20:502:1",
+                            "daily_pv_generation": 18.2,
+                            "daily_pv_generation_date": "2026-05-19",
+                            "last_poll": "2026-05-19T17:00:00",
+                        },
+                    },
+                }
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["energy_summary"]["pv_today_kwh"] == 0
+
+
+def test_sungrow_coordinator_restores_ac_daily_energy_before_first_poll():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}}
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._ac_inverter_energy_store = _FakeStore(
+            {
+                "source_id": "sungrow:192.0.2.20:502:1",
+                "date": "2026-05-20",
+                "daily_pv_generation": 18.2,
+            }
+        )
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["ac_inverter_solar_power"] == 0
+    assert data["energy_summary"]["pv_today_kwh"] == 46.1
+
+
+def test_sungrow_coordinator_ignores_persisted_energy_from_old_ac_source():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}}
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._ac_inverter_energy_store = _FakeStore(
+            {
+                "source_id": "sungrow:192.0.2.99:502:1",
+                "date": "2026-05-20",
+                "daily_pv_generation": 18.2,
+            }
+        )
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["energy_summary"]["pv_today_kwh"] == 27.9
+
+
+def test_sungrow_coordinator_does_not_decrease_same_day_persisted_ac_energy():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "brand": "sungrow",
+                            "inverter_source_id": "sungrow:192.0.2.20:502:1",
+                            "daily_pv_generation": 0,
+                            "daily_pv_generation_date": "2026-05-20",
+                            "last_poll": "2026-05-20T10:00:00",
+                        },
+                    },
+                }
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._ac_inverter_energy_store = _FakeStore(
+            {
+                "source_id": "sungrow:192.0.2.20:502:1",
+                "date": "2026-05-20",
+                "daily_pv_generation": 18.2,
+            }
+        )
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["energy_summary"]["pv_today_kwh"] == 46.1
+
+
+def test_sungrow_coordinator_does_not_double_count_ac_in_energy_balance_fallback():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 500,
+                "meter_power": -1000,
+                "load_power": 7000,
+                "pv_power": None,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "brand": "sungrow",
+                            "inverter_source_id": "sungrow:192.0.2.20:502:1",
+                            "power_output_w": 3000,
+                            "daily_pv_generation": 18.2,
+                            "daily_pv_generation_date": "2026-05-20",
+                            "last_poll": "2026-05-20T10:00:00",
+                        },
+                    },
+                }
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["solar_power"] == 7.5
+    assert data["battery_inverter_solar_power"] == 4.5
+    assert data["ac_inverter_solar_power"] == 3.0
+    assert data["load_power"] == 7.0
+
+
+def test_sungrow_coordinator_does_not_aggregate_other_ac_inverter_brands():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 70.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 4550,
+                "pv_power": 4550,
+                "daily_pv_generation": 27.9,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "brand": "goodwe",
+                            "power_output_w": 3119,
+                            "daily_pv_generation": 18.2,
+                            "daily_pv_generation_date": "2026-05-20",
+                            "last_poll": "2026-05-20T10:00:00",
+                        },
+                    },
+                }
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["solar_power"] == 4.55
+    assert data["ac_inverter_solar_power"] == 0
+    assert data["energy_summary"]["pv_today_kwh"] == 27.9
 
 
 def test_sungrow_coordinator_derives_zero_load_register_from_energy_balance():

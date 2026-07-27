@@ -19435,12 +19435,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Initializing Sungrow Modbus coordinator: %s:%s (slave %s)",
             sungrow_host, sungrow_port, sungrow_slave_id
         )
+        ac_inverter_enabled = entry.options.get(
+            CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+        )
+        ac_inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND,
+            entry.data.get(CONF_INVERTER_BRAND),
+        )
+        ac_inverter_host = entry.options.get(
+            CONF_INVERTER_HOST,
+            entry.data.get(CONF_INVERTER_HOST),
+        )
+        ac_inverter_port = entry.options.get(
+            CONF_INVERTER_PORT,
+            entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+        )
+        ac_inverter_slave_id = entry.options.get(
+            CONF_INVERTER_SLAVE_ID,
+            entry.data.get(
+                CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
+            ),
+        )
+        has_separate_sungrow_ac_inverter = (
+            ac_inverter_enabled
+            and ac_inverter_brand == "sungrow"
+            and bool(ac_inverter_host)
+            and (
+                str(ac_inverter_host).strip() != str(sungrow_host).strip()
+                or int(ac_inverter_port) != int(sungrow_port)
+                or int(ac_inverter_slave_id) != int(sungrow_slave_id)
+            )
+        )
+        ac_inverter_source_id = (
+            f"sungrow:{str(ac_inverter_host).strip()}:"
+            f"{int(ac_inverter_port)}:{int(ac_inverter_slave_id)}"
+            if has_separate_sungrow_ac_inverter
+            else None
+        )
         sungrow_coordinator = SungrowEnergyCoordinator(
             hass,
             sungrow_host,
             port=sungrow_port,
             slave_id=sungrow_slave_id,
             entry_id=entry.entry_id,
+            ac_inverter_source_id=ac_inverter_source_id,
         )
 
     elif is_foxess:

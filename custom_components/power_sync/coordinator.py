@@ -104,21 +104,96 @@ def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
     return numeric_value / 1000.0 if abs(numeric_value) > 100 else numeric_value
 
 
-def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> float:
-    """Return the latest separately configured AC inverter output in kW."""
+def _configured_sungrow_ac_inverter_attributes(
+    hass: HomeAssistant,
+    entry_id: str,
+    expected_source_id: str,
+) -> dict[str, Any]:
+    """Return telemetry from the separately configured Sungrow AC inverter."""
     attrs = (
         hass.data.get(DOMAIN, {})
         .get(entry_id, {})
         .get("inverter_attributes")
         or {}
     )
+    if not isinstance(attrs, dict):
+        return {}
+    if str(attrs.get("brand") or "").strip().lower() != "sungrow":
+        return {}
+    if attrs.get("inverter_source_id") != expected_source_id:
+        return {}
+    return attrs
+
+
+def _inverter_poll_datetime(attrs: dict[str, Any]) -> datetime | None:
+    """Parse the AC inverter poll timestamp when one is available."""
+    raw_value = attrs.get("last_poll")
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _configured_ac_inverter_power_kw(
+    hass: HomeAssistant,
+    entry_id: str,
+    expected_source_id: str,
+) -> float:
+    """Return fresh output from the separately configured AC inverter in kW."""
+    attrs = _configured_sungrow_ac_inverter_attributes(
+        hass, entry_id, expected_source_id
+    )
+    polled_at = _inverter_poll_datetime(attrs)
+    if polled_at is None:
+        return 0.0
+    now = dt_util.now()
+    if polled_at.tzinfo is None and now.tzinfo is not None:
+        polled_at = polled_at.replace(tzinfo=now.tzinfo)
+    elif polled_at.tzinfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=polled_at.tzinfo)
+    poll_age = (now - polled_at).total_seconds()
+    if poll_age < -5 or poll_age > 120:
+        return 0.0
+
     power_w = attrs.get("power_output_w")
     if power_w is None:
         power_w = attrs.get("dc_power")
     try:
-        return max(0.0, float(power_w or 0) / 1000.0)
+        power_kw = float(power_w or 0) / 1000.0
     except (TypeError, ValueError):
         return 0.0
+    return max(0.0, power_kw) if math.isfinite(power_kw) else 0.0
+
+
+def _configured_ac_inverter_daily_energy_kwh(
+    hass: HomeAssistant,
+    entry_id: str,
+    expected_source_id: str,
+) -> float | None:
+    """Return today's separately configured AC inverter generation counter."""
+    attrs = _configured_sungrow_ac_inverter_attributes(
+        hass, entry_id, expected_source_id
+    )
+    value = attrs.get("daily_pv_generation")
+    if value is None:
+        return None
+
+    recorded_date = attrs.get("daily_pv_generation_date")
+    if not recorded_date:
+        polled_at = _inverter_poll_datetime(attrs)
+        recorded_date = polled_at.date().isoformat() if polled_at else None
+    if recorded_date != dt_util.now().date().isoformat():
+        return None
+
+    try:
+        energy_kwh = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(energy_kwh):
+        return None
+    return max(0.0, energy_kwh)
 
 
 def _is_night_for_solar_telemetry(hass: HomeAssistant) -> bool:
@@ -4568,6 +4643,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
     _EXPORT_CONTROL_STORAGE_VERSION = 1
+    _AC_INVERTER_ENERGY_STORAGE_VERSION = 1
 
     def __init__(
         self,
@@ -4576,6 +4652,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         port: int = 502,
         slave_id: int = 1,
         entry_id: str = "",
+        ac_inverter_source_id: str | None = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -4592,6 +4669,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
+        self._ac_inverter_source_id = ac_inverter_source_id
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
         self._export_control_store = (
@@ -4603,6 +4681,18 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             if entry_id
             else None
         )
+        self._ac_inverter_energy_store = (
+            Store(
+                hass,
+                self._AC_INVERTER_ENERGY_STORAGE_VERSION,
+                f"{DOMAIN}.sungrow_ac_inverter_energy.{entry_id}",
+            )
+            if entry_id and ac_inverter_source_id
+            else None
+        )
+        self._ac_inverter_daily_energy_restored = False
+        self._ac_inverter_daily_energy_kwh: float | None = None
+        self._ac_inverter_daily_energy_date: str | None = None
         # Sungrow/WiNet Modbus is sensitive to overlapping TCP operations.
         # Keep each coordinator poll or control command as one serialized
         # transaction so a refresh cannot close/reopen the shared client in the
@@ -4669,6 +4759,14 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # software accumulator has already recorded energy — if so, try
         # deriving daily values from the total (lifetime) registers.
         daily_pv = data.get("daily_pv_generation")
+        ac_inverter_daily_pv = data.get("ac_inverter_daily_pv_generation")
+        site_daily_pv = daily_pv
+        if daily_pv is not None and ac_inverter_daily_pv is not None:
+            site_daily_pv = round(
+                max(0.0, float(daily_pv))
+                + max(0.0, float(ac_inverter_daily_pv)),
+                2,
+            )
         daily_import = data.get("daily_import")
         daily_export = data.get("daily_export")
         daily_discharge = data.get("daily_battery_discharge")
@@ -4677,8 +4775,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # Update midnight baselines for total register delta method
         self._update_total_baselines(data)
 
-        if daily_pv is not None:
-            summary["pv_today_kwh"] = daily_pv
+        if site_daily_pv is not None:
+            summary["pv_today_kwh"] = site_daily_pv
         else:
             # No daily PV register (e.g. FoxESS) — use energy accumulator
             summary["pv_today_kwh"] = self._energy_acc.solar_kwh
@@ -4714,9 +4812,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         final_export = summary.get("grid_export_today_kwh", 0)
 
         # Calculate daily load from energy balance (no register for this)
-        if all(v is not None for v in (daily_pv, daily_discharge, daily_charge)):
+        if all(
+            v is not None
+            for v in (site_daily_pv, daily_discharge, daily_charge)
+        ):
             summary["load_today_kwh"] = round(max(0,
-                daily_pv + final_import + (daily_discharge or 0) - final_export - (daily_charge or 0)
+                site_daily_pv + final_import + (daily_discharge or 0)
+                - final_export - (daily_charge or 0)
             ), 2)
 
         # Recompute daily avg using possibly-overridden load from hardware registers
@@ -4730,10 +4832,81 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         return summary
 
+    async def _async_restore_ac_inverter_daily_energy(self) -> None:
+        """Restore today's separate Sungrow generation before first refresh."""
+        if self._ac_inverter_daily_energy_restored:
+            return
+        self._ac_inverter_daily_energy_restored = True
+        store = self._ac_inverter_energy_store
+        if store is None:
+            return
+        try:
+            payload = await store.async_load()
+        except Exception as exc:
+            _LOGGER.debug(
+                "Could not restore separate Sungrow daily generation: %s", exc
+            )
+            return
+        if not isinstance(payload, dict):
+            return
+        today = dt_util.now().date().isoformat()
+        if (
+            payload.get("date") != today
+            or payload.get("source_id") != self._ac_inverter_source_id
+        ):
+            return
+        try:
+            value = float(payload.get("daily_pv_generation"))
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value):
+            return
+        self._ac_inverter_daily_energy_kwh = max(0.0, value)
+        self._ac_inverter_daily_energy_date = today
+
+    async def _async_resolve_ac_inverter_daily_energy(
+        self, current_value: float | None
+    ) -> float | None:
+        """Return today's current or persisted separate Sungrow generation."""
+        today = dt_util.now().date().isoformat()
+        if current_value is None:
+            if self._ac_inverter_daily_energy_date == today:
+                return self._ac_inverter_daily_energy_kwh
+            return None
+
+        value = max(0.0, float(current_value))
+        if (
+            self._ac_inverter_daily_energy_date == today
+            and self._ac_inverter_daily_energy_kwh is not None
+        ):
+            value = max(value, self._ac_inverter_daily_energy_kwh)
+        changed = (
+            self._ac_inverter_daily_energy_date != today
+            or self._ac_inverter_daily_energy_kwh != value
+        )
+        self._ac_inverter_daily_energy_kwh = value
+        self._ac_inverter_daily_energy_date = today
+        if changed and self._ac_inverter_energy_store is not None:
+            try:
+                await self._ac_inverter_energy_store.async_save(
+                    {
+                        "source_id": self._ac_inverter_source_id,
+                        "date": today,
+                        "daily_pv_generation": value,
+                    }
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Could not persist separate Sungrow daily generation: %s",
+                    exc,
+                )
+        return value
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Sungrow system via Modbus."""
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
+        await self._async_restore_ac_inverter_daily_energy()
         try:
             async with self._modbus_lock:
                 data = await self._controller.get_battery_data()
@@ -4764,8 +4937,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 grid_kw = -export_power_w / 1000  # Invert: positive = importing, negative = exporting
             load_kw = (load_power_w or 0) / 1000
 
-            # Use direct PV reading if available; otherwise calculate from energy balance
-            if pv_power_w is not None:
+            # Use direct hybrid PV reading if available; otherwise calculate
+            # site-total solar from the energy balance.
+            has_direct_hybrid_pv = pv_power_w is not None
+            if has_direct_hybrid_pv:
                 solar_kw = max(0, pv_power_w / 1000)
                 # Derive load from energy balance: Load = Solar + Grid_Import + Battery_Discharge
                 # (more reliable than the load register on some firmware)
@@ -4811,15 +4986,58 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 # Fallback: estimate solar from energy balance
                 solar_kw = max(0, load_kw - grid_kw - battery_kw)
 
-            ac_inverter_kw = _configured_ac_inverter_power_kw(self.hass, self._entry_id)
-            if ac_inverter_kw > 0:
-                combined_load_kw = max(0.0, solar_kw + ac_inverter_kw + grid_kw + battery_kw)
+            battery_inverter_solar_kw = solar_kw
+            ac_inverter_kw = (
+                _configured_ac_inverter_power_kw(
+                    self.hass,
+                    self._entry_id,
+                    self._ac_inverter_source_id,
+                )
+                if self._ac_inverter_source_id
+                else 0.0
+            )
+            if has_direct_hybrid_pv:
+                site_solar_kw = battery_inverter_solar_kw + ac_inverter_kw
+            else:
+                # The fallback uses site load, site grid and battery power, so
+                # it already includes separately coupled solar.
+                site_solar_kw = solar_kw
+                battery_inverter_solar_kw = max(
+                    0.0, site_solar_kw - ac_inverter_kw
+                )
+            if has_direct_hybrid_pv and ac_inverter_kw > 0:
+                combined_load_kw = max(
+                    0.0, site_solar_kw + grid_kw + battery_kw
+                )
                 if combined_load_kw > load_kw:
                     load_kw = combined_load_kw
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                max(0, site_solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
+            current_ac_inverter_daily_pv = (
+                _configured_ac_inverter_daily_energy_kwh(
+                    self.hass,
+                    self._entry_id,
+                    self._ac_inverter_source_id,
+                )
+                if self._ac_inverter_source_id
+                else None
+            )
+            ac_inverter_daily_pv = (
+                await self._async_resolve_ac_inverter_daily_energy(
+                    current_ac_inverter_daily_pv
+                )
+            )
+            if ac_inverter_daily_pv is not None:
+                data["ac_inverter_daily_pv_generation"] = ac_inverter_daily_pv
 
             # Sanity-check SOC — 0xFFFF (6553.5%) means Modbus returned invalid data
             raw_soc = data.get("battery_soc", 0)
@@ -4832,7 +5050,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 raw_soc = 0
 
             energy_data = {
-                "solar_power": max(0, solar_kw),  # kW, clamp to 0 if calculated negative
+                "solar_power": max(0, site_solar_kw),  # kW, total configured site solar
+                "battery_inverter_solar_power": max(
+                    0, battery_inverter_solar_kw
+                ),
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
                 "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
                 "load_power": load_kw,  # kW
