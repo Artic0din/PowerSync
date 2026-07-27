@@ -33353,6 +33353,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        # A Tesla force-charge can leave a delayed charge-kick task waiting to
+        # complete its self_consumption -> autonomous bounce. Self-consumption
+        # is a newer operation-mode owner, so invalidate that task before the
+        # first await; otherwise its autonomous phase can race this write and
+        # strand the Powerwall back in Savings/TOU mode while the optimizer is
+        # already publishing self_consumption.
+        if active_battery_system in (None, "tesla"):
+            _supersede_tesla_charge_kick(
+                "set self consumption",
+                owns_operation_mode=True,
+            )
+
         internal_hold_soc_transition = (
             source == "hold_soc"
             and call.data.get("_hold_soc_transition_token")

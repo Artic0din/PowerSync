@@ -2766,6 +2766,7 @@ def test_tesla_charge_kick_retry_is_generation_guarded_and_direct_controls_super
     for handler_name in (
         "handle_set_backup_reserve",
         "handle_set_operation_mode",
+        "handle_set_self_consumption",
         "handle_set_grid_charging",
     ):
         handler_source = ast.get_source_segment(
@@ -2783,6 +2784,25 @@ def test_tesla_charge_kick_retry_is_generation_guarded_and_direct_controls_super
     )
     assert operation_source is not None
     assert "owns_operation_mode=True" in operation_source
+
+
+def test_optimizer_self_consumption_owns_mode_before_pending_charge_kick_can_resume():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+
+    assert handler_source is not None
+    supersede_index = handler_source.index("_supersede_tesla_charge_kick(")
+    first_await_index = handler_source.index("await ")
+    assert supersede_index < first_await_index
+    supersede_call = handler_source[
+        supersede_index:handler_source.index(")", supersede_index) + 1
+    ]
+    assert '"set self consumption"' in supersede_call
+    assert "owns_operation_mode=True" in supersede_call
 
 
 def test_tesla_backup_reserve_kick_cannot_adopt_a_newer_force_generation():
