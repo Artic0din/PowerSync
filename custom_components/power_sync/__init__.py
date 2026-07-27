@@ -9622,7 +9622,10 @@ class ProviderConfigView(HomeAssistantView):
                             )
                             from .quota import QuotaLedger
 
-                            snapshot = CovaUPlanSnapshot.from_dict(snapshot_raw)
+                            snapshot = CovaUPlanSnapshot.from_dict(
+                                snapshot_raw,
+                                timezone_token=self._hass.config.time_zone,
+                            )
                             provider_contract = covau_provider_contract(
                                 snapshot,
                                 QuotaLedger(covau_quota_rules(snapshot)),
@@ -20900,7 +20903,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_COVAU_PLAN_SNAPSHOT),
         )
         try:
-            covau_snapshot = CovaUPlanSnapshot.from_dict(snapshot_raw)
+            covau_snapshot = CovaUPlanSnapshot.from_dict(
+                snapshot_raw,
+                timezone_token=hass.config.time_zone,
+            )
             covau_runtime = CovaUQuotaRuntime(
                 hass,
                 entry,

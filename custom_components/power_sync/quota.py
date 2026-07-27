@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Iterable, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 Direction = Literal["import", "export"]
 Confidence = Literal["authoritative", "estimated", "unknown"]
@@ -422,11 +423,17 @@ def import_legacy_settled_state(
 
 
 def tariff_datetime(value: datetime, token: str) -> datetime:
-    """Convert to the tariff clock.  AEST is fixed UTC+10, never Adelaide DST."""
+    """Convert to a fixed-offset or IANA tariff clock."""
     value = _aware(value)
-    if str(token).upper() == "AEST":
+    normalized = str(token or "").strip()
+    if normalized.upper() == "AEST":
         return value.astimezone(timezone(timedelta(hours=10), name="AEST"))
-    return value
+    if not normalized or normalized.upper() == "LOCAL":
+        return value
+    try:
+        return value.astimezone(ZoneInfo(normalized))
+    except ZoneInfoNotFoundError:
+        return value
 
 
 def _window_overlap_seconds(start: datetime, end: datetime, rule: QuotaRule) -> float:

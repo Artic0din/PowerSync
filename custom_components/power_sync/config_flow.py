@@ -2131,7 +2131,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     raw = await async_fetch_covau_plan(self.hass, plan_id)
-                    snapshot = normalize_covau_plan(raw, plan_id)
+                    snapshot = normalize_covau_plan(
+                        raw,
+                        plan_id,
+                        timezone_token=self.hass.config.time_zone,
+                    )
                 except Exception as err:
                     _LOGGER.warning("CovaU public plan fetch failed for %s: %s", plan_id, err)
                     errors["base"] = "cannot_connect"
@@ -2189,29 +2193,71 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 day_rate = float(user_input["day_rate_c_per_kwh"])
-                snapshot = validate_manual_covau_snapshot({
-                    "plan_id": user_input.get("plan_id") or "manual_covau_solarmax",
-                    "display_name": user_input.get("display_name") or "Manual CovaU SolarMax",
-                    "distributor": user_input.get(CONF_COVAU_DISTRIBUTOR) or "Manual",
-                    "effective_date": user_input.get("effective_date") or "",
-                    "supply_c_per_day": user_input["supply_c_per_day"],
-                    "import_periods": [
-                        {"start": "00:00", "end": "06:00", "c_per_kwh": user_input["overnight_rate_c_per_kwh"]},
-                        {"start": "06:00", "end": "11:00", "c_per_kwh": day_rate},
-                        {"start": "11:00", "end": "14:00", "c_per_kwh": day_rate},
-                        {"start": "14:00", "end": "15:00", "c_per_kwh": day_rate},
-                        {"start": "15:00", "end": "21:00", "c_per_kwh": user_input["peak_rate_c_per_kwh"]},
-                        {"start": "21:00", "end": "24:00", "c_per_kwh": day_rate},
-                    ],
-                    "export_base_c_per_kwh": user_input["export_base_c_per_kwh"],
-                    "free_import_start": "11:00",
-                    "free_import_end": "14:00",
-                    "free_import_cap_kwh": user_input["free_import_cap_kwh"],
-                    "premium_export_start": "18:00",
-                    "premium_export_end": "21:00",
-                    "premium_export_cap_kwh": user_input["premium_export_cap_kwh"],
-                    "premium_export_total_c_per_kwh": user_input["premium_export_total_c_per_kwh"],
-                })
+                snapshot = validate_manual_covau_snapshot(
+                    {
+                        "plan_id": user_input.get("plan_id")
+                        or "manual_covau_solarmax",
+                        "display_name": user_input.get("display_name")
+                        or "Manual CovaU SolarMax",
+                        "distributor": user_input.get(CONF_COVAU_DISTRIBUTOR)
+                        or "Manual",
+                        "effective_date": user_input.get("effective_date") or "",
+                        "supply_c_per_day": user_input["supply_c_per_day"],
+                        "import_periods": [
+                            {
+                                "start": "00:00",
+                                "end": "06:00",
+                                "c_per_kwh": user_input[
+                                    "overnight_rate_c_per_kwh"
+                                ],
+                            },
+                            {
+                                "start": "06:00",
+                                "end": "11:00",
+                                "c_per_kwh": day_rate,
+                            },
+                            {
+                                "start": "11:00",
+                                "end": "14:00",
+                                "c_per_kwh": day_rate,
+                            },
+                            {
+                                "start": "14:00",
+                                "end": "15:00",
+                                "c_per_kwh": day_rate,
+                            },
+                            {
+                                "start": "15:00",
+                                "end": "21:00",
+                                "c_per_kwh": user_input[
+                                    "peak_rate_c_per_kwh"
+                                ],
+                            },
+                            {
+                                "start": "21:00",
+                                "end": "24:00",
+                                "c_per_kwh": day_rate,
+                            },
+                        ],
+                        "export_base_c_per_kwh": user_input[
+                            "export_base_c_per_kwh"
+                        ],
+                        "free_import_start": "11:00",
+                        "free_import_end": "14:00",
+                        "free_import_cap_kwh": user_input[
+                            "free_import_cap_kwh"
+                        ],
+                        "premium_export_start": "18:00",
+                        "premium_export_end": "21:00",
+                        "premium_export_cap_kwh": user_input[
+                            "premium_export_cap_kwh"
+                        ],
+                        "premium_export_total_c_per_kwh": user_input[
+                            "premium_export_total_c_per_kwh"
+                        ],
+                    },
+                    timezone_token=self.hass.config.time_zone,
+                )
             except (KeyError, TypeError, ValueError) as err:
                 _LOGGER.debug("Manual CovaU tariff validation failed: %s", err)
                 errors["base"] = "covau_manual_tariff_invalid"
@@ -8705,7 +8751,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ):
                     try:
                         raw = await async_fetch_covau_plan(self.hass, plan_id)
-                        snapshot_dict = normalize_covau_plan(raw, plan_id).to_dict()
+                        snapshot_dict = normalize_covau_plan(
+                            raw,
+                            plan_id,
+                            timezone_token=self.hass.config.time_zone,
+                        ).to_dict()
                     except Exception as err:
                         _LOGGER.warning(
                             "CovaU public plan fetch failed for %s: %s", plan_id, err

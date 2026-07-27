@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .quota import (
     MarginalBucket,
@@ -18,13 +19,19 @@ from .quota import (
 )
 
 COVAU_SCHEMA_VERSION = 1
-COVAU_PARSER_VERSION = 1
+COVAU_PARSER_VERSION = 2
 COVAU_CDR_BASE_URL = "https://cdr.energymadeeasy.gov.au/covau/cds-au/v1/energy/plans"
 COVAU_SOURCE_KIND = "aer_cdr"
 COVAU_IMPORT_RULE_ID = "covau_solarmax_free_import"
 COVAU_EXPORT_RULE_ID = "covau_solarmax_premium_export"
 COVAU_BASE_IMPORT_PERIOD_ID = "covau_base_import"
 COVAU_BASE_EXPORT_PERIOD_ID = "covau_base_export"
+
+COVAU_STATE_TIMEZONES = {
+    "NSW": "Australia/Sydney",
+    "QLD": "Australia/Brisbane",
+    "SA": "Australia/Adelaide",
+}
 
 SUPPORTED_SOLARMAX_PLANS: dict[str, dict[str, str]] = {
     "COV1117610MRE2@EME": {
@@ -95,17 +102,40 @@ class CovaUPlanSnapshot:
         return value
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "CovaUPlanSnapshot":
+    def from_dict(
+        cls,
+        raw: dict[str, Any],
+        *,
+        timezone_token: str | None = None,
+    ) -> "CovaUPlanSnapshot":
+        state = str(raw.get("state") or "")
+        stored_timezone = str(raw.get("timezone_token") or "")
+        effective_timezone = _local_timezone_token(
+            timezone_token or stored_timezone,
+            state,
+        )
+        stored_parser_version = int(
+            raw.get("parser_version", COVAU_PARSER_VERSION)
+        )
+        content_hash = str(raw.get("content_hash") or "")
+        if (
+            effective_timezone != stored_timezone
+            or stored_parser_version < COVAU_PARSER_VERSION
+        ):
+            content_hash = _migrated_content_hash(
+                content_hash,
+                effective_timezone,
+            )
         return cls(
             schema_version=int(raw.get("schema_version", COVAU_SCHEMA_VERSION)),
-            parser_version=int(raw.get("parser_version", COVAU_PARSER_VERSION)),
+            parser_version=COVAU_PARSER_VERSION,
             plan_id=str(raw["plan_id"]),
             display_name=str(raw.get("display_name") or raw["plan_id"]),
             distributor=str(raw.get("distributor") or ""),
-            state=str(raw.get("state") or ""),
+            state=state,
             effective_date=str(raw.get("effective_date") or ""),
             withdrawn_date=raw.get("withdrawn_date"),
-            timezone_token=str(raw.get("timezone_token") or "AEST"),
+            timezone_token=effective_timezone,
             supply_c_per_day=float(raw.get("supply_c_per_day") or 0.0),
             import_periods=tuple(
                 CovaURatePeriod(
@@ -128,7 +158,7 @@ class CovaUPlanSnapshot:
             source_kind=str(raw.get("source_kind") or COVAU_SOURCE_KIND),
             source_url=str(raw.get("source_url") or ""),
             source_last_updated=raw.get("source_last_updated"),
-            content_hash=str(raw.get("content_hash") or ""),
+            content_hash=content_hash,
             manual=bool(raw.get("manual", False)),
         )
 
@@ -165,16 +195,21 @@ async def async_fetch_covau_plan(hass: Any, plan_id: str) -> dict[str, Any]:
     return await response.json()
 
 
-def normalize_covau_plan(raw_response: dict[str, Any], expected_plan_id: str) -> CovaUPlanSnapshot:
-    """Normalize an immutable AER/CDR snapshot with explicit GST handling."""
+def normalize_covau_plan(
+    raw_response: dict[str, Any],
+    expected_plan_id: str,
+    *,
+    timezone_token: str | None = None,
+) -> CovaUPlanSnapshot:
+    """Normalize an AER/CDR snapshot using the customer's local tariff clock."""
     data = raw_response.get("data") or {}
     plan_id = str(data.get("planId") or "")
     if plan_id != expected_plan_id or plan_id not in SUPPORTED_SOLARMAX_PLANS:
         raise ValueError("CDR response did not match the selected SolarMax plan")
     contract = data.get("electricityContract") or {}
-    timezone_token = str(contract.get("timeZone") or "")
-    if timezone_token != "AEST":
-        raise ValueError("SolarMax plan must declare the fixed AEST tariff clock")
+    source_timezone_token = str(contract.get("timeZone") or "")
+    if source_timezone_token not in {"AEST", "LOCAL"}:
+        raise ValueError("SolarMax CDR plan has an unsupported source timezone")
     tariff_periods = contract.get("tariffPeriod") or []
     if not tariff_periods:
         raise ValueError("SolarMax plan has no tariff periods")
@@ -226,8 +261,20 @@ def normalize_covau_plan(raw_response: dict[str, Any], expected_plan_id: str) ->
         raise ValueError("SolarMax premium export price is below its base rate")
 
     metadata = SUPPORTED_SOLARMAX_PLANS[plan_id]
+    effective_timezone = _local_timezone_token(
+        timezone_token,
+        metadata["state"],
+    )
     source_url = f"{COVAU_CDR_BASE_URL}/{quote(plan_id, safe='')}"
-    canonical = json.dumps(raw_response, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        {
+            "source": raw_response,
+            "timezone_token": effective_timezone,
+            "parser_version": COVAU_PARSER_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return CovaUPlanSnapshot(
         schema_version=COVAU_SCHEMA_VERSION,
         parser_version=COVAU_PARSER_VERSION,
@@ -237,7 +284,7 @@ def normalize_covau_plan(raw_response: dict[str, Any], expected_plan_id: str) ->
         state=metadata["state"],
         effective_date=str(data.get("effectiveFrom") or ""),
         withdrawn_date=data.get("effectiveTo"),
-        timezone_token=timezone_token,
+        timezone_token=effective_timezone,
         supply_c_per_day=round(supply_c_per_day, 6),
         import_periods=tuple(import_periods),
         export_base_c_per_kwh=round(export_base, 6),
@@ -255,7 +302,11 @@ def normalize_covau_plan(raw_response: dict[str, Any], expected_plan_id: str) ->
     )
 
 
-def validate_manual_covau_snapshot(raw: dict[str, Any]) -> CovaUPlanSnapshot:
+def validate_manual_covau_snapshot(
+    raw: dict[str, Any],
+    *,
+    timezone_token: str | None = None,
+) -> CovaUPlanSnapshot:
     """Validate a user-entered stepped-tariff fallback without plan substitution."""
     periods = tuple(
         CovaURatePeriod(
@@ -269,17 +320,27 @@ def validate_manual_covau_snapshot(raw: dict[str, Any]) -> CovaUPlanSnapshot:
         raise ValueError("At least one stepped import period is required")
     _validate_full_day(periods)
     plan_id = str(raw.get("plan_id") or "manual_covau_solarmax").strip()
-    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+    state = str(raw.get("state") or "")
+    effective_timezone = _local_timezone_token(timezone_token, state)
+    canonical = json.dumps(
+        {
+            "source": raw,
+            "timezone_token": effective_timezone,
+            "parser_version": COVAU_PARSER_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return CovaUPlanSnapshot(
         schema_version=COVAU_SCHEMA_VERSION,
         parser_version=COVAU_PARSER_VERSION,
         plan_id=plan_id,
         display_name=str(raw.get("display_name") or plan_id),
         distributor=str(raw.get("distributor") or "Manual"),
-        state=str(raw.get("state") or ""),
+        state=state,
         effective_date=str(raw.get("effective_date") or ""),
         withdrawn_date=None,
-        timezone_token="AEST",
+        timezone_token=effective_timezone,
         supply_c_per_day=_positive(raw.get("supply_c_per_day"), "supply charge"),
         import_periods=periods,
         export_base_c_per_kwh=_positive(
@@ -303,7 +364,10 @@ def validate_manual_covau_snapshot(raw: dict[str, Any]) -> CovaUPlanSnapshot:
 
 
 def covau_quota_rules(snapshot: CovaUPlanSnapshot) -> tuple[QuotaRule, QuotaRule]:
-    import_base = import_price_c_per_kwh(snapshot, _window_probe(snapshot.free_import_start))
+    import_base = import_price_c_per_kwh(
+        snapshot,
+        _window_probe(snapshot.free_import_start, snapshot.timezone_token),
+    )
     return (
         QuotaRule(
             rule_id=COVAU_IMPORT_RULE_ID,
@@ -797,18 +861,42 @@ def _minute_in_window(minute: int, start: str, end: str) -> bool:
     return start_min <= minute < end_min
 
 
-def _window_probe(start: str) -> datetime:
+def _window_probe(start: str, timezone_token: str) -> datetime:
     hour, minute = (int(part) for part in start.split(":"))
-    # The plan explicitly declares fixed AEST.  Construct the probe in that
-    # tariff clock so the result is independent of the host/HA timezone.
+    try:
+        tariff_timezone = ZoneInfo(timezone_token)
+    except ZoneInfoNotFoundError:
+        tariff_timezone = timezone.utc
     return datetime(
         2026,
         1,
         1,
         hour,
         minute,
-        tzinfo=timezone(timedelta(hours=10), name="AEST"),
+        tzinfo=tariff_timezone,
     )
+
+
+def _local_timezone_token(token: Any, state: str) -> str:
+    """Resolve CovaU wall-clock periods to an IANA customer timezone."""
+    value = str(token or "").strip()
+    if not value or value.upper() in {"AEST", "LOCAL"}:
+        value = COVAU_STATE_TIMEZONES.get(state, "LOCAL")
+    if value == "LOCAL":
+        return value
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as err:
+        raise ValueError(f"Invalid CovaU local timezone: {value}") from err
+    return value
+
+
+def _migrated_content_hash(content_hash: str, timezone_token: str) -> str:
+    """Invalidate fixed-AEST settlement state when adopting local tariff time."""
+    migration_key = (
+        f"{content_hash}|parser:{COVAU_PARSER_VERSION}|timezone:{timezone_token}"
+    )
+    return hashlib.sha256(migration_key.encode()).hexdigest()
 
 
 def _positive(value: Any, label: str, *, allow_zero: bool = False) -> float:

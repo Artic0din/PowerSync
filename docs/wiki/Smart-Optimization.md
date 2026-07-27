@@ -77,10 +77,12 @@ while telemetry remains continuous. A telemetry gap or a first setup without a
 valid tariff-day baseline marks quota confidence unknown and disables quota
 bonus optimization until the next reset.
 
-The tariff's `AEST` token means fixed UTC+10. It does not follow Home Assistant
-timezone settings or Adelaide daylight-saving time. Current price sensors show
-the effective marginal price, and the CovaU sensors/API expose cap, settled,
-remaining and planned quota values explicitly in kWh.
+CovaU tariff windows follow the Home Assistant timezone, including daylight
+saving. For example, an advertised `11:00-14:00` South Australian window
+remains `11:00-14:00` in Adelaide rather than being shifted by the public CDR
+record's `AEST` token. Current price sensors show the effective marginal price,
+and the CovaU sensors/API expose cap, settled, remaining and planned quota
+values explicitly in kWh.
 
 ## Network export limits / Flexible Exports
 

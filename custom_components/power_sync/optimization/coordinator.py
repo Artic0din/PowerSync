@@ -2301,7 +2301,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         try:
-            snapshot = CovaUPlanSnapshot.from_dict(raw)
+            snapshot = CovaUPlanSnapshot.from_dict(
+                raw,
+                timezone_token=getattr(
+                    getattr(self.hass, "config", None),
+                    "time_zone",
+                    None,
+                ),
+            )
             # Rebuild the rules as a structural validation step. This catches
             # incomplete/invalid snapshots before they reach the LP.
             covau_quota_rules(snapshot)
@@ -2450,7 +2457,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # its numeric value has not changed since yesterday.  Using the HA
             # state's last_updated timestamp would deadlock the new tariff day
             # whenever one direction legitimately records zero energy around
-            # the fixed-AEST reset.
+            # the local tariff-day reset.
             observed_at = now
             settled[direction] = ledger.observe_cumulative(
                 direction,
@@ -2486,7 +2493,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def _covau_price_forecast(self) -> tuple[list[float], list[float]] | None:
-        """Build fixed-AEST CovaU base prices and marginal quota bonuses."""
+        """Build local-time CovaU base prices and marginal quota bonuses."""
         runtime = self._ensure_covau_ledger(now=dt_util.now())
         if runtime is None:
             return None
@@ -2598,7 +2605,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         import_bonus: list[float],
         export_bonus: list[float],
     ) -> None:
-        """Partition marginal allowances by fixed-AEST tariff day."""
+        """Partition marginal allowances by local tariff day."""
         import_rule, export_rule = covau_quota_rules(snapshot)
         current_day = ledger.state.tariff_day
         import_groups: list[str | None] = []

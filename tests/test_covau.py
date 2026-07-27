@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import types
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -29,6 +30,8 @@ covau = sys.modules[f"{TEST_PACKAGE}.covau"]
 quota = sys.modules[f"{TEST_PACKAGE}.quota"]
 COVAU_EXPORT_RULE_ID = covau.COVAU_EXPORT_RULE_ID
 COVAU_IMPORT_RULE_ID = covau.COVAU_IMPORT_RULE_ID
+COVAU_PARSER_VERSION = covau.COVAU_PARSER_VERSION
+CovaUPlanSnapshot = covau.CovaUPlanSnapshot
 CovaUQuotaRuntime = covau.CovaUQuotaRuntime
 SUPPORTED_SOLARMAX_PLANS = covau.SUPPORTED_SOLARMAX_PLANS
 covau_plan_candidates = covau.covau_plan_candidates
@@ -98,16 +101,86 @@ def test_all_supported_solarmax_fixtures_normalize_gst_and_quotas(plan_id: str) 
     assert len(snapshot.content_hash) == 64
 
 
-def test_sa_fixed_aest_boundaries_ignore_adelaide_dst() -> None:
-    snapshot = normalize_covau_plan(_raw("COV1117616MRE2@EME"), "COV1117616MRE2@EME")
-    # 01:00 UTC is 11:00 fixed AEST, even while Adelaide observes UTC+10:30.
-    at_start = datetime(2026, 1, 15, 1, 0, tzinfo=timezone.utc)
+@pytest.mark.parametrize(
+    "utc_start",
+    [
+        (2026, 1, 15, 0, 30),
+        (2026, 7, 15, 1, 30),
+    ],
+)
+def test_sa_boundaries_follow_adelaide_local_time(
+    utc_start: tuple[int, int, int, int, int],
+) -> None:
+    snapshot = normalize_covau_plan(
+        _raw("COV1117616MRE2@EME"),
+        "COV1117616MRE2@EME",
+        timezone_token="Australia/Adelaide",
+    )
+    at_start = datetime(*utc_start, tzinfo=timezone.utc)
     before_start = at_start - timedelta(minutes=1)
     assert import_price_c_per_kwh(snapshot, before_start) == pytest.approx(35.167)
     assert import_price_c_per_kwh(snapshot, at_start) == pytest.approx(35.167)
     rules = covau_quota_rules(snapshot)
     assert not rules[0].contains(before_start)
     assert rules[0].contains(at_start)
+    assert snapshot.timezone_token == "Australia/Adelaide"
+    assert rules[0].timezone_token == "Australia/Adelaide"
+
+
+@pytest.mark.parametrize(
+    ("plan_id", "timezone_name", "utc_start"),
+    [
+        ("COV1117610MRE2@EME", "Australia/Sydney", (2026, 1, 15, 0, 0)),
+        ("COV1117614MRE2@EME", "Australia/Brisbane", (2026, 1, 15, 1, 0)),
+    ],
+)
+def test_solarmax_windows_follow_each_home_assistant_timezone(
+    plan_id: str,
+    timezone_name: str,
+    utc_start: tuple[int, int, int, int, int],
+) -> None:
+    snapshot = normalize_covau_plan(
+        _raw(plan_id),
+        plan_id,
+        timezone_token=timezone_name,
+    )
+    at_start = datetime(*utc_start, tzinfo=timezone.utc)
+    rule = covau_quota_rules(snapshot)[0]
+    assert not rule.contains(at_start - timedelta(minutes=1))
+    assert rule.contains(at_start)
+
+
+def test_saved_fixed_aest_snapshot_migrates_and_invalidates_quota_state() -> None:
+    original = normalize_covau_plan(
+        _raw("COV1117616MRE2@EME"),
+        "COV1117616MRE2@EME",
+        timezone_token="Australia/Adelaide",
+    ).to_dict()
+    original["parser_version"] = 1
+    original["timezone_token"] = "AEST"
+    original["content_hash"] = "legacy-content-hash"
+
+    migrated = CovaUPlanSnapshot.from_dict(
+        original,
+        timezone_token="Australia/Adelaide",
+    )
+
+    assert migrated.parser_version == COVAU_PARSER_VERSION
+    assert migrated.timezone_token == "Australia/Adelaide"
+    assert migrated.content_hash != "legacy-content-hash"
+
+
+def test_corrected_local_cdr_timezone_is_accepted() -> None:
+    raw = _raw("COV1117616MRE2@EME")
+    raw["data"]["electricityContract"]["timeZone"] = "LOCAL"
+
+    snapshot = normalize_covau_plan(
+        raw,
+        "COV1117616MRE2@EME",
+        timezone_token="Australia/Adelaide",
+    )
+
+    assert snapshot.timezone_token == "Australia/Adelaide"
 
 
 def test_unknown_confidence_disables_bonuses_without_changing_base_prices() -> None:
@@ -207,13 +280,14 @@ def test_standalone_runtime_uses_current_read_time_for_unchanged_new_day_totals(
         import_energy_entity="sensor.import_energy",
         export_energy_entity="sensor.export_energy",
     )
-    midday = datetime(2026, 7, 14, 12, 0, tzinfo=timezone(timedelta(hours=10)))
+    adelaide = ZoneInfo("Australia/Adelaide")
+    midday = datetime(2026, 7, 14, 12, 0, tzinfo=adelaide)
     asyncio.run(runtime.async_sample(now=midday))
     assert runtime.ledger.state.confidence == "unknown"
 
-    # Neither total changes, but polling the entities after fixed-AEST
+    # Neither total changes, but polling the entities after local
     # midnight establishes an authoritative baseline for the new tariff day.
-    reset = datetime(2026, 7, 15, 0, 1, tzinfo=timezone(timedelta(hours=10)))
+    reset = datetime(2026, 7, 15, 0, 1, tzinfo=adelaide)
     asyncio.run(runtime.async_sample(now=reset))
     assert runtime.ledger.state.tariff_day == "2026-07-15"
     assert runtime.ledger.state.confidence == "authoritative"

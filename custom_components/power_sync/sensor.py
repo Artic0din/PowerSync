@@ -3838,7 +3838,10 @@ def _covau_provider_contract_for_entry(
         )
         from .quota import QuotaLedger
 
-        snapshot = CovaUPlanSnapshot.from_dict(raw)
+        snapshot = CovaUPlanSnapshot.from_dict(
+            raw,
+            timezone_token=hass.config.time_zone,
+        )
         return covau_provider_contract(
             snapshot,
             QuotaLedger(covau_quota_rules(snapshot)),

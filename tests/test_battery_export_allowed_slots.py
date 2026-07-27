@@ -2004,8 +2004,8 @@ def _covau_snapshot_dict() -> dict:
     }
 
 
-def test_covau_forecast_partitions_caps_by_fixed_aest_tariff_day(opt_module):
-    now = datetime(2026, 5, 3, 0, 30, tzinfo=timezone.utc)  # 10:30 AEST
+def test_covau_forecast_partitions_caps_by_adelaide_tariff_day(opt_module):
+    now = datetime(2026, 5, 3, 0, 30, tzinfo=timezone.utc)  # 10:00 ACST
     opt_module.dt_util.now = lambda: now
     coordinator = _coordinator(
         opt_module,
@@ -2016,7 +2016,7 @@ def test_covau_forecast_partitions_caps_by_fixed_aest_tariff_day(opt_module):
     coordinator._config.horizon_hours = 48
     state = opt_module.QuotaLedgerState(
         tariff_day="2026-05-03",
-        timezone_token="AEST",
+        timezone_token="Australia/Adelaide",
         confidence="authoritative",
         settled_kwh={
             opt_module.COVAU_IMPORT_RULE_ID: 1.0,
@@ -2046,7 +2046,10 @@ def test_covau_forecast_partitions_caps_by_fixed_aest_tariff_day(opt_module):
         active = [timestamps[idx] for idx, value in enumerate(bonuses) if value > 0]
         assert active
         assert {
-            opt_module.tariff_datetime(value, "AEST").date().isoformat()
+            opt_module.tariff_datetime(
+                value,
+                "Australia/Adelaide",
+            ).date().isoformat()
             for value in active
         } == {"2026-05-03", "2026-05-04"}
 
@@ -2057,7 +2060,10 @@ def test_covau_forecast_partitions_caps_by_fixed_aest_tariff_day(opt_module):
     priority_times = [timestamps[idx] for idx, value in enumerate(priority) if value]
     assert priority_times
     assert {
-        opt_module.tariff_datetime(value, "AEST").date().isoformat()
+        opt_module.tariff_datetime(
+            value,
+            "Australia/Adelaide",
+        ).date().isoformat()
         for value in priority_times
     } == {"2026-05-03", "2026-05-04"}
 
@@ -2074,7 +2080,7 @@ def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module
         "covau_export_energy_entity": "sensor.grid_export_energy",
     }
     coordinator = _coordinator(opt_module, "covau", **options)
-    first = datetime(2026, 5, 3, 1, 30, tzinfo=timezone.utc)  # 11:30 AEST
+    first = datetime(2026, 5, 3, 1, 35, tzinfo=timezone.utc)  # 11:05 ACST
     previous = first - timedelta(minutes=5)
     states = {
         "sensor.grid_import_energy": SimpleNamespace(
@@ -2094,7 +2100,7 @@ def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module
     )
     state = opt_module.QuotaLedgerState(
         tariff_day="2026-05-03",
-        timezone_token="AEST",
+        timezone_token="Australia/Adelaide",
         confidence="authoritative",
         settled_kwh={
             opt_module.COVAU_IMPORT_RULE_ID: 0.0,
@@ -2112,7 +2118,7 @@ def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module
     settled = coordinator._settle_covau_measurements(first, 0.0, 0.0)
     assert settled == {"import": pytest.approx(0.5), "export": 0.0}
 
-    export_time = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)  # 18:30 AEST
+    export_time = datetime(2026, 5, 3, 8, 35, tzinfo=timezone.utc)  # 18:05 ACST
     states["sensor.grid_import_energy"] = SimpleNamespace(
         state="100.5",
         attributes={"unit_of_measurement": "kWh"},

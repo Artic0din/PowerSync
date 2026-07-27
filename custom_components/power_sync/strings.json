@@ -59,7 +59,7 @@
       },
       "covau_manual_tariff": {
         "title": "Manual CovaU SolarMax tariff",
-        "description": "Validated fallback for a withdrawn or account-specific SolarMax plan. Enter rates in cents per kWh and the daily supply charge in cents. The tariff clock remains fixed AEST (UTC+10).",
+        "description": "Validated fallback for a withdrawn or account-specific SolarMax plan. Enter rates in cents per kWh and the daily supply charge in cents. Tariff times follow your Home Assistant timezone.",
         "data": {
           "plan_id": "Plan ID",
           "display_name": "Plan name",
@@ -1112,7 +1112,7 @@
       "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or use the validated manual fallback.",
       "covau_distributor_mismatch": "The distributor must match the selected AER SolarMax plan.",
       "covau_energy_meter_invalid": "Select a monotonic total_increasing energy sensor using Wh, kWh, or MWh.",
-      "covau_manual_tariff_invalid": "The manual tariff is incomplete or invalid. Rates and caps must be non-negative and the stepped periods must cover the full fixed-AEST day.",
+      "covau_manual_tariff_invalid": "The manual tariff is incomplete or invalid. Rates and caps must be non-negative and the stepped periods must cover the full local tariff day.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
       "solax_missing_entities": "Could not find the required solax_modbus entities in the selected integration entry. The first missing entity was: {first_missing}. Make sure you selected the correct Solax Modbus integration. If your entities use a prefix like solax_modbus, enter that in Entity prefix override.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
