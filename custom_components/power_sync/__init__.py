@@ -449,6 +449,7 @@ from .const import (
     # Solcast solar forecasting
     CONF_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
+    SOLAR_FORECAST_PROVIDER_VOLCAST,
     SOLAR_FORECAST_PROVIDERS,
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
@@ -11924,6 +11925,11 @@ _SOLCAST_EXTERNAL_SENSOR_PATTERNS = (
     "sensor.solcast_pv_forecast_today",
 )
 
+_VOLCAST_EXTERNAL_SENSOR_PATTERNS = (
+    "sensor.volcast_energy_forecast_today",
+    "sensor.volcast_energy_forecast_tomorrow",
+)
+
 
 def _has_external_solcast_integration(hass: HomeAssistant) -> bool:
     """Return whether the external Solcast integration exposes usable sensors."""
@@ -11935,6 +11941,17 @@ def _has_external_solcast_integration(hass: HomeAssistant) -> bool:
         for state in (
             hass.states.get(entity_id)
             for entity_id in _SOLCAST_EXTERNAL_SENSOR_PATTERNS
+        )
+    )
+
+
+def _has_external_volcast_integration(hass: HomeAssistant) -> bool:
+    """Return whether the Volcast integration exposes usable forecast sensors."""
+    return any(
+        state is not None and state.state not in ("unavailable", "unknown", None, "")
+        for state in (
+            hass.states.get(entity_id)
+            for entity_id in _VOLCAST_EXTERNAL_SENSOR_PATTERNS
         )
     )
 
@@ -11978,11 +11995,20 @@ class WeatherSolcastSettingsView(HomeAssistantView):
 
         opts = {**entry.data, **entry.options}
         builtin_configured = _solcast_builtin_configured(opts)
+        selected_provider = _normalize_solar_forecast_provider(
+            opts.get(CONF_SOLAR_FORECAST_PROVIDER)
+        )
 
-        # Detect external Solcast HA integration (solcast_solar)
+        # Detect supported external Home Assistant forecast integrations.
         external_solcast = _has_external_solcast_integration(self._hass)
+        external_volcast = _has_external_volcast_integration(self._hass)
         solcast_source = "none"
-        if external_solcast:
+        if (
+            selected_provider == SOLAR_FORECAST_PROVIDER_VOLCAST
+            and external_volcast
+        ):
+            solcast_source = "volcast"
+        elif external_solcast:
             solcast_source = "integration"
         elif builtin_configured:
             solcast_source = "builtin"
@@ -11994,29 +12020,41 @@ class WeatherSolcastSettingsView(HomeAssistantView):
         domain_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         solcast_init_error = domain_data.get("solcast_init_error") if isinstance(domain_data, dict) else None
         solcast_coord = domain_data.get("solcast_coordinator") if isinstance(domain_data, dict) else None
-        solcast_active = bool(solcast_coord is not None or external_solcast)
+        solar_forecast_active = bool(
+            solcast_source != "none"
+            or solcast_coord is not None
+        )
 
         _LOGGER.info(
-            "Weather/Solcast GET: source=%s, builtin_configured=%s, external_detected=%s, api_key=%s, active=%s, init_error=%s",
-            solcast_source, builtin_configured, external_solcast,
+            "Weather/Solcast GET: source=%s, builtin_configured=%s, "
+            "external_solcast=%s, external_volcast=%s, api_key=%s, "
+            "active=%s, init_error=%s",
+            solcast_source, builtin_configured, external_solcast, external_volcast,
             "set" if opts.get(CONF_SOLCAST_API_KEY) else "empty",
-            solcast_active, bool(solcast_init_error),
+            solar_forecast_active, bool(solcast_init_error),
         )
         return web.json_response({
             "success": True,
             "weather_location": opts.get(CONF_WEATHER_LOCATION, ""),
             "openweathermap_api_key": opts.get(CONF_OPENWEATHERMAP_API_KEY, ""),
-            "solar_forecast_provider": _normalize_solar_forecast_provider(
-                opts.get(CONF_SOLAR_FORECAST_PROVIDER)
+            "solar_forecast_provider": selected_provider,
+            "solar_forecast_source": solcast_source,
+            "solar_forecast_active": solar_forecast_active,
+            "solcast_enabled": (
+                builtin_configured
+                or external_solcast
+                or (
+                    selected_provider == SOLAR_FORECAST_PROVIDER_VOLCAST
+                    and external_volcast
+                )
             ),
-            "solcast_enabled": builtin_configured or external_solcast,
             "solcast_source": solcast_source,
             "solcast_api_key": opts.get(CONF_SOLCAST_API_KEY, ""),
             "solcast_resource_id": opts.get(CONF_SOLCAST_RESOURCE_ID, ""),
             "solcast_estimate_type": opts.get(
                 CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
             ),
-            "solcast_active": solcast_active,
+            "solcast_active": solar_forecast_active,
             "solcast_error": solcast_init_error,
         })
 

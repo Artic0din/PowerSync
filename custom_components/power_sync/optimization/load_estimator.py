@@ -27,6 +27,7 @@ from ..const import (
     DEFAULT_SOLCAST_ESTIMATE_TYPE,
     SOLAR_FORECAST_PROVIDER_OPEN_METEO,
     SOLAR_FORECAST_PROVIDER_SOLCAST,
+    SOLAR_FORECAST_PROVIDER_VOLCAST,
     SOLAR_FORECAST_PROVIDERS,
     SOLCAST_ESTIMATE,
     SOLCAST_ESTIMATE10,
@@ -87,6 +88,16 @@ OPEN_METEO_WATTS_ATTR = "watts"
 OPEN_METEO_DAILY_SENSOR_SUFFIXES = (
     "_energy_production_today",
     "_energy_production_tomorrow",
+)
+VOLCAST_FORECAST_ENTITY_PREFIX = "sensor.volcast_energy_forecast_"
+VOLCAST_FORECAST_ENTITY_SUFFIXES = (
+    "today",
+    "tomorrow",
+    "day_3",
+    "day_4",
+    "day_5",
+    "day_6",
+    "day_7",
 )
 
 
@@ -1640,7 +1651,7 @@ class SolcastForecaster:
             solcast_entity: Solcast sensor entity ID
             interval_minutes: Forecast interval in minutes
             estimate_type: Solcast estimate to use: estimate, estimate10, or estimate90
-            provider_preference: Preferred forecast source: solcast or open_meteo
+            provider_preference: Preferred forecast source
         """
         self.hass = hass
         self.solcast_entity = solcast_entity
@@ -1657,8 +1668,14 @@ class SolcastForecaster:
             else DEFAULT_SOLCAST_ESTIMATE_TYPE
         )
 
-    def _provider_order(self) -> tuple[str, str]:
-        """Return preferred provider first, then fallback provider."""
+    def _provider_order(self) -> tuple[str, ...]:
+        """Return the selected provider and its compatibility-safe fallbacks."""
+        if self.provider_preference == SOLAR_FORECAST_PROVIDER_VOLCAST:
+            return (
+                SOLAR_FORECAST_PROVIDER_VOLCAST,
+                SOLAR_FORECAST_PROVIDER_SOLCAST,
+                SOLAR_FORECAST_PROVIDER_OPEN_METEO,
+            )
         if self.provider_preference == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
             return (SOLAR_FORECAST_PROVIDER_OPEN_METEO, SOLAR_FORECAST_PROVIDER_SOLCAST)
         return (SOLAR_FORECAST_PROVIDER_SOLCAST, SOLAR_FORECAST_PROVIDER_OPEN_METEO)
@@ -1724,8 +1741,10 @@ class SolcastForecaster:
         for provider in self._provider_order():
             if provider == SOLAR_FORECAST_PROVIDER_SOLCAST:
                 forecast = await self._get_solcast_forecast(start_time, n_intervals)
-            else:
+            elif provider == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
                 forecast = self._get_open_meteo_forecast(start_time, n_intervals)
+            else:
+                forecast = self._get_volcast_forecast(start_time, n_intervals)
             if forecast is not None:
                 self.last_forecast_source = provider
                 return forecast
@@ -1735,7 +1754,8 @@ class SolcastForecaster:
         self.last_forecast_source = None
         _LOGGER.warning(
             "Solar forecast not available — using zero solar forecast. "
-            "Install Solcast Solar or Open-Meteo Solar Forecast for optimal battery scheduling."
+            "Install Solcast Solar, Open-Meteo Solar Forecast, or Volcast "
+            "for optimal battery scheduling."
         )
         return [0.0] * n_intervals
 
@@ -1769,6 +1789,203 @@ class SolcastForecaster:
             "today_forecast_kwh": today_kwh,
             "source": self.last_forecast_source,
         }
+
+    def _get_volcast_forecast(
+        self,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Read Volcast's aggregate forecast from its Home Assistant sensors."""
+        states = self._iter_volcast_forecast_states()
+        if not states:
+            return None
+
+        # Volcast exposes both a 5-minute forecast in watts and an hourly
+        # forecast in kW. The detailed feed omits zero-power periods and
+        # normally covers only today/tomorrow, so keep the hourly periods as a
+        # zero-aware, day-three-capable baseline and let shorter detailed
+        # periods override them.
+        forecast_periods: dict[
+            tuple[datetime, datetime], tuple[datetime, datetime, float]
+        ] = {}
+        hourly_periods: list[tuple[datetime, datetime, float]] = []
+        ambiguous_periods = False
+        for state in states:
+            attributes = getattr(state, "attributes", {}) or {}
+            for item in attributes.get("detailedHourly", []) or []:
+                parsed = self._parse_volcast_period(
+                    item,
+                    start_time,
+                    period_minutes=60,
+                    power_field="power_kw",
+                    power_multiplier=1000.0,
+                )
+                if parsed is not None:
+                    key = (parsed[0], parsed[1])
+                    existing = forecast_periods.get(key)
+                    if existing is not None and existing[2] != parsed[2]:
+                        ambiguous_periods = True
+                    else:
+                        forecast_periods.setdefault(key, parsed)
+                    hourly_periods.append(parsed)
+            for item in attributes.get("detailedForecast", []) or []:
+                parsed = self._parse_volcast_period(
+                    item,
+                    start_time,
+                    period_minutes=5,
+                    power_field="power_w",
+                    power_multiplier=1.0,
+                )
+                if parsed is not None:
+                    # The five-minute feed is more precise than an overlapping
+                    # hourly period and therefore remains a separate candidate.
+                    forecast_periods.setdefault((parsed[0], parsed[1]), parsed)
+
+        periods = list(forecast_periods.values())
+        if not periods or not hourly_periods:
+            return None
+
+        horizon_end = start_time + timedelta(
+            minutes=n_intervals * self.interval_minutes
+        )
+        if not self._periods_cover_horizon(
+            hourly_periods,
+            start_time,
+            horizon_end,
+        ):
+            _LOGGER.debug(
+                "Ignoring partial Volcast sensor forecast that does not cover "
+                "the requested horizon"
+            )
+            return None
+        if ambiguous_periods:
+            _LOGGER.warning(
+                "Multiple Volcast forecast sensors expose conflicting values; "
+                "using the first complete forecast set"
+            )
+
+        result: list[float] = []
+        current_time = start_time
+        for _ in range(n_intervals):
+            candidates = [
+                period
+                for period in periods
+                if period[0] <= current_time < period[1]
+            ]
+            if candidates:
+                # Prefer Volcast's five-minute period over its hourly baseline.
+                selected = min(candidates, key=lambda period: period[1] - period[0])
+                result.append(selected[2])
+            else:
+                result.append(0.0)
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        total_kwh = sum(result) * (self.interval_minutes / 60) / 1000
+        _LOGGER.info(
+            "Volcast sensor forecast: %d periods from %d entries, "
+            "peak=%.1fW, total=%.1fkWh",
+            len(result),
+            len(periods),
+            max(result) if result else 0,
+            total_kwh,
+        )
+        return result
+
+    @staticmethod
+    def _periods_cover_horizon(
+        periods: list[tuple[datetime, datetime, float]],
+        start_time: datetime,
+        horizon_end: datetime,
+    ) -> bool:
+        """Return whether hourly periods continuously cover the horizon."""
+        cursor = start_time
+        for period_start, period_end, _ in sorted(periods, key=lambda period: period[0]):
+            if period_end <= cursor:
+                continue
+            if period_start > cursor:
+                return False
+            cursor = max(cursor, period_end)
+            if cursor >= horizon_end:
+                return True
+        return cursor >= horizon_end
+
+    def _iter_volcast_forecast_states(self) -> list[Any]:
+        """Return one ordered set of usable Volcast daily forecast sensors."""
+        states: list[Any] = []
+        seen_entity_ids: set[str] = set()
+
+        for suffix in VOLCAST_FORECAST_ENTITY_SUFFIXES:
+            entity_id = f"{VOLCAST_FORECAST_ENTITY_PREFIX}{suffix}"
+            state = self.hass.states.get(entity_id)
+            if state and state.state not in ("unavailable", "unknown", None, ""):
+                states.append(state)
+                seen_entity_ids.add(entity_id)
+
+        async_all = getattr(self.hass.states, "async_all", None)
+        if callable(async_all):
+            try:
+                all_states = async_all("sensor")
+            except TypeError:
+                all_states = async_all()
+            for state in all_states or []:
+                entity_id = getattr(state, "entity_id", "")
+                if (
+                    "volcast" not in entity_id
+                    or entity_id in seen_entity_ids
+                    or state.state in ("unavailable", "unknown", None, "")
+                ):
+                    continue
+                attributes = getattr(state, "attributes", {}) or {}
+                if not (
+                    isinstance(attributes.get("detailedForecast"), list)
+                    or isinstance(attributes.get("detailedHourly"), list)
+                ):
+                    continue
+                states.append(state)
+                seen_entity_ids.add(entity_id)
+
+        return states
+
+    @staticmethod
+    def _parse_volcast_period(
+        item: Any,
+        start_time: datetime,
+        *,
+        period_minutes: int,
+        power_field: str,
+        power_multiplier: float,
+    ) -> tuple[datetime, datetime, float] | None:
+        """Normalize one Volcast period to timezone-aligned watts."""
+        if not isinstance(item, dict):
+            return None
+        period_start_value = item.get("period_start")
+        if not period_start_value:
+            return None
+        try:
+            period_start = (
+                period_start_value
+                if isinstance(period_start_value, datetime)
+                else datetime.fromisoformat(
+                    str(period_start_value).replace("Z", "+00:00")
+                )
+            )
+            if start_time.tzinfo is not None:
+                period_start = (
+                    period_start.replace(tzinfo=start_time.tzinfo)
+                    if period_start.tzinfo is None
+                    else period_start.astimezone(start_time.tzinfo)
+                )
+            power_w = max(
+                0.0,
+                float(item.get(power_field, 0.0) or 0.0) * power_multiplier,
+            )
+        except (TypeError, ValueError):
+            return None
+        return (
+            period_start,
+            period_start + timedelta(minutes=period_minutes),
+            power_w,
+        )
 
     def _get_open_meteo_forecast(
         self,

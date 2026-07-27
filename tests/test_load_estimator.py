@@ -39,9 +39,11 @@ def _load_estimator_module(monkeypatch):
     const_module.SOLCAST_ESTIMATE90 = "estimate90"
     const_module.SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
     const_module.SOLAR_FORECAST_PROVIDER_SOLCAST = "solcast"
+    const_module.SOLAR_FORECAST_PROVIDER_VOLCAST = "volcast"
     const_module.SOLAR_FORECAST_PROVIDERS = {
         "solcast": "Solcast",
         "open_meteo": "Open-Meteo",
+        "volcast": "Volcast",
     }
     const_module.DOMAIN = "power_sync"
 
@@ -846,6 +848,315 @@ def test_solar_forecast_default_prefers_solcast_when_both_providers_have_data(mo
 
     assert forecast == [2000.0, 0.0]
     assert forecaster.last_forecast_source == "solcast"
+
+
+def test_volcast_five_minute_power_is_aligned_without_smearing(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    state = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_today",
+        state="18.0",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": start.isoformat(),
+                    "power_kw": 1.0,
+                    "energy_kwh": 1.0,
+                },
+            ],
+            "detailedForecast": [
+                {
+                    "period_start": start.isoformat(),
+                    "power_w": 3600,
+                    "energy_wh": 300,
+                },
+                {
+                    "period_start": (start + timedelta(minutes=5)).isoformat(),
+                    "power_w": 1800,
+                    "energy_wh": 150,
+                },
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates([state], {state.entity_id: state}),
+    )
+    forecaster = module.SolcastForecaster(
+        hass,
+        interval_minutes=5,
+        provider_preference="volcast",
+    )
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [3600.0, 1800.0] + [1000.0] * 10
+    assert forecaster.last_forecast_source == "volcast"
+
+
+def test_volcast_hourly_sensors_cover_late_day_rolling_horizon(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 27, 23, 30, tzinfo=timezone.utc)
+    today = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_today",
+        state="0.0",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": datetime(
+                        2026, 7, 27, 23, 0, tzinfo=timezone.utc
+                    ).isoformat(),
+                    "power_kw": 0.0,
+                    "energy_kwh": 0.0,
+                },
+            ],
+        },
+    )
+    tomorrow = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_tomorrow",
+        state="16.0",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": datetime(
+                        2026, 7, 28, hour, tzinfo=timezone.utc
+                    ).isoformat(),
+                    "power_kw": 2.0 if hour == 12 else 0.0,
+                    "energy_kwh": 2.0 if hour == 12 else 0.0,
+                }
+                for hour in range(24)
+            ],
+        },
+    )
+    day_three = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_day_3",
+        state="20.0",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": datetime(
+                        2026, 7, 29, hour, tzinfo=timezone.utc
+                    ).isoformat(),
+                    "power_kw": 3.0 if hour == 12 else 0.0,
+                    "energy_kwh": 3.0 if hour == 12 else 0.0,
+                }
+                for hour in range(24)
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates(
+            [today, tomorrow, day_three],
+            {
+                today.entity_id: today,
+                tomorrow.entity_id: tomorrow,
+                day_three.entity_id: day_three,
+            },
+        ),
+    )
+    forecaster = module.SolcastForecaster(
+        hass,
+        interval_minutes=30,
+        provider_preference="volcast",
+    )
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=48, start_time=start))
+
+    assert forecast[25:27] == [2000.0, 2000.0]
+    assert forecast[73:75] == [3000.0, 3000.0]
+    assert forecaster.last_forecast_source == "volcast"
+
+
+def test_partial_volcast_horizon_falls_back_to_solcast(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    volcast = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_today",
+        state="0",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": start.isoformat(),
+                    "power_kw": 0.0,
+                    "energy_kwh": 0.0,
+                },
+            ],
+        },
+    )
+    solcast = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today",
+        state="10",
+        attributes={
+            "detailedForecast": [
+                {"period_start": start.isoformat(), "pv_estimate": 1.5},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates(
+            [volcast, solcast],
+            {
+                volcast.entity_id: volcast,
+                solcast.entity_id: solcast,
+            },
+        ),
+    )
+    forecaster = module.SolcastForecaster(
+        hass,
+        interval_minutes=30,
+        provider_preference="volcast",
+    )
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=48, start_time=start))
+
+    assert forecast[0] == 1500.0
+    assert forecaster.last_forecast_source == "solcast"
+
+
+def test_volcast_current_zero_hour_is_available_but_stale_data_is_not(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+
+    def _forecast_for(period_start):
+        state = SimpleNamespace(
+            entity_id="sensor.volcast_energy_forecast_today",
+            state="0",
+            attributes={
+                "detailedHourly": [
+                    {
+                        "period_start": period_start.isoformat(),
+                        "power_kw": 0.0,
+                        "energy_kwh": 0.0,
+                    },
+                ],
+            },
+        )
+        hass = SimpleNamespace(
+            data={},
+            states=_FakeStates([state], {state.entity_id: state}),
+        )
+        forecaster = module.SolcastForecaster(
+            hass,
+            interval_minutes=30,
+            provider_preference="volcast",
+        )
+        forecast = _run(
+            forecaster.get_forecast(horizon_hours=1, start_time=start)
+        )
+        return forecaster, forecast
+
+    current_forecaster, current = _forecast_for(start)
+    stale_forecaster, stale = _forecast_for(start - timedelta(days=1))
+
+    assert current == [0.0, 0.0]
+    assert current_forecaster.last_forecast_source == "volcast"
+    assert stale == [0.0, 0.0]
+    assert stale_forecaster.last_forecast_source is None
+
+
+def test_volcast_timezone_alignment_does_not_double_count_duplicate_view(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    local_tz = timezone(timedelta(hours=10))
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=local_tz)
+    utc_period_start = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
+
+    def _state(entity_id, power_kw):
+        return SimpleNamespace(
+            entity_id=entity_id,
+            state="12",
+            attributes={
+                "detailedHourly": [
+                    {
+                        "period_start": utc_period_start.isoformat(),
+                        "power_kw": power_kw,
+                        "energy_kwh": power_kw,
+                    },
+                ],
+            },
+        )
+
+    primary = _state("sensor.volcast_energy_forecast_today", 2.0)
+    duplicate = _state("sensor.backup_volcast_forecast", 5.0)
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates(
+            [duplicate, primary],
+            {primary.entity_id: primary},
+        ),
+    )
+    forecaster = module.SolcastForecaster(
+        hass,
+        interval_minutes=30,
+        provider_preference="volcast",
+    )
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [2000.0, 2000.0]
+    assert forecaster.last_forecast_source == "volcast"
+
+
+def test_volcast_preference_falls_back_without_changing_existing_default(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    solcast = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today",
+        state="10",
+        attributes={
+            "detailedForecast": [
+                {"period_start": start.isoformat(), "pv_estimate": 1.5},
+            ],
+        },
+    )
+    volcast = SimpleNamespace(
+        entity_id="sensor.volcast_energy_forecast_today",
+        state="18",
+        attributes={
+            "detailedHourly": [
+                {
+                    "period_start": start.isoformat(),
+                    "power_kw": 2.5,
+                    "energy_kwh": 2.5,
+                },
+            ],
+        },
+    )
+
+    volcast_preferred = module.SolcastForecaster(
+        SimpleNamespace(
+            data={},
+            states=_FakeStates(
+                [solcast],
+                {solcast.entity_id: solcast},
+            ),
+        ),
+        interval_minutes=30,
+        provider_preference="volcast",
+    )
+    default_provider = module.SolcastForecaster(
+        SimpleNamespace(
+            data={},
+            states=_FakeStates(
+                [volcast],
+                {volcast.entity_id: volcast},
+            ),
+        ),
+        interval_minutes=30,
+    )
+
+    fallback = _run(
+        volcast_preferred.get_forecast(horizon_hours=1, start_time=start)
+    )
+    unchanged_default = _run(
+        default_provider.get_forecast(horizon_hours=1, start_time=start)
+    )
+
+    assert fallback == [1500.0, 0.0]
+    assert volcast_preferred.last_forecast_source == "solcast"
+    assert unchanged_default == [0.0, 0.0]
+    assert default_provider.last_forecast_source is None
 
 
 def test_solar_forecast_open_meteo_preference_wins_when_both_providers_have_data(monkeypatch):

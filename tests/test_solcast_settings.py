@@ -120,7 +120,22 @@ def test_mobile_solcast_get_prefers_external_integration_over_builtin_credential
     assert external_check < builtin_check
     assert 'solcast_source = "integration"' in method_source
     assert '"solcast_estimate_type": opts.get(' in method_source
-    assert '"solar_forecast_provider": _normalize_solar_forecast_provider(' in method_source
+    assert '"solar_forecast_provider": selected_provider' in method_source
+
+
+def test_mobile_forecast_settings_report_selected_volcast_as_active():
+    method_source = _class_method_source(
+        INIT_PATH,
+        "WeatherSolcastSettingsView",
+        "get",
+    )
+
+    assert "_has_external_volcast_integration(self._hass)" in method_source
+    assert "selected_provider == SOLAR_FORECAST_PROVIDER_VOLCAST" in method_source
+    assert 'solcast_source = "volcast"' in method_source
+    assert '"solar_forecast_source": solcast_source' in method_source
+    assert '"solar_forecast_active": solar_forecast_active' in method_source
+    assert '"solcast_active": solar_forecast_active' in method_source
 
 
 def test_setup_skips_builtin_solcast_when_external_integration_has_data():

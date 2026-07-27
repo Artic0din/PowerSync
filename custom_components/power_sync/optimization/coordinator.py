@@ -10330,7 +10330,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             warnings.append({
                 "type": "no_solar_forecast",
                 "title": "Solar Forecast Unavailable",
-                "message": "No usable current solar forecast data is available. The optimizer is making decisions based on price only, without knowing when solar will be available. Check that the selected Solcast or Open-Meteo provider is loaded and exposing current forecast periods.",
+                "message": "No usable current solar forecast data is available. The optimizer is making decisions based on price only, without knowing when solar will be available. Check that the selected Solcast, Open-Meteo, or Volcast provider is loaded and exposing current forecast periods.",
             })
         return warnings
 

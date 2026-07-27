@@ -140,9 +140,11 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
     const_module.SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
     const_module.SOLAR_FORECAST_PROVIDER_SOLCAST = "solcast"
+    const_module.SOLAR_FORECAST_PROVIDER_VOLCAST = "volcast"
     const_module.SOLAR_FORECAST_PROVIDERS = {
         "solcast": "Solcast",
         "open_meteo": "Open-Meteo",
+        "volcast": "Volcast",
     }
     const_module.SOLCAST_ESTIMATE = "estimate"
     const_module.SOLCAST_ESTIMATE10 = "estimate10"
