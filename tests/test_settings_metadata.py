@@ -95,3 +95,25 @@ def test_behaviour_live_update_cannot_reset_auto_applied_reserve():
 
     assert selected == {"allow_grid_charge": False}
     assert "backup_reserve" not in selected
+
+
+def test_auto_apply_reserve_values_split_manual_control_from_applied_floor():
+    module = _load_module()
+
+    displayed, applied = module.split_optimizer_reserve_values(
+        auto_apply_enabled=True,
+        configured_reserve=0.61,
+        manual_reserve=0.30,
+    )
+
+    assert displayed == 0.30
+    assert applied == 0.61
+
+    displayed, applied = module.split_optimizer_reserve_values(
+        auto_apply_enabled=False,
+        configured_reserve=0.25,
+        manual_reserve=0.30,
+    )
+
+    assert displayed == 0.25
+    assert applied is None

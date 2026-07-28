@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from .settings_metadata import (
     optimizer_settings_groups,
     optimizer_settings_schema,
+    split_optimizer_reserve_values,
 )
 
 # Module-level state for alert cooldowns (keyed by entry_id)
@@ -39011,6 +39012,11 @@ class OptimizationSettingsView(HomeAssistantView):
             else:
                 disable_idle_enabled = False
 
+            displayed_backup_reserve, _ = split_optimizer_reserve_values(
+                auto_apply_enabled=auto_apply_reserve,
+                configured_reserve=backup_reserve,
+                manual_reserve=manual_reserve,
+            )
             return web.json_response({
                 "success": True,
                 "enabled": bool(
@@ -39018,7 +39024,8 @@ class OptimizationSettingsView(HomeAssistantView):
                     and config_entry.options.get(CONF_OPTIMIZATION_ENABLED, False)
                 ),
                 "cost_function": "cost",
-                "backup_reserve": round(backup_reserve * 100),
+                "backup_reserve": round(displayed_backup_reserve * 100),
+                "auto_applied_optimizer_reserve": None,
                 "auto_apply_reserve_enabled": auto_apply_reserve,
                 "manual_backup_reserve": (
                     round(manual_reserve * 100) if manual_reserve is not None else None
@@ -39133,12 +39140,13 @@ class OptimizationSettingsView(HomeAssistantView):
                         if manual_reserve is not None
                         else None
                     ),
+                    "auto_applied_optimizer_reserve": None,
                     "charge_by_time_enabled": charge_by_time_enabled,
                     "charge_by_time_target_time": charge_by_time_target_time,
                     "charge_by_time_target_soc": charge_by_time_target_soc,
                     "profit_max_target_time": charge_by_time_target_time,
                     "profit_max_target_soc": charge_by_time_target_soc,
-                    "backup_reserve": round(backup_reserve * 100),
+                    "backup_reserve": round(displayed_backup_reserve * 100),
                     "hardware_backup_reserve": round(hardware_reserve),
                     "battery_specs_source": "manual"
                     if config_entry
@@ -39156,6 +39164,20 @@ class OptimizationSettingsView(HomeAssistantView):
                 "settings_schema": optimizer_settings_schema(),
             })
 
+        manual_backup_reserve = opt_coordinator.manual_backup_reserve
+        displayed_backup_reserve, applied_backup_reserve = (
+            split_optimizer_reserve_values(
+                auto_apply_enabled=opt_coordinator.auto_apply_reserve_enabled,
+                configured_reserve=opt_coordinator._config.backup_reserve,
+                manual_reserve=manual_backup_reserve,
+            )
+        )
+        auto_applied_optimizer_reserve = (
+            round(applied_backup_reserve * 100)
+            if applied_backup_reserve is not None
+            else None
+        )
+
         return web.json_response({
             "success": True,
             "enabled": opt_coordinator.enabled,
@@ -39172,10 +39194,11 @@ class OptimizationSettingsView(HomeAssistantView):
             "settings_groups": _optimizer_settings_groups(),
             "settings_schema": optimizer_settings_schema(),
             "manual_backup_reserve": (
-                round(opt_coordinator.manual_backup_reserve * 100)
-                if opt_coordinator.manual_backup_reserve is not None
+                round(manual_backup_reserve * 100)
+                if manual_backup_reserve is not None
                 else None
             ),
+            "auto_applied_optimizer_reserve": auto_applied_optimizer_reserve,
             "config": {
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
                 "max_charge_w": opt_coordinator._config.max_charge_w,
@@ -39202,11 +39225,14 @@ class OptimizationSettingsView(HomeAssistantView):
                 "charge_by_time_enabled": opt_coordinator.charge_by_time_enabled,
                 "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
                 "manual_backup_reserve": (
-                    round(opt_coordinator.manual_backup_reserve * 100)
-                    if opt_coordinator.manual_backup_reserve is not None
+                    round(manual_backup_reserve * 100)
+                    if manual_backup_reserve is not None
                     else None
                 ),
-                "backup_reserve": round(opt_coordinator._config.backup_reserve * 100),
+                "auto_applied_optimizer_reserve": (
+                    auto_applied_optimizer_reserve
+                ),
+                "backup_reserve": round(displayed_backup_reserve * 100),
                 "hardware_backup_reserve": opt_coordinator._startup_backup_reserve if opt_coordinator._startup_backup_reserve is not None else 0,
                 "battery_specs_source": opt_coordinator._battery_specs_source,
                 "interval_minutes": opt_coordinator._config.interval_minutes,

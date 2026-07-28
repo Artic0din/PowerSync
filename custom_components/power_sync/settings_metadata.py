@@ -5,6 +5,22 @@ from __future__ import annotations
 from typing import Any
 
 
+def split_optimizer_reserve_values(
+    *,
+    auto_apply_enabled: bool,
+    configured_reserve: float,
+    manual_reserve: float | None,
+) -> tuple[float, float | None]:
+    """Return the editable manual reserve and read-only applied reserve."""
+    displayed_reserve = (
+        manual_reserve
+        if auto_apply_enabled and manual_reserve is not None
+        else configured_reserve
+    )
+    applied_reserve = configured_reserve if auto_apply_enabled else None
+    return displayed_reserve, applied_reserve
+
+
 def merge_optimization_section_input(
     live_values: dict[str, Any],
     visible_fields: set[str],

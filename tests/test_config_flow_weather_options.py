@@ -1283,6 +1283,19 @@ def test_optimization_settings_api_exposes_planned_ev_load_entity():
     assert "Cleared max_grid_export_w" in post_source
 
 
+def test_optimization_settings_api_splits_manual_and_auto_applied_reserve():
+    source = INIT_PATH.read_text()
+    get_method = _init_class_method("OptimizationSettingsView", "get")
+    get_source = ast.get_source_segment(source, get_method)
+
+    assert get_source is not None
+    assert "split_optimizer_reserve_values(" in get_source
+    assert "manual_reserve=manual_backup_reserve" in get_source
+    assert '"backup_reserve": round(displayed_backup_reserve * 100)' in get_source
+    assert "round(applied_backup_reserve * 100)" in get_source
+    assert '"auto_applied_optimizer_reserve": None' in get_source
+
+
 def test_optimization_settings_api_treats_omitted_fields_as_unchanged():
     source = INIT_PATH.read_text()
     post_method = _init_class_method("OptimizationSettingsView", "post")
