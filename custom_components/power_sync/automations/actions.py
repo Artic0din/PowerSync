@@ -4044,6 +4044,7 @@ _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
+_dynamic_ev_update_locks: Dict[str, asyncio.Lock] = {}
 
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
@@ -5471,6 +5472,389 @@ def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float
     return max(0.0, load_power_kw - ev_kw)
 
 
+def _smart_schedule_battery_target_states(
+    entry_id: str,
+) -> list[tuple[str, Dict[str, Any]]]:
+    """Return adaptive Smart Schedule sessions sharing the site meter."""
+    states: list[tuple[str, Dict[str, Any]]] = []
+    for vehicle_id, state in _dynamic_ev_state.get(entry_id, {}).items():
+        params = state.get("params") or {}
+        if (
+            state.get("active")
+            and params.get("dynamic_mode", "battery_target") == "battery_target"
+            and params.get("owner_mode") == "smart_schedule"
+            and params.get("charger_type", "tesla") == "tesla"
+            and not params.get("no_grid_import", False)
+            and not _coerce_positive_int(params.get("fixed_charge_amps"))
+        ):
+            states.append((vehicle_id, state))
+    return sorted(states, key=lambda item: (item[1].get("priority", 1), item[0]))
+
+
+def _dynamic_ev_commanded_power_kw(state: Dict[str, Any]) -> float:
+    """Return the power implied by one dynamic session's commanded amps."""
+    params = state.get("params") or {}
+    try:
+        return max(
+            0.0,
+            float(state.get("current_amps", 0) or 0)
+            * float(params.get("voltage", 240) or 240)
+            * float(params.get("phases", 1) or 1)
+            / 1000.0,
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _allocate_dynamic_ev_site_budget(
+    sessions: list[tuple[str, Dict[str, Any]]],
+    budget_kw: float,
+) -> Dict[str, int]:
+    """Allocate one aggregate site budget without rounding above it."""
+    records: list[dict[str, Any]] = []
+    for vehicle_id, state in sessions:
+        params = state.get("params") or {}
+        voltage = max(1.0, float(params.get("voltage", 240) or 240))
+        phases = max(1.0, float(params.get("phases", 1) or 1))
+        min_amps = max(1, int(params.get("min_charge_amps", 5) or 5))
+        max_amps = max(min_amps, int(params.get("max_charge_amps", 32) or 32))
+        unit_kw = voltage * phases / 1000.0
+        records.append(
+            {
+                "vehicle_id": vehicle_id,
+                "state": state,
+                "unit_kw": unit_kw,
+                "min_amps": min_amps,
+                "max_amps": max_amps,
+                "min_kw": min_amps * unit_kw,
+                "max_kw": max_amps * unit_kw,
+                "allocated_kw": 0.0,
+            }
+        )
+
+    remaining_kw = max(0.0, float(budget_kw or 0.0))
+    minimum_total_kw = sum(record["min_kw"] for record in records)
+    selected = records
+    if remaining_kw + 1e-9 >= minimum_total_kw:
+        for record in records:
+            record["allocated_kw"] = record["min_kw"]
+            remaining_kw -= record["min_kw"]
+    else:
+        selected = []
+        for record in records:
+            if remaining_kw + 1e-9 < record["min_kw"]:
+                continue
+            record["allocated_kw"] = record["min_kw"]
+            remaining_kw -= record["min_kw"]
+            selected.append(record)
+
+    # Water-fill only sessions that received their physical minimum. When the
+    # site can run just one car, keeping that stable avoids alternating stops.
+    unsaturated = list(selected)
+    while remaining_kw > 1e-9 and unsaturated:
+        share_kw = remaining_kw / len(unsaturated)
+        consumed_kw = 0.0
+        next_unsaturated: list[dict[str, Any]] = []
+        for record in unsaturated:
+            capacity_kw = record["max_kw"] - record["allocated_kw"]
+            addition_kw = min(share_kw, capacity_kw)
+            record["allocated_kw"] += addition_kw
+            consumed_kw += addition_kw
+            if capacity_kw - addition_kw > 1e-9:
+                next_unsaturated.append(record)
+        if consumed_kw <= 1e-9:
+            break
+        remaining_kw -= consumed_kw
+        unsaturated = next_unsaturated
+
+    targets: Dict[str, int] = {}
+    for record in records:
+        # Floor rather than round: the sum of commanded phase power must never
+        # exceed the shared site budget.
+        amps = int((record["allocated_kw"] + 1e-9) / record["unit_kw"])
+        if amps < record["min_amps"]:
+            amps = 0
+        targets[record["vehicle_id"]] = min(record["max_amps"], amps)
+    return targets
+
+
+async def _update_smart_schedule_battery_target_group(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    entry_id: str,
+    sessions: list[tuple[str, Dict[str, Any]]],
+) -> None:
+    """Allocate and apply one atomic battery-target decision for all EVs."""
+    plan_tokens = {
+        vehicle_id: {
+            "state": state,
+            "owner_mode": (state.get("params") or {}).get("owner_mode"),
+            "ownership": state.get("ownership"),
+        }
+        for vehicle_id, state in sessions
+    }
+
+    def _plan_still_owns_vehicle(vehicle_id: str) -> bool:
+        token = plan_tokens[vehicle_id]
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        current_params = (
+            current_state.get("params") or {}
+            if isinstance(current_state, dict)
+            else {}
+        )
+        return bool(
+            token["owner_mode"] == "smart_schedule"
+            and current_state is token["state"]
+            and current_state.get("active")
+            and current_params.get("owner_mode") == "smart_schedule"
+            and current_params.get("dynamic_mode", "battery_target")
+            == "battery_target"
+            and current_params.get("charger_type", "tesla") == "tesla"
+            and not current_params.get("no_grid_import", False)
+            and not _coerce_positive_int(current_params.get("fixed_charge_amps"))
+            and current_state.get("ownership") is token["ownership"]
+        )
+
+    def _plan_is_current() -> bool:
+        return all(
+            _plan_still_owns_vehicle(vehicle_id)
+            for vehicle_id, _state in sessions
+        )
+
+    if not _plan_is_current():
+        return
+
+    live_status = await _get_tesla_live_status(hass, config_entry)
+    if not live_status or not _plan_is_current():
+        _LOGGER.debug(
+            "Dynamic EV group: live site status unavailable or ownership changed"
+        )
+        return
+
+    max_grid_limits = []
+    for _vehicle_id, state in sessions:
+        params = state.get("params") or {}
+        max_grid_limits.append(
+            await _resolve_max_grid_import_kw(hass, config_entry, params) or 12.5
+        )
+        if not _plan_is_current():
+            return
+    max_grid_import_kw = min(max_grid_limits)
+
+    session_ids = {vehicle_id for vehicle_id, _state in sessions}
+    group_commanded_kw = sum(
+        _dynamic_ev_commanded_power_kw(state) for _vehicle_id, state in sessions
+    )
+    other_commanded_kw = sum(
+        _dynamic_ev_commanded_power_kw(state)
+        for vehicle_id, state in _dynamic_ev_state.get(entry_id, {}).items()
+        if vehicle_id not in session_ids and state.get("active")
+    )
+    observed_ev_kw = _live_status_power_kw(live_status, "ev_power")
+    commanded_site_ev_kw = group_commanded_kw + other_commanded_kw
+    effective_site_ev_kw = (
+        min(observed_ev_kw, commanded_site_ev_kw)
+        if observed_ev_kw > _ACTIVE_EV_POWER_EPSILON_KW
+        else commanded_site_ev_kw
+    )
+
+    grid_power_kw = _live_status_power_kw(live_status, "grid_power")
+    solar_power_kw = _live_status_power_kw(live_status, "solar_power")
+    battery_power_kw = _live_status_power_kw(live_status, "battery_power")
+    non_ev_home_kw = _non_ev_home_load_kw(live_status, effective_site_ev_kw)
+    base_grid_kw = grid_power_kw - effective_site_ev_kw
+    site_budget_kw = max(
+        0.0,
+        max_grid_import_kw - base_grid_kw - other_commanded_kw,
+    )
+
+    params_list = [(state.get("params") or {}) for _vehicle_id, state in sessions]
+    target_battery_charge_kw = max(
+        float(params.get("target_battery_charge_kw", 0) or 0)
+        for params in params_list
+    )
+    try:
+        battery_soc = float(live_status.get("battery_soc", 0) or 0)
+    except (TypeError, ValueError):
+        battery_soc = 0.0
+
+    if (
+        target_battery_charge_kw > 0
+        and battery_soc < _BATTERY_TAPER_BYPASS_SOC
+    ):
+        budget_kw = min(
+            site_budget_kw,
+            max(
+                0.0,
+                max_grid_import_kw
+                + solar_power_kw
+                - non_ev_home_kw
+                - target_battery_charge_kw
+                - other_commanded_kw,
+            ),
+        )
+    elif battery_soc >= _BATTERY_TAPER_BYPASS_SOC:
+        budget_kw = site_budget_kw
+    else:
+        target_battery_power_kw = -target_battery_charge_kw
+        battery_deficit_kw = target_battery_power_kw - battery_power_kw
+        grid_headroom_kw = max_grid_import_kw - grid_power_kw
+        if battery_deficit_kw > 0.1:
+            budget_kw = group_commanded_kw + battery_deficit_kw
+        elif battery_deficit_kw < -0.2:
+            budget_kw = (
+                group_commanded_kw + battery_deficit_kw + grid_headroom_kw
+            )
+        else:
+            budget_kw = group_commanded_kw + grid_headroom_kw
+        budget_kw = min(site_budget_kw, max(0.0, budget_kw))
+
+    targets = _allocate_dynamic_ev_site_budget(sessions, budget_kw)
+    previous_amps = {
+        vehicle_id: int(state.get("current_amps", 0) or 0)
+        for vehicle_id, state in sessions
+    }
+    if not _plan_is_current():
+        return
+    for vehicle_id, state in sessions:
+        state["target_amps"] = targets[vehicle_id]
+        state.setdefault(
+            "charging_started",
+            int(state.get("current_amps", 0) or 0) > 0,
+        )
+
+    _LOGGER.debug(
+        "Dynamic EV group: grid=%.1fkW max=%.1fkW base=%.1fkW "
+        "budget=%.1fkW targets=%s",
+        grid_power_kw,
+        max_grid_import_kw,
+        base_grid_kw,
+        budget_kw,
+        targets,
+    )
+
+    async def _apply_target(vehicle_id: str, state: Dict[str, Any]) -> bool:
+        params = state.get("params") or {}
+        current_amps = int(state.get("current_amps", 0) or 0)
+        target_amps = targets[vehicle_id]
+        if not _plan_still_owns_vehicle(vehicle_id):
+            return False
+
+        amps_set = await _set_vehicle_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            target_amps,
+            params,
+        )
+        if not _plan_still_owns_vehicle(vehicle_id):
+            return False
+
+        success = amps_set
+        if (
+            amps_set
+            and params.get("charger_type", "tesla") == "tesla"
+            and current_amps <= 0 < target_amps
+        ):
+            start_params = dict(params)
+            start_params["vehicle_vin"] = (
+                vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+            )
+            start_params["amps"] = target_amps
+            success = await _action_start_ev_charging(
+                hass,
+                config_entry,
+                start_params,
+                context=None,
+            )
+            if not _plan_still_owns_vehicle(vehicle_id):
+                return False
+
+        if success:
+            state["current_amps"] = target_amps
+            state["target_amps"] = target_amps
+            state["charging_started"] = target_amps > 0
+            return True
+
+        if _plan_still_owns_vehicle(vehicle_id):
+            state["target_amps"] = current_amps
+        return False
+
+    changes = sorted(
+        sessions,
+        key=lambda item: (item[1].get("priority", 1), item[0]),
+    )
+    decreases = [
+        item
+        for item in changes
+        if targets[item[0]] < int(item[1].get("current_amps", 0) or 0)
+    ]
+    increases = [
+        item
+        for item in changes
+        if targets[item[0]] > int(item[1].get("current_amps", 0) or 0)
+    ]
+
+    decreases_succeeded = True
+    for vehicle_id, state in decreases:
+        if not await _apply_target(vehicle_id, state):
+            decreases_succeeded = False
+
+    if decreases_succeeded:
+        for vehicle_id, state in increases:
+            if not await _apply_target(vehicle_id, state):
+                break
+    elif increases:
+        _LOGGER.warning(
+            "Dynamic EV group: rate decrease failed; withholding %d increase(s)",
+            len(increases),
+        )
+
+    # A target is only a reservation for this decision. Do not leave a stale
+    # increase behind for another callback after a prerequisite write failed.
+    for vehicle_id, state in sessions:
+        if (
+            _plan_still_owns_vehicle(vehicle_id)
+            and int(state.get("current_amps", 0) or 0) != targets[vehicle_id]
+        ):
+            state["target_amps"] = int(state.get("current_amps", 0) or 0)
+
+    try:
+        from .ev_charging_session import get_session_manager
+
+        session_manager = get_session_manager()
+        if session_manager:
+            import_price, export_price = _get_current_ev_prices(hass, entry_id)
+            for vehicle_id, state in sessions:
+                params = state.get("params") or {}
+                if _session_energy_tracked_by_charger_poll(params):
+                    continue
+                prior_amps = previous_amps[vehicle_id]
+                current_amps = int(state.get("current_amps", 0) or 0)
+                if prior_amps > 0 and current_amps <= 0:
+                    live_soc = live_status.get("battery_soc")
+                    await session_manager.end_session(
+                        vehicle_id=vehicle_id,
+                        reason="battery_target_stop",
+                        end_soc=int(live_soc) if live_soc else None,
+                    )
+                elif current_amps > 0:
+                    power_kw = _dynamic_ev_commanded_power_kw(state)
+                    await session_manager.update_session(
+                        vehicle_id=vehicle_id,
+                        power_kw=power_kw,
+                        amps=current_amps,
+                        is_solar=_is_ev_charging_from_solar(
+                            grid_power_kw,
+                            power_kw,
+                        ),
+                        import_price_cents=import_price,
+                        export_price_cents=export_price,
+                    )
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV group: session tracking failed: %s", err)
+
+
 def _refresh_solar_surplus_runtime_params(
     hass: HomeAssistant,
     entry_id: str,
@@ -6349,6 +6733,24 @@ async def _dynamic_ev_update(
                 await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 return
 
+    group_sessions = _smart_schedule_battery_target_states(entry_id)
+    if len(group_sessions) > 1:
+        group_leader = group_sessions[0][0]
+        if vehicle_id != group_leader:
+            return
+        update_lock = _dynamic_ev_update_locks.setdefault(entry_id, asyncio.Lock())
+        async with update_lock:
+            group_sessions = _smart_schedule_battery_target_states(entry_id)
+            if len(group_sessions) <= 1 or group_sessions[0][0] != vehicle_id:
+                return
+            await _update_smart_schedule_battery_target_group(
+                hass,
+                config_entry,
+                entry_id,
+                group_sessions,
+            )
+        return
+
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
     # e.g., 5.0 means we want 5kW going INTO the battery
     target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
@@ -7012,6 +7414,25 @@ async def _action_start_ev_charging_dynamic_locked(
     charger_type = params.get("charger_type", "tesla")
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     priority = params.get("priority", 1)
+    defer_battery_target_start = (
+        dynamic_mode == "battery_target"
+        and params.get("owner_mode") == "smart_schedule"
+        and params.get("charger_type", "tesla") == "tesla"
+        and not params.get("no_grid_import", False)
+        and not _coerce_positive_int(params.get("fixed_charge_amps"))
+        and any(
+            candidate_id != vehicle_id
+            and candidate_state.get("active")
+            and (
+                candidate_params := candidate_state.get("params") or {}
+            ).get("dynamic_mode", "battery_target") == "battery_target"
+            and candidate_params.get("owner_mode") == "smart_schedule"
+            and candidate_params.get("charger_type", "tesla") == "tesla"
+            and not candidate_params.get("no_grid_import", False)
+            and not _coerce_positive_int(candidate_params.get("fixed_charge_amps"))
+            for candidate_id, candidate_state in entry_vehicles.items()
+        )
+    )
     allow_stale_entity_max_override = bool(
         params.get("allow_stale_entity_max_override")
     )
@@ -7066,6 +7487,8 @@ async def _action_start_ev_charging_dynamic_locked(
         if no_grid_import:
             inverter_max_amps = int((mode_params["max_inverter_kw"] * 1000) / (voltage * resolved_phases))
             start_amps = min(start_amps, inverter_max_amps)
+        if defer_battery_target_start:
+            start_amps = 0
         no_grid_info = f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)" if no_grid_import else ""
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
@@ -7084,7 +7507,14 @@ async def _action_start_ev_charging_dynamic_locked(
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
-        if charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
+        if defer_battery_target_start:
+            start_success = True
+            _LOGGER.info(
+                "Dynamic EV: Deferring %s until the active site controller "
+                "allocates shared grid headroom",
+                vehicle_id,
+            )
+        elif charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
             start_params = dict(params)
             if charger_type == "sigenergy":
                 start_params["_sigenergy_start_after_rate_limit"] = True
@@ -7232,7 +7662,9 @@ async def _action_start_ev_charging_dynamic_locked(
         "priority": priority,
         "paused": False,
         "paused_reason": None,
-        "charging_started": dynamic_mode == "battery_target",  # Already started for battery_target
+        "charging_started": (
+            dynamic_mode == "battery_target" and not defer_battery_target_start
+        ),
         "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
         "reason": "",
