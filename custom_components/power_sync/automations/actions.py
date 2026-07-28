@@ -6368,8 +6368,31 @@ async def _dynamic_ev_update(
     phases = params.get("phases", 1)
     fixed_charge_amps = _coerce_positive_int(params.get("fixed_charge_amps"))
     current_amps = state.get("current_amps", max_amps)
-    owner_mode = str(params.get("owner_mode") or "").lower()
+    owner_mode = str(
+        params.get("owner_mode")
+        or params.get("dynamic_mode")
+        or ""
+    ).lower()
+    expected_ownership = state.get("ownership")
     scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
+
+    def _session_still_owns_vehicle() -> bool:
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if current_state is not state or not current_state.get("active"):
+            return False
+        current_params = current_state.get("params") or {}
+        current_owner_mode = str(
+            current_params.get("owner_mode")
+            or current_params.get("dynamic_mode")
+            or ""
+        ).lower()
+        if current_owner_mode != owner_mode:
+            return False
+        current_ownership = current_state.get("ownership")
+        return (
+            expected_ownership is None
+            or current_ownership is expected_ownership
+        )
 
     if (
         params.get("charger_type") == "sigenergy"
@@ -6572,10 +6595,54 @@ async def _dynamic_ev_update(
             f"solar={solar_power_kw:.1f}kW, home_load={home_load_kw:.1f}kW, "
             f"available={available_power_kw:.1f}kW)"
         )
-        success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
+        tesla_restart_required = (
+            params.get("charger_type", "tesla") == "tesla"
+            and current_amps <= 0
+            and new_amps > 0
+        )
+        if not _session_still_owns_vehicle():
+            _LOGGER.debug(
+                "Dynamic EV: Session changed before applying %sA to %s",
+                new_amps,
+                vehicle_id,
+            )
+            return
+        amps_set = await _set_vehicle_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            new_amps,
+            params,
+        )
+        success = amps_set
+        if amps_set and tesla_restart_required:
+            if not _session_still_owns_vehicle():
+                _LOGGER.debug(
+                    "Dynamic EV: Session changed while applying %sA to %s; "
+                    "skipping stale restart",
+                    new_amps,
+                    vehicle_id,
+                )
+                return
+            start_params = dict(params)
+            start_params["vehicle_vin"] = (
+                vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+            )
+            start_params["amps"] = new_amps
+            success = await _action_start_ev_charging(
+                hass,
+                config_entry,
+                start_params,
+                context=None,
+            )
+            if not success:
+                _LOGGER.warning(
+                    "Dynamic EV: Failed to restart Tesla charging at %sA",
+                    new_amps,
+                )
         if success:
             state["current_amps"] = new_amps
-        else:
+        elif not amps_set:
             _LOGGER.warning(f"Dynamic EV: Failed to set amps to {new_amps}A")
 
     # Update session tracking (battery target mode)

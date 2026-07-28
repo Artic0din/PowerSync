@@ -891,6 +891,220 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(monkeyp
     assert actions._dynamic_ev_state["entry-1"]["VIN123"]["current_amps"] == 22
 
 
+def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
+    """A Tesla stopped at 0A must receive a new physical start command."""
+    vehicle_id = "ble_tesla_flinn"
+    live_status = {
+        "battery_power": -15000,
+        "grid_power": 11300,
+        "solar_power": 9600,
+        "ev_power": 0,
+        "battery_soc": 68,
+    }
+    set_amps_calls: list[tuple[str, int]] = []
+    start_calls: list[tuple[str | None, int]] = []
+    takeover_during_set: set[str] = set()
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return live_status
+
+    async def fake_set_vehicle_amps(hass, config_entry, requested_id, amps, params):
+        set_amps_calls.append((requested_id, amps))
+        if requested_id in takeover_during_set:
+            actions._dynamic_ev_state["entry-1"][requested_id] = {
+                "active": True,
+                "current_amps": amps,
+                "params": {
+                    "dynamic_mode": "manual",
+                    "owner_mode": "manual",
+                    "charger_type": "tesla",
+                },
+            }
+        return True
+
+    async def fake_start_charging(hass, config_entry, params, context=None):
+        start_calls.append((params["vehicle_vin"], params["amps"]))
+        return len(start_calls) > 1
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_charging)
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: None
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_session",
+        ev_session,
+    )
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 3,
+            },
+        }
+    }
+
+    # The reported 15kW battery charge and 12.5kW site limit leave only
+    # 1.2kW for the EV, below the 3-phase 5A minimum, so staying stopped is valid.
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+    assert set_amps_calls == []
+    assert start_calls == []
+
+    # When solar later creates enough headroom, raising the amp limit alone is
+    # insufficient because the previous 0A transition sent a physical stop.
+    live_status.update(
+        {
+            "grid_power": 5000,
+            "solar_power": 25000,
+            # Site-wide EV power can belong to the other Tesla and must not
+            # suppress this exact vehicle's idempotent restart command.
+            "ev_power": 6900,
+        }
+    )
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert set_amps_calls == [(vehicle_id, 11)]
+    assert start_calls == [(vehicle_id, 11)]
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 0
+
+    # A failed physical start must leave state at 0A so the next update retries.
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+    assert set_amps_calls == [(vehicle_id, 11), (vehicle_id, 11)]
+    assert start_calls == [(vehicle_id, 11), (vehicle_id, 11)]
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 11
+    assert (
+        actions._dynamic_ev_state["entry-1"][vehicle_id]["params"]["owner_mode"]
+        == "smart_schedule"
+    )
+
+    # A default Fleet session must preserve an unspecified VIN instead of
+    # passing the internal "_default" loadpoint identifier to entity lookup.
+    default_id = actions.DEFAULT_VEHICLE_ID
+    live_status.update(
+        {
+            "grid_power": 5000,
+            "solar_power": 15000,
+            "ev_power": 0,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {
+        default_id: {
+            "active": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": None,
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 3,
+            },
+        }
+    }
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            default_id,
+        )
+    )
+
+    assert set_amps_calls[-1] == (default_id, 11)
+    assert start_calls[-1] == (None, 11)
+    assert actions._dynamic_ev_state["entry-1"][default_id]["current_amps"] == 11
+
+    # If another mode takes ownership while the amp write is awaiting, the
+    # stale Smart Schedule callback must not physically restart the vehicle.
+    takeover_during_set.add(vehicle_id)
+    live_status.update(
+        {
+            "grid_power": 5000,
+            "solar_power": 15000,
+            "ev_power": 0,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 3,
+            },
+        }
+    }
+    starts_before_takeover = len(start_calls)
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert len(start_calls) == starts_before_takeover
+    assert (
+        actions._dynamic_ev_state["entry-1"][vehicle_id]["params"]["owner_mode"]
+        == "manual"
+    )
+
+
 def test_dynamic_scheduled_full_battery_grid_cap_holds_min_amps(monkeypatch):
     set_amps_calls: list[int] = []
 
