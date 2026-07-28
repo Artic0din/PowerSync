@@ -3995,6 +3995,210 @@ def test_optimizer_export_may_finish_exactly_at_reserve(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_tesla_targetless_partial_export_stops_before_crossing_reserve(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.6643)
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.66
+    coordinator._config.battery_capacity_wh = 27000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._last_executed_action = "export"
+    action = SimpleNamespace(
+        action="export",
+        power_w=1281.7,
+        soc=0.66,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_tesla_targetless_full_interval_may_finish_at_reserve(opt_module):
+    battery = _FakeBattery()
+    interval_drop = 10000 * (5 / 60) / 0.92 / 27000
+    coordinator = _execution_coordinator(
+        opt_module,
+        battery,
+        soc=0.66 + interval_drop,
+    )
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.66
+    coordinator._config.battery_capacity_wh = 27000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    action = SimpleNamespace(
+        action="export",
+        power_w=10000,
+        soc=0.66,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 10000, False, None)]
+    assert coordinator._last_executed_action == "export"
+
+
+def test_tesla_targetless_export_window_is_shortened_to_safe_duration(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.832)
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.66
+    coordinator._config.battery_capacity_wh = 27000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=10000 if idx < 5 else 1281.7,
+            soc=0.832 - min(idx + 1, 5) * (10000 * (5 / 60) / 0.92 / 27000),
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(6)
+    ]
+    actions[-1].soc = 0.66
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls
+    assert battery.force_discharge_calls[0][0] == 25
+    assert battery.force_discharge_calls[0][1] == 10000
+    assert coordinator._last_executed_action == "export"
+
+
+def test_active_tesla_partial_export_restores_before_crossing_reserve(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.6643)
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.66
+    coordinator._config.battery_capacity_wh = 27000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._last_executed_action = "export"
+    force_state_clears = []
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "discharge",
+        "source": "optimizer",
+    }
+    coordinator._force_state_clearer = lambda: force_state_clears.append(True)
+    action = SimpleNamespace(
+        action="export",
+        power_w=1281.7,
+        soc=0.66,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert force_state_clears == [True]
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_active_tesla_targetless_extension_uses_safe_window(opt_module):
+    now = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.832)
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.66
+    coordinator._config.battery_capacity_wh = 27000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._last_executed_action = "export"
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=10000 if idx < 5 else 1281.7,
+            soc=0.832 - min(idx + 1, 5) * (10000 * (5 / 60) / 0.92 / 27000),
+            timestamp=now + idx * timedelta(minutes=5),
+        )
+        for idx in range(6)
+    ]
+    actions[-1].soc = 0.66
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    force_state = {
+        "active": True,
+        "expires_at": now + timedelta(minutes=30),
+        "hardware_expires_at": now + timedelta(minutes=30),
+        "source": "optimizer",
+        "cancel_expiry_timer": lambda: None,
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_discharge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "discharge",
+        "source": "optimizer",
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls
+    assert battery.force_discharge_calls[0][:3] == (25, 10000, True)
+    assert force_state["expires_at"] == now + timedelta(minutes=25)
+    assert coordinator._last_executed_action == "export"
+
+
+@pytest.mark.parametrize(
+    ("capacity_wh", "efficiency"),
+    [
+        (0, 0.92),
+        (27000, "invalid"),
+    ],
+)
+def test_tesla_targetless_export_fails_closed_without_safety_inputs(
+    opt_module,
+    capacity_wh,
+    efficiency,
+):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "tesla"
+    coordinator._config.backup_reserve = 0.20
+    coordinator._config.battery_capacity_wh = capacity_wh
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=efficiency)
+    coordinator._last_executed_action = "export"
+    action = SimpleNamespace(
+        action="export",
+        power_w=10000,
+        soc=0.75,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_stale_profit_max_bridge_metadata_does_not_raise_export_floor(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.10)

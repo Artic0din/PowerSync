@@ -1831,6 +1831,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             windows.append((run_start, boundary_end, boundary_source))
         return windows
 
+    def _targetless_export_safe_duration(
+        self,
+        action: Any,
+        soc_now: float | None,
+        reserve: float,
+        requested_minutes: int,
+    ) -> tuple[int, float | None]:
+        """Return a reserve-safe full-power duration for targetless export."""
+        if self._supports_target_export_power():
+            return max(0, int(requested_minutes)), None
+        try:
+            capacity_wh = float(
+                getattr(self._config, "battery_capacity_wh", 0.0) or 0.0
+            )
+            command_w = float(self._export_command_power_w(action))
+            efficiency = float(
+                getattr(
+                    getattr(self, "_optimizer", None),
+                    "efficiency",
+                    0.92,
+                )
+                or 0.92
+            )
+            requested = max(0, int(requested_minutes))
+        except (TypeError, ValueError, OverflowError):
+            return 0, None
+        if (
+            soc_now is None
+            or capacity_wh <= 0
+            or command_w <= 0
+            or not 0 < efficiency <= 1
+        ):
+            return 0, None
+
+        headroom_wh = max(0.0, (soc_now - reserve) * capacity_wh)
+        safe_minutes_raw = headroom_wh * efficiency / command_w * 60.0
+        safe_minutes = max(0, math.floor(safe_minutes_raw + 1e-6))
+        hardware_projected_soc = soc_now - (
+            command_w * requested / 60.0 / efficiency / capacity_wh
+        )
+        return min(requested, safe_minutes), hardware_projected_soc
+
     def _force_discharge_reaches_reserve(
         self,
         action: Any,
@@ -1841,9 +1883,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         projected_soc = self._reserve_ratio(getattr(action, "soc", None))
         if soc_now is not None and soc_now <= reserve + 0.0001:
             return True, projected_soc
+        if not self._supports_target_export_power():
+            interval_minutes = max(
+                1,
+                int(getattr(self._config, "interval_minutes", 5) or 5),
+            )
+            safe_minutes, hardware_projected_soc = (
+                self._targetless_export_safe_duration(
+                    action,
+                    soc_now,
+                    reserve,
+                    interval_minutes,
+                )
+            )
+            if safe_minutes < interval_minutes:
+                return True, (
+                    min(projected_soc, hardware_projected_soc)
+                    if projected_soc is not None
+                    and hardware_projected_soc is not None
+                    else (
+                        projected_soc
+                        if projected_soc is not None
+                        else hardware_projected_soc
+                    )
+                )
         # A modeled export slot may legitimately finish exactly on the active
-        # reserve. Block only plans that cross it; the next cycle is blocked by
-        # the live starting-SOC guard above.
+        # reserve when the battery can honor that slot's requested power.
+        # Targetless force modes run at their configured maximum, so the
+        # hardware projection above must also remain at or above the floor.
         if projected_soc is not None and projected_soc < reserve - 0.0001:
             return True, projected_soc
         return False, projected_soc
@@ -6247,23 +6314,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if preserve_active_for_force and force_type == "discharge":
                     lp_matches_force = False
                 force_window_action = action
+                force_discharge_soc_now: float | None = None
+                force_discharge_reserve: float | None = None
 
                 if lp_matches_force:
                     if force_type == "discharge":
                         try:
-                            soc_now, _ = await self._get_battery_state()
-                            opt_reserve = self._force_discharge_reserve_floor(action)
+                            force_discharge_soc_now, _ = (
+                                await self._get_battery_state()
+                            )
+                            force_discharge_reserve = (
+                                self._force_discharge_reserve_floor(action)
+                            )
                             reaches_reserve, projected_soc = (
                                 self._force_discharge_reaches_reserve(
                                     action,
-                                    soc_now,
-                                    opt_reserve,
+                                    force_discharge_soc_now,
+                                    force_discharge_reserve,
                                 )
                             )
                             if reaches_reserve:
                                 soc_text = (
-                                    f"{soc_now * 100:.1f}%"
-                                    if soc_now is not None
+                                    f"{force_discharge_soc_now * 100:.1f}%"
+                                    if force_discharge_soc_now is not None
                                     else "unknown"
                                 )
                                 projected_text = (
@@ -6277,7 +6350,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     "restoring self_consumption instead of extending",
                                     soc_text,
                                     projected_text,
-                                    opt_reserve * 100,
+                                    force_discharge_reserve * 100,
                                 )
                                 restore_success = True
                                 if hasattr(battery, "restore_normal"):
@@ -6350,6 +6423,55 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
+                    targetless_window_shortened = False
+                    if (
+                        force_type == "discharge"
+                        and not self._supports_target_export_power()
+                    ):
+                        safe_mins, _ = self._targetless_export_safe_duration(
+                            force_window_action,
+                            force_discharge_soc_now,
+                            (
+                                force_discharge_reserve
+                                if force_discharge_reserve is not None
+                                else 1.0
+                            ),
+                            extend_mins,
+                        )
+                        if safe_mins <= 0:
+                            _LOGGER.warning(
+                                "Optimizer: Canceling active targetless force "
+                                "discharge — reserve-safe duration is unavailable"
+                            )
+                            restore_success = True
+                            if hasattr(battery, "restore_normal"):
+                                restore_success = await battery.restore_normal()
+                            elif hasattr(battery, "set_self_consumption_mode"):
+                                restore_success = (
+                                    await battery.set_self_consumption_mode()
+                                )
+                            if restore_success is False:
+                                _LOGGER.warning(
+                                    "Optimizer: Targetless force-discharge restore "
+                                    "failed; retaining force state for retry"
+                                )
+                                return
+                            if force_state.get("scope") == "optimizer":
+                                self._clear_optimizer_force_state()
+                            elif self._force_state_clearer:
+                                self._force_state_clearer()
+                            self._last_executed_planned_action = action.action
+                            self._last_executed_action = "self_consumption"
+                            return
+                        if safe_mins < extend_mins:
+                            _LOGGER.info(
+                                "Optimizer: Shortening targetless force discharge "
+                                "from %dmin to reserve-safe %dmin",
+                                extend_mins,
+                                safe_mins,
+                            )
+                            extend_mins = safe_mins
+                            targetless_window_shortened = True
                     tariff_mins = (
                         self._tesla_tariff_duration_for_force_window(extend_mins)
                         if force_type == "discharge"
@@ -6423,6 +6545,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             should_refresh_hardware
                             or self._force_discharge_hardware_needs_refresh(force_power_w)
                         )
+                    if (
+                        targetless_window_shortened
+                        and (
+                            hardware_expiry is None
+                            or hardware_expiry > new_expiry
+                        )
+                    ):
+                        should_refresh_hardware = True
 
                     # Re-issue hardware writes when the hardware-side window is
                     # shorter than the extended optimizer-owned force state, or
@@ -6755,21 +6885,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # discharge request and return the inverter to self-consumption;
             # do not keep exporting just because the hardware min-SOC would
             # eventually stop the battery.
+            export_soc_now: float | None = None
+            export_reserve: float | None = None
             if effective_action in ("discharge", "export"):
                 try:
-                    soc_now, _ = await self._get_battery_state()
-                    opt_reserve = self._force_discharge_reserve_floor(action)
+                    export_soc_now, _ = await self._get_battery_state()
+                    export_reserve = self._force_discharge_reserve_floor(action)
                     reaches_reserve, projected_soc = (
                         self._force_discharge_reaches_reserve(
                             action,
-                            soc_now,
-                            opt_reserve,
+                            export_soc_now,
+                            export_reserve,
                         )
                     )
                     if reaches_reserve:
                         soc_text = (
-                            f"{soc_now * 100:.1f}%"
-                            if soc_now is not None
+                            f"{export_soc_now * 100:.1f}%"
+                            if export_soc_now is not None
                             else "unknown"
                         )
                         projected_text = (
@@ -6783,11 +6915,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             effective_action,
                             soc_text,
                             projected_text,
-                            opt_reserve * 100,
+                            export_reserve * 100,
                         )
                         effective_action = "self_consumption"
-                except Exception:
-                    pass
+                except Exception as reserve_err:
+                    if not self._supports_target_export_power():
+                        _LOGGER.warning(
+                            "Optimizer: Blocking targetless %s because its "
+                            "reserve-safe duration could not be verified: %s",
+                            effective_action,
+                            reserve_err,
+                        )
+                        effective_action = "self_consumption"
 
             # A cached boundary action owns this slot once the fresh periodic
             # solve is genuinely late. Normal boundary solves finish a few
@@ -6915,6 +7054,44 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
+                    if not self._supports_target_export_power():
+                        safe_mins, _ = self._targetless_export_safe_duration(
+                            action,
+                            export_soc_now,
+                            export_reserve if export_reserve is not None else 1.0,
+                            discharge_duration,
+                        )
+                        if safe_mins <= 0:
+                            _LOGGER.warning(
+                                "Optimizer: Blocking targetless %s because no "
+                                "reserve-safe force duration remains",
+                                effective_action,
+                            )
+                            mode_result = True
+                            if hasattr(battery, "set_self_consumption_mode"):
+                                mode_result = (
+                                    await battery.set_self_consumption_mode()
+                                )
+                            elif hasattr(battery, "restore_normal"):
+                                mode_result = await battery.restore_normal()
+                            if mode_result is False:
+                                _LOGGER.warning(
+                                    "Optimizer: Failed to restore self-consumption "
+                                    "after blocking targetless export"
+                                )
+                                return
+                            self._last_executed_planned_action = planned_action
+                            self._last_executed_action = "self_consumption"
+                            return
+                        if safe_mins < discharge_duration:
+                            _LOGGER.info(
+                                "Optimizer: Shortening targetless %s from %dmin "
+                                "to reserve-safe %dmin",
+                                effective_action,
+                                discharge_duration,
+                                safe_mins,
+                            )
+                            discharge_duration = safe_mins
                     tariff_duration = self._tesla_tariff_duration_for_force_window(
                         discharge_duration
                     )
