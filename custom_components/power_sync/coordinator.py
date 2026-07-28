@@ -4167,15 +4167,31 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 if evdc_state and evdc_state.power_kw is not None
                 else 0.0
             )
+            external_ev_power_kw = 0.0
+            try:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                if entry:
+                    from . import _get_external_tesla_ev_power_kw
 
-            # Balance-derived Sigenergy load includes DC-side EVDC power. Keep
-            # home load separate so EVDC charging/discharge is modeled as an EV
-            # branch rather than household demand.
+                    external_ev_power_kw = _get_external_tesla_ev_power_kw(
+                        self.hass,
+                        entry,
+                    )
+            except Exception as err:
+                _LOGGER.debug(
+                    "Sigenergy external Tesla power lookup failed: %s",
+                    err,
+                )
+
+            # Balance-derived Sigenergy load includes DC-side EVDC and external
+            # AC EV power. Keep Home separate because the dashboard and load
+            # planner model those EV measurements as their own branch.
             load_kw = sigenergy_home_load_kw(
                 solar_kw=solar_kw,
                 grid_kw=grid_kw,
                 battery_kw=battery_kw,
                 evdc_power_kw=evdc_power_kw,
+                external_ev_power_kw=external_ev_power_kw,
             )
 
             # Accumulate daily energy from power readings (with cost tracking)

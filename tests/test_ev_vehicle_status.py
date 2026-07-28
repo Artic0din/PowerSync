@@ -249,6 +249,7 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
         "is_connected": False,
         "is_charging": False,
     }]
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
 
 
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
@@ -267,6 +268,139 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     assert vehicles[0]["is_connected"] is True
     assert vehicles[0]["is_charging"] is True
     assert vehicles[0]["ev_soc"] == 73
+
+
+def test_external_tesla_power_uses_coalesced_charging_vehicle():
+    power_sync = _power_sync_module()
+    hass = _tesla_hass([
+        _State("sensor.tessy_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.tessy_charging_2", "charging"),
+        _State("binary_sensor.tessy_charge_cable_2", "on"),
+        _State("device_tracker.tessy_location_2", "home"),
+    ])
+
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 7.0
+
+
+def test_external_tesla_power_excludes_other_charger_types():
+    power_sync = _power_sync_module()
+    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+        {
+            "vehicle_id": "generic_ev",
+            "brand": "generic",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "sigenergy_charger",
+            "charger_type": "evdc",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "LRWYHCEK3PC907290",
+            "brand": "tesla",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "5YJ3E1EA7KF000001",
+            "brand": "tesla",
+            "ev_power_kw": 3.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "wall_connector",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+    ]
+
+    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 10.0
+
+
+def test_external_tesla_power_honors_fleet_provider_with_ble_duplicate():
+    power_sync = _power_sync_module()
+    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+        {
+            "vehicle_id": "LRWYHCEK3PC907290",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "5YJ3E1EA7KF000001",
+            "ev_power_kw": 0.0,
+            "is_charging": False,
+        },
+        {
+            "vehicle_id": "ble_tessy",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+    ]
+
+    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 7.0
+
+
+def test_external_tesla_power_coalesces_reversed_fleet_and_ble_in_both_mode():
+    power_sync = _power_sync_module()
+    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+        {
+            "vehicle_id": "LRWYHCEK3PC907290",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "5YJ3E1EA7KF000001",
+            "ev_power_kw": 3.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "ble_tessy",
+            "ev_power_kw": 3.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "ble_theo",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "wall_connector",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+    ]
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": power_sync.EV_PROVIDER_BOTH},
+    )
+
+    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), entry) == 10.0
+
+
+def test_external_tesla_power_uses_conservative_total_for_partial_both_mode():
+    power_sync = _power_sync_module()
+    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+        {
+            "vehicle_id": "LRWYHCEK3PC907290",
+            "ev_power_kw": 3.0,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "ble_tessy",
+            "ev_power_kw": 7.0,
+            "is_charging": True,
+        },
+    ]
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": power_sync.EV_PROVIDER_BOTH},
+    )
+
+    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), entry) == 7.0
 
 
 def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_status():
@@ -327,6 +461,7 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         "is_connected": True,
         "is_charging": True,
     }]
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
 def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
@@ -362,6 +497,7 @@ def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
         "is_connected": True,
         "is_charging": True,
     }]
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
 def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():

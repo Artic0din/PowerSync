@@ -41,13 +41,19 @@ def sigenergy_home_load_kw(
     grid_kw: Any,
     battery_kw: Any,
     evdc_power_kw: Any = 0.0,
+    external_ev_power_kw: Any = 0.0,
 ) -> float:
-    """Return home/site load excluding signed EVDC power.
+    """Return home/site load excluding separately measured EV power.
 
     The Sigenergy balance-derived load is home load plus EVDC net power. EVDC
     charging is positive demand and V2X discharge is negative supply, so
-    subtracting the signed EVDC branch leaves home/site load.
+    subtracting the signed EVDC branch leaves home/site load. Positive external
+    Tesla power is also behind the site meter and is rendered as its own branch.
     """
     balance_kw = _as_float(solar_kw) + _as_float(grid_kw) + _as_float(battery_kw)
-    home_kw = balance_kw - _as_float(evdc_power_kw)
+    home_kw = (
+        balance_kw
+        - _as_float(evdc_power_kw)
+        - max(0.0, _as_float(external_ev_power_kw))
+    )
     return max(0.0, home_kw)

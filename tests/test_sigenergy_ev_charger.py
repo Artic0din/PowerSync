@@ -337,3 +337,29 @@ def test_sigenergy_home_load_excludes_signed_evdc_branch(charger_module):
         battery_kw=0.0,
         evdc_power_kw=-3.0,
     ) == 2.0
+
+
+def test_sigenergy_home_load_excludes_external_tesla_and_evdc(charger_module):
+    model = importlib.import_module("power_sync.sigenergy_model")
+
+    assert model.sigenergy_home_load_kw(
+        solar_kw=5.0,
+        grid_kw=4.1,
+        battery_kw=0.0,
+        external_ev_power_kw=7.0,
+    ) == pytest.approx(2.1)
+    assert model.sigenergy_home_load_kw(
+        solar_kw=8.0,
+        grid_kw=4.0,
+        battery_kw=0.0,
+        evdc_power_kw=3.0,
+        external_ev_power_kw=7.0,
+    ) == 2.0
+
+
+def test_sigenergy_coordinator_wires_external_tesla_power_into_home_load():
+    source = (COMPONENT_ROOT / "coordinator.py").read_text()
+
+    assert "from . import _get_external_tesla_ev_power_kw" in source
+    assert "external_ev_power_kw = _get_external_tesla_ev_power_kw(" in source
+    assert "external_ev_power_kw=external_ev_power_kw" in source

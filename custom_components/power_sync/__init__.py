@@ -1606,6 +1606,75 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     return list(coalesce_vehicle_observations(vehicles))
 
 
+def _get_external_tesla_ev_power_kw(hass, entry) -> float:
+    """Return coalesced positive Tesla power for a separate site-load branch."""
+    fleet_power_kw: list[float] = []
+    ble_power_kw: list[float] = []
+    other_tesla_power_kw: list[float] = []
+    bridge_power_kw = 0.0
+    excluded_ids = {
+        "generic_ev",
+        "sigenergy_charger",
+        "sigenergy_evac",
+        "sigenergy_evdc",
+    }
+    bridge_ids = {"wall_connector", "tesla_ev", "tesla_wall_connector"}
+
+    for vehicle in _get_ev_vehicles_status(hass, entry):
+        try:
+            power_kw = max(0.0, float(vehicle.get("ev_power_kw") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if power_kw <= 0.05 or not vehicle.get("is_charging"):
+            continue
+
+        vehicle_id = str(vehicle.get("vehicle_id") or "").strip().lower()
+        charger_type = str(vehicle.get("charger_type") or "").strip().lower()
+        brand = str(vehicle.get("brand") or "").strip().lower()
+        if (
+            vehicle_id in excluded_ids
+            or charger_type in {"generic", "sigenergy", "evac", "evdc"}
+            or brand in {"generic", "sigenergy"}
+        ):
+            continue
+        if vehicle_id in bridge_ids:
+            bridge_power_kw = max(bridge_power_kw, power_kw)
+        elif len(vehicle_id) == 17 and vehicle_id.isalnum():
+            fleet_power_kw.append(power_kw)
+        elif vehicle_id.startswith("ble_"):
+            ble_power_kw.append(power_kw)
+        else:
+            other_tesla_power_kw.append(power_kw)
+
+    # A bridge row is fallback loadpoint telemetry. When physical vehicle rows
+    # exist, coalescing has already attached that measurement to the vehicle;
+    # never subtract the same charge twice.
+    provider = {
+        **getattr(entry, "data", {}),
+        **getattr(entry, "options", {}),
+    }.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+    fleet_total_kw = sum(fleet_power_kw)
+    ble_total_kw = sum(ble_power_kw)
+    if provider == EV_PROVIDER_BOTH:
+        # Fleet registry order and configured BLE-prefix order are unrelated,
+        # so individual rows cannot be paired safely. Both providers observe
+        # the same configured Tesla set; use the larger aggregate to preserve
+        # extra/partial observations without ever counting both feeds.
+        named_power_kw = max(fleet_total_kw, ble_total_kw)
+    elif provider == EV_PROVIDER_TESLA_BLE:
+        named_power_kw = (
+            ble_total_kw if ble_total_kw > 0.05 else fleet_total_kw
+        )
+    elif provider == EV_PROVIDER_FLEET_API:
+        named_power_kw = (
+            fleet_total_kw if fleet_total_kw > 0.05 else ble_total_kw
+        )
+    else:
+        named_power_kw = max(fleet_total_kw, ble_total_kw)
+    named_power_kw += sum(other_tesla_power_kw)
+    return named_power_kw if named_power_kw > 0.05 else bridge_power_kw
+
+
 async def _read_sigenergy_charger_state_for_entry(entry, hass=None):
     """Read configured Sigenergy EVAC/EVDC charger state, if enabled."""
     from .const import (
