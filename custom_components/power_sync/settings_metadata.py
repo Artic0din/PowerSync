@@ -54,9 +54,8 @@ def optimizer_settings_schema() -> dict[str, Any]:
     """Return cross-client ownership metadata for PowerSync settings.
 
     ``category`` is retained for version-1 mobile clients. New clients should
-    use ``owner`` and ``section`` so a field is rendered by the surface that
-    owns it instead of treating every value used by the solver as an optimizer
-    setting.
+    use ``owner`` and ``section`` so all optimizer controls can be rendered in
+    one destination with coherent internal groups.
 
     Monitoring and Away use separate control endpoints and remain intentionally
     absent from this writable optimization/settings contract.
@@ -67,127 +66,127 @@ def optimizer_settings_schema() -> dict[str, Any]:
             "enabled": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "overview",
+                "section": "core_goals",
                 "order": 1,
             },
             "profit_max_enabled": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "goals",
+                "section": "core_goals",
                 "order": 10,
             },
             "charge_by_time_enabled": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "goals",
+                "section": "core_goals",
                 "order": 11,
             },
             "charge_by_time_target_soc": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "goals",
+                "section": "core_goals",
                 "order": 12,
             },
             "charge_by_time_target_time": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "goals",
+                "section": "core_goals",
                 "order": 13,
             },
             "backup_reserve": {
                 "category": "core",
                 "owner": "optimizer",
-                "section": "reserve_strategy",
+                "section": "reserve_controls",
                 "order": 20,
             },
             "auto_apply_reserve_enabled": {
                 "category": "behaviour",
                 "owner": "optimizer",
-                "section": "reserve_strategy",
+                "section": "reserve_controls",
                 "order": 21,
             },
             "ev_integration": {
                 "category": "behaviour",
-                "owner": "ev_charging",
-                "section": "battery_planning",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
                 "order": 30,
                 "capability": "ev_integration",
             },
             "allow_grid_charge": {
                 "category": "behaviour",
                 "owner": "optimizer",
-                "section": "grid_charging",
+                "section": "grid_site_constraints",
                 "order": 40,
                 "capability": "grid_charge",
             },
             "hardware_backup_reserve": {
                 "category": "system",
-                "owner": "controls",
-                "section": "battery",
+                "owner": "optimizer",
+                "section": "reserve_controls",
                 "order": 50,
             },
             "battery_capacity_wh": {
                 "category": "system",
-                "owner": "battery",
-                "section": "specifications",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
                 "order": 60,
             },
             "max_charge_w": {
                 "category": "system",
-                "owner": "battery",
-                "section": "specifications",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
                 "order": 61,
             },
             "max_discharge_w": {
                 "category": "system",
-                "owner": "battery",
-                "section": "specifications",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
                 "order": 62,
             },
             "max_grid_import_w": {
                 "category": "system",
-                "owner": "site",
-                "section": "limits",
+                "owner": "optimizer",
+                "section": "grid_site_constraints",
                 "order": 70,
             },
             "max_grid_export_w": {
                 "category": "system",
-                "owner": "site",
-                "section": "limits",
+                "owner": "optimizer",
+                "section": "grid_site_constraints",
                 "order": 71,
             },
             "max_grid_charge_price": {
                 "category": "advanced",
                 "owner": "optimizer",
-                "section": "grid_charging",
+                "section": "grid_site_constraints",
                 "order": 41,
                 "capability": "grid_charge",
             },
             "grid_charge_soc_cap": {
                 "category": "advanced",
                 "owner": "optimizer",
-                "section": "grid_charging",
+                "section": "grid_site_constraints",
                 "order": 42,
                 "capability": "grid_charge",
             },
             "spread_import_enabled": {
                 "category": "advanced",
                 "owner": "optimizer",
-                "section": "dispatch",
+                "section": "dispatch_behaviour",
                 "order": 80,
                 "visible_if": {"battery_system_not": "tesla"},
             },
             "spread_export_enabled": {
                 "category": "advanced",
                 "owner": "optimizer",
-                "section": "dispatch",
+                "section": "dispatch_behaviour",
                 "order": 81,
                 "visible_if": {"battery_system_not": "tesla"},
             },
             "disable_idle_enabled": {
                 "category": "advanced",
                 "owner": "optimizer",
-                "section": "dispatch",
+                "section": "dispatch_behaviour",
                 "order": 82,
                 "capability": "disable_idle",
             },

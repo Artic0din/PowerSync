@@ -1480,7 +1480,7 @@ def test_options_menu_exposes_editable_battery_system_section():
     assert 'menu_options.append("custom_battery")' in method_source
 
 
-def test_options_menu_keeps_specialist_sections_under_advanced():
+def test_options_menu_keeps_optimizer_grouped_and_specialists_under_advanced():
     source = CONFIG_FLOW_PATH.read_text()
     init_source = ast.get_source_segment(
         source, _options_flow_method("async_step_init")
@@ -1492,9 +1492,6 @@ def test_options_menu_keeps_specialist_sections_under_advanced():
     assert init_source is not None
     assert advanced_source is not None
     for owner_section in (
-        '"battery_control"',
-        '"battery_specs"',
-        '"site_limits"',
         '"optimization"',
         '"ev_charging"',
         '"advanced"',
@@ -1511,6 +1508,12 @@ def test_options_menu_keeps_specialist_sections_under_advanced():
     ):
         assert specialist_section not in init_source
         assert specialist_section in advanced_source
+    for split_optimizer_section in (
+        '"battery_control"',
+        '"battery_specs"',
+        '"site_limits"',
+    ):
+        assert split_optimizer_section not in init_source
 
     assert "BATTERY_SYSTEM_SUNGROW" in advanced_source
     assert 'menu_options.append("history_relink")' in advanced_source
@@ -1523,7 +1526,7 @@ def test_options_menu_keeps_specialist_sections_under_advanced():
         assert "safely leave these alone" in steps["advanced"]["description"]
 
 
-def test_optimization_options_are_split_without_resetting_hidden_sections():
+def test_optimization_options_use_one_grouped_form_without_stale_replay():
     source = CONFIG_FLOW_PATH.read_text()
     menu = _options_flow_method("async_step_optimization", implementation=False)
     implementation = _options_flow_method("_async_step_optimization")
@@ -1535,16 +1538,7 @@ def test_optimization_options_are_split_without_resetting_hidden_sections():
     assert menu_source is not None
     assert implementation_source is not None
     assert section_handler_source is not None
-    for section in (
-        "optimization_overview",
-        "optimization_goals",
-        "optimization_reserve",
-        "optimization_grid_charging",
-        "optimization_forecast",
-        "optimization_dispatch",
-    ):
-        assert f'"{section}"' in menu_source
-        assert f"async_step_{section}" in source
+    assert '_async_optimization_section("optimization", user_input)' in menu_source
 
     refresh_index = section_handler_source.index(
         "await self._async_step_optimization(None"
@@ -1553,30 +1547,38 @@ def test_optimization_options_are_split_without_resetting_hidden_sections():
     assert refresh_index < merge_index
     assert "current_form_values: dict[str, Any]" in implementation_source
     for section in (
-        "overview",
-        "goals",
-        "reserve",
-        "grid_charging",
-        "forecast",
-        "dispatch",
-        "battery_control",
-        "battery_specs",
-        "site_limits",
+        "core_goals",
+        "reserve_controls",
+        "battery_forecast_inputs",
+        "grid_site_constraints",
+        "dispatch_behaviour",
     ):
         assert f'"{section}": {{' in implementation_source
     assert "if marker.schema in allowed_fields" in implementation_source
-    assert "marker.schema for marker in visible_schema" in implementation_source
+    assert "marker.schema for marker in schema_fields" in implementation_source
+    assert "section(" in implementation_source
     assert (
         "self._optimization_submitted_fields = set(visible_fields)"
         in section_handler_source
     )
     assert "all_live_settings = {" in implementation_source
-    forecast_fields = implementation_source.split('"forecast": {', 1)[1].split(
+    forecast_fields = implementation_source.split('"battery_forecast_inputs": {', 1)[1].split(
         "},",
         1,
     )[0]
     assert "CONF_OPTIMIZATION_LOAD_ENTITY" in forecast_fields
-    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" not in forecast_fields
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in forecast_fields
+    assert "CONF_OPTIMIZATION_EV_INTEGRATION" in forecast_fields
+    reserve_fields = implementation_source.split('"reserve_controls": {', 1)[1].split(
+        "},",
+        1,
+    )[0]
+    assert "CONF_HARDWARE_BACKUP_RESERVE" in reserve_fields
+    dispatch_fields = implementation_source.split('"dispatch_behaviour": {', 1)[1].split(
+        "},",
+        1,
+    )[0]
+    assert "CONF_MONITORING_MODE" in dispatch_fields
     assert "live_settings = submitted_live_settings(" in implementation_source
     native_owner_block = implementation_source.split(
         "legacy aggregated optimizer form used to silently discard",
@@ -1594,13 +1596,12 @@ def test_optimization_options_are_split_without_resetting_hidden_sections():
 
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         step = json.loads(path.read_text())["options"]["step"]["optimization"]
-        assert step["menu_options"] == {
-            "optimization_overview": "Overview & engine",
-            "optimization_goals": "Goals",
-            "optimization_reserve": "Reserve strategy",
-            "optimization_grid_charging": "Grid charging",
-            "optimization_forecast": "Forecast inputs",
-            "optimization_dispatch": "Dispatch behaviour",
+        assert set(step["sections"]) == {
+            "core_goals",
+            "reserve_controls",
+            "battery_forecast_inputs",
+            "grid_site_constraints",
+            "dispatch_behaviour",
         }
 
 
@@ -2365,14 +2366,13 @@ def test_smart_optimization_setup_and_sectioned_options_labels_match():
         options_step = data["options"]["step"]["optimization"]
 
         assert config_step["title"] == options_step["title"]
-        assert "Choose the Smart Optimization task" in options_step["description"]
-        assert set(options_step["menu_options"]) == {
-            "optimization_overview",
-            "optimization_goals",
-            "optimization_reserve",
-            "optimization_grid_charging",
-            "optimization_forecast",
-            "optimization_dispatch",
+        assert "one screen" in options_step["description"]
+        assert set(options_step["sections"]) == {
+            "core_goals",
+            "reserve_controls",
+            "battery_forecast_inputs",
+            "grid_site_constraints",
+            "dispatch_behaviour",
         }
         assert config_step["data"] == options_step["data"]
         assert config_step["data_description"] == options_step["data_description"]

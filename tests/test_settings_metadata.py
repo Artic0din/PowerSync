@@ -45,13 +45,14 @@ def test_optimizer_schema_is_versioned_and_legacy_groups_remain_compatible():
     assert "allow_grid_charge" in groups["advanced_optimizer"]["fields"]
     assert schema["fields"]["allow_grid_charge"]["category"] == "behaviour"
     assert schema["fields"]["allow_grid_charge"]["owner"] == "optimizer"
-    assert schema["fields"]["allow_grid_charge"]["section"] == "grid_charging"
+    assert schema["fields"]["allow_grid_charge"]["section"] == "grid_site_constraints"
     assert schema["fields"]["max_grid_export_w"]["category"] == "system"
-    assert schema["fields"]["max_grid_export_w"]["owner"] == "site"
+    assert schema["fields"]["max_grid_export_w"]["owner"] == "optimizer"
     assert schema["fields"]["max_grid_charge_price"]["category"] == "advanced"
-    assert schema["fields"]["hardware_backup_reserve"]["owner"] == "controls"
-    assert schema["fields"]["battery_capacity_wh"]["owner"] == "battery"
-    assert schema["fields"]["ev_integration"]["owner"] == "ev_charging"
+    assert schema["fields"]["hardware_backup_reserve"]["owner"] == "optimizer"
+    assert schema["fields"]["hardware_backup_reserve"]["section"] == "reserve_controls"
+    assert schema["fields"]["battery_capacity_wh"]["owner"] == "optimizer"
+    assert schema["fields"]["ev_integration"]["owner"] == "optimizer"
     assert schema["fields"]["spread_export_enabled"]["visible_if"] == {
         "battery_system_not": "tesla"
     }
@@ -180,11 +181,17 @@ def test_legacy_controls_reserve_wins_until_next_canonical_write():
     assert legacy_index < canonical_index
 
 
-def test_ev_planning_participation_is_owned_by_ev_options():
+def test_ev_planning_participation_is_owned_by_optimizer_options():
     source = CONFIG_FLOW_PATH.read_text()
     ev_step_start = source.index("async def async_step_ev_charging")
     ev_step_end = source.index("async def async_step_zaptec_cloud_options")
     ev_source = source[ev_step_start:ev_step_end]
 
-    assert "CONF_OPTIMIZATION_EV_INTEGRATION" in ev_source
-    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in ev_source
+    assert "CONF_OPTIMIZATION_EV_INTEGRATION" not in ev_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" not in ev_source
+
+    optimizer_start = source.index("async def _async_step_optimization")
+    optimizer_end = source.index("async def async_step_inverter", optimizer_start)
+    optimizer_source = source[optimizer_start:optimizer_end]
+    assert "CONF_OPTIMIZATION_EV_INTEGRATION" in optimizer_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in optimizer_source
