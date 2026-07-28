@@ -1163,7 +1163,10 @@
           "neovolt_connection": "Neovolt connection",
           "anker_solix": "Anker Solix connection",
           "custom_battery": "Custom external controller",
-          "optimization": "Optimization mode",
+          "battery_control": "Battery control & reserve",
+          "battery_specs": "Battery specifications",
+          "site_limits": "Home & grid limits",
+          "optimization": "Smart Optimization",
           "ev_charging": "EV charging",
           "solax_battery_options": "Solax connection",
           "advanced": "Advanced settings"
@@ -1511,12 +1514,14 @@
       },
       "optimization": {
         "title": "Smart Optimization settings",
-        "description": "Choose the part of Smart Optimization you want to change. Everyday goals stay separate from occasional behaviour, battery specifications, and specialist constraints.",
+        "description": "Choose the Smart Optimization task you want to change. Physical battery, site, and EV settings are managed from their own sections.",
         "menu_options": {
-          "optimization_core": "Core goals",
-          "optimization_behaviour": "Behaviour",
-          "optimization_system": "Battery & limits",
-          "optimization_advanced": "Advanced optimizer controls"
+          "optimization_overview": "Overview & engine",
+          "optimization_goals": "Goals",
+          "optimization_reserve": "Reserve strategy",
+          "optimization_grid_charging": "Grid charging",
+          "optimization_forecast": "Forecast inputs",
+          "optimization_dispatch": "Dispatch behaviour"
         },
         "data": {
           "optimization_provider": "Optimization mode",
@@ -1569,6 +1574,47 @@
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
+        },
+        "submit": "Save"
+      },
+      "battery_control": {
+        "title": "Battery control & reserve",
+        "description": "Configure physical battery behavior. The hardware reserve is the battery's outage reserve and restore target; it is separate from Smart Optimization's planning reserve.",
+        "data": {
+          "hardware_backup_reserve": "Hardware backup reserve",
+          "monitoring_mode": "Monitoring mode"
+        },
+        "data_description": {
+          "hardware_backup_reserve": "The battery's own backup reserve for grid outages. This is the same value exposed by the Battery control in the PowerSync app and is restored after temporary hold or force-control modes.",
+          "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation."
+        },
+        "submit": "Save"
+      },
+      "battery_specs": {
+        "title": "Battery specifications",
+        "description": "Configure the usable battery model shared by planning and dispatch.",
+        "data": {
+          "optimization_battery_capacity_wh": "Usable battery capacity",
+          "optimization_max_charge_w": "Maximum charge power",
+          "optimization_max_discharge_w": "Maximum discharge power"
+        },
+        "data_description": {
+          "optimization_battery_capacity_wh": "Total usable battery capacity in kWh.",
+          "optimization_max_charge_w": "Maximum charge power in kW PowerSync may request.",
+          "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW PowerSync may request for loads and export."
+        },
+        "submit": "Save"
+      },
+      "site_limits": {
+        "title": "Home & grid limits",
+        "description": "Configure whole-site import and export constraints independently of optimizer goals.",
+        "data": {
+          "optimization_max_grid_export_w": "Maximum grid export",
+          "optimization_max_grid_import_w": "Maximum grid import"
+        },
+        "data_description": {
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+          "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit."
         },
         "submit": "Save"
       },
@@ -2149,6 +2195,8 @@
         "data": {
           "ev_charging_enabled": "Enable Tesla EV charging",
           "ev_provider": "Tesla control method",
+          "optimization_ev_integration": "Include PowerSync EV plans in battery optimization",
+          "optimization_planned_ev_load_entity": "External planned EV load forecast sensor",
           "tesla_ble_entity_prefix": "Tesla BLE entity prefix",
           "ocpp_enabled": "Enable OCPP charger integration",
           "ocpp_port": "Legacy OCPP WebSocket port",
@@ -2174,6 +2222,8 @@
         "data_description": {
           "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
           "ev_provider": "Fleet API/Teslemetry = cloud API. Tesla BLE = local Bluetooth via ESPHome. Both = BLE with Fleet API fallback.",
+          "optimization_ev_integration": "Adds demand from PowerSync-managed EV charging plans to Smart Optimization. Leave this off when the external planned EV load sensor already represents the same charging demand.",
+          "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync includes it in the battery forecast but does not control that charger.",
           "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles: my_tesla, wifes_tesla. Default: tesla_ble.",
           "ocpp_enabled": "Use chargers exposed by the HACS OCPP integration for status, sessions, and smart charging control.",
           "ocpp_port": "Legacy setting kept for existing installs. PowerSync uses the HACS OCPP integration for charger communication.",

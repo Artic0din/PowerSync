@@ -1491,10 +1491,15 @@ def test_options_menu_keeps_specialist_sections_under_advanced():
 
     assert init_source is not None
     assert advanced_source is not None
-    assert (
-        'menu_options.extend(["optimization", "ev_charging", "advanced"])'
-        in init_source
-    )
+    for owner_section in (
+        '"battery_control"',
+        '"battery_specs"',
+        '"site_limits"',
+        '"optimization"',
+        '"ev_charging"',
+        '"advanced"',
+    ):
+        assert owner_section in init_source
     for specialist_section in (
         '"network_export"',
         '"inverter"',
@@ -1522,40 +1527,80 @@ def test_optimization_options_are_split_without_resetting_hidden_sections():
     source = CONFIG_FLOW_PATH.read_text()
     menu = _options_flow_method("async_step_optimization", implementation=False)
     implementation = _options_flow_method("_async_step_optimization")
+    section_handler = _options_flow_method("_async_optimization_section")
     menu_source = ast.get_source_segment(source, menu)
     implementation_source = ast.get_source_segment(source, implementation)
+    section_handler_source = ast.get_source_segment(source, section_handler)
 
     assert menu_source is not None
     assert implementation_source is not None
+    assert section_handler_source is not None
     for section in (
-        "optimization_core",
-        "optimization_behaviour",
-        "optimization_system",
-        "optimization_advanced",
+        "optimization_overview",
+        "optimization_goals",
+        "optimization_reserve",
+        "optimization_grid_charging",
+        "optimization_forecast",
+        "optimization_dispatch",
     ):
         assert f'"{section}"' in menu_source
         assert f"async_step_{section}" in source
 
-    refresh_index = menu_source.index("await self._async_step_optimization(None)")
-    merge_index = menu_source.index("merge_optimization_section_input(")
+    refresh_index = section_handler_source.index(
+        "await self._async_step_optimization(None"
+    )
+    merge_index = section_handler_source.index("merge_optimization_section_input(")
     assert refresh_index < merge_index
     assert "current_form_values: dict[str, Any]" in implementation_source
-    assert '"core": {' in implementation_source
-    assert '"behaviour": {' in implementation_source
-    assert '"system": {' in implementation_source
-    assert '"advanced": {' in implementation_source
+    for section in (
+        "overview",
+        "goals",
+        "reserve",
+        "grid_charging",
+        "forecast",
+        "dispatch",
+        "battery_control",
+        "battery_specs",
+        "site_limits",
+    ):
+        assert f'"{section}": {{' in implementation_source
     assert "if marker.schema in allowed_fields" in implementation_source
-    assert "self._optimization_visible_fields = allowed_fields" in implementation_source
+    assert "marker.schema for marker in visible_schema" in implementation_source
+    assert (
+        "self._optimization_submitted_fields = set(visible_fields)"
+        in section_handler_source
+    )
     assert "all_live_settings = {" in implementation_source
+    forecast_fields = implementation_source.split('"forecast": {', 1)[1].split(
+        "},",
+        1,
+    )[0]
+    assert "CONF_OPTIMIZATION_LOAD_ENTITY" in forecast_fields
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" not in forecast_fields
     assert "live_settings = submitted_live_settings(" in implementation_source
+    native_owner_block = implementation_source.split(
+        "legacy aggregated optimizer form used to silently discard",
+        1,
+    )[1].split("entry_data =", 1)[0]
+    for owner_field in (
+        "CONF_HARDWARE_BACKUP_RESERVE",
+        "CONF_OPTIMIZATION_BATTERY_CAPACITY_WH",
+        "CONF_OPTIMIZATION_MAX_CHARGE_W",
+        "CONF_OPTIMIZATION_MAX_DISCHARGE_W",
+        "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W",
+        "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W",
+    ):
+        assert owner_field in native_owner_block
 
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         step = json.loads(path.read_text())["options"]["step"]["optimization"]
         assert step["menu_options"] == {
-            "optimization_core": "Core goals",
-            "optimization_behaviour": "Behaviour",
-            "optimization_system": "Battery & limits",
-            "optimization_advanced": "Advanced optimizer controls",
+            "optimization_overview": "Overview & engine",
+            "optimization_goals": "Goals",
+            "optimization_reserve": "Reserve strategy",
+            "optimization_grid_charging": "Grid charging",
+            "optimization_forecast": "Forecast inputs",
+            "optimization_dispatch": "Dispatch behaviour",
         }
 
 
@@ -2320,12 +2365,14 @@ def test_smart_optimization_setup_and_sectioned_options_labels_match():
         options_step = data["options"]["step"]["optimization"]
 
         assert config_step["title"] == options_step["title"]
-        assert "Choose the part" in options_step["description"]
+        assert "Choose the Smart Optimization task" in options_step["description"]
         assert set(options_step["menu_options"]) == {
-            "optimization_core",
-            "optimization_behaviour",
-            "optimization_system",
-            "optimization_advanced",
+            "optimization_overview",
+            "optimization_goals",
+            "optimization_reserve",
+            "optimization_grid_charging",
+            "optimization_forecast",
+            "optimization_dispatch",
         }
         assert config_step["data"] == options_step["data"]
         assert config_step["data_description"] == options_step["data_description"]

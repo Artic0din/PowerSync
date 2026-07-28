@@ -77,6 +77,10 @@ def _disabled_optimizer_backup_reserve_target(entry: Any) -> tuple[int | None, s
     data = getattr(entry, "data", {}) or {}
     options = getattr(entry, "options", {}) or {}
     candidates = (
+        # Legacy Controls writes used this private key. Prefer it during
+        # migration because it represents the most recent physical reserve
+        # chosen by the user, even when an older optimizer-owned value exists.
+        (options.get("_user_backup_reserve"), "persisted user backup reserve"),
         (
             data.get(
                 CONF_HARDWARE_BACKUP_RESERVE,
@@ -84,7 +88,6 @@ def _disabled_optimizer_backup_reserve_target(entry: Any) -> tuple[int | None, s
             ),
             "hardware backup reserve config",
         ),
-        (options.get("_user_backup_reserve"), "persisted user backup reserve"),
         (
             options.get(
                 CONF_OPTIMIZATION_MANUAL_RESERVE,
@@ -34573,11 +34576,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not optimizer_write:
                 if opt_coord:
                     opt_coord._startup_backup_reserve = percent
-                new_opts = {**entry.options, "_user_backup_reserve": percent}
-                if new_opts != dict(entry.options):
+                    if hasattr(opt_coord, "_sync_brand_restore_targets"):
+                        opt_coord._sync_brand_restore_targets(percent)
+                    optimizer_model = getattr(opt_coord, "_optimizer", None)
+                    if optimizer_model:
+                        optimizer_model.update_hardware_reserve(percent / 100)
+                new_data = dict(entry.data)
+                new_opts = dict(entry.options)
+                hardware_reserve = percent / 100
+                new_data[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve
+                new_opts[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve
+                new_opts.pop("_user_backup_reserve", None)
+                if (
+                    new_data != dict(entry.data)
+                    or new_opts != dict(entry.options)
+                ):
                     entry_data["_skip_reload"] = True
-                hass.config_entries.async_update_entry(entry, options=new_opts)
-                _LOGGER.info("Persisted user backup reserve: %d%%", percent)
+                hass.config_entries.async_update_entry(
+                    entry,
+                    data=new_data,
+                    options=new_opts,
+                )
+                _LOGGER.info(
+                    "Persisted canonical hardware backup reserve: %d%%",
+                    percent,
+                )
             else:
                 _LOGGER.debug(
                     "Skipping backup reserve persistence (source=%s, idle_adjustment=%s, percent=%d%%)",
@@ -38339,21 +38362,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 optimization_coordinator._config.grid_charge_soc_cap * 100,
             )
 
-            # Load hardware backup reserve (user-configured restore target)
-            from .const import CONF_HARDWARE_BACKUP_RESERVE
-            hw_reserve_pct = entry.data.get(
-                CONF_HARDWARE_BACKUP_RESERVE,
-                entry.options.get(CONF_HARDWARE_BACKUP_RESERVE)
+            # Load the physical reserve restore target. The coordinator resolver
+            # also understands the legacy Controls-only persistence key so an
+            # older, more recent user choice wins over stale optimizer config.
+            hw_reserve_int, hw_reserve_source = (
+                optimization_coordinator._configured_startup_backup_reserve()
             )
-            if hw_reserve_pct is not None:
-                if hw_reserve_pct > 1:
-                    hw_reserve_int = int(hw_reserve_pct)
-                else:
-                    hw_reserve_int = int(hw_reserve_pct * 100)
+            if hw_reserve_int is not None:
                 optimization_coordinator._startup_backup_reserve = hw_reserve_int
                 if optimization_coordinator._optimizer:
                     optimization_coordinator._optimizer.update_hardware_reserve(hw_reserve_int / 100)
-                _LOGGER.info(f"Hardware backup reserve set from config: {hw_reserve_int}%%")
+                _LOGGER.info(
+                    "Hardware backup reserve set from %s: %d%%",
+                    hw_reserve_source,
+                    hw_reserve_int,
+                )
 
                 # Set restore target on Sigenergy controller so restore_normal
                 # writes the correct backup reserve after force discharge
@@ -39044,9 +39067,12 @@ class OptimizationSettingsView(HomeAssistantView):
                         backup_reserve = backup_reserve / 100
                 except (TypeError, ValueError):
                     backup_reserve = DEFAULT_OPTIMIZATION_BACKUP_RESERVE
-                raw_hardware = config_entry.data.get(
-                    CONF_HARDWARE_BACKUP_RESERVE,
-                    config_entry.options.get(CONF_HARDWARE_BACKUP_RESERVE, 0),
+                raw_hardware = config_entry.options.get(
+                    "_user_backup_reserve",
+                    config_entry.options.get(
+                        CONF_HARDWARE_BACKUP_RESERVE,
+                        config_entry.data.get(CONF_HARDWARE_BACKUP_RESERVE, 0),
+                    ),
                 )
                 try:
                     hardware_reserve = float(raw_hardware)
@@ -39616,6 +39642,7 @@ class OptimizationSettingsView(HomeAssistantView):
                     new_options[option_key] = spec_value
                     changes.append(f"Set {payload_key} to {spec_value}")
                 else:
+                    new_data.pop(option_key, None)
                     new_options.pop(option_key, None)
                     changes.append(f"Cleared {payload_key}")
 

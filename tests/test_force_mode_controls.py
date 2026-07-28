@@ -2858,7 +2858,9 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
     assert '"hold_soc_restore"' in function_source
     assert "if not optimizer_write:" in function_source
     persistence_branch = function_source.split("if not optimizer_write:", 1)[1]
-    assert '"_user_backup_reserve": percent' in persistence_branch
+    assert "new_data[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve" in persistence_branch
+    assert "new_opts[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve" in persistence_branch
+    assert 'new_opts.pop("_user_backup_reserve", None)' in persistence_branch
 
 
 def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():

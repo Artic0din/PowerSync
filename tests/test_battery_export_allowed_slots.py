@@ -145,6 +145,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
+    const_module.CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
     const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.CONF_COVAU_PLAN_SNAPSHOT = "covau_plan_snapshot"
     const_module.CONF_COVAU_IMPORT_ENERGY_ENTITY = "covau_import_energy_entity"
@@ -186,6 +187,8 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"
     const_module.DEFAULT_PROFIT_MAX_TARGET_SOC = 1.0
     const_module.DEFAULT_OPTIMIZATION_INTERVAL = 5
+    const_module.BATTERY_CAPACITY_DEFAULTS = {"tesla": 13500}
+    const_module.BATTERY_POWER_DEFAULTS = {"tesla": 5000}
     const_module.FLOW_POWER_BENCHMARK = 1.7
     const_module.FLOW_POWER_EXPORT_RATES = {"NSW1": 0.45}
     const_module.FLOW_POWER_GST = 1.1
@@ -643,7 +646,7 @@ def test_update_config_propagates_horizon_hours_to_optimizer(opt_module):
     assert update_calls[-1]["horizon_hours"] == 12
 
 
-def test_startup_restore_target_prefers_hardware_reserve_config(opt_module):
+def test_startup_restore_target_prefers_newer_legacy_controls_reserve(opt_module):
     coordinator = _coordinator(
         opt_module,
         "amber",
@@ -653,12 +656,14 @@ def test_startup_restore_target_prefers_hardware_reserve_config(opt_module):
     )
 
     assert coordinator._configured_startup_backup_reserve() == (
-        20,
-        "hardware backup reserve config",
+        45,
+        "persisted user backup reserve",
     )
 
 
-def test_startup_restore_target_prefers_data_hardware_reserve_over_stale_options(opt_module):
+def test_startup_restore_target_prefers_legacy_controls_reserve_during_migration(
+    opt_module,
+):
     coordinator = _coordinator(
         opt_module,
         "amber",
@@ -669,8 +674,8 @@ def test_startup_restore_target_prefers_data_hardware_reserve_over_stale_options
     coordinator._entry.data = {"hardware_backup_reserve": 0.2}
 
     assert coordinator._configured_startup_backup_reserve() == (
-        20,
-        "hardware backup reserve config",
+        45,
+        "persisted user backup reserve",
     )
 
 
@@ -814,6 +819,108 @@ def test_set_settings_persists_hardware_reserve_to_data_and_options(opt_module):
     assert updates[-1]["data"]["hardware_backup_reserve"] == 0.2
     assert updates[-1]["options"]["hardware_backup_reserve"] == 0.2
     assert "_user_backup_reserve" not in updates[-1]["options"]
+
+
+def test_set_settings_reset_battery_specs_re_detects_without_zeroing_model(
+    opt_module,
+):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.entry_id = "entry-1"
+    coordinator._entry.data = {
+        "battery_capacity_wh": 13500,
+        "max_charge_w": 5000,
+        "max_discharge_w": 5000,
+    }
+    coordinator._entry.options = dict(coordinator._entry.data)
+    coordinator._battery_specs_source = "manual"
+    coordinator._enabled = False
+    detected = []
+    defaults_seen = []
+    optimizer_updates = []
+
+    async def _auto_detect_battery_specs():
+        detected.append(True)
+        defaults_seen.append(
+            (
+                coordinator._config.battery_capacity_wh,
+                coordinator._config.max_charge_w,
+                coordinator._config.max_discharge_w,
+            )
+        )
+        coordinator._config.battery_capacity_wh = 16000
+        coordinator._config.max_charge_w = 6000
+        coordinator._config.max_discharge_w = 5500
+        coordinator._battery_specs_source = "auto"
+
+    coordinator._auto_detect_battery_specs = _auto_detect_battery_specs
+    coordinator._optimizer = SimpleNamespace(
+        update_config=lambda **values: optimizer_updates.append(values)
+    )
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings(
+            {
+                "battery_capacity_wh": 0,
+                "max_charge_w": 0,
+                "max_discharge_w": 0,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert detected == [True]
+    assert defaults_seen == [(13500, 5000, 5000)]
+    assert coordinator._entry.data == {}
+    assert coordinator._entry.options == {}
+    assert coordinator._battery_specs_source == "auto"
+    assert optimizer_updates == [
+        {
+            "capacity_wh": 16000,
+            "max_charge_w": 6000,
+            "max_discharge_w": 5500,
+        }
+    ]
+
+
+def test_set_settings_ev_participation_allows_options_reload(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_ev_integration=False,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._ev_integration_enabled = False
+    coordinator._enabled = False
+    entry_data = {}
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": entry_data}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"ev_integration": True}))
+
+    assert result["success"] is True
+    assert coordinator._ev_integration_enabled is True
+    assert coordinator._entry.options["optimization_ev_integration"] is True
+    assert "_skip_reload" not in entry_data
 
 
 def test_set_settings_enabled_noop_does_not_leave_stale_skip_reload_flag(opt_module):

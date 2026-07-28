@@ -2133,6 +2133,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         from ..const import CONF_HARDWARE_BACKUP_RESERVE, CONF_OPTIMIZATION_BACKUP_RESERVE
 
+        # Controls used a private key before hardware reserve gained one
+        # canonical owner. Prefer that newer user choice while old entries are
+        # being migrated by the next physical reserve write.
+        persisted_user_reserve = self._reserve_percent(
+            self._entry.options.get("_user_backup_reserve")
+        )
+        if persisted_user_reserve is not None and (
+            persisted_user_reserve > 0 or self.battery_system != "tesla"
+        ):
+            return persisted_user_reserve, "persisted user backup reserve"
+
         hw_reserve = self._reserve_percent(
             self._entry.data.get(
                 CONF_HARDWARE_BACKUP_RESERVE,
@@ -2141,14 +2152,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if hw_reserve is not None:
             return hw_reserve, "hardware backup reserve config"
-
-        persisted_user_reserve = self._reserve_percent(
-            self._entry.options.get("_user_backup_reserve")
-        )
-        if persisted_user_reserve is not None and (
-            persisted_user_reserve > 0 or self.battery_system != "tesla"
-        ):
-            return persisted_user_reserve, "persisted user backup reserve"
 
         optimizer_reserve = self._reserve_percent(
             self._entry.options.get(
@@ -12612,8 +12615,91 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def set_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Update optimization settings from API."""
+        settings = dict(settings)
         response = {"success": True, "changes": []}
         rerun_after_settings = False
+
+        # A non-positive battery specification means "clear the manual
+        # override", matching the mobile Reset to Auto action. Never push a
+        # zero capacity/power into the live LP model while waiting for
+        # detection; clear persistence first, then re-detect in place.
+        battery_spec_keys = (
+            "battery_capacity_wh",
+            "max_charge_w",
+            "max_discharge_w",
+        )
+        cleared_battery_specs: set[str] = set()
+        for key in battery_spec_keys:
+            if key not in settings:
+                continue
+            try:
+                should_clear = float(settings[key]) <= 0
+            except (TypeError, ValueError):
+                should_clear = False
+            if should_clear:
+                cleared_battery_specs.add(key)
+                settings.pop(key)
+
+        if cleared_battery_specs and self._entry:
+            from ..const import (
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                CONF_OPTIMIZATION_MAX_CHARGE_W,
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                DOMAIN as _SKIP_DOM,
+            )
+
+            option_by_setting = {
+                "battery_capacity_wh": CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                "max_charge_w": CONF_OPTIMIZATION_MAX_CHARGE_W,
+                "max_discharge_w": CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+            }
+            new_data = dict(self._entry.data)
+            new_options = dict(self._entry.options)
+            persisted_before = (dict(new_data), dict(new_options))
+            for key in cleared_battery_specs:
+                option_key = option_by_setting[key]
+                new_data.pop(option_key, None)
+                new_options.pop(option_key, None)
+                response["changes"].append(f"cleared {key}")
+
+            if (new_data, new_options) != persisted_before:
+                self.hass.data.get(_SKIP_DOM, {}).get(
+                    self.entry_id,
+                    {},
+                )["_skip_reload"] = True
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data=new_data,
+                options=new_options,
+            )
+
+        if cleared_battery_specs:
+            from ..const import BATTERY_CAPACITY_DEFAULTS, BATTERY_POWER_DEFAULTS
+
+            default_config = OptimizationConfig()
+            default_capacity_wh = BATTERY_CAPACITY_DEFAULTS.get(
+                self.battery_system, default_config.battery_capacity_wh
+            )
+            default_power_w = BATTERY_POWER_DEFAULTS.get(
+                self.battery_system,
+                default_config.max_charge_w,
+            )
+            defaults_by_setting = {
+                "battery_capacity_wh": default_capacity_wh,
+                "max_charge_w": default_power_w,
+                "max_discharge_w": default_power_w,
+            }
+            for key in cleared_battery_specs:
+                setattr(self._config, key, defaults_by_setting[key])
+            self._battery_specs_source = "default"
+            await self._auto_detect_battery_specs()
+            if self._optimizer:
+                self._optimizer.update_config(
+                    capacity_wh=self._config.battery_capacity_wh,
+                    max_charge_w=self._config.max_charge_w,
+                    max_discharge_w=self._config.max_discharge_w,
+                )
+            rerun_after_settings = True
 
         # Handle enabled toggle
         if "enabled" in settings:
@@ -13076,14 +13162,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 new_options = dict(self._entry.options)
                 persisted_changed = new_options.get(CONF_OPTIMIZATION_EV_INTEGRATION) != ev_enabled
                 new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_enabled
-                # Prevent reload from API-driven options update — only when
-                # this write actually changes persisted state (see the
-                # "enabled" toggle above for why an unconditional set is a bug).
-                from ..const import DOMAIN as _SKIP_DOM
-                if persisted_changed:
-                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
                 response["changes"].append(f"ev_integration: {ev_enabled}")
+                # EV participation owns coordinator lifecycle as well as the
+                # forecast flag. Deliberately allow the options listener to
+                # reload when this value changes so EV coordinators are
+                # started/stopped; an in-place flag flip is incomplete.
+                if not persisted_changed:
+                    _LOGGER.debug("EV integration setting was already %s", ev_enabled)
 
         if rerun_after_settings and getattr(self, "_enabled", False):
             self._schedule_settings_reoptimization()

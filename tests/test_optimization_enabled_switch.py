@@ -307,8 +307,9 @@ def test_max_grid_import_setting_is_exposed_through_api_and_coordinator():
     assert '"max_grid_export_w": self._config.max_grid_export_w' in coordinator_source
     assert '"max_grid_charge_price": (' in coordinator_source
     assert '"grid_charge_soc_cap": int(' in coordinator_source
-    assert '"max_grid_import_w": {"category": "system"' in metadata_source
-    assert '"max_grid_export_w": {"category": "system"' in metadata_source
+    assert '"max_grid_import_w": {' in metadata_source
+    assert '"max_grid_export_w": {' in metadata_source
+    assert metadata_source.count('"owner": "site"') >= 2
     assert '"max_grid_charge_price": {' in metadata_source
     assert '"grid_charge_soc_cap": {' in metadata_source
     assert '"settings_schema": optimizer_settings_schema()' in init_source

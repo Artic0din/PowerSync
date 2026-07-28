@@ -8,6 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = ROOT / "custom_components" / "power_sync" / "settings_metadata.py"
+INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
+COORDINATOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+)
+CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 
 
 def _load_module():
@@ -23,7 +28,7 @@ def test_optimizer_schema_is_versioned_and_legacy_groups_remain_compatible():
     schema = module.optimizer_settings_schema()
     groups = module.optimizer_settings_groups()
 
-    assert schema["version"] == 1
+    assert schema["version"] == 2
     assert set(groups) == {"optimizer", "advanced_optimizer"}
     assert groups["optimizer"]["collapsed"] is False
     assert groups["advanced_optimizer"]["collapsed"] is True
@@ -39,13 +44,19 @@ def test_optimizer_schema_is_versioned_and_legacy_groups_remain_compatible():
     }
     assert "allow_grid_charge" in groups["advanced_optimizer"]["fields"]
     assert schema["fields"]["allow_grid_charge"]["category"] == "behaviour"
+    assert schema["fields"]["allow_grid_charge"]["owner"] == "optimizer"
+    assert schema["fields"]["allow_grid_charge"]["section"] == "grid_charging"
     assert schema["fields"]["max_grid_export_w"]["category"] == "system"
+    assert schema["fields"]["max_grid_export_w"]["owner"] == "site"
     assert schema["fields"]["max_grid_charge_price"]["category"] == "advanced"
+    assert schema["fields"]["hardware_backup_reserve"]["owner"] == "controls"
+    assert schema["fields"]["battery_capacity_wh"]["owner"] == "battery"
+    assert schema["fields"]["ev_integration"]["owner"] == "ev_charging"
     assert schema["fields"]["spread_export_enabled"]["visible_if"] == {
         "battery_system_not": "tesla"
     }
     # These settings are owned by other endpoints or by HA entity selectors;
-    # schema v1 must not promise that optimization/settings can write them.
+    # Schema v2 must not promise that optimization/settings can write them.
     for field in (
         "monitoring_mode",
         "away_mode",
@@ -70,6 +81,25 @@ def test_section_merge_uses_live_hidden_values_not_rendered_values():
         "monitoring_mode": True,
         "backup_reserve": 35,
         "max_grid_export_w": 0,
+    }
+
+
+def test_section_merge_treats_an_omitted_optional_field_as_cleared():
+    module = _load_module()
+
+    merged = module.merge_optimization_section_input(
+        {
+            "max_grid_export_w": 5000,
+            "max_grid_import_w": 15000,
+            "backup_reserve": 20,
+        },
+        {"max_grid_export_w", "max_grid_import_w"},
+        {"max_grid_import_w": 12000},
+    )
+
+    assert merged == {
+        "max_grid_import_w": 12000,
+        "backup_reserve": 20,
     }
 
 
@@ -117,3 +147,44 @@ def test_auto_apply_reserve_values_split_manual_control_from_applied_floor():
 
     assert displayed == 0.25
     assert applied is None
+
+
+def test_controls_hardware_reserve_uses_one_canonical_persistence_key():
+    init_source = INIT_PATH.read_text()
+    handler_start = init_source.index("async def handle_set_backup_reserve")
+    handler_end = init_source.index(
+        "async def handle_set_operation_mode",
+        handler_start,
+    )
+    handler_source = init_source[handler_start:handler_end]
+
+    assert "new_data[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve" in handler_source
+    assert "new_opts[CONF_HARDWARE_BACKUP_RESERVE] = hardware_reserve" in handler_source
+    assert 'new_opts.pop("_user_backup_reserve", None)' in handler_source
+    assert '{"_user_backup_reserve": percent}' not in handler_source
+
+
+def test_legacy_controls_reserve_wins_until_next_canonical_write():
+    coordinator_source = COORDINATOR_PATH.read_text()
+    method_start = coordinator_source.index(
+        "def _configured_startup_backup_reserve"
+    )
+    method_end = coordinator_source.index(
+        "async def _resolve_startup_backup_reserve",
+        method_start,
+    )
+    method_source = coordinator_source[method_start:method_end]
+
+    legacy_index = method_source.index('self._entry.options.get("_user_backup_reserve")')
+    canonical_index = method_source.index("hw_reserve =")
+    assert legacy_index < canonical_index
+
+
+def test_ev_planning_participation_is_owned_by_ev_options():
+    source = CONFIG_FLOW_PATH.read_text()
+    ev_step_start = source.index("async def async_step_ev_charging")
+    ev_step_end = source.index("async def async_step_zaptec_cloud_options")
+    ev_source = source[ev_step_start:ev_step_end]
+
+    assert "CONF_OPTIMIZATION_EV_INTEGRATION" in ev_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in ev_source

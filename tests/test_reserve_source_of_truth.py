@@ -733,15 +733,25 @@ def _handle_set_backup_reserve_persist_source() -> str:
         / "__init__.py"
     )
     source = init_path.read_text()
-    start = source.index("# Persist the user's chosen backup reserve")
-    end = source.index("async def handle_set_operation_mode", start)
+    marker = source.index("# Persist the user's chosen backup reserve")
+    start = source.rfind("\n", 0, marker) + 1
+    next_handler = source.index("async def handle_set_operation_mode", marker)
+    end = source.rfind("\n", 0, next_handler) + 1
     return source[start:end]
 
 
 def _run_persist_backup_reserve(*, hass, entry, percent, call):
-    block = textwrap.indent(_handle_set_backup_reserve_persist_source(), "    ")
-    func_src = f"async def _persist(hass, entry, percent, call, DOMAIN):\n{block}"
+    block = textwrap.indent(
+        textwrap.dedent(_handle_set_backup_reserve_persist_source()),
+        "    ",
+    )
+    func_src = (
+        "async def _persist(hass, entry, percent, call, DOMAIN):\n"
+        "    reserve_source = call.data.get('source')\n"
+        f"{block}"
+    )
     namespace = {
+        "CONF_HARDWARE_BACKUP_RESERVE": "hardware_backup_reserve",
         "_LOGGER": SimpleNamespace(
             info=lambda *a, **k: None,
             debug=lambda *a, **k: None,
@@ -759,6 +769,8 @@ def _backup_reserve_hass(*, entry_id="entry-1"):
 
         def async_update_entry(self, entry, **kwargs):
             self.calls.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
             if "options" in kwargs:
                 entry.options = kwargs["options"]
 
@@ -775,7 +787,11 @@ def test_handle_set_backup_reserve_noop_does_not_set_skip_reload():
     `_skip_reload` (OB-39 site 1)."""
 
     hass, config_entries = _backup_reserve_hass()
-    entry = SimpleNamespace(entry_id="entry-1", options={"_user_backup_reserve": 20})
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={"hardware_backup_reserve": 0.2},
+        options={"hardware_backup_reserve": 0.2},
+    )
     call = SimpleNamespace(data={})
 
     _run_persist_backup_reserve(hass=hass, entry=entry, percent=20, call=call)
@@ -788,10 +804,33 @@ def test_handle_set_backup_reserve_changed_sets_skip_reload():
     against an inverted no-op condition)."""
 
     hass, config_entries = _backup_reserve_hass()
-    entry = SimpleNamespace(entry_id="entry-1", options={"_user_backup_reserve": 20})
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={"hardware_backup_reserve": 0.2},
+        options={"hardware_backup_reserve": 0.2},
+    )
     call = SimpleNamespace(data={})
 
     _run_persist_backup_reserve(hass=hass, entry=entry, percent=30, call=call)
 
     assert hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
-    assert entry.options["_user_backup_reserve"] == 30
+    assert entry.data["hardware_backup_reserve"] == 0.3
+    assert entry.options["hardware_backup_reserve"] == 0.3
+    assert "_user_backup_reserve" not in entry.options
+
+
+def test_handle_set_backup_reserve_migrates_legacy_key_even_when_value_matches():
+    hass, config_entries = _backup_reserve_hass()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"_user_backup_reserve": 20},
+    )
+    call = SimpleNamespace(data={})
+
+    _run_persist_backup_reserve(hass=hass, entry=entry, percent=20, call=call)
+
+    assert hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
+    assert entry.data["hardware_backup_reserve"] == 0.2
+    assert entry.options["hardware_backup_reserve"] == 0.2
+    assert "_user_backup_reserve" not in entry.options
