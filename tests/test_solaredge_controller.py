@@ -550,6 +550,107 @@ def test_solaredge_force_charge_writes_remote_charge_entities_and_restores():
     assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
 
 
+@pytest.mark.parametrize(
+    "policy_entity_id",
+    [
+        "select.solaredge_i1_ac_charge_policy",
+        "select.solaredge_storage_ac_charge_policy",
+    ],
+)
+def test_solaredge_force_charge_uses_grid_command_and_ac_policy_entities(
+    policy_entity_id,
+):
+    hass = _SEHass()
+    command_mode = hass.states.get("select.solaredge_storage_command_mode")
+    command_mode.state = "Solar Power Only (Off)"
+    command_mode.attributes["options"] = [
+        "Solar Power Only (Off)",
+        "Charge from Clipped Solar Power",
+        "Charge from Solar Power",
+        "Charge from Solar Power and Grid",
+        "Discharge to Maximize Export",
+        "Discharge to Minimize Import",
+        "Maximize Self Consumption",
+    ]
+    hass.states._states.pop("switch.solaredge_allow_grid_charge")
+    hass.states._states[policy_entity_id] = _SEState(
+        policy_entity_id,
+        "Disabled",
+        {
+            "options": [
+                "Disabled",
+                "Always Allowed",
+                "Fixed Energy Limit",
+                "Percent of Production",
+            ]
+        },
+    )
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+
+    assert controller._control_entity_map["allow_grid_charge"] == policy_entity_id
+    assert hass.states.get(policy_entity_id).state == "Always Allowed"
+    assert hass.states.get("select.solaredge_storage_command_mode").state == (
+        "Charge from Solar Power and Grid"
+    )
+
+    assert asyncio.run(controller.restore_normal())
+    assert hass.states.get(policy_entity_id).state == "Disabled"
+    assert hass.states.get("select.solaredge_storage_command_mode").state == (
+        "Solar Power Only (Off)"
+    )
+
+
+def test_solaredge_stale_dispatch_restore_preserves_saved_ac_policy():
+    hass = _SEHass()
+    command_mode = hass.states.get("select.solaredge_storage_command_mode")
+    command_mode.state = "Charge from Solar Power and Grid"
+    command_mode.attributes["options"] = [
+        "Solar Power Only (Off)",
+        "Charge from Solar Power and Grid",
+        "Maximize Self Consumption",
+    ]
+    hass.states.get("number.solaredge_storage_command_timeout").state = "5400"
+    hass.states._states.pop("switch.solaredge_allow_grid_charge")
+    policy_entity_id = "select.solaredge_i1_ac_charge_policy"
+    hass.states._states[policy_entity_id] = _SEState(
+        policy_entity_id,
+        "Disabled",
+        {"options": ["Disabled", "Always Allowed"]},
+    )
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.states.get(policy_entity_id).state == "Always Allowed"
+
+    assert asyncio.run(controller.restore_normal())
+    assert hass.states.get(policy_entity_id).state == "Disabled"
+    assert hass.states.get("select.solaredge_storage_control_mode").state == (
+        "Maximize Self Consumption"
+    )
+    assert hass.states.get("select.solaredge_storage_command_mode").state == (
+        "Solar Power Only (Off)"
+    )
+
+
+def test_solaredge_charge_alias_does_not_match_discharge_option():
+    hass = _SEHass()
+    command_mode = hass.states.get("select.solaredge_storage_command_mode")
+    command_mode.state = "Discharge to Maximize Export"
+    command_mode.attributes["options"] = ["Discharge to Maximize Export"]
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert (
+        controller._match_select_option(
+            "select.solaredge_storage_command_mode", ("charge",)
+        )
+        is None
+    )
+
+
 def test_solaredge_restore_normal_discards_saved_active_dispatch_snapshot():
     hass = _SEHass()
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")

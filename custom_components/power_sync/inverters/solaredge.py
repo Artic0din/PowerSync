@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from typing import Any, Optional
 
 from .base import InverterController, InverterState, InverterStatus
@@ -97,6 +98,8 @@ _CONTROL_ENTITIES: dict[str, tuple[str, tuple[str, ...]]] = {
             "storage_grid_charge",
             "battery_grid_charge",
             "ac_charge",
+            "ac_charge_policy",
+            "storage_ac_charge_policy",
         ),
     ),
 }
@@ -123,7 +126,17 @@ _SELF_USE_OPTIONS = (
     "auto",
     "automatic",
 )
-_CHARGE_OPTIONS = ("charge", "charge battery", "charging", "force charge", "remote charge")
+_CHARGE_OPTIONS = (
+    "charge from solar power and grid",
+    "charge from pv and ac",
+    "charge from solar and grid",
+    "charge from grid",
+    "charge",
+    "charge battery",
+    "charging",
+    "force charge",
+    "remote charge",
+)
 _DISCHARGE_OPTIONS = (
     "discharge",
     "discharge battery",
@@ -724,11 +737,15 @@ class SolarEdgeEnergyController:
     async def restore_normal(self) -> bool:
         """Restore SolarEdge storage controls to the saved or self-use state."""
         self._ensure_entity_map()
+        saved_allow_grid_charge: Any = None
         if self._saved_control_state:
             if self._saved_control_state_contains_active_dispatch():
                 _LOGGER.info(
                     "SolarEdge saved control state contains active dispatch; "
                     "falling back to self-consumption restore"
+                )
+                saved_allow_grid_charge = self._saved_control_state.get(
+                    "allow_grid_charge"
                 )
                 self._saved_control_state = None
             else:
@@ -743,6 +760,10 @@ class SolarEdgeEnergyController:
         ok &= await self._set_number_if_mapped("command_timeout", 0)
         ok &= await self._set_select_by_alias("storage_command_mode", _IDLE_OPTIONS)
         ok &= await self._set_select_by_alias("storage_control_mode", _SELF_USE_OPTIONS)
+        if saved_allow_grid_charge is not None:
+            ok &= await self._restore_control_value(
+                "allow_grid_charge", saved_allow_grid_charge
+            )
         return bool(ok)
 
     def _saved_control_state_contains_active_dispatch(self) -> bool:
@@ -962,17 +983,21 @@ class SolarEdgeEnergyController:
     async def _restore_saved_control_state(self) -> bool:
         ok = True
         for key, value in (self._saved_control_state or {}).items():
-            entity_id = self._control_entity_map.get(key)
-            if not entity_id:
-                continue
-            domain = entity_id.split(".", 1)[0]
-            if domain == "number":
-                ok &= await self._set_number_if_mapped(key, value)
-            elif domain == "select":
-                ok &= await self._select_option(entity_id, str(value))
-            elif domain == "switch":
-                ok &= await self._set_switch(entity_id, str(value).lower() == "on")
+            ok &= await self._restore_control_value(key, value)
         return bool(ok)
+
+    async def _restore_control_value(self, key: str, value: Any) -> bool:
+        entity_id = self._control_entity_map.get(key)
+        if not entity_id:
+            return True
+        domain = entity_id.split(".", 1)[0]
+        if domain == "number":
+            return await self._set_number_if_mapped(key, value)
+        if domain == "select":
+            return await self._select_option(entity_id, str(value))
+        if domain == "switch":
+            return await self._set_switch(entity_id, str(value).lower() == "on")
+        return True
 
     def _read_control_float(self, key: str) -> float | None:
         entity_id = self._control_entity_map.get(key)
@@ -1046,11 +1071,24 @@ class SolarEdgeEnergyController:
         attrs = getattr(state, "attributes", {}) or {}
         options = attrs.get("options") or []
         normalized_aliases = {_normalize_option(alias) for alias in aliases}
+
+        # Prefer an exact supported option across the complete list before
+        # falling back to substring aliases. SolarEdge Modbus Multi orders
+        # several charge variants before "Charge from Solar Power and Grid";
+        # matching the generic "charge" alias inline would select the first
+        # clipped-solar option instead of the requested grid-charge command.
         for option in options:
             normalized_option = _normalize_option(str(option))
-            if (
-                normalized_option in normalized_aliases
-                or any(alias in normalized_option for alias in normalized_aliases)
+            if normalized_option in normalized_aliases:
+                return str(option)
+        for option in options:
+            normalized_option = _normalize_option(str(option))
+            if any(
+                re.search(
+                    rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
+                    normalized_option,
+                )
+                for alias in normalized_aliases
             ):
                 return str(option)
         current = getattr(state, "state", None)
@@ -1079,12 +1117,16 @@ class SolarEdgeEnergyController:
         if domain == "switch":
             return await self._set_switch(entity_id, enabled)
         if domain == "select":
-            aliases = ("on", "enabled", "enable", "allowed", "allow") if enabled else (
-                "off",
-                "disabled",
-                "disable",
-                "not allowed",
-                "disallow",
+            aliases = (
+                ("always allowed", "on", "enabled", "enable", "allowed", "allow")
+                if enabled
+                else (
+                    "disabled",
+                    "off",
+                    "disable",
+                    "not allowed",
+                    "disallow",
+                )
             )
             return await self._set_select_by_alias("allow_grid_charge", aliases)
         return True
