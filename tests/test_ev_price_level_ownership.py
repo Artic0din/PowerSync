@@ -107,6 +107,23 @@ def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(12) == "12.0c"
 
 
+def test_active_smart_schedule_solar_session_delegates_low_surplus_stop():
+    assert not ev_planner._should_block_smart_schedule_solar_start(
+        current_surplus_kw=3.0,
+        min_surplus_kw=3.5,
+        owner_mode="smart_schedule_solar_surplus",
+    )
+
+
+@pytest.mark.parametrize("owner_mode", (None, "solar_surplus", "smart_schedule"))
+def test_inactive_smart_schedule_solar_start_keeps_minimum_gate(owner_mode):
+    assert ev_planner._should_block_smart_schedule_solar_start(
+        current_surplus_kw=3.0,
+        min_surplus_kw=3.5,
+        owner_mode=owner_mode,
+    )
+
+
 def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(
@@ -3391,6 +3408,99 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
 
     assert start_calls == ["solar_surplus"]
     assert state.last_decision == "started"
+
+
+@pytest.mark.parametrize(
+    (
+        "schedule_vehicle_id",
+        "resolved_vehicle_id",
+        "owner_mode",
+        "expected_stop_count",
+    ),
+    (
+        (VIN, VIN, "smart_schedule_solar_surplus", 0),
+        ("1", "ble_tesla_flinn", "smart_schedule_solar_surplus", 0),
+        (VIN, VIN, None, 1),
+    ),
+)
+def test_auto_schedule_active_solar_session_delegates_low_surplus_stop(
+    monkeypatch,
+    schedule_vehicle_id,
+    resolved_vehicle_id,
+    owner_mode,
+    expected_stop_count,
+):
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def vehicle_soc(self, vehicle_id):
+        return 73
+
+    class SolarPlanner:
+        async def should_charge_now(self, **kwargs):
+            assert kwargs["current_surplus_kw"] == pytest.approx(3.0)
+            return True, "planned solar window", "solar_surplus"
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    hass = _FakeHass()
+    if owner_mode is not None:
+        hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
+            resolved_vehicle_id: {
+                "owner": "powersync",
+                "owner_mode": owner_mode,
+            }
+        }
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SolarPlanner(),
+    )
+    executor._resolve_vehicle_vin = lambda vehicle_id: resolved_vehicle_id
+    executor._stop_charging = AsyncMock()
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=schedule_vehicle_id,
+        display_name="Model 3",
+        phases=3,
+        voltage=230,
+        min_charge_amps=5,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=schedule_vehicle_id)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    state.is_charging = True
+    executor._state[schedule_vehicle_id] = state
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            schedule_vehicle_id,
+            settings,
+            {
+                "battery_soc": 100,
+                "solar_power": 7700,
+                "load_power": 4700,
+                "grid_power": -2970,
+            },
+            current_price_cents=0,
+        )
+    )
+
+    assert executor._stop_charging.await_count == expected_stop_count
+    assert state.last_decision == (
+        "charging"
+        if owner_mode == "smart_schedule_solar_surplus"
+        else "stopped"
+    )
 
 
 def test_auto_schedule_solar_allows_strict_surplus_below_battery_floor(monkeypatch, fake_actions):

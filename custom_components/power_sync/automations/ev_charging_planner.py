@@ -106,6 +106,18 @@ def _format_price_log_value(price_cents: Optional[float]) -> str:
     return f"{price_cents:.1f}c"
 
 
+def _should_block_smart_schedule_solar_start(
+    current_surplus_kw: float,
+    min_surplus_kw: float,
+    owner_mode: Optional[str],
+) -> bool:
+    """Keep the minimum gate for starts while delegating active-session stops."""
+    return (
+        current_surplus_kw < min_surplus_kw
+        and owner_mode != "smart_schedule_solar_surplus"
+    )
+
+
 def _ha_local_now_naive() -> datetime:
     """Return Home Assistant local time without tzinfo for schedule comparisons."""
     try:
@@ -5223,7 +5235,23 @@ class AutoScheduleExecutor:
             else:
                 # Battery is above threshold, check surplus requirement
                 min_surplus = settings.get_min_surplus_kw()
-                if current_surplus_kw < min_surplus:
+                active_owner_mode = None
+                if state.is_charging:
+                    from .ev_ownership import get_active_ev_owner_mode
+
+                    owner_vehicle_id = (
+                        self._resolve_vehicle_vin(vehicle_id) or vehicle_id
+                    )
+                    active_owner_mode = get_active_ev_owner_mode(
+                        self.hass,
+                        self.config_entry,
+                        owner_vehicle_id,
+                    )
+                if _should_block_smart_schedule_solar_start(
+                    current_surplus_kw,
+                    min_surplus,
+                    active_owner_mode,
+                ):
                     should_charge = False
                     reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
                     _LOGGER.info(
@@ -5231,6 +5259,16 @@ class AutoScheduleExecutor:
                         f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
                         f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed "
                         f"(phases={settings.phases})"
+                    )
+                elif current_surplus_kw < min_surplus:
+                    reason = (
+                        f"Active Solar Surplus session controls low-surplus stop "
+                        f"({current_surplus_kw:.1f}kW < {min_surplus:.1f}kW)"
+                    )
+                    _LOGGER.debug(
+                        "Auto-schedule: %s for %s",
+                        reason,
+                        vehicle_id,
                     )
 
         # Find current window (if in one)
