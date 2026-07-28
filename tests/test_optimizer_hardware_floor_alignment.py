@@ -1560,6 +1560,364 @@ def test_full_battery_free_import_keeps_full_slot_charge_command(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_capped_bonus_free_import_keeps_full_slot_charge_command(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """A capped tariff credit must preserve the same free-slot command mode."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.3517, 0.3517, 0.3517],
+        export_prices=[0.05, 0.05, 0.05],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[0.7, 0.7, 0.7],
+        current_soc=0.98,
+        allow_battery_export=[False, False, False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.3517, 0.3517, 0.3517],
+        import_bonus_cap_kwh=50.0,
+    )
+
+    assert [action.action for action in result.schedule.actions] == [
+        "charge",
+        "charge",
+        "charge",
+    ]
+    assert [action.power_w for action in result.schedule.actions] == pytest.approx(
+        [5_000.0, 5_000.0, 5_000.0],
+        abs=0.1,
+    )
+    assert all(
+        action.battery_charge_w == pytest.approx(0.0, abs=0.1)
+        for action in result.schedule.actions
+    )
+
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=[0.3517, 0.3517, 0.3517],
+        export_prices=[0.05, 0.05, 0.05],
+        solar=[0.0, 0.0, 0.0],
+        load=[0.7, 0.7, 0.7],
+        import_bonus_prices=[0.3517, 0.3517, 0.3517],
+        import_bonus_cap_kwh=50.0,
+        initial_soc=0.98,
+    )
+    assert [action.action for action in reconciled.schedule.actions] == [
+        "charge",
+        "charge",
+        "charge",
+    ]
+    assert all(
+        action.battery_charge_w == pytest.approx(0.0, abs=0.1)
+        for action in reconciled.schedule.actions
+    )
+    assert reconciled.grid_import_w == pytest.approx(
+        [700.0, 700.0, 700.0],
+        abs=0.1,
+    )
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_capped_bonus_free_import_requires_quota_for_the_whole_window(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """A partial window credit cannot authorize an unbounded charge command."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.3517, 0.3517, 0.3517],
+        export_prices=[0.05, 0.05, 0.05],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[0.7, 0.7, 0.7],
+        current_soc=0.98,
+        allow_battery_export=[False, False, False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.3517, 0.3517, 0.3517],
+        import_bonus_cap_kwh=5.7,
+    )
+
+    assert [action.action for action in result.schedule.actions] == [
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+    ]
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+@pytest.mark.parametrize(
+    ("bonus_price", "quota_kwh"),
+    ((0.3517, 0.0), (0.20, 50.0)),
+)
+def test_nonfree_capped_bonus_does_not_own_charge_mode(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+    bonus_price,
+    quota_kwh,
+):
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.3517],
+        export_prices=[0.05],
+        solar_forecast=[0.0],
+        load_forecast=[0.7],
+        current_soc=0.98,
+        allow_battery_export=[False],
+        allow_grid_charge=True,
+        import_bonus_prices=[bonus_price],
+        import_bonus_cap_kwh=quota_kwh,
+    )
+
+    assert result.schedule.actions[0].action == "self_consumption"
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_capped_bonus_free_import_resets_for_next_tariff_day(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.0,
+    )
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=["2026-07-28", "2026-07-29"],
+        import_caps_by_group={
+            "2026-07-28": 5.7,
+            "2026-07-29": 5.7,
+        },
+        export_group_ids=None,
+        export_caps_by_group=None,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.3517, 0.3517],
+        export_prices=[0.05, 0.05],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.7, 0.7],
+        current_soc=0.98,
+        allow_battery_export=[False, False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.3517, 0.3517],
+        import_bonus_cap_kwh=11.4,
+    )
+
+    assert [action.action for action in result.schedule.actions] == [
+        "charge",
+        "charge",
+    ]
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_partial_bonus_consumes_quota_before_later_free_bonus_slot(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.50, 0.3517],
+        export_prices=[0.05, 0.05],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.7, 0.7],
+        current_soc=0.98,
+        allow_battery_export=[False, False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.20, 0.3517],
+        import_bonus_cap_kwh=5.7,
+    )
+
+    assert result.free_import_command_slots == [False, False]
+    imported_kwh = sum(result.grid_import_w) / 1000.0 * optimizer.dt_hours
+    assert imported_kwh <= 5.701
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_raw_zero_price_remains_free_with_exhausted_optional_bonus(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.0],
+        export_prices=[0.05],
+        solar_forecast=[0.0],
+        load_forecast=[0.7],
+        current_soc=0.98,
+        allow_battery_export=[False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.10],
+        import_bonus_cap_kwh=0.0,
+    )
+
+    assert result.free_import_command_slots == [True]
+    assert result.schedule.actions[0].action == "charge"
+
+
+def test_charge_by_time_reachability_uses_quota_backed_free_command_mask(
+    battery_optimizer_module,
+):
+    module = battery_optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=2_000,
+        max_discharge_w=2_000,
+        efficiency=1.0,
+        backup_reserve=0.40,
+        hardware_reserve=0.40,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 2
+    optimizer.pre_window_soc_target = 0.50
+
+    schedule = optimizer._build_schedule(
+        3,
+        grid_import=[1.0, 0.0, 0.0],
+        grid_export=[0.0, 0.0, 0.0],
+        battery_charge=[0.0, 0.0, 0.0],
+        battery_discharge=[0.0, 0.0, 0.0],
+        solar=[0.0, 0.0, 0.0],
+        load=[1.0, 0.0, 0.0],
+        soc_0=0.40,
+        import_prices=[0.3517, 0.3517, 0.50],
+        export_prices=[0.0, 0.0, 0.0],
+        allow_grid_charge=True,
+        grid_charge_allowed=[False, True, False],
+        free_import_command_slots=[False, True, False],
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[1].action == "charge"
+
+
+def test_infeasible_hold_propagates_quota_backed_free_command_mask(
+    battery_optimizer_module,
+):
+    module = battery_optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer._solve_self_consumption_hold(
+        n=1,
+        import_prices=[0.3517],
+        export_prices=[0.05],
+        solar=[0.0],
+        load=[0.7],
+        soc_0=0.98,
+        cost_function="cost",
+        allow_battery_export=[False],
+        block_battery_charge=[False],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True],
+        export_bonus_prices=[0.0],
+        export_bonus_cap_kwh=0.0,
+        import_bonus_prices=[0.3517],
+        import_bonus_cap_kwh=50.0,
+    )
+
+    assert result.feasible is False
+    assert result.free_import_command_slots == [True]
+    assert result.schedule.actions[0].action == "charge"
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
 def test_free_import_emission_obeys_grid_charge_soc_cap(
     battery_optimizer_module,
     monkeypatch,

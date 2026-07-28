@@ -262,6 +262,7 @@ class OptimizerResult:
     modeled_backup_reserve: float | None = None
     modeled_export_reserve_floor: float | None = None
     modeled_export_reserve_floor_slots: list[float] | None = None
+    free_import_command_slots: list[bool] = field(default_factory=list)
 
 
 class BatteryOptimizer:
@@ -3014,6 +3015,13 @@ class BatteryOptimizer:
             export_prices[t] + export_bonus_prices[t]
             for t in range(n)
         ]
+        free_import_command_slots = self._quota_backed_free_import_command_slots(
+            import_prices,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            solar,
+            load,
+        )
 
         # Build schedule with action mapping
         schedule = self._build_schedule(
@@ -3025,6 +3033,7 @@ class BatteryOptimizer:
             grid_charge_allowed,
             priority_export_slots,
             disable_idle,
+            free_import_command_slots,
         )
 
         # _build_schedule re-models "hold" slots (LP imports to serve load while
@@ -3091,6 +3100,7 @@ class BatteryOptimizer:
             grid_export_w=[v * 1000 for v in grid_export],
             lp_stats=lp_stats,
             reserve_recommendation=reserve_recommendation,
+            free_import_command_slots=free_import_command_slots,
         )
 
     def _build_reserve_recommendation(
@@ -3372,6 +3382,13 @@ class BatteryOptimizer:
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
             soc = max(self_consumption_floor, min(1.0, soc))
 
+        free_import_command_slots = self._quota_backed_free_import_command_slots(
+            import_prices,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            solar,
+            load,
+        )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
             solar, load, soc_0, import_prices,
@@ -3381,6 +3398,7 @@ class BatteryOptimizer:
             allow_grid_charge,
             grid_charge_allowed,
             disable_idle=disable_idle,
+            free_import_command_slots=free_import_command_slots,
         )
 
         n_24h = min(n, int(24 * 60 / self.interval_minutes))
@@ -3427,6 +3445,7 @@ class BatteryOptimizer:
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
             reserve_recommendation={},
+            free_import_command_slots=free_import_command_slots,
         )
 
     def _solve_greedy(
@@ -4590,6 +4609,13 @@ class BatteryOptimizer:
             soc = max(self_consumption_floor, min(1.0, soc))
 
         # Build schedule
+        free_import_command_slots = self._quota_backed_free_import_command_slots(
+            import_prices,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            solar,
+            load,
+        )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
             solar, load, soc_0, import_prices, effective_export_prices,
@@ -4599,6 +4625,7 @@ class BatteryOptimizer:
             grid_charge_allowed,
             priority_export_slots,
             disable_idle,
+            free_import_command_slots,
         )
 
         grid_import, grid_export = self._grid_flows_from_schedule(
@@ -4686,6 +4713,7 @@ class BatteryOptimizer:
             grid_import_w=[v * 1000 for v in grid_import],
             grid_export_w=[v * 1000 for v in grid_export],
             reserve_recommendation=reserve_recommendation,
+            free_import_command_slots=free_import_command_slots,
         )
 
     def _build_schedule(
@@ -4706,6 +4734,7 @@ class BatteryOptimizer:
         grid_charge_allowed: list[bool] | None = None,
         priority_export_slots: list[bool] | None = None,
         disable_idle: bool = False,
+        free_import_command_slots: list[bool] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -4740,6 +4769,7 @@ class BatteryOptimizer:
         block_battery_charge = block_battery_charge or [False] * n
         grid_charge_allowed = grid_charge_allowed or [True] * n
         priority_export_slots = priority_export_slots or [False] * n
+        free_import_command_slots = free_import_command_slots or []
         actions = []
         soc = soc_0
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
@@ -4759,7 +4789,11 @@ class BatteryOptimizer:
                 if future_charge_kw <= threshold_kw:
                     continue
                 if (
-                    import_prices is not None
+                    future_idx < len(free_import_command_slots)
+                    and free_import_command_slots[future_idx]
+                ) or (
+                    not free_import_command_slots
+                    and import_prices is not None
                     and future_idx < len(import_prices)
                     and import_prices[future_idx] <= 0.001
                 ):
@@ -4804,9 +4838,15 @@ class BatteryOptimizer:
 
                 net_load_kw = max(0.0, load[idx] - solar[idx])
                 free_import_slot = (
-                    import_prices is not None
-                    and idx < len(import_prices)
-                    and import_prices[idx] <= 0.001
+                    (
+                        free_import_command_slots[idx]
+                        if idx < len(free_import_command_slots)
+                        else (
+                            import_prices is not None
+                            and idx < len(import_prices)
+                            and import_prices[idx] <= 0.001
+                        )
+                    )
                     and allow_grid_charge
                     and grid_charge_allowed[idx]
                 )
@@ -4964,8 +5004,14 @@ class BatteryOptimizer:
                 and export_prices[t] > 0.001
             )
             free_import_slot = (
-                import_prices is not None
-                and import_prices[t] <= 0.001
+                (
+                    free_import_command_slots[t]
+                    if t < len(free_import_command_slots)
+                    else (
+                        import_prices is not None
+                        and import_prices[t] <= 0.001
+                    )
+                )
                 and not charge_blocked
                 and allow_grid_charge
                 and grid_charge_allowed[t]
@@ -5264,6 +5310,9 @@ class BatteryOptimizer:
 
         if initial_soc is not None and self.capacity_kwh > 0:
             soc_cursor = max(0.0, min(1.0, float(initial_soc)))
+            free_import_command_slots = list(
+                result.free_import_command_slots or []
+            )
             modeled_backup_reserve = optimizer_reserve
             if modeled_backup_reserve is None:
                 modeled_backup_reserve = (
@@ -5307,8 +5356,17 @@ class BatteryOptimizer:
                 emitted_action = action.action
                 preserve_free_charge_command = (
                     action.action == "charge"
-                    and idx < len(import_prices)
-                    and import_prices[idx] <= 0.001
+                    and (
+                        (
+                            idx < len(free_import_command_slots)
+                            and free_import_command_slots[idx]
+                        )
+                        or (
+                            not free_import_command_slots
+                            and idx < len(import_prices)
+                            and import_prices[idx] <= 0.001
+                        )
+                    )
                 )
                 effective_grid_charge_w = 0.0
                 solar_w = (
@@ -5554,6 +5612,95 @@ class BatteryOptimizer:
             bonus[t] = take_kw
             remaining_by_group[group] = max(0.0, remaining - take_kw * dt)
         return bonus
+
+    def _quota_backed_free_import_command_slots(
+        self,
+        import_prices: list[float],
+        import_bonus_prices: list[float],
+        import_bonus_cap_kwh: float | None,
+        solar: list[float],
+        load: list[float],
+    ) -> list[bool]:
+        """Return free slots whose remaining tariff credit covers the command."""
+        n = min(
+            len(import_prices),
+            len(import_bonus_prices),
+            len(solar),
+            len(load),
+        )
+        slots = [False] * n
+        group_ids = list(self._quota_import_group_ids or [None] * n)[:n]
+        if len(group_ids) < n:
+            group_ids.extend([None] * (n - len(group_ids)))
+        grouped = bool(self._quota_import_caps_by_group and any(group_ids))
+        quota_by_group = (
+            {
+                str(key): max(0.0, float(value))
+                for key, value in self._quota_import_caps_by_group.items()
+            }
+            if grouped
+            else {"__all__": max(0.0, float(import_bonus_cap_kwh or 0.0))}
+        )
+        candidate_slots_by_group: dict[str, list[int]] = {}
+        potential_import_by_group: dict[str, float] = {}
+
+        for idx in range(n):
+            try:
+                base_price = float(import_prices[idx] or 0.0)
+                bonus_price = max(0.0, float(import_bonus_prices[idx] or 0.0))
+            except (TypeError, ValueError):
+                continue
+
+            # Native zero-price tariffs are free independently of any optional
+            # settlement bonus or its remaining quota.
+            if base_price <= 0.001:
+                slots[idx] = True
+                continue
+            if bonus_price <= 0.001:
+                continue
+
+            group = (
+                str(group_ids[idx])
+                if grouped and group_ids[idx] is not None
+                else "__all__"
+            )
+            if quota_by_group.get(group, 0.0) <= 1e-9:
+                continue
+
+            net_home_kw = max(
+                0.0,
+                float(load[idx] or 0.0) - float(solar[idx] or 0.0),
+            )
+            requested_charge_kw = self._charge_limit_kw(
+                float(load[idx] or 0.0),
+                float(solar[idx] or 0.0),
+                True,
+            )
+            potential_import_kwh = (
+                net_home_kw + requested_charge_kw
+            ) * self.dt_hours
+            potential_import_by_group[group] = (
+                potential_import_by_group.get(group, 0.0)
+                + potential_import_kwh
+            )
+            if base_price - bonus_price > 0.001:
+                continue
+            candidate_slots_by_group.setdefault(group, []).append(idx)
+
+        # Treat a capped bonus window as command-owned only when its quota can
+        # cover every remaining candidate interval at the maximum feasible site
+        # import. Otherwise leave the whole group to the ordinary LP, which can
+        # allocate a partial residual credit without an unbounded hardware mode.
+        for group, candidate_slots in candidate_slots_by_group.items():
+            if (
+                quota_by_group.get(group, 0.0) + 1e-9
+                < potential_import_by_group.get(group, 0.0)
+            ):
+                continue
+            for idx in candidate_slots:
+                slots[idx] = True
+
+        return slots
 
     def _calculate_baseline_cost(
         self,
