@@ -3072,6 +3072,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             grid_charge_soc_cap=self._config.grid_charge_soc_cap,
             interval_minutes=self._config.interval_minutes,
             horizon_hours=self._config.horizon_hours,
+            target_charge_power_supported=self._supports_target_charge_power(),
         )
 
         # Initialize load estimator

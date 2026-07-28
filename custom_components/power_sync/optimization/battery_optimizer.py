@@ -288,6 +288,7 @@ class BatteryOptimizer:
         interval_minutes: int = 5,
         horizon_hours: int = 48,
         terminal_weight: float = 1.0,
+        target_charge_power_supported: bool = True,
     ):
         self.capacity_wh = capacity_wh
         self.max_charge_w = max_charge_w
@@ -308,6 +309,7 @@ class BatteryOptimizer:
         self.interval_minutes = interval_minutes
         self.horizon_hours = horizon_hours
         self.terminal_weight = terminal_weight
+        self.target_charge_power_supported = bool(target_charge_power_supported)
         # Set by coordinator when a user-triggered force discharge is active so
         # that the below-reserve adjustment fires at INFO instead of WARNING.
         # (SOC below reserve is expected during intentional force discharge.)
@@ -620,6 +622,16 @@ class BatteryOptimizer:
         )
         grid_charge_allowed = self._normalize_grid_charge_allowed(
             grid_charge_allowed, n_steps
+        )
+        grid_charge_allowed = (
+            self._block_partial_quota_charge_without_power_control(
+                import_prices,
+                import_bonus_prices,
+                import_bonus_cap_kwh,
+                solar_forecast,
+                load_forecast,
+                grid_charge_allowed,
+            )
         )
         effective_priority_export_prices = [
             export_prices[idx] + export_bonus_prices[idx]
@@ -5667,23 +5679,45 @@ class BatteryOptimizer:
             if quota_by_group.get(group, 0.0) <= 1e-9:
                 continue
 
-            net_home_kw = max(
-                0.0,
-                float(load[idx] or 0.0) - float(solar[idx] or 0.0),
-            )
-            requested_charge_kw = self._charge_limit_kw(
-                float(load[idx] or 0.0),
-                float(solar[idx] or 0.0),
-                True,
-            )
+            load_kw = float(load[idx] or 0.0)
+            solar_kw = float(solar[idx] or 0.0)
+            net_home_kw = max(0.0, load_kw - solar_kw)
+            free_command_candidate = base_price - bonus_price <= 0.001
+            site_cap_safe = True
+            if self.target_charge_power_supported:
+                requested_charge_kw = self._charge_limit_kw(
+                    load_kw,
+                    solar_kw,
+                    True,
+                )
+                potential_site_import_kw = (
+                    net_home_kw + requested_charge_kw
+                )
+            else:
+                fixed_command_site_import_kw = max(
+                    0.0,
+                    load_kw + self.max_charge_kw,
+                )
+                site_cap_safe = (
+                    self.max_grid_import_kw is None
+                    or fixed_command_site_import_kw
+                    <= self.max_grid_import_kw + 1e-9
+                )
+                potential_site_import_kw = (
+                    fixed_command_site_import_kw
+                    if free_command_candidate and site_cap_safe
+                    else net_home_kw
+                )
             potential_import_kwh = (
-                net_home_kw + requested_charge_kw
-            ) * self.dt_hours
+                potential_site_import_kw * self.dt_hours
+            )
             potential_import_by_group[group] = (
                 potential_import_by_group.get(group, 0.0)
                 + potential_import_kwh
             )
-            if base_price - bonus_price > 0.001:
+            if not free_command_candidate:
+                continue
+            if not site_cap_safe:
                 continue
             candidate_slots_by_group.setdefault(group, []).append(idx)
 
@@ -5701,6 +5735,69 @@ class BatteryOptimizer:
                 slots[idx] = True
 
         return slots
+
+    def _block_partial_quota_charge_without_power_control(
+        self,
+        import_prices: list[float],
+        import_bonus_prices: list[float],
+        import_bonus_cap_kwh: float | None,
+        solar: list[float],
+        load: list[float],
+        grid_charge_allowed: list[bool],
+    ) -> list[bool]:
+        """Block bounded quota charge when hardware can only charge at full rate."""
+        if self.target_charge_power_supported:
+            return grid_charge_allowed
+        has_import_quota = bool(
+            any(self._quota_import_caps_by_group.values())
+            or float(import_bonus_cap_kwh or 0.0) > 1e-9
+        )
+        if not has_import_quota:
+            return grid_charge_allowed
+
+        free_command_slots = self._quota_backed_free_import_command_slots(
+            import_prices,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            solar,
+            load,
+        )
+        safe_grid_charge_allowed = list(grid_charge_allowed)
+        blocked = 0
+        n = min(
+            len(import_prices),
+            len(import_bonus_prices),
+            len(free_command_slots),
+            len(safe_grid_charge_allowed),
+        )
+        for idx in range(n):
+            try:
+                base_price = float(import_prices[idx] or 0.0)
+                bonus_price = max(
+                    0.0,
+                    float(import_bonus_prices[idx] or 0.0),
+                )
+            except (TypeError, ValueError):
+                continue
+            quota_backed_candidate = (
+                base_price > 0.001
+                and bonus_price > 0.001
+            )
+            if (
+                quota_backed_candidate
+                and not free_command_slots[idx]
+                and safe_grid_charge_allowed[idx]
+            ):
+                safe_grid_charge_allowed[idx] = False
+                blocked += 1
+
+        if blocked:
+            _LOGGER.info(
+                "Blocked grid charging in %d partially quota-backed free slots "
+                "because the battery cannot honor a bounded charge target",
+                blocked,
+            )
+        return safe_grid_charge_allowed
 
     def _calculate_baseline_cost(
         self,
