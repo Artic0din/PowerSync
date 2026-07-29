@@ -550,6 +550,7 @@ def convert_amber_to_tesla_tariff(
     export_min_price: float = 0.0,
     currency: str | None = None,
     include_sell_prices: bool = True,
+    rolling_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -779,7 +780,7 @@ def convert_amber_to_tesla_tariff(
         _LOGGER.info("Amber spike status detected for %d periods: %s", len(spike_lookup), spike_lookup)
 
     # Build the rolling 24-hour tariff
-    general_prices, feedin_prices = _build_rolling_24h_tariff(
+    general_prices, feedin_prices, rolling_anchor = _build_rolling_24h_tariff(
         general_lookup, feedin_lookup, detected_tz, current_actual_interval,
         spike_protection_enabled=spike_protection_enabled, spike_lookup=spike_lookup,
         export_boost_enabled=export_boost_enabled,
@@ -787,6 +788,13 @@ def convert_amber_to_tesla_tariff(
         export_min_price=export_min_price,
         include_sell_prices=include_sell_prices,
     )
+    if rolling_metadata is not None:
+        rolling_metadata.update(
+            {
+                "rolling_24h": True,
+                "rolling_anchor": rolling_anchor.isoformat(),
+            }
+        )
 
     # If too many periods are missing, abort sync to preserve last good tariff
     if general_prices is None or feedin_prices is None:
@@ -894,7 +902,7 @@ def _build_rolling_24h_tariff(
     export_price_offset: float = 0.0,
     export_min_price: float = 0.0,
     include_sell_prices: bool = True,
-) -> tuple[dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float] | None, dict[str, float] | None, datetime]:
     """
     Build a rolling 24-hour tariff where past periods use tomorrow's prices.
 
@@ -912,7 +920,9 @@ def _build_rolling_24h_tariff(
         current_actual_interval: Dict with 'general' and 'feedIn' ActualInterval data (optional)
 
     Returns:
-        (general_prices, feedin_prices) as dicts mapping PERIOD_XX_XX to price
+        (general_prices, feedin_prices, rolling_anchor), where the price dicts
+        map PERIOD_XX_XX to price and rolling_anchor is the exact aware
+        datetime used to divide today's slots from tomorrow's.
     """
     from zoneinfo import ZoneInfo
 
@@ -1148,7 +1158,7 @@ def _build_rolling_24h_tariff(
             "This usually indicates Amber API is unreachable.",
             total_missing, MAX_MISSING_PERIODS
         )
-        return None, None
+        return None, None, now
 
     # Replace any remaining None values with 0 (shouldn't happen if we abort above)
     for key in general_prices:
@@ -1220,7 +1230,7 @@ def _build_rolling_24h_tariff(
             periods_overridden, override_buy, max_sell_price
         )
 
-    return general_prices, feedin_prices
+    return general_prices, feedin_prices, now
 
 
 def _build_tariff_structure(

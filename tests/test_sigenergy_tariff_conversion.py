@@ -192,6 +192,7 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
         "general": {"perKwh": 35.33},
         "feedIn": {"perKwh": -9.82},
     }
+    rolling_metadata: dict = {}
 
     tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
         forecast,
@@ -200,6 +201,7 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
         powerwall_timezone="Australia/Brisbane",
         current_actual_interval=current_actual,
         electricity_provider="amber",
+        rolling_metadata=rolling_metadata,
     )
     canonical_rates = tariff["energy_charges"]["Summer"]["rates"]
 
@@ -209,6 +211,42 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
     assert by_start["00:00"] == canonical_rates["PERIOD_00_00"] * 100
     assert by_start["20:30"] == canonical_rates["PERIOD_20_30"] * 100
     assert by_start["20:30"] == 35.33
+    assert rolling_metadata == {
+        "rolling_24h": True,
+        "rolling_anchor": "2026-05-06T20:38:00+10:00",
+    }
+
+
+def test_all_dynamic_tariff_schedule_stores_use_converter_anchor():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+
+    assert init_source.count("rolling_metadata=rolling_metadata") == 4
+    assert init_source.count("**rolling_metadata,") == 4
+
+
+def test_converter_missing_price_abort_preserves_three_value_internal_contract(
+    tariff_converter_module,
+    monkeypatch,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 6, 20, 38, tzinfo=brisbane).astimezone(tz)
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", FixedDatetime)
+    rolling_metadata: dict = {}
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        [_interval(datetime(2026, 5, 6, 21, 0, tzinfo=brisbane), 35.0)],
+        tesla_energy_site_id="none",
+        powerwall_timezone="Australia/Brisbane",
+        rolling_metadata=rolling_metadata,
+    )
+
+    assert tariff is None
+    assert rolling_metadata["rolling_anchor"] == "2026-05-06T20:38:00+10:00"
 
 
 def test_static_tou_tariff_schedule_converts_to_sigenergy_slots(

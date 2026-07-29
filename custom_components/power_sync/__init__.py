@@ -22691,6 +22691,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
             canonical_timezone = timezone_name or nem_timezones.get(nem_region)
             canonical_tariff = None
+            rolling_metadata: dict[str, Any] = {}
             if forecast_data:
                 canonical_tariff = convert_amber_to_tesla_tariff(
                     forecast_data,
@@ -22709,6 +22710,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     spike_protection_enabled=False,
                     export_boost_enabled=False,
                     currency=currency_for_entry(entry, hass),
+                    rolling_metadata=rolling_metadata,
                 )
             if canonical_tariff:
                 canonical_tariff = _apply_provider_tariff_adjustments(
@@ -22743,6 +22745,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "buy_prices": canonical_buy_rates,
                         "sell_prices": canonical_sell_rates,
                         **currency_metadata(canonical_tariff.get("currency")),
+                        **rolling_metadata,
                         "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
                     async_dispatcher_send(
@@ -23690,6 +23693,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.info("🔀 FoxESS uses Modbus control — storing prices for sensors only")
             # Still build tariff schedule for sensor display
+            rolling_metadata: dict[str, Any] = {}
             tariff = convert_amber_to_tesla_tariff(
                 forecast_data,
                 tesla_energy_site_id="none",
@@ -23709,6 +23713,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 export_price_offset=export_price_offset,
                 export_min_price=export_min_price,
                 currency=currency_for_entry(entry, hass),
+                rolling_metadata=rolling_metadata,
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(
@@ -23725,6 +23730,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
                     **_flow_power_price_source_metadata(),
+                    **rolling_metadata,
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -23736,6 +23742,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if battery_system == "sungrow":
             _LOGGER.info("🔀 Sungrow uses Modbus control — skipping TOU tariff upload")
             # Still build tariff schedule for sensor display
+            rolling_metadata: dict[str, Any] = {}
             tariff = convert_amber_to_tesla_tariff(
                 forecast_data,
                 tesla_energy_site_id="none",
@@ -23755,6 +23762,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 export_price_offset=export_price_offset,
                 export_min_price=export_min_price,
                 currency=currency_for_entry(entry, hass),
+                rolling_metadata=rolling_metadata,
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(
@@ -23771,6 +23779,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
                     **_flow_power_price_source_metadata(),
+                    **rolling_metadata,
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -23779,6 +23788,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
+        rolling_metadata: dict[str, Any] = {}
         tariff = convert_amber_to_tesla_tariff(
             forecast_data,
             tesla_energy_site_id=entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
@@ -23798,6 +23808,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_price_offset=export_price_offset,
             export_min_price=export_min_price,
             currency=currency_for_entry(entry, hass),
+            rolling_metadata=rolling_metadata,
         )
 
         if not tariff:
@@ -23995,6 +24006,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "sell_prices": sell_prices,
             **currency_metadata(tariff.get("currency")),
             **_flow_power_price_source_metadata(),
+            **rolling_metadata,
             "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 

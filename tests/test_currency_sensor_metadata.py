@@ -832,6 +832,97 @@ def test_tariff_schedule_wall_clock_periods_do_not_roll_elapsed_slots_to_tomorro
     assert schedule[1]["date_label"] == "Today"
 
 
+def test_rolling_tariff_schedule_labels_elapsed_slots_as_tomorrow(monkeypatch):
+    sensor = _sensor_module()
+    hass = _hass("AUD")
+    entry = _entry("amber")
+    monkeypatch.setattr(
+        sensor.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 29, 8, 53, tzinfo=timezone.utc),
+    )
+    hass.data = {
+        "power_sync": {
+            entry.entry_id: {
+                "tariff_schedule": {
+                    "buy_prices": {
+                        "PERIOD_18_00": 2.15,
+                        "PERIOD_18_30": 0.39,
+                        "PERIOD_19_00": 0.37,
+                    },
+                    "sell_prices": {
+                        "PERIOD_18_00": 1.73,
+                        "PERIOD_18_30": 0.13,
+                        "PERIOD_19_00": 0.11,
+                    },
+                    "rolling_24h": True,
+                    "rolling_anchor": "2026-07-29T18:50:00+10:00",
+                    "last_sync": "2026-07-29 18:50:00",
+                }
+            }
+        }
+    }
+    entity = sensor.TariffScheduleSensor(hass, entry)
+
+    schedule = entity.extra_state_attributes["schedule"]
+
+    assert schedule[0] == {
+        "time": "18:00",
+        "date": "2026-07-30",
+        "date_label": "Tomorrow",
+        "buy": 2.15,
+        "sell": 1.73,
+    }
+    assert schedule[1]["date"] == "2026-07-29"
+    assert schedule[1]["date_label"] == "Today"
+    assert schedule[2]["date_label"] == "Today"
+
+
+def test_rolling_tariff_schedule_relabels_cached_absolute_dates_after_midnight(monkeypatch):
+    sensor = _sensor_module()
+    hass = _hass("AUD")
+    entry = _entry("amber")
+    monkeypatch.setattr(
+        sensor.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(
+            2026,
+            7,
+            30,
+            0,
+            5,
+            tzinfo=timezone(timedelta(hours=10)),
+        ),
+    )
+    hass.data = {
+        "power_sync": {
+            entry.entry_id: {
+                "tariff_schedule": {
+                    "buy_prices": {
+                        "PERIOD_00_00": 0.16,
+                        "PERIOD_23_00": 0.20,
+                        "PERIOD_23_30": 0.40,
+                    },
+                    "sell_prices": {},
+                    "rolling_24h": True,
+                    "rolling_anchor": "2026-07-29T23:50:00+10:00",
+                    "last_sync": "2026-07-29 23:50:00",
+                }
+            }
+        }
+    }
+    entity = sensor.TariffScheduleSensor(hass, entry)
+
+    schedule = entity.extra_state_attributes["schedule"]
+
+    assert schedule[0]["date"] == "2026-07-30"
+    assert schedule[0]["date_label"] == "Today"
+    assert schedule[1]["date"] == "2026-07-30"
+    assert schedule[1]["date_label"] == "Today"
+    assert schedule[2]["date"] == "2026-07-29"
+    assert schedule[2]["date_label"] == "Yesterday"
+
+
 def test_tariff_price_sensor_unit_prefers_tariff_currency_metadata():
     sensor = _sensor_module()
     hass = _hass("GBP")

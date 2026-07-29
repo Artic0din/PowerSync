@@ -4147,14 +4147,55 @@ class TariffScheduleSensor(SensorEntity):
         if buy_prices:
             schedule_list = []
             now = dt_util.now()
-            today = now.date()
+            schedule_anchor = now
+            if tariff_data.get("rolling_24h"):
+                raw_anchor = tariff_data.get("rolling_anchor")
+                if raw_anchor:
+                    try:
+                        parsed_anchor = datetime.fromisoformat(
+                            str(raw_anchor).replace("Z", "+00:00")
+                        )
+                        schedule_anchor = parsed_anchor
+                    except ValueError:
+                        _LOGGER.debug(
+                            "Invalid rolling tariff anchor %r; using HA local time",
+                            raw_anchor,
+                        )
+            today = schedule_anchor.date()
+            tomorrow = today + timedelta(days=1)
+            anchor_slot_minutes = (
+                schedule_anchor.hour * 60
+                + (0 if schedule_anchor.minute < 30 else 30)
+            )
             for period_key in sorted(buy_prices.keys()):
                 parts = period_key.replace("PERIOD_", "").split("_")
                 time_str = f"{parts[0]}:{parts[1]}"
+                try:
+                    period_minutes = int(parts[0]) * 60 + int(parts[1])
+                except (TypeError, ValueError):
+                    period_minutes = None
+                period_date = (
+                    tomorrow
+                    if (
+                        tariff_data.get("rolling_24h")
+                        and period_minutes is not None
+                        and period_minutes < anchor_slot_minutes
+                    )
+                    else today
+                )
+                current_date = now.date()
+                if period_date == current_date:
+                    date_label = "Today"
+                elif period_date == current_date + timedelta(days=1):
+                    date_label = "Tomorrow"
+                elif period_date == current_date - timedelta(days=1):
+                    date_label = "Yesterday"
+                else:
+                    date_label = period_date.isoformat()
                 schedule_list.append({
                     "time": time_str,
-                    "date": today.isoformat(),
-                    "date_label": "Today",
+                    "date": period_date.isoformat(),
+                    "date_label": date_label,
                     "buy": buy_prices.get(period_key, 0),
                     "sell": sell_prices.get(period_key, 0),
                 })
