@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 import logging
 import math
 import re
@@ -59,6 +59,7 @@ from .const import (
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from .sigenergy_model import sigenergy_home_load_kw
 from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
+from .teslemetry_sse import TeslemetryEnergySSEClient
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -73,6 +74,7 @@ SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
 TESLA_OUTAGE_NOTIFY_MIN_SECONDS = 300
+TESLEMETRY_STREAM_FRESH_SECONDS = 150
 LIFETIME_TOTAL_KEYS = (
     "lifetime_solar_kwh",
     "lifetime_grid_import_kwh",
@@ -1935,6 +1937,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
         self._last_valid_battery_level_pct: float | None = None
+        self._teslemetry_stream: TeslemetryEnergySSEClient | None = None
+        self._teslemetry_stream_connected = False
+        self._teslemetry_stream_last_event: float = 0
+        self._teslemetry_stream_created_at: datetime | None = None
+        self._teslemetry_stream_live_status: dict[str, Any] | None = None
+        self._teslemetry_stream_generation = 0
+        self._teslemetry_stream_processed_generation = 0
 
         # Tesla Energy Site capability detection (populated by probe on first site_info fetch).
         # Keys: storm_mode, off_grid_vehicle_charging_reserve, vpp_programs.
@@ -1987,6 +1996,160 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             name=f"{DOMAIN}_tesla_energy",
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
+
+    @staticmethod
+    def _parse_teslemetry_stream_timestamp(value: Any) -> datetime | None:
+        """Parse an SSE ``createdAt`` timestamp as UTC."""
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _set_teslemetry_stream_connected(self, connected: bool) -> None:
+        """Track stream connection state for the REST fallback gate."""
+        was_connected = bool(
+            getattr(self, "_teslemetry_stream_connected", False)
+        )
+        self._teslemetry_stream_connected = connected
+        if connected and not was_connected:
+            _LOGGER.info(
+                "Teslemetry Energy Site SSE connected for site %s",
+                self.site_id,
+            )
+        elif not connected and was_connected:
+            _LOGGER.info(
+                "Teslemetry Energy Site SSE disconnected for site %s; "
+                "REST polling fallback active",
+                self.site_id,
+            )
+
+    async def _async_handle_teslemetry_stream_event(
+        self,
+        event: dict[str, Any],
+    ) -> None:
+        """Cache a full Teslemetry live_status event and refresh entities."""
+        if self.api_provider != TESLA_PROVIDER_TESLEMETRY:
+            return
+        if str(event.get("site_id", "")) != str(self.site_id):
+            return
+        if "live_status" not in event:
+            # Compatibility-mode streams can also carry site_info or tariff
+            # topics. They are unrelated to the high-frequency telemetry path.
+            return
+        live_status = event.get("live_status")
+        if not isinstance(live_status, dict) or not live_status:
+            _LOGGER.debug(
+                "Ignoring empty Teslemetry SSE live_status for site %s",
+                self.site_id,
+            )
+            # Do not keep serving the previous stream sample as healthy after
+            # an explicit empty document. Force the coordinator through REST
+            # immediately so its existing local-Powerwall fallback can run.
+            self._teslemetry_stream_last_event = 0
+            await self.async_request_refresh()
+            return
+
+        created_at = self._parse_teslemetry_stream_timestamp(
+            event.get("createdAt")
+        )
+        self._teslemetry_stream_last_event = time.monotonic()
+        previous_created_at = getattr(
+            self,
+            "_teslemetry_stream_created_at",
+            None,
+        )
+
+        # Reconnects replay the latest cache snapshot.  Do not integrate the
+        # same power sample twice or let an out-of-order replay replace newer
+        # live data.
+        if (
+            created_at is not None
+            and previous_created_at is not None
+            and created_at <= previous_created_at
+        ):
+            return
+
+        self._teslemetry_stream_created_at = created_at
+        self._teslemetry_stream_live_status = dict(live_status)
+        self._teslemetry_stream_generation = (
+            getattr(self, "_teslemetry_stream_generation", 0) + 1
+        )
+        await self.async_request_refresh()
+
+    def _fresh_teslemetry_stream_snapshot(
+        self,
+    ) -> tuple[dict[str, Any], int, datetime | None] | None:
+        """Return a current SSE snapshot or None so the caller polls REST."""
+        if (
+            self.api_provider != TESLA_PROVIDER_TESLEMETRY
+            or not getattr(self, "_teslemetry_stream_connected", False)
+            or not getattr(self, "_teslemetry_stream_live_status", None)
+            or not getattr(self, "_teslemetry_stream_last_event", 0)
+        ):
+            return None
+
+        if (
+            time.monotonic()
+            - getattr(self, "_teslemetry_stream_last_event", 0)
+            > TESLEMETRY_STREAM_FRESH_SECONDS
+        ):
+            return None
+
+        created_at = getattr(self, "_teslemetry_stream_created_at", None)
+        if created_at is not None:
+            now = dt_util.utcnow()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            if (
+                now.astimezone(timezone.utc) - created_at
+            ).total_seconds() > TESLEMETRY_STREAM_FRESH_SECONDS:
+                # The connect-time replay can be much older than its arrival.
+                # Keep polling until Teslemetry emits a genuinely fresh sample.
+                return None
+
+        return (
+            dict(getattr(self, "_teslemetry_stream_live_status")),
+            getattr(self, "_teslemetry_stream_generation", 0),
+            created_at,
+        )
+
+    def async_start_teslemetry_stream(self) -> None:
+        """Start push updates for Teslemetry-backed Energy Sites."""
+        if (
+            self.api_provider != TESLA_PROVIDER_TESLEMETRY
+            or getattr(self, "_teslemetry_stream", None) is not None
+        ):
+            return
+
+        async def _token_getter() -> str | None:
+            token = self._get_current_token()
+            if self.api_provider != TESLA_PROVIDER_TESLEMETRY:
+                return None
+            return token
+
+        self._teslemetry_stream = TeslemetryEnergySSEClient(
+            self.session,
+            base_url=TESLEMETRY_API_BASE_URL,
+            site_id=str(self.site_id),
+            token_getter=_token_getter,
+            event_callback=self._async_handle_teslemetry_stream_event,
+            connection_callback=self._set_teslemetry_stream_connected,
+            user_agent=POWER_SYNC_USER_AGENT,
+        )
+        self._teslemetry_stream.start(self.hass.async_create_task)
+
+    async def async_shutdown(self) -> None:
+        """Stop the Teslemetry stream during config-entry unload."""
+        stream = getattr(self, "_teslemetry_stream", None)
+        self._teslemetry_stream = None
+        if stream is not None:
+            await stream.async_stop()
+        self._teslemetry_stream_connected = False
 
     def _resolve_battery_level_pct(self, live_status: dict[str, Any]) -> float | None:
         """Return Tesla SOC, preserving the last valid value when omitted."""
@@ -2225,28 +2388,60 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         if not self._lifetime_totals_restored:
             await self.async_restore_lifetime_totals()
 
-        current_token = self._get_current_token()
-        if not current_token:
-            raise UpdateFailed("Tesla token temporarily unavailable — will retry next poll")
-        headers = self._tesla_headers(current_token)
+        stream_snapshot = self._fresh_teslemetry_stream_snapshot()
+        stream_generation: int | None = None
+        stream_created_at: datetime | None = None
+        if stream_snapshot is not None:
+            stream_live_status, stream_generation, stream_created_at = stream_snapshot
+            if (
+                stream_generation
+                == getattr(
+                    self,
+                    "_teslemetry_stream_processed_generation",
+                    0,
+                )
+                and getattr(self, "data", None)
+            ):
+                # The 15-second coordinator timer remains the failover health
+                # check, but a healthy stream must not produce another REST
+                # request or integrate the same power sample twice.
+                return self.data
+            current_token = None
+            headers = None
+        else:
+            stream_live_status = None
+            current_token = self._get_current_token()
+            if not current_token:
+                raise UpdateFailed(
+                    "Tesla token temporarily unavailable — will retry next poll"
+                )
+            headers = self._tesla_headers(current_token)
 
         try:
-            # Get live status from Tesla API with retry logic
-            # Note: Both Teslemetry and Fleet API can be slow, so we use retries
-            data = await _fetch_with_retry(
-                self.session,
-                f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/live_status",
-                headers,
-                max_retries=3,  # More retries for reliability
-                timeout_seconds=60,  # Longer timeout
-                raise_auth_failed=self.api_provider != TESLA_PROVIDER_FLEET_API,
-            )
+            if stream_live_status is not None:
+                live_status = stream_live_status
+                _LOGGER.debug(
+                    "Teslemetry SSE live_status response: %s",
+                    live_status,
+                )
+            else:
+                # Fleet API, PowerSync Cloud, and an unhealthy Teslemetry
+                # stream continue through the proven REST retry path.
+                data = await _fetch_with_retry(
+                    self.session,
+                    f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/live_status",
+                    headers,
+                    max_retries=3,
+                    timeout_seconds=60,
+                    raise_auth_failed=self.api_provider
+                    != TESLA_PROVIDER_FLEET_API,
+                )
+                live_status = data.get("response") or {}
+                _LOGGER.debug("Tesla API live_status response: %s", live_status)
 
             # Tesla returns {"response": null} occasionally during transient failures
             # or right after a token mint when the account state is still propagating.
             # Treat null/missing response as a temporary outage to avoid crashing.
-            live_status = data.get("response") or {}
-            _LOGGER.debug("Tesla API live_status response: %s", live_status)
             if not live_status:
                 local_energy_data = self._local_powerwall_energy_data()
                 if local_energy_data is not None:
@@ -2421,7 +2616,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
-                "last_update": dt_util.utcnow(),
+                "last_update": stream_created_at or dt_util.utcnow(),
                 "energy_summary": self._energy_acc.as_dict(),
                 "firmware": self._firmware,
                 # BMS ceiling for the mobile force-mode picker's Max chip
@@ -2466,6 +2661,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             self._consecutive_failures = 0
             self._failure_streak_start = 0
             self._outage_notified = False
+            if stream_generation is not None:
+                self._teslemetry_stream_processed_generation = max(
+                    getattr(
+                        self,
+                        "_teslemetry_stream_processed_generation",
+                        0,
+                    ),
+                    stream_generation,
+                )
 
             return energy_data
 

@@ -39106,6 +39106,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).pop("_skip_reload", None)
     entry.async_on_unload(entry.add_update_listener(_async_options_update_listener))
 
+    # Teslemetry now publishes full Energy Site live_status snapshots over
+    # SSE. Start only after setup has completed so a failed setup cannot leak
+    # a reconnect task; Fleet API and PowerSync Cloud remain REST-backed.
+    if tesla_coordinator:
+        tesla_coordinator.async_start_teslemetry_stream()
+
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
@@ -40112,6 +40118,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+    if tesla_stream_coordinator := entry_data.get("tesla_coordinator"):
+        try:
+            await tesla_stream_coordinator.async_shutdown()
+        except Exception as err:
+            _LOGGER.debug("Tesla Energy Site stream shutdown error: %s", err)
     if covau_runtime := entry_data.get("covau_quota_runtime"):
         try:
             await covau_runtime.async_stop()

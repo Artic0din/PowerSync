@@ -19,8 +19,10 @@ leak other power flows into the load estimator's training data:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import time
 import types
 
 import pytest
@@ -399,6 +401,209 @@ def test_non_powersync_tesla_headers_do_not_leak_cloud_ownership_metadata():
     assert "X-PowerSync-Client-Instance-Id" not in headers
     assert "X-PowerSync-Control-Mode" not in headers
     assert "X-PowerSync-Control-Observed-At" not in headers
+
+
+# ---------------------------------------------------------------------------
+# Teslemetry Energy Site SSE must replace healthy live_status REST polling
+# ---------------------------------------------------------------------------
+
+
+class _StreamEnergyAccumulator:
+    def __init__(self) -> None:
+        self._last_update = datetime(2026, 7, 8, 0, 59, tzinfo=timezone.utc)
+        self.updates: list[tuple] = []
+
+    async def async_restore(self) -> None:
+        raise AssertionError("The initialized accumulator must not restore")
+
+    def update(self, *args) -> None:
+        self.updates.append(args)
+
+    def as_dict(self) -> dict:
+        return {"solar_kwh": 1.0}
+
+
+def _new_stream_tesla_coordinator() -> TeslaEnergyCoordinator:
+    coordinator = TeslaEnergyCoordinator.__new__(TeslaEnergyCoordinator)
+    entry_id = "stream-entry"
+    coordinator.hass = types.SimpleNamespace(
+        data={DOMAIN: {entry_id: {}}},
+        config_entries=types.SimpleNamespace(async_get_entry=lambda entry_id: None),
+    )
+    coordinator.site_id = "12345"
+    coordinator._entry_id = entry_id
+    coordinator.api_provider = TESLA_PROVIDER_TESLEMETRY
+    coordinator.data = {"old": True}
+    coordinator._energy_acc = _StreamEnergyAccumulator()
+    coordinator._lifetime_totals_restored = True
+    coordinator._lifetime_totals = None
+    coordinator._lifetime_last_fetch = time.monotonic()
+    coordinator._lifetime_fetch_failed = False
+    coordinator._site_info_cache = {}
+    coordinator._site_info_last_fetch = time.monotonic()
+    coordinator._site_info_fetch_failed = False
+    coordinator._firmware = None
+    coordinator._last_valid_battery_level_pct = None
+    coordinator._last_grid_status = "Active"
+    coordinator._consecutive_failures = 0
+    coordinator._failure_streak_start = 0
+    coordinator._outage_notified = False
+    coordinator._teslemetry_stream_connected = True
+    coordinator._teslemetry_stream_last_event = 0
+    coordinator._teslemetry_stream_created_at = None
+    coordinator._teslemetry_stream_live_status = None
+    coordinator._teslemetry_stream_generation = 0
+    coordinator._teslemetry_stream_processed_generation = 0
+    return coordinator
+
+
+def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
+    coordinator = _new_stream_tesla_coordinator()
+    refresh_count = 0
+
+    async def _request_refresh() -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+
+    coordinator.async_request_refresh = _request_refresh
+    coordinator._get_current_token = lambda: (_ for _ in ()).throw(
+        AssertionError("Healthy SSE data must not fetch a REST token")
+    )
+    event = {
+        "createdAt": "2026-07-08T00:59:30.000Z",
+        "site_id": "12345",
+        "isCache": True,
+        "live_status": {
+            "solar_power": 2400,
+            "grid_power": -300,
+            "battery_power": 1100,
+            "load_power": 900,
+            "percentage_charged": 82.5,
+            "grid_status": "Active",
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert refresh_count == 1
+    assert result["solar_power"] == pytest.approx(2.4)
+    assert result["grid_power"] == pytest.approx(-0.3)
+    assert result["battery_power"] == pytest.approx(1.1)
+    assert result["load_power"] == pytest.approx(0.9)
+    assert result["battery_level"] == pytest.approx(82.5)
+    assert result["last_update"] == datetime(
+        2026,
+        7,
+        8,
+        0,
+        59,
+        30,
+        tzinfo=timezone.utc,
+    )
+    assert len(coordinator._energy_acc.updates) == 1
+    assert coordinator._teslemetry_stream_processed_generation == 1
+
+    # The coordinator's existing 15-second timer is now only a health check.
+    # Until a new SSE generation arrives, it returns the published snapshot
+    # without polling REST or integrating the same sample again.
+    coordinator.data = result
+    repeated = asyncio.run(coordinator._async_update_data())
+    assert repeated is result
+    assert len(coordinator._energy_acc.updates) == 1
+
+
+def test_teslemetry_sse_ignores_other_sites_and_out_of_order_replays():
+    coordinator = _new_stream_tesla_coordinator()
+    refresh_count = 0
+
+    async def _request_refresh() -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+
+    coordinator.async_request_refresh = _request_refresh
+    current = {
+        "createdAt": "2026-07-08T00:59:30.000Z",
+        "site_id": "12345",
+        "live_status": {"grid_power": 100},
+    }
+    other_site = {
+        **current,
+        "site_id": "67890",
+        "live_status": {"grid_power": 999},
+    }
+    unrelated_topic = {
+        "createdAt": "2026-07-08T00:59:35.000Z",
+        "site_id": "12345",
+        "site_info": {"backup_reserve_percent": 20},
+    }
+    older = {
+        **current,
+        "createdAt": "2026-07-08T00:58:30.000Z",
+        "live_status": {"grid_power": 888},
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(current))
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(other_site))
+    asyncio.run(
+        coordinator._async_handle_teslemetry_stream_event(unrelated_topic)
+    )
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(older))
+
+    assert refresh_count == 1
+    assert coordinator._teslemetry_stream_generation == 1
+    assert coordinator._teslemetry_stream_live_status == {"grid_power": 100}
+
+
+def test_teslemetry_empty_stream_document_forces_immediate_rest_fallback():
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator._teslemetry_stream_last_event = time.monotonic()
+    coordinator._teslemetry_stream_live_status = {"grid_power": 100}
+    refresh_count = 0
+
+    async def _request_refresh() -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+
+    coordinator.async_request_refresh = _request_refresh
+
+    asyncio.run(
+        coordinator._async_handle_teslemetry_stream_event(
+            {
+                "createdAt": "2026-07-08T00:59:45.000Z",
+                "site_id": "12345",
+                "live_status": {},
+            }
+        )
+    )
+
+    assert refresh_count == 1
+    assert coordinator._teslemetry_stream_last_event == 0
+    assert coordinator._fresh_teslemetry_stream_snapshot() is None
+
+
+def test_teslemetry_stale_cache_replay_keeps_rest_fallback_active():
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator._teslemetry_stream_last_event = time.monotonic()
+    coordinator._teslemetry_stream_created_at = datetime(
+        2026,
+        7,
+        7,
+        23,
+        0,
+        tzinfo=timezone.utc,
+    )
+    coordinator._teslemetry_stream_live_status = {"grid_power": 100}
+    coordinator._teslemetry_stream_generation = 1
+
+    assert coordinator._fresh_teslemetry_stream_snapshot() is None
+
+
+def test_teslemetry_stream_lifecycle_is_wired_to_entry_setup_and_unload():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text(encoding="utf-8")
+
+    assert "tesla_coordinator.async_start_teslemetry_stream()" in init_source
+    assert "await tesla_stream_coordinator.async_shutdown()" in init_source
 
 
 def test_powersync_copy_paste_auth_url_is_explicitly_home_assistant():
