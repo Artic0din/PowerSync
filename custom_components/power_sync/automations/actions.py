@@ -4856,6 +4856,7 @@ async def _clear_ble_dynamic_session_if_unplugged(
     config_entry: ConfigEntry,
     vehicle_id: str,
     params: Dict[str, Any],
+    expected_state: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Clear a stale dynamic session when the vehicle is definitively unplugged.
 
@@ -4891,6 +4892,13 @@ async def _clear_ble_dynamic_session_if_unplugged(
         return False
 
     state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+    if expected_state is not None and state is not expected_state:
+        _LOGGER.debug(
+            "Dynamic EV: session changed during plug-state check for %s; "
+            "discarding stale result",
+            vehicle_id,
+        )
+        return False
 
     if plugged_in:
         # Reset the debounce counter on any confirmed-plugged read.
@@ -5903,14 +5911,31 @@ async def _dynamic_ev_update_surplus(
     if not state or not state.get("active"):
         return
 
+    def _session_was_replaced(stage: str) -> bool:
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if current_state is state and current_state.get("active"):
+            return False
+        _LOGGER.debug(
+            "Solar surplus EV: Session changed during %s for %s; "
+            "discarding stale update",
+            stage,
+            vehicle_id,
+        )
+        return True
+
     params = state.get("params", {})
     params = _refresh_solar_surplus_runtime_params(hass, entry_id, params)
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
 
-    if await _clear_ble_dynamic_session_if_unplugged(
-        hass, config_entry, vehicle_id, params
-    ):
+    unplugged = await _clear_ble_dynamic_session_if_unplugged(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+        expected_state=state,
+    )
+    if unplugged or _session_was_replaced("plug-state check"):
         return
 
     full_soc_reason = await _dynamic_ev_full_soc_reason(
@@ -5919,6 +5944,8 @@ async def _dynamic_ev_update_surplus(
         vehicle_id,
         params,
     )
+    if _session_was_replaced("charge-limit check"):
+        return
     if full_soc_reason:
         _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
         await _action_stop_ev_charging_dynamic(
@@ -5933,29 +5960,36 @@ async def _dynamic_ev_update_surplus(
         return
 
     # Don't charge when vehicle is away from home
+    _location = None
     try:
         from .ev_charging_planner import get_ev_location
         _vin = vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
         _location = await get_ev_location(hass, config_entry, _vin)
-        if _location not in ("home", "unknown"):
-            _current_amps = state.get("current_amps", 0)
-            if _current_amps > 0:
-                _LOGGER.info(f"⚡ Solar surplus EV: Stopping - vehicle not at home ({_location})")
-                await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
-                state["current_amps"] = 0
-                state["target_amps"] = 0
-                try:
-                    from .ev_charging_session import get_session_manager
-                    _sm = get_session_manager()
-                    if _sm:
-                        await _sm.end_session(vehicle_id=vehicle_id, reason="vehicle_away")
-                except Exception:
-                    pass
-            state["high_surplus_start"] = None
-            state["low_surplus_start"] = None
-            return
     except Exception as e:
         _LOGGER.debug(f"Solar surplus EV: Could not check vehicle location: {e}")
+    if _session_was_replaced("location check"):
+        return
+    if _location is not None and _location not in ("home", "unknown"):
+        _current_amps = state.get("current_amps", 0)
+        if _current_amps > 0:
+            _LOGGER.info(f"⚡ Solar surplus EV: Stopping - vehicle not at home ({_location})")
+            await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+            if _session_was_replaced("away-state stop"):
+                return
+            state["current_amps"] = 0
+            state["target_amps"] = 0
+            try:
+                from .ev_charging_session import get_session_manager
+                _sm = get_session_manager()
+                if _sm:
+                    await _sm.end_session(vehicle_id=vehicle_id, reason="vehicle_away")
+            except Exception:
+                pass
+            if _session_was_replaced("away-session cleanup"):
+                return
+        state["high_surplus_start"] = None
+        state["low_surplus_start"] = None
+        return
 
     # Re-check Tesla entity max after charging starts (Tesla reports real max only when active)
     # The entity needs a few seconds to update after the car starts drawing power,
@@ -5963,41 +5997,46 @@ async def _dynamic_ev_update_surplus(
     if (state.get("charging_started") and not state.get("entity_max_rechecked")
             and params.get("charger_type") == "tesla"
             and vehicle_id != DEFAULT_VEHICLE_ID):
+        entity = None
         try:
             entity = await _get_tesla_ev_entity(
                 hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
             )
-            if entity:
-                entity_state = hass.states.get(entity)
-                if entity_state:
-                    new_max = int(entity_state.attributes.get("max", 0))
-                    old_max = params.get("max_charge_amps", 32)
-                    if (
-                        new_max > 0
-                        and new_max < old_max
-                        and params.get("allow_stale_entity_max_override")
-                    ):
-                        _LOGGER.debug(
-                            "Solar surplus EV: ignoring Tesla entity max %dA below configured %dA",
-                            new_max,
-                            old_max,
-                        )
-                    elif (
-                        new_max > 0
-                        and new_max != old_max
-                        and not params.get("allow_stale_entity_max_override")
-                    ):
-                        _LOGGER.info(
-                            f"⚡ Solar surplus EV: Updated max_charge_amps {old_max}A -> {new_max}A "
-                            f"(entity limit after charging started)"
-                        )
-                        params["max_charge_amps"] = new_max
         except Exception:
             pass
+        if _session_was_replaced("charge-limit entity lookup"):
+            return
+        if entity:
+            entity_state = hass.states.get(entity)
+            if entity_state:
+                new_max = int(entity_state.attributes.get("max", 0))
+                old_max = params.get("max_charge_amps", 32)
+                if (
+                    new_max > 0
+                    and new_max < old_max
+                    and params.get("allow_stale_entity_max_override")
+                ):
+                    _LOGGER.debug(
+                        "Solar surplus EV: ignoring Tesla entity max %dA below configured %dA",
+                        new_max,
+                        old_max,
+                    )
+                elif (
+                    new_max > 0
+                    and new_max != old_max
+                    and not params.get("allow_stale_entity_max_override")
+                ):
+                    _LOGGER.info(
+                        f"⚡ Solar surplus EV: Updated max_charge_amps {old_max}A -> {new_max}A "
+                        f"(entity limit after charging started)"
+                    )
+                    params["max_charge_amps"] = new_max
         state["entity_max_rechecked"] = True
 
     # Get live status
     live_status = await _get_tesla_live_status(hass, config_entry)
+    if _session_was_replaced("live-status lookup"):
+        return
     if not live_status:
         _LOGGER.debug("Solar surplus EV: Could not get live status")
         return
@@ -6055,6 +6094,8 @@ async def _dynamic_ev_update_surplus(
             v_params,
             allow_wall_connector_fallback=len(active_vehicles) == 1,
         )
+        if _session_was_replaced("charger-power lookup"):
+            return
         if vid == vehicle_id:
             observed_current_power_kw = observed_power_kw
         total_ev_power_kw += max(commanded_power_kw, observed_power_kw)
@@ -6108,6 +6149,8 @@ async def _dynamic_ev_update_surplus(
                 state["paused_reason"] = f"Strict surplus paused - {unsafe_reason}"
                 _LOGGER.info(f"⚡ Solar surplus EV: {state['paused_reason']}")
             await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+            if _session_was_replaced("strict-surplus pause"):
+                return
             state["current_amps"] = 0
             return
 
@@ -6157,6 +6200,8 @@ async def _dynamic_ev_update_surplus(
                 state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
                 _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
                 await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+                if _session_was_replaced("battery-floor pause"):
+                    return
                 state["current_amps"] = 0
 
                 # Send pause notification
@@ -6222,6 +6267,8 @@ async def _dynamic_ev_update_surplus(
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send resume notification: {e}")
+                    if _session_was_replaced("resume notification"):
+                        return
 
     # Calculate current EV power for THIS vehicle. Prefer measured charger
     # power so an already-active charge is treated as controllable load.
@@ -6311,6 +6358,8 @@ async def _dynamic_ev_update_surplus(
                     start_params,
                     context=None,
                 )
+                if _session_was_replaced("solar charging start"):
+                    return
                 if not start_success:
                     # Check if failure was due to charge complete
                     if _is_vehicle_charge_complete(hass, vehicle_id):
@@ -6343,6 +6392,8 @@ async def _dynamic_ev_update_surplus(
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send solar start notification: {e}")
+                    if _session_was_replaced("start notification"):
+                        return
             else:
                 # Don't start yet, waiting for sustained surplus
                 new_amps = 0
@@ -6379,6 +6430,8 @@ async def _dynamic_ev_update_surplus(
                 )
         except Exception as e:
             _LOGGER.debug(f"Could not update session: {e}")
+        if _session_was_replaced("session accounting"):
+            return
 
     # Only update if change is significant (>= 1 amp)
     if abs(new_amps - effective_current_amps) >= 1:
@@ -6387,6 +6440,8 @@ async def _dynamic_ev_update_surplus(
             f"(surplus={my_surplus_kw:.1f}kW, battery={battery_soc:.0f}%)"
         )
         success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
+        if _session_was_replaced("amp adjustment"):
+            return
         if success:
             applied_amps = new_amps
             max_after_set = _coerce_positive_int(params.get("max_charge_amps"))
@@ -6714,7 +6769,11 @@ async def _dynamic_ev_update(
         return
 
     if await _clear_ble_dynamic_session_if_unplugged(
-        hass, config_entry, vehicle_id, params
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+        expected_state=state,
     ):
         return
 

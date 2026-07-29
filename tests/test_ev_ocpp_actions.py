@@ -3389,7 +3389,148 @@ def test_dynamic_start_takes_over_legacy_solar_surplus_when_allowed():
     assert ownership["owner_mode"] == "price_level_recovery"
 
 
-def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed():
+def test_inflight_solar_surplus_update_cannot_command_after_scheduled_takeover(
+    monkeypatch,
+):
+    hass = _Hass([])
+    vehicle_id = "ocpp_evse_1"
+    cancelled = []
+    live_status_requested = asyncio.Event()
+    release_live_status = asyncio.Event()
+    live_status_calls = 0
+    set_amps_calls: list[int] = []
+
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def get_ev_location(*args, **kwargs):
+        return "home"
+
+    async def get_ev_battery_level(*args, **kwargs):
+        return None
+
+    ev_planner.get_ev_location = get_ev_location
+    ev_planner.get_ev_battery_level = get_ev_battery_level
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: None
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_session",
+        ev_session,
+    )
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def gated_live_status(*args, **kwargs):
+        nonlocal live_status_calls
+        live_status_calls += 1
+        if live_status_calls == 1:
+            live_status_requested.set()
+            await release_live_status.wait()
+        return {
+            "battery_soc": 100,
+            "grid_power": -5000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        }
+
+    async def fake_observed_ev_power_kw(*args, **kwargs):
+        return 0.0
+
+    async def fake_set_vehicle_amps(
+        hass,
+        config_entry,
+        requested_vehicle_id,
+        amps,
+        params,
+    ):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        not_unplugged,
+    )
+    monkeypatch.setattr(actions, "_get_tesla_live_status", gated_live_status)
+    monkeypatch.setattr(
+        actions,
+        "_get_observed_ev_power_kw",
+        fake_observed_ev_power_kw,
+    )
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    old_state = _solar_surplus_state(current_amps=8)
+    old_state["params"].update(
+        {
+            "owner_mode": "solar_surplus",
+            "charger_type": "ocpp",
+            "ocpp_charger_id": "evse_1",
+        }
+    )
+    old_state["cancel_timer"] = lambda: cancelled.append(True)
+    old_state["session_id"] = "solar-session"
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: old_state}
+
+    async def run_takeover():
+        stale_update = asyncio.create_task(
+            actions._dynamic_ev_update_surplus(
+                hass,
+                _Entry(),
+                "entry-1",
+                vehicle_id,
+            )
+        )
+        await live_status_requested.wait()
+        takeover_result = await actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": vehicle_id,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "allow_ownership_takeover": True,
+                "charger_type": "ocpp",
+                "ocpp_charger_id": "evse_1",
+                "max_charge_amps": 16,
+            },
+            context=None,
+        )
+        replacement_state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+        release_live_status.set()
+        await stale_update
+        return takeover_result, replacement_state
+
+    takeover_result, replacement_state = asyncio.run(run_takeover())
+
+    assert takeover_result is True
+    assert cancelled == [True]
+    assert set_amps_calls == [0, 16]
+    assert replacement_state["params"]["owner_mode"] == "scheduled"
+    assert replacement_state["current_amps"] == 16
+
+
+def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed(monkeypatch):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def is_ev_plugged_in(*args, **kwargs):
+        return True
+
+    ev_planner.is_ev_plugged_in = is_ev_plugged_in
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {

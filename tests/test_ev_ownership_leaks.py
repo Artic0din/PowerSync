@@ -392,6 +392,54 @@ def test_still_plugged_non_ble_session_is_not_falsely_released(monkeypatch):
     assert lease is not None
 
 
+def test_stale_unplug_result_cannot_clear_replacement_session(monkeypatch):
+    plug_check_started = asyncio.Event()
+    release_plug_check = asyncio.Event()
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def is_ev_plugged_in(hass, config_entry, vehicle_vin=None):
+        plug_check_started.set()
+        await release_plug_check.wait()
+        return False
+
+    ev_planner.is_ev_plugged_in = is_ev_plugged_in
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
+    hass = _Hass()
+    entry = _Entry()
+    original_state = _fleet_dynamic_state()
+    replacement_state = _fleet_dynamic_state()
+    replacement_state["params"]["owner_mode"] = "scheduled"
+    replacement_state["consecutive_unplugged"] = 1
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {FLEET_VIN: original_state}
+
+    async def run_replacement():
+        stale_check = asyncio.create_task(
+            actions._clear_ble_dynamic_session_if_unplugged(
+                hass,
+                entry,
+                FLEET_VIN,
+                original_state["params"],
+                expected_state=original_state,
+            )
+        )
+        await plug_check_started.wait()
+        actions._dynamic_ev_state["entry-1"][FLEET_VIN] = replacement_state
+        release_plug_check.set()
+        return await stale_check
+
+    cleared = asyncio.run(run_replacement())
+
+    assert cleared is False
+    assert actions._dynamic_ev_state["entry-1"][FLEET_VIN] is replacement_state
+    assert replacement_state["consecutive_unplugged"] == 1
+
+
 def test_asleep_or_unavailable_non_ble_session_is_not_falsely_released(monkeypatch):
     """is_ev_plugged_in already treats an asleep/unavailable vehicle as
     "assume plugged in" (see ev_charging_planner.is_ev_plugged_in). Verify
