@@ -5052,6 +5052,119 @@ def test_optimizer_owned_force_charge_reissues_when_foxess_mode_drops_to_self_us
     assert coordinator._optimizer_force_state["type"] == "charge"
 
 
+def test_optimizer_owned_saj_charge_does_not_rewrite_active_tou_slot(opt_module):
+    """An active SAJ TOU command must not be treated as an external force."""
+    now = datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.64)
+    coordinator.battery_system = "saj_h2"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "app_mode": 1,
+            "battery_power": -2.5,
+        }
+    )
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=now + idx * timedelta(minutes=5),
+        )
+        for idx in range(6)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("charge", 75, 5000)
+    shared_force_state = {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+        "expires_at": now + timedelta(minutes=75),
+        "hardware_expires_at": now + timedelta(minutes=75),
+        "power_w": 5000,
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_charge_state": shared_force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: shared_force_state
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == []
+    assert coordinator._get_active_force_state()["scope"] == "optimizer"
+
+
+def test_optimizer_owned_saj_charge_reissues_when_app_mode_drops(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.64)
+    coordinator.battery_system = "saj_h2"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "app_mode": 0,
+            "battery_power": -2.5,
+        }
+    )
+
+    assert coordinator._force_charge_hardware_needs_refresh(5000) is True
+
+
+def test_optimizer_owned_saj_failed_refresh_retains_retry_state(opt_module):
+    now = datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery(force_charge_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.64)
+    coordinator.battery_system = "saj_h2"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "app_mode": 0,
+            "battery_power": -2.5,
+        }
+    )
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=now + idx * timedelta(minutes=5),
+        )
+        for idx in range(6)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("charge", 12, 5000)
+    prior_hardware_expiry = coordinator._optimizer_force_state[
+        "hardware_expires_at"
+    ]
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == [(30, 5000.0, True)]
+    assert (
+        coordinator._optimizer_force_state["hardware_expires_at"]
+        == prior_hardware_expiry
+    )
+
+
+@pytest.mark.parametrize("app_mode", [None, "unknown"])
+def test_optimizer_owned_saj_charge_does_not_guess_from_power_without_app_mode(
+    opt_module,
+    app_mode,
+):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.64)
+    coordinator.battery_system = "saj_h2"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "app_mode": app_mode,
+            "battery_power": -2.5,
+        }
+    )
+
+    assert coordinator._force_charge_hardware_needs_refresh(5000) is False
+
+
 def test_optimizer_owned_force_charge_reissues_when_sungrow_ems_is_not_charging(opt_module):
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     opt_module.dt_util.utcnow = lambda *args, **kwargs: now

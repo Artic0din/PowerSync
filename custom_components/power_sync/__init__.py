@@ -28494,6 +28494,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 _LOGGER.debug(f"ESY Sunhome force discharge hardware extended ({duration}min)")
                 return
+            saj_coord = entry_data.get("saj_h2_coordinator")
+            if saj_coord:
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: saj_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
+                if not discharge_result:
+                    raise HomeAssistantError(
+                        "SAJ H2 force discharge hardware refresh was not confirmed"
+                    )
+                _LOGGER.debug(f"SAJ H2 force discharge hardware extended ({duration}min)")
+                return
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
                 await _guarded_force_discharge_write(
@@ -30163,6 +30176,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if esy_coord:
                 await esy_coord.force_charge(duration, power_w=power_w)
                 _LOGGER.debug(f"ESY Sunhome force charge hardware extended ({duration}min)")
+                return
+            saj_coord = entry_data.get("saj_h2_coordinator")
+            if saj_coord:
+                charge_result = await saj_coord.force_charge(
+                    duration, power_w=power_w
+                )
+                if charge_result is False:
+                    raise HomeAssistantError(
+                        "SAJ H2 force charge hardware refresh was not confirmed"
+                    )
+                _LOGGER.debug(f"SAJ H2 force charge hardware extended ({duration}min)")
                 return
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:

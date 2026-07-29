@@ -750,3 +750,26 @@ def test_set_idle_drives_and_verifies_passive_app_mode_when_mapped():
         {"entity_id": "number.saj_app_mode_input", "value": 3},
     ) in hass.services.calls
     assert hass.states.get("sensor.saj_app_mode").state == "3"
+
+
+def test_optimizer_force_routes_saj_directly_without_user_state_fallback():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    discharge_start = source.index("async def handle_force_discharge")
+    charge_start = source.index("async def handle_force_charge", discharge_start)
+    restore_start = source.index("async def handle_restore_normal", charge_start)
+
+    discharge_source = source[discharge_start:charge_start]
+    discharge_hardware = discharge_source.split(
+        "# Hardware-only path:", 1
+    )[1].split("# Fallback: no coordinator found", 1)[0]
+    charge_source = source[charge_start:restore_start]
+    charge_hardware = charge_source.split(
+        "# Hardware-only path:", 1
+    )[1].split("# Fallback: no coordinator found", 1)[0]
+
+    assert 'entry_data.get("saj_h2_coordinator")' in discharge_hardware
+    assert "saj_coord.force_discharge(" in discharge_hardware
+    assert "if not discharge_result:" in discharge_hardware
+    assert 'entry_data.get("saj_h2_coordinator")' in charge_hardware
+    assert "saj_coord.force_charge(" in charge_hardware
+    assert "if charge_result is False:" in charge_hardware

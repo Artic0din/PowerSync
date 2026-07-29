@@ -5741,22 +5741,42 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _get_active_force_state(self) -> dict[str, Any]:
         """Return user-visible force state or private optimizer force state."""
+        shared_force_state: dict[str, Any] = {}
         force_state_getter = getattr(self, "_force_state_getter", None)
         if force_state_getter:
-            force_state = force_state_getter() or {}
-            if force_state.get("active"):
-                force_state = dict(force_state)
-                force_state.setdefault("scope", "external")
-                return force_state
+            shared_force_state = force_state_getter() or {}
+            if (
+                shared_force_state.get("active")
+                and shared_force_state.get("source") != "optimizer"
+            ):
+                external_state = dict(shared_force_state)
+                external_state.setdefault("scope", "external")
+                return external_state
 
         state = getattr(self, "_optimizer_force_state", None)
-        if not isinstance(state, dict) or not state.get("active"):
+        optimizer_state_matches = (
+            isinstance(state, dict)
+            and state.get("active")
+            and (
+                not shared_force_state.get("active")
+                or shared_force_state.get("type") == state.get("type")
+            )
+        )
+        if not optimizer_state_matches:
+            if shared_force_state.get("active"):
+                external_state = dict(shared_force_state)
+                external_state.setdefault("scope", "external")
+                return external_state
             return {"active": False}
 
         expires_at = self._as_utc_datetime(state.get("expires_at"))
         now = dt_util.utcnow()
         if expires_at is not None and expires_at <= now:
             self._clear_optimizer_force_state()
+            if shared_force_state.get("active"):
+                external_state = dict(shared_force_state)
+                external_state.setdefault("scope", "external")
+                return external_state
             return {"active": False}
 
         active = dict(state)
@@ -5875,6 +5895,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (TypeError, ValueError):
             return False
         if target_w <= 0:
+            return False
+
+        if self.battery_system == "saj_h2":
+            app_mode = data.get("app_mode")
+            try:
+                app_mode_int = int(float(app_mode))
+            except (TypeError, ValueError):
+                return False
+            if app_mode_int == 1:
+                return False
+            _LOGGER.info(
+                "Optimizer: SAJ force charge hardware appears inactive "
+                "(AppMode=%s, expected TOU AppMode=1) — refreshing command",
+                app_mode,
+            )
+            return True
+
+        # The power-threshold heuristic is only meaningful when the selected
+        # battery can honor the requested target. Fixed-rate controls may taper
+        # below that target while their hardware command remains active.
+        if not self._supports_target_charge_power():
             return False
 
         mode_value = (
@@ -6627,11 +6668,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             # service falls through to the full tariff uploader
                             # so the TOU force window is rolled forward too.
                             if force_type == "charge":
-                                await battery.force_charge(
+                                refresh_result = await battery.force_charge(
                                     duration_minutes=extend_mins,
                                     power_w=force_power_w,
                                     _extend_hardware=True,
                                 )
+                                if refresh_result is False:
+                                    _LOGGER.warning(
+                                        "Optimizer: force-charge hardware refresh "
+                                        "was not confirmed; retaining prior force "
+                                        "state for retry"
+                                    )
+                                    return
                             else:
                                 allowed, applied_power_w = (
                                     await self._force_discharge_through_export_guard(
