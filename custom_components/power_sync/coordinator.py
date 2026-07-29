@@ -8073,14 +8073,23 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
                 return self.data
             raise UpdateFailed(f"SAJ H2 entity read failed: {exc}") from exc
 
+        telemetry_ready = bool(status.get("telemetry_ready", True))
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
         energy_summary = self._energy_acc.as_dict()
         for status_key, summary_key in (
             ("daily_solar_energy_kwh", "pv_today_kwh"),
@@ -8092,6 +8101,7 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
                 energy_summary[summary_key] = round(float(value), 3)
 
         return {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,

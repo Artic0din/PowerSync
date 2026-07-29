@@ -187,6 +187,13 @@ class SajH2BatteryController:
     _MIN_ENGAGED_INV_VOLTAGE = 50.0
     _SWITCH_VERIFY_DELAY_SEC = 0.5
     _APP_MODE_VERIFY_DELAY_SEC = 0.5
+    _TELEMETRY_KEYS = (
+        "battery_level",
+        "battery_power",
+        "grid_power",
+        "solar_power",
+        "load_power",
+    )
 
     def __init__(
         self,
@@ -363,6 +370,11 @@ class SajH2BatteryController:
 
     def get_status(self) -> dict[str, Any]:
         """Read current SAJ state and return PowerSync-canonical fields."""
+        battery_level = self._read_float("battery_level")
+        telemetry_ready = all(
+            self._read_float(key) is not None for key in self._TELEMETRY_KEYS
+        )
+
         # Battery power: SAJ typically reports absolute value + direction sensor
         battery_w_raw = self._read_float("battery_power") or 0.0
         dir_bat = self._read_direction("direction_battery")
@@ -432,7 +444,8 @@ class SajH2BatteryController:
             load_kw = max(0.0, (self._read_float("load_power") or 0.0) / 1000.0)
 
         return {
-            "battery_level":              self._read_float("battery_level") or 0.0,
+            "telemetry_ready":            telemetry_ready,
+            "battery_level":              battery_level,
             "battery_power":              battery_kw,
             "grid_power":                 grid_kw,
             "solar_power":                solar_kw,
@@ -481,6 +494,55 @@ class SajH2BatteryController:
             return False
         return True
 
+    def _check_telemetry_ready(self, operation: str) -> bool:
+        """Refuse battery writes until the upstream SAJ entities are usable."""
+        unavailable = [
+            key for key in self._TELEMETRY_KEYS
+            if self._read_float(key) is None
+        ]
+        if not unavailable:
+            return True
+        _LOGGER.warning(
+            "SAJ H2: %s deferred — startup telemetry unavailable: %s",
+            operation,
+            unavailable,
+        )
+        return False
+
+    def _check_restore_control_entities(self) -> bool:
+        """Preflight every mapped entity used by restore_normal."""
+        numeric_controls = (
+            "charge_power",
+            "discharge_power",
+            "charge_time_enable",
+            "discharge_time_enable",
+            "charge_time_enable_bitmask",
+            "discharge_time_enable_bitmask",
+            "app_mode",
+            "app_mode_writable",
+        )
+        switch_controls = (
+            "passive_charge_control",
+            "passive_discharge_control",
+            "charging_control",
+            "discharging_control",
+        )
+        unavailable = [
+            key for key in numeric_controls
+            if key in self._entity_map and self._read_float(key) is None
+        ]
+        unavailable.extend(
+            key for key in switch_controls
+            if key in self._entity_map and not self._entity_state_available(key)
+        )
+        if not unavailable:
+            return True
+        _LOGGER.error(
+            "SAJ H2: restore_normal aborted — control entities unavailable: %s",
+            unavailable,
+        )
+        return False
+
     def _check_tou_charge_control_entities(self, operation: str) -> bool:
         """Return False and log an error if charge-slot TOU entities are not mapped."""
         missing = [
@@ -519,6 +581,17 @@ class SajH2BatteryController:
             return False
         return True
 
+    def _read_enable_bitmask(self, direction: str) -> int | None:
+        """Read the authoritative TOU enable-mask sensor.
+
+        The writable ``*_input`` number may lag the actual register, so it
+        must never be used to reconstruct or modify a user's schedule.
+        """
+        key = f"{direction}_time_enable_bitmask"
+        if key not in self._entity_map:
+            return None
+        return self._read_int_sensor(key)
+
     def _check_engaged(self, operation: str) -> bool:
         """Refuse Modbus commands when the inverter's battery converter is offline.
 
@@ -552,37 +625,62 @@ class SajH2BatteryController:
         intentionally ignored so manual and optimizer charge requests use the
         inverter's full configured charge rate, just like force_discharge does.
         """
+        if not self._check_telemetry_ready("force_charge"):
+            return False
         if not self._check_tou_charge_control_entities("force_charge"):
             return False
         if not self._check_engaged("force_charge"):
             return False
+
+        charge_mask = self._read_enable_bitmask("charge")
+        discharge_mask = (
+            self._read_enable_bitmask("discharge")
+            if (
+                self._cached_discharge_enable is None
+                and "discharge_time_enable" in self._entity_map
+            )
+            else None
+        )
+        if charge_mask is None or (
+            self._cached_discharge_enable is None
+            and "discharge_time_enable" in self._entity_map
+            and discharge_mask is None
+        ):
+            _LOGGER.error(
+                "SAJ H2: force_charge aborted — TOU enable bitmask unavailable"
+            )
+            return False
         try:
-            await self._clear_switch_controls_for_tou("force_charge")
+            if not await self._clear_switch_controls_for_tou("force_charge"):
+                raise RuntimeError("failed to clear switch controls")
 
             # Bootstrap (idempotent): make sure charge slot 7 spans the whole day at 100%.
             await self._set_text("charge7_start_time", "00:00")
             await self._set_text("charge7_end_time", "23:59")
-            await self._set_number("charge7_day_mask", 127)
-            await self._set_number("charge7_power_percent", 100)
+            if not await self._set_number("charge7_day_mask", 127):
+                raise RuntimeError("failed to set charge slot day mask")
+            if not await self._set_number("charge7_power_percent", 100):
+                raise RuntimeError("failed to set charge slot power")
 
             # Capture & clear discharge_time_enable so user discharge slots don't
             # contend with us in AppMode=1. Skip if we already cached it
             # (force_charge called twice without restore in between).
             if self._cached_discharge_enable is None:
-                cached = self._read_int_sensor("discharge_time_enable_bitmask")
-                self._cached_discharge_enable = cached if cached is not None else 0
                 if "discharge_time_enable" in self._entity_map:
-                    await self._set_number("discharge_time_enable", 0)
+                    self._cached_discharge_enable = discharge_mask
+                    if not await self._set_number("discharge_time_enable", 0):
+                        raise RuntimeError("failed to disable discharge slots")
 
             # Set slot 7 bit on the charge_time_enable bitmask.
-            current = self._read_int_sensor("charge_time_enable_bitmask") or 0
-            await self._set_number(
+            if not await self._set_number(
                 "charge_time_enable",
-                current | _POWERSYNC_CHARGE_BIT,
-            )
+                charge_mask | _POWERSYNC_CHARGE_BIT,
+            ):
+                raise RuntimeError("failed to enable PowerSync charge slot")
 
             # Enter TOU mode.
-            await self._set_number("app_mode_writable", _APP_MODE_TOU)
+            if not await self._ensure_app_mode(_APP_MODE_TOU, "force_charge"):
+                raise RuntimeError("failed to enter TOU mode")
         except Exception:
             _LOGGER.exception("SAJ H2: force_charge failed mid-sequence — attempting restore_normal")
             await self.restore_normal()
@@ -611,6 +709,8 @@ class SajH2BatteryController:
         `power_w` is converted to a discharge percentage using the configured
         inverter rated power. If no target is supplied, slot 7 runs at 100%.
         """
+        if not self._check_telemetry_ready("force_discharge"):
+            return False
         if not self._check_tou_discharge_control_entities("force_discharge"):
             return False
         if not self._check_engaged("force_discharge"):
@@ -624,34 +724,62 @@ class SajH2BatteryController:
                 soc, floor, self._min_soc_pct, self._MIN_SOC_BUFFER_PCT,
             )
             return False
+
+        discharge_mask = self._read_enable_bitmask("discharge")
+        charge_mask = (
+            self._read_enable_bitmask("charge")
+            if (
+                self._cached_charge_enable is None
+                and "charge_time_enable" in self._entity_map
+            )
+            else None
+        )
+        if discharge_mask is None or (
+            self._cached_charge_enable is None
+            and "charge_time_enable" in self._entity_map
+            and charge_mask is None
+        ):
+            _LOGGER.error(
+                "SAJ H2: force_discharge aborted — TOU enable bitmask unavailable"
+            )
+            return False
         try:
-            await self._clear_switch_controls_for_tou("force_discharge")
+            if not await self._clear_switch_controls_for_tou("force_discharge"):
+                raise RuntimeError("failed to clear switch controls")
 
             # Bootstrap (idempotent): make sure slot 7 spans the whole day at 100%.
             target_percent = self._tou_power_percent(power_w)
             await self._set_text("discharge7_start_time", "00:00")
             await self._set_text("discharge7_end_time", "23:59")
-            await self._set_number("discharge7_day_mask", 127)
-            await self._set_number("discharge7_power_percent", target_percent)
+            if not await self._set_number("discharge7_day_mask", 127):
+                raise RuntimeError("failed to set discharge slot day mask")
+            if not await self._set_number(
+                "discharge7_power_percent",
+                target_percent,
+            ):
+                raise RuntimeError("failed to set discharge slot power")
 
             # Capture & clear charge_time_enable so user charge slots don't
             # contend with us in AppMode=1. Skip if we already cached it
             # (force_discharge called twice without restore in between).
             if self._cached_charge_enable is None:
-                cached = self._read_int_sensor("charge_time_enable_bitmask")
-                self._cached_charge_enable = (cached if cached is not None else 0) & ~_POWERSYNC_CHARGE_BIT
                 if "charge_time_enable" in self._entity_map:
-                    await self._set_number("charge_time_enable", 0)
+                    self._cached_charge_enable = (
+                        charge_mask & ~_POWERSYNC_CHARGE_BIT
+                    )
+                    if not await self._set_number("charge_time_enable", 0):
+                        raise RuntimeError("failed to disable charge slots")
 
             # Set slot 7 bit on the discharge_time_enable bitmask.
-            current = self._read_int_sensor("discharge_time_enable_bitmask") or 0
-            await self._set_number(
+            if not await self._set_number(
                 "discharge_time_enable",
-                current | _POWERSYNC_DISCHARGE_BIT,
-            )
+                discharge_mask | _POWERSYNC_DISCHARGE_BIT,
+            ):
+                raise RuntimeError("failed to enable PowerSync discharge slot")
 
             # Enter TOU mode.
-            await self._set_number("app_mode_writable", _APP_MODE_TOU)
+            if not await self._ensure_app_mode(_APP_MODE_TOU, "force_discharge"):
+                raise RuntimeError("failed to enter TOU mode")
         except Exception:
             _LOGGER.exception("SAJ H2: force_discharge failed mid-sequence — attempting restore_normal")
             await self.restore_normal()
@@ -685,6 +813,8 @@ class SajH2BatteryController:
         zero charge target also prevents PV from charging the battery — surplus
         PV exports to grid instead. This is intentional: idle means hold SOC.
         """
+        if not self._check_telemetry_ready("set_idle"):
+            return False
         if not self._check_passive_control_entities("set_idle"):
             return False
         if not self._check_engaged("set_idle"):
@@ -722,38 +852,104 @@ class SajH2BatteryController:
         Then explicitly writes AppMode=0 (Self-Use) so the user always lands in
         Self-Use after a force operation, regardless of stanus74's AppMode capture.
         """
+        if not self._check_telemetry_ready("restore_normal"):
+            return False
+        if not self._check_restore_control_entities():
+            return False
+
+        charge_target: int | None = None
+        discharge_target: int | None = None
+        if "charge_time_enable" in self._entity_map:
+            if self._cached_charge_enable is not None:
+                charge_target = self._cached_charge_enable
+            else:
+                charge_mask = self._read_enable_bitmask("charge")
+                if charge_mask is not None:
+                    charge_target = charge_mask & ~_POWERSYNC_CHARGE_BIT
+        elif self._cached_charge_enable is not None:
+            _LOGGER.error(
+                "SAJ H2: restore_normal aborted — cached charge schedule "
+                "cannot be restored because its writable entity is missing"
+            )
+            return False
+
+        if "discharge_time_enable" in self._entity_map:
+            if self._cached_discharge_enable is not None:
+                discharge_target = self._cached_discharge_enable
+            else:
+                discharge_mask = self._read_enable_bitmask("discharge")
+                if discharge_mask is not None:
+                    discharge_target = (
+                        discharge_mask & ~_POWERSYNC_DISCHARGE_BIT
+                    )
+        elif self._cached_discharge_enable is not None:
+            _LOGGER.error(
+                "SAJ H2: restore_normal aborted — cached discharge schedule "
+                "cannot be restored because its writable entity is missing"
+            )
+            return False
+
+        success = True
+        async def _attempt(write: Any) -> bool:
+            try:
+                return bool(await write)
+            except Exception:
+                _LOGGER.exception(
+                    "SAJ H2 restore_normal write failed; continuing cleanup"
+                )
+                return False
+
         # Passive-mode unwind
-        await self._set_number("charge_power", 0)
-        await self._set_number("discharge_power", 0)
-        await self._turn_off("passive_charge_control")
-        await self._turn_off("passive_discharge_control")
-        await self._turn_off("charging_control")
-        await self._turn_off("discharging_control")
+        for key in ("charge_power", "discharge_power"):
+            if key in self._entity_map:
+                success = await _attempt(self._set_number(key, 0)) and success
+        for key in (
+            "passive_charge_control",
+            "passive_discharge_control",
+            "charging_control",
+            "discharging_control",
+        ):
+            if key in self._entity_map:
+                success = await _attempt(self._turn_off(key)) and success
 
         # TOU-mode unwind: clear PowerSync slot 7 bits and restore user slots
-        if "charge_time_enable" in self._entity_map:
-            current = self._read_int_sensor("charge_time_enable_bitmask") or 0
-            await self._set_number(
-                "charge_time_enable",
-                current & ~_POWERSYNC_CHARGE_BIT,
+        if charge_target is not None:
+            charge_write_succeeded = await _attempt(
+                self._set_number("charge_time_enable", charge_target)
             )
-        if "discharge_time_enable" in self._entity_map:
-            current = self._read_int_sensor("discharge_time_enable_bitmask") or 0
-            await self._set_number(
-                "discharge_time_enable",
-                current & ~_POWERSYNC_DISCHARGE_BIT,
+            if charge_write_succeeded and self._cached_charge_enable is not None:
+                self._cached_charge_enable = None
+            success = charge_write_succeeded and success
+        if discharge_target is not None:
+            discharge_write_succeeded = await _attempt(
+                self._set_number("discharge_time_enable", discharge_target)
             )
-        if self._cached_charge_enable is not None:
-            if "charge_time_enable" in self._entity_map:
-                await self._set_number("charge_time_enable", self._cached_charge_enable)
-            self._cached_charge_enable = None
-        if self._cached_discharge_enable is not None:
-            if "discharge_time_enable" in self._entity_map:
-                await self._set_number("discharge_time_enable", self._cached_discharge_enable)
-            self._cached_discharge_enable = None
+            if (
+                discharge_write_succeeded
+                and self._cached_discharge_enable is not None
+            ):
+                self._cached_discharge_enable = None
+            success = discharge_write_succeeded and success
 
         # Final mode flip
-        await self._set_number("app_mode_writable", _APP_MODE_SELF_USE)
+        if "app_mode_writable" in self._entity_map:
+            success = await _attempt(
+                self._ensure_app_mode(
+                    _APP_MODE_SELF_USE,
+                    "restore_normal",
+                )
+            ) and success
+        elif "app_mode" in self._entity_map:
+            current_mode = self._read_float("app_mode")
+            success = (
+                current_mode is not None
+                and int(current_mode) == _APP_MODE_SELF_USE
+                and success
+            )
+
+        if not success:
+            _LOGGER.error("SAJ H2 restore_normal did not complete successfully")
+            return False
         _LOGGER.info("SAJ H2 restored to Self-Use mode (AppMode=0)")
         return True
 
@@ -769,7 +965,8 @@ class SajH2BatteryController:
         if not state or state.state in ("unavailable", "unknown", ""):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 
@@ -797,8 +994,9 @@ class SajH2BatteryController:
         state = self.hass.states.get(entity_id)
         return bool(state and str(state.state).lower().strip() == "on")
 
-    async def _clear_switch_controls_for_tou(self, operation: str) -> None:
+    async def _clear_switch_controls_for_tou(self, operation: str) -> bool:
         """Clear stale passive/manual controls before TOU slot control takes over."""
+        success = True
         for key in (
             "passive_charge_control",
             "passive_discharge_control",
@@ -807,7 +1005,8 @@ class SajH2BatteryController:
         ):
             if key in self._entity_map and self._switch_is_on(key):
                 _LOGGER.debug("SAJ H2: %s turning off stale %s before TOU mode", operation, key)
-                await self._turn_off(key)
+                success = await self._turn_off(key) and success
+        return success
 
     async def _ensure_app_mode(self, expected_mode: int, operation: str) -> bool:
         """Drive and verify the inverter AppMode when the upstream switch does not."""

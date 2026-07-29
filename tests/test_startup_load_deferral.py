@@ -11,6 +11,9 @@ INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 OPTIMIZATION_COORDINATOR_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
 )
+ENERGY_COORDINATOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "coordinator.py"
+)
 
 
 def _find_class_method(
@@ -140,6 +143,16 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
         "OptimizationCoordinator",
         "_run_initial_optimization_after_startup_delay",
     )
+    run_optimization = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "_run_optimization",
+    )
+    deferred_restore = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "_deferred_enable_restore",
+    )
     polling_loop = _find_class_method(
         tree,
         "OptimizationCoordinator",
@@ -149,12 +162,16 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
     enable_source = ast.get_source_segment(source, enable)
     price_update_source = ast.get_source_segment(source, price_update)
     initial_run_source = ast.get_source_segment(source, initial_run)
+    run_optimization_source = ast.get_source_segment(source, run_optimization)
+    deferred_restore_source = ast.get_source_segment(source, deferred_restore)
     polling_loop_source = ast.get_source_segment(source, polling_loop)
 
     assert "INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0" in source
     assert enable_source is not None
     assert price_update_source is not None
     assert initial_run_source is not None
+    assert run_optimization_source is not None
+    assert deferred_restore_source is not None
     assert polling_loop_source is not None
     assert "self._initial_optimization_not_before" in enable_source
     assert (
@@ -183,6 +200,24 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
     assert "await asyncio.sleep(startup_delay)" in polling_loop_source
     assert "not initial_task.done()" in polling_loop_source
     assert "self._initial_opt_task = None" in initial_run_source
+    assert "self._energy_telemetry_ready()" in run_optimization_source
+    assert "self._energy_telemetry_ready()" in deferred_restore_source
+
+
+def test_saj_energy_coordinator_propagates_startup_telemetry_readiness():
+    source = ENERGY_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    update = _find_class_method(
+        tree,
+        "SajH2EnergyCoordinator",
+        "_async_update_data",
+    )
+    update_source = ast.get_source_segment(source, update)
+
+    assert update_source is not None
+    assert 'status.get("telemetry_ready", True)' in update_source
+    assert "if telemetry_ready:" in update_source
+    assert '"telemetry_ready": telemetry_ready' in update_source
 
 
 def test_initial_vpp_aemo_spike_check_is_backgrounded():

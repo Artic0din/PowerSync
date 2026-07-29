@@ -26677,6 +26677,67 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not persisted_force_state:
             return
 
+        async def _restore_persisted_normal(
+            service_data: dict[str, Any],
+        ) -> bool:
+            """Restore persisted state, retrying SAJ once telemetry is usable."""
+            if not is_saj_h2:
+                try:
+                    await hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_RESTORE_NORMAL,
+                        service_data,
+                        blocking=True,
+                    )
+                    return True
+                except Exception as err:
+                    _LOGGER.error(
+                        "Persisted force cleanup failed: %s",
+                        err,
+                        exc_info=True,
+                    )
+                    return False
+
+            attempt = 0
+            while entry.entry_id in hass.data.get(DOMAIN, {}):
+                saj_coord = (
+                    hass.data.get(DOMAIN, {})
+                    .get(entry.entry_id, {})
+                    .get("saj_h2_coordinator")
+                )
+                saj_data = getattr(saj_coord, "data", None)
+                if (
+                    saj_coord is not None
+                    and isinstance(saj_data, dict)
+                    and saj_data.get("telemetry_ready") is True
+                ):
+                    try:
+                        await hass.services.async_call(
+                            DOMAIN,
+                            SERVICE_RESTORE_NORMAL,
+                            service_data,
+                            blocking=True,
+                        )
+                        return True
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "SAJ H2 persisted cleanup attempt failed; "
+                            "preserving state for retry: %s",
+                            err,
+                        )
+                attempt += 1
+                if attempt == 1:
+                    _LOGGER.info(
+                        "SAJ H2 persisted cleanup is waiting for ready telemetry"
+                    )
+                await asyncio.sleep(min(30, 5 * attempt))
+
+            _LOGGER.info(
+                "SAJ H2 persisted cleanup stopped because the config entry "
+                "was unloaded"
+            )
+            return False
+
         mode = persisted_force_state.get("mode")
         expires_at_str = persisted_force_state.get("expires_at")
 
@@ -26909,6 +26970,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
                 state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
                 state["saved_grid_charging_enabled"] = persisted_force_state.get("saved_grid_charging_enabled")
+                restore_completed = False
                 if is_sigenergy:
                     _LOGGER.info(
                         "[MONITORING] Persisted Sigenergy force %s will not be "
@@ -26926,7 +26988,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             },
                             blocking=True,
                         )
+                        restore_completed = True
                     except Exception as e:
+                        restore_completed = False
                         _LOGGER.error(
                             "Error restoring Sigenergy native/VPP control after "
                             "persisted force %s: %s",
@@ -26939,24 +27003,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "[MONITORING] Persisted force %s will not be replayed; restoring normal operation",
                         mode,
                     )
-                    try:
-                        await hass.services.async_call(
-                            DOMAIN,
-                            SERVICE_RESTORE_NORMAL,
-                            {
-                                "source": persisted_source,
-                                "_force_restore": True,
-                                "_allow_monitoring_restore": True,
-                            },
-                            blocking=True,
-                        )
-                    except Exception as e:
-                        _LOGGER.error(
-                            "Error restoring normal operation after persisted force %s in monitoring mode: %s",
-                            mode,
-                            e,
-                            exc_info=True,
-                        )
+                    restore_completed = await _restore_persisted_normal(
+                        {
+                            "source": persisted_source,
+                            "_force_restore": True,
+                            "_allow_monitoring_restore": True,
+                        }
+                    )
+                if not restore_completed:
+                    _LOGGER.warning(
+                        "Persisted force %s cleanup remains pending for retry",
+                        mode,
+                    )
+                    return
                 if persisted_source == "optimizer":
                     hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
                 stored_data = await store.async_load() or {}
@@ -26991,26 +27050,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
                 state["saved_grid_charging_enabled"] = persisted_force_state.get("saved_grid_charging_enabled")
 
-                try:
-                    await hass.services.async_call(
-                        DOMAIN,
-                        SERVICE_RESTORE_NORMAL,
-                        {"source": "optimizer"},
-                        blocking=True,
-                    )
-                    _LOGGER.info(
-                        "Cleared stale optimizer force %s after restart",
+                restore_completed = await _restore_persisted_normal(
+                    {"source": "optimizer"}
+                )
+                if not restore_completed:
+                    _LOGGER.warning(
+                        "Persisted optimizer force %s cleanup remains pending "
+                        "for retry",
                         mode,
                     )
-                except Exception as e:
-                    _LOGGER.error(
-                        "Error clearing optimizer force %s after restart: %s",
-                        mode,
-                        e,
-                        exc_info=True,
-                    )
-                finally:
-                    hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
+                    return
+
+                _LOGGER.info(
+                    "Cleared stale optimizer force %s after restart",
+                    mode,
+                )
+                hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
 
                 stored_data = await store.async_load() or {}
                 stored_data["force_mode_state"] = None
@@ -27043,18 +27098,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
                 state["saved_grid_charging_enabled"] = persisted_force_state.get("saved_grid_charging_enabled")
 
-                # Use handle_restore_normal for full cleanup — it has direct API access
-                # and doesn't depend on battery_controller (which isn't created yet)
-                try:
-                    await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "force_timer", "_allow_monitoring_restore": True}, blocking=True)
+                restore_completed = await _restore_persisted_normal(
+                    {
+                        "source": "force_timer",
+                        "_allow_monitoring_restore": True,
+                    }
+                )
+                if restore_completed:
                     _LOGGER.info("✅ Restored normal operation after expired force mode")
-                except Exception as e:
-                    _LOGGER.error(f"Error restoring after expired force mode: {e}", exc_info=True)
-
-                # Clear the persisted state
-                stored_data = await store.async_load() or {}
-                stored_data["force_mode_state"] = None
-                await store.async_save(stored_data)
+                    stored_data = await store.async_load() or {}
+                    stored_data["force_mode_state"] = None
+                    await store.async_save(stored_data)
+                else:
+                    _LOGGER.warning(
+                        "Expired persisted force %s cleanup remains stored "
+                        "for retry",
+                        mode,
+                    )
             else:
                 # Force mode is still active - restore state and re-setup timer
                 remaining_seconds = (expires_at - now).total_seconds()
@@ -27183,7 +27243,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error restoring force mode from persistence: {e}", exc_info=True)
             if persisted_force_state.get("source") == "optimizer":
-                hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
+                _LOGGER.warning(
+                    "Optimizer startup cleanup remains pending after an "
+                    "unexpected restore error"
+                )
 
     # NOTE: restore_force_mode_from_persistence is scheduled AFTER handle_restore_normal
     # is defined (see below), because it needs handle_restore_normal in its closure.
@@ -32188,8 +32251,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 saj_coord = entry_data.get("saj_h2_coordinator")
-                if saj_coord:
-                    await saj_coord.restore_normal()
+                if not saj_coord:
+                    raise HomeAssistantError(
+                        "SAJ H2 coordinator is not available for restore"
+                    )
+                restore_succeeded = bool(await saj_coord.restore_normal())
+                if not restore_succeeded:
+                    raise HomeAssistantError(
+                        "SAJ H2 did not confirm the restore; control state "
+                        "was preserved for retry"
+                    )
 
                 if _restore_superseded("SAJ H2 restore"):
                     return
@@ -32217,6 +32288,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in SAJ H2 restore normal: {e}", exc_info=True)
                 return

@@ -172,7 +172,43 @@ def _tou_states(
     ]
 
 
+def _startup_telemetry_states(state: str = "unavailable") -> list[_FakeState]:
+    return [
+        _FakeState("sensor.saj_battery_soc", state),
+        _FakeState("sensor.saj_battery_power", state),
+        _FakeState("sensor.saj_grid_power", state),
+        _FakeState("sensor.saj_solar_power", state),
+        _FakeState("sensor.saj_load_power", state),
+    ]
+
+
+def _map_startup_telemetry(controller: SajH2BatteryController) -> None:
+    controller._entity_map.update(
+        {
+            "battery_level": "sensor.saj_battery_soc",
+            "battery_power": "sensor.saj_battery_power",
+            "grid_power": "sensor.saj_grid_power",
+            "solar_power": "sensor.saj_solar_power",
+            "load_power": "sensor.saj_load_power",
+        }
+    )
+
+
+def _ensure_ready_telemetry(hass: _FakeHass) -> None:
+    ready_values = {
+        "sensor.saj_battery_soc": "50",
+        "sensor.saj_battery_power": "0",
+        "sensor.saj_grid_power": "300",
+        "sensor.saj_solar_power": "0",
+        "sensor.saj_load_power": "300",
+    }
+    for entity_id, state in ready_values.items():
+        if hass.states.get(entity_id) is None:
+            hass.states.set(entity_id, state)
+
+
 def _controller(hass: _FakeHass) -> SajH2BatteryController:
+    _ensure_ready_telemetry(hass)
     controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
     controller._SWITCH_VERIFY_DELAY_SEC = 0
     controller._entity_map = {
@@ -182,6 +218,7 @@ def _controller(hass: _FakeHass) -> SajH2BatteryController:
         "inverter_working_mode": "sensor.saj_inverter_working_mode",
         "inverter_voltage_r": "sensor.saj_r_phase_inverter_voltage",
     }
+    _map_startup_telemetry(controller)
     return controller
 
 
@@ -190,6 +227,7 @@ def _tou_controller(
     *,
     inverter_rated_kw: float = 10.0,
 ) -> SajH2BatteryController:
+    _ensure_ready_telemetry(hass)
     controller = SajH2BatteryController(
         hass,
         saj_entry_id="saj-entry",
@@ -213,6 +251,7 @@ def _tou_controller(
         "inverter_working_mode": "sensor.saj_inverter_working_mode",
         "inverter_voltage_r": "sensor.saj_r_phase_inverter_voltage",
     }
+    _map_startup_telemetry(controller)
     return controller
 
 
@@ -277,6 +316,39 @@ def test_status_uses_pv_string_sum_when_solar_total_omits_a_string():
     assert status["daily_solar_energy_kwh"] == 9.9
     assert status["daily_grid_import_kwh"] == 1.8
     assert status["daily_grid_export_kwh"] == 0.7
+
+
+def test_status_marks_unavailable_startup_telemetry_invalid():
+    hass = _FakeHass(_startup_telemetry_states())
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
+    _map_startup_telemetry(controller)
+
+    status = controller.get_status()
+
+    assert status["telemetry_ready"] is False
+    assert status["battery_level"] is None
+
+
+def test_status_treats_genuine_zero_telemetry_as_ready():
+    hass = _FakeHass(_startup_telemetry_states("0"))
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
+    _map_startup_telemetry(controller)
+
+    status = controller.get_status()
+
+    assert status["telemetry_ready"] is True
+    assert status["battery_level"] == 0.0
+
+
+def test_status_rejects_non_numeric_startup_telemetry():
+    hass = _FakeHass(_startup_telemetry_states("not-a-number"))
+    controller = SajH2BatteryController(hass, saj_entry_id="saj-entry")
+    _map_startup_telemetry(controller)
+
+    status = controller.get_status()
+
+    assert status["telemetry_ready"] is False
+    assert status["battery_level"] is None
 
 
 def test_config_entry_discovery_prefers_grid_load_power_and_current_daily_keys():
@@ -524,6 +596,93 @@ def test_restore_normal_after_cross_type_force_does_not_reapply_stale_charge_bit
     assert charge_writes[-1] == 2
 
 
+def test_restore_normal_refuses_writes_while_startup_telemetry_is_unavailable():
+    hass = _FakeHass(_tou_states() + _startup_telemetry_states())
+    controller = _tou_controller_with_switches(hass)
+    _map_startup_telemetry(controller)
+
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+
+
+def test_restore_normal_returns_false_when_final_mode_write_fails():
+    hass = _FakeHass(
+        _tou_states() + _startup_telemetry_states("0"),
+        fail_on=("number", "set_value", "number.saj_app_mode_input"),
+    )
+    controller = _tou_controller_with_switches(hass)
+
+    assert not asyncio.run(controller.restore_normal())
+
+
+def test_restore_normal_preflight_rejects_non_numeric_bitmask_without_writes():
+    hass = _FakeHass(
+        _tou_states(charge_bitmask="not-a-number")
+        + _startup_telemetry_states("0"),
+    )
+    controller = _tou_controller_with_switches(hass)
+
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+
+
+def test_restore_normal_skips_masks_when_authoritative_sensors_are_absent():
+    hass = _FakeHass(
+        _tou_states(charge_bitmask="67", discharge_bitmask="69"),
+    )
+    controller = _tou_controller(hass)
+    controller._entity_map.pop("charge_time_enable_bitmask")
+    controller._entity_map.pop("discharge_time_enable_bitmask")
+
+    assert asyncio.run(controller.restore_normal())
+
+    mask_entities = {
+        "number.saj_charge_time_enable_input",
+        "number.saj_discharge_time_enable_input",
+    }
+    assert not any(
+        call[2].get("entity_id") in mask_entities
+        for call in hass.services.calls
+    )
+    assert hass.states.get("number.saj_charge_time_enable_input").state == "67"
+    assert hass.states.get("number.saj_discharge_time_enable_input").state == "69"
+
+
+def test_force_charge_refuses_unreadable_enable_mask_before_any_writes():
+    hass = _FakeHass(_tou_states(charge_bitmask="unavailable"))
+    controller = _tou_controller(hass)
+    controller._entity_map.pop("charge_time_enable_bitmask")
+
+    assert not asyncio.run(
+        controller.force_charge(duration_minutes=30, power_w=2500)
+    )
+    assert hass.services.calls == []
+
+
+def test_restore_normal_clears_successfully_restored_cache_on_later_failure():
+    hass = _FakeHass(
+        _tou_states(),
+        fail_on=("number", "set_value", "number.saj_app_mode_input"),
+    )
+    controller = _tou_controller(hass)
+    controller._cached_discharge_enable = 5
+
+    assert not asyncio.run(controller.restore_normal())
+    assert controller._cached_discharge_enable is None
+
+
+def test_restore_normal_returns_false_when_app_mode_does_not_confirm():
+    hass = _FakeHass(
+        _tou_states(),
+        mirror_app_mode=False,
+    )
+    controller = _tou_controller_with_switches(hass)
+    controller._APP_MODE_VERIFY_DELAY_SEC = 0
+    hass.states.set("sensor.saj_app_mode", "1")
+
+    assert not asyncio.run(controller.restore_normal())
+
+
 def test_force_charge_attempts_restore_normal_on_mid_sequence_exception():
     hass = _FakeHass(
         _tou_states(),
@@ -559,6 +718,15 @@ def test_set_idle_fails_when_passive_switch_does_not_stick_on():
         {"entity_id": "switch.saj_passive_charge_control"},
     ) in hass.services.calls
     assert hass.states.get("switch.saj_passive_charge_control").state == "off"
+
+
+def test_set_idle_refuses_writes_while_startup_telemetry_is_unavailable():
+    hass = _FakeHass(_passive_states() + _startup_telemetry_states())
+    controller = _controller(hass)
+    _map_startup_telemetry(controller)
+
+    assert not asyncio.run(controller.set_idle())
+    assert hass.services.calls == []
 
 
 def test_set_idle_drives_and_verifies_passive_app_mode_when_mapped():

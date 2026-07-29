@@ -2096,6 +2096,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = getattr(self.energy_coordinator, "data", None)
         return data if isinstance(data, dict) else None
 
+    def _energy_telemetry_ready(self) -> bool:
+        """Return False only when a coordinator explicitly reports stale telemetry."""
+        data = self._get_energy_data()
+        return not (
+            isinstance(data, dict)
+            and data.get("telemetry_ready") is False
+        )
+
     def _resolve_max_grid_export_w(self) -> int | None:
         """Return the configured or reported grid export cap for optimizer planning."""
         if self._entry:
@@ -3853,12 +3861,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._enabled:
             return
+        if not self._energy_telemetry_ready():
+            _LOGGER.info(
+                "Optimizer startup: battery telemetry is not ready — "
+                "deferring mode writes until a later optimization cycle"
+            )
+            return
         # Start in self-consumption mode so the battery serves home load
         # immediately. Without this, the first LP action might be IDLE
         # (especially at night with no solar), forcing grid import until
         # the optimizer completes its first run.
         battery = self._executor.battery_controller if self._executor else None
         if battery:
+            async def _set_startup_self_consumption() -> bool:
+                if (
+                    self.battery_system == "saj_h2"
+                    and self.energy_coordinator
+                    and hasattr(self.energy_coordinator, "restore_normal")
+                ):
+                    return bool(await self.energy_coordinator.restore_normal())
+                if hasattr(battery, "set_self_consumption_mode"):
+                    return bool(await battery.set_self_consumption_mode())
+                return False
+
             # Restore the user's reserve target without trusting the live
             # inverter value. GoodWe/Tesla IDLE temporarily raises the hardware
             # reserve to hold SOC; after an HA restart or update that live value
@@ -3934,18 +3959,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif _restart_restore_pending:
                 _LOGGER.info("Optimizer startup: stale force restore pending — setting self-consumption mode")
                 try:
-                    if hasattr(battery, "set_self_consumption_mode"):
-                        await battery.set_self_consumption_mode()
+                    if await _set_startup_self_consumption():
                         _LOGGER.info("Optimizer startup: set self-consumption mode (stale force restore)")
+                    else:
+                        _LOGGER.warning(
+                            "Optimizer startup: stale force self-consumption restore failed"
+                        )
                 except Exception as e:
                     _LOGGER.warning("Failed to set self-consumption during stale force restore: %s", e)
             elif _force_active:
                 _LOGGER.info("Optimizer startup: force mode active — skipping self-consumption mode set")
             else:
                 try:
-                    if hasattr(battery, "set_self_consumption_mode"):
-                        await battery.set_self_consumption_mode()
+                    if await _set_startup_self_consumption():
                         _LOGGER.info("Optimizer startup: set self-consumption mode (battery serves load)")
+                    else:
+                        _LOGGER.warning(
+                            "Optimizer startup: self-consumption restore failed"
+                        )
                 except Exception as e:
                     _LOGGER.warning("Failed to set self-consumption on startup: %s", e)
 
@@ -3954,6 +3985,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if (
             self.energy_coordinator
             and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+            and self.battery_system != "saj_h2"
             and not _monitoring
             and not _force_active
         ):
@@ -4131,6 +4163,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         silently dropped.
         """
         if not self._optimizer or not self._enabled:
+            return False
+        if not self._energy_telemetry_ready():
+            _LOGGER.info(
+                "Optimizer: battery telemetry is not ready — skipping this run"
+            )
             return False
 
         if await self._wait_for_restart_force_restore():

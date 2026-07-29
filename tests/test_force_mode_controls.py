@@ -2099,15 +2099,113 @@ def test_optimizer_force_modes_are_not_reissued_after_restart():
     assert 'if persisted_source == "optimizer":' in function_source
 
     optimizer_branch = function_source.split(
-        'if persisted_source == "optimizer":',
+        "# Optimizer-owned force modes are schedule decisions",
         1,
     )[1].split("if now >= expires_at:", 1)[0]
-    assert "SERVICE_RESTORE_NORMAL" in optimizer_branch
+    assert "_restore_persisted_normal" in optimizer_branch
     assert '"set_self_consumption"' not in optimizer_branch
     assert 'stored_data["force_mode_state"] = None' in optimizer_branch
     assert '"optimizer_force_restart_restore_pending"] = False' in optimizer_branch
     assert "SERVICE_FORCE_DISCHARGE" not in optimizer_branch
     assert "SERVICE_FORCE_CHARGE" not in optimizer_branch
+
+
+def test_saj_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "restore_force_mode_from_persistence")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "async def _restore_persisted_normal" in function_source
+    assert 'saj_data.get("telemetry_ready") is True' in function_source
+    assert "while entry.entry_id in hass.data.get(DOMAIN, {})" in function_source
+    assert "preserving state for retry" in function_source
+    optimizer_branch = function_source.split(
+        "# Optimizer-owned force modes are schedule decisions",
+        1,
+    )[1].split("if now >= expires_at:", 1)[0]
+    assert "restore_completed = await _restore_persisted_normal(" in optimizer_branch
+    assert "if not restore_completed:" in optimizer_branch
+    assert "cleanup remains pending" in optimizer_branch
+    assert optimizer_branch.index("if not restore_completed:") < optimizer_branch.index(
+        '"optimizer_force_restart_restore_pending"] = False'
+    )
+    assert optimizer_branch.index("if not restore_completed:") < optimizer_branch.index(
+        'stored_data["force_mode_state"] = None'
+    )
+
+
+def test_saj_persisted_cleanup_retries_readiness_and_restore_failure():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_helper = _find_function(tree, "_restore_persisted_normal")
+    helper_module = ast.fix_missing_locations(
+        ast.Module(body=[restore_helper], type_ignores=[])
+    )
+
+    coordinator = SimpleNamespace(data={"telemetry_ready": False})
+    service_attempts = 0
+    sleep_attempts = 0
+
+    class _Services:
+        async def async_call(self, *_args, **_kwargs):
+            nonlocal service_attempts
+            service_attempts += 1
+            if service_attempts == 1:
+                raise RuntimeError("transient restore failure")
+
+    hass = SimpleNamespace(
+        data={"power_sync": {"entry": {"saj_h2_coordinator": coordinator}}},
+        services=_Services(),
+    )
+
+    async def _sleep(_delay):
+        nonlocal sleep_attempts
+        sleep_attempts += 1
+        coordinator.data["telemetry_ready"] = True
+
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "SERVICE_RESTORE_NORMAL": "restore_normal",
+        "_LOGGER": SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+        "asyncio": SimpleNamespace(sleep=_sleep),
+        "entry": SimpleNamespace(entry_id="entry"),
+        "hass": hass,
+        "is_saj_h2": True,
+    }
+    exec(compile(helper_module, str(INIT_PATH), "exec"), namespace)
+
+    assert asyncio.run(namespace["_restore_persisted_normal"]({"source": "optimizer"}))
+    assert sleep_attempts == 2
+    assert service_attempts == 2
+
+
+def test_expired_persisted_force_state_clears_only_after_confirmed_restore():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "restore_force_mode_from_persistence")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    expired_branch = function_source.split(
+        "# Force mode has expired during restart",
+        1,
+    )[1].split(
+        "# Force mode is still active",
+        1,
+    )[0]
+    assert "restore_completed = await _restore_persisted_normal(" in expired_branch
+    assert "if restore_completed:" in expired_branch
+    clear_index = expired_branch.index('stored_data["force_mode_state"] = None')
+    confirmed_index = expired_branch.index("if restore_completed:")
+    pending_index = expired_branch.index("cleanup remains stored")
+    assert confirmed_index < clear_index < pending_index
 
 
 def test_optimizer_restart_restore_is_hidden_from_force_getter():
