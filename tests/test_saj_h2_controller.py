@@ -53,12 +53,27 @@ class _FakeState:
 class _FakeStates:
     def __init__(self, states: list[_FakeState]):
         self._states = {state.entity_id: state for state in states}
+        self._deferred_sets: dict[str, tuple[int, str]] = {}
 
     def get(self, entity_id: str | None):
+        if entity_id in self._deferred_sets:
+            remaining_reads, deferred_state = self._deferred_sets[entity_id]
+            remaining_reads -= 1
+            if remaining_reads <= 0:
+                self.set(entity_id, deferred_state)
+                self._deferred_sets.pop(entity_id)
+            else:
+                self._deferred_sets[entity_id] = (
+                    remaining_reads,
+                    deferred_state,
+                )
         return self._states.get(entity_id or "")
 
     def set(self, entity_id: str, state: str) -> None:
         self._states[entity_id] = _FakeState(entity_id, state)
+
+    def defer_set(self, entity_id: str, state: str, after_reads: int) -> None:
+        self._deferred_sets[entity_id] = (after_reads, state)
 
 
 class _FakeServices:
@@ -69,11 +84,13 @@ class _FakeServices:
         switch_turn_on_sticks: bool = True,
         fail_on: tuple[str, str, str] | None = None,
         mirror_app_mode: bool = True,
+        app_mode_mirror_after_reads: int = 0,
     ):
         self._states = states
         self._switch_turn_on_sticks = switch_turn_on_sticks
         self._fail_on = fail_on
         self._mirror_app_mode = mirror_app_mode
+        self._app_mode_mirror_after_reads = app_mode_mirror_after_reads
         self.calls: list[tuple[str, str, dict]] = []
 
     async def async_call(self, domain: str, service: str, data: dict, blocking: bool = True):
@@ -84,7 +101,14 @@ class _FakeServices:
         if domain == "number" and service == "set_value":
             self._states.set(entity_id, str(data["value"]))
             if self._mirror_app_mode and entity_id == "number.saj_app_mode_input":
-                self._states.set("sensor.saj_app_mode", str(data["value"]))
+                if self._app_mode_mirror_after_reads > 0:
+                    self._states.defer_set(
+                        "sensor.saj_app_mode",
+                        str(data["value"]),
+                        self._app_mode_mirror_after_reads,
+                    )
+                else:
+                    self._states.set("sensor.saj_app_mode", str(data["value"]))
         elif domain == "text" and service == "set_value":
             self._states.set(entity_id, str(data["value"]))
         elif domain == "switch" and service == "turn_on" and self._switch_turn_on_sticks:
@@ -112,6 +136,7 @@ class _FakeHass:
         switch_turn_on_sticks: bool = True,
         fail_on: tuple[str, str, str] | None = None,
         mirror_app_mode: bool = True,
+        app_mode_mirror_after_reads: int = 0,
         registry_entries: dict[str, list[tuple[str, str]]] | None = None,
     ):
         self.states = _FakeStates(states)
@@ -120,6 +145,7 @@ class _FakeHass:
             switch_turn_on_sticks=switch_turn_on_sticks,
             fail_on=fail_on,
             mirror_app_mode=mirror_app_mode,
+            app_mode_mirror_after_reads=app_mode_mirror_after_reads,
         )
         self.entity_registry = _FakeRegistry(registry_entries)
 
@@ -531,6 +557,69 @@ def test_force_discharge_sets_tou_slot_power_from_requested_watts():
         "set_value",
         {"entity_id": "number.saj_discharge7_power_percent_input", "value": 25},
     ) in hass.services.calls
+
+
+def test_force_discharge_waits_for_deferred_app_mode_confirmation():
+    hass = _FakeHass(
+        _tou_states(),
+        app_mode_mirror_after_reads=2,
+    )
+    controller = _tou_controller(hass)
+    controller._APP_MODE_VERIFY_DELAY_SEC = 0
+
+    assert asyncio.run(
+        controller.force_discharge(duration_minutes=180, power_w=2081)
+    )
+
+    app_mode_writes = [
+        call[2]["value"]
+        for call in hass.services.calls
+        if call[2].get("entity_id") == "number.saj_app_mode_input"
+    ]
+    assert app_mode_writes == [1]
+    assert hass.states.get("sensor.saj_app_mode").state == "1"
+
+
+def test_force_charge_waits_for_deferred_app_mode_confirmation():
+    hass = _FakeHass(
+        _tou_states(),
+        app_mode_mirror_after_reads=2,
+    )
+    controller = _tou_controller(hass)
+    controller._APP_MODE_VERIFY_DELAY_SEC = 0
+
+    assert asyncio.run(
+        controller.force_charge(duration_minutes=180, power_w=5000)
+    )
+
+    app_mode_writes = [
+        call[2]["value"]
+        for call in hass.services.calls
+        if call[2].get("entity_id") == "number.saj_app_mode_input"
+    ]
+    assert app_mode_writes == [1]
+    assert hass.states.get("sensor.saj_app_mode").state == "1"
+
+
+def test_force_discharge_restores_when_app_mode_never_confirms():
+    hass = _FakeHass(
+        _tou_states(),
+        mirror_app_mode=False,
+    )
+    controller = _tou_controller(hass)
+    controller._APP_MODE_VERIFY_DELAY_SEC = 0
+    controller._APP_MODE_VERIFY_ATTEMPTS = 2
+
+    assert not asyncio.run(
+        controller.force_discharge(duration_minutes=180, power_w=2081)
+    )
+
+    app_mode_writes = [
+        call[2]["value"]
+        for call in hass.services.calls
+        if call[2].get("entity_id") == "number.saj_app_mode_input"
+    ]
+    assert app_mode_writes == [1, 0]
 
 
 def test_force_discharge_clamps_tou_slot_power_percent():

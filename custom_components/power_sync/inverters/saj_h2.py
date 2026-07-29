@@ -187,6 +187,7 @@ class SajH2BatteryController:
     _MIN_ENGAGED_INV_VOLTAGE = 50.0
     _SWITCH_VERIFY_DELAY_SEC = 0.5
     _APP_MODE_VERIFY_DELAY_SEC = 0.5
+    _APP_MODE_VERIFY_ATTEMPTS = 10
     _TELEMETRY_KEYS = (
         "battery_level",
         "battery_power",
@@ -1016,22 +1017,31 @@ class SajH2BatteryController:
 
     async def _ensure_app_mode(self, expected_mode: int, operation: str) -> bool:
         """Drive and verify the inverter AppMode when the upstream switch does not."""
-        if "app_mode_writable" in self._entity_map:
+        app_mode_writable = "app_mode_writable" in self._entity_map
+        if app_mode_writable:
             if not await self._set_number("app_mode_writable", expected_mode):
                 return False
-            await asyncio.sleep(self._APP_MODE_VERIFY_DELAY_SEC)
 
-        current_mode = self._read_float("app_mode")
-        if current_mode is None:
-            if "app_mode_writable" not in self._entity_map:
-                _LOGGER.warning(
-                    "SAJ H2: %s cannot verify AppMode — no app_mode sensor or writable entity mapped",
-                    operation,
-                )
-            return True
+        attempts = self._APP_MODE_VERIFY_ATTEMPTS if app_mode_writable else 1
+        current_mode: float | None = None
+        for _attempt in range(attempts):
+            if app_mode_writable:
+                # The upstream SAJ integration queues writable number commands.
+                # A complete TOU setup places AppMode after several slot writes,
+                # so its sensor may legitimately lag the blocking service call.
+                await asyncio.sleep(self._APP_MODE_VERIFY_DELAY_SEC)
 
-        if int(current_mode) == expected_mode:
-            return True
+            current_mode = self._read_float("app_mode")
+            if current_mode is None:
+                if not app_mode_writable:
+                    _LOGGER.warning(
+                        "SAJ H2: %s cannot verify AppMode — no app_mode sensor or writable entity mapped",
+                        operation,
+                    )
+                return True
+
+            if int(current_mode) == expected_mode:
+                return True
 
         _LOGGER.error(
             "SAJ H2: %s did not enter expected AppMode %s; current AppMode is %s",
