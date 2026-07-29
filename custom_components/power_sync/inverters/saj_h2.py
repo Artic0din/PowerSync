@@ -509,6 +509,12 @@ class SajH2BatteryController:
         )
         return False
 
+    def telemetry_ready(self) -> bool:
+        """Return whether all telemetry inputs required for control are usable."""
+        if not self._entity_map:
+            self._discover_entities()
+        return all(self._read_float(key) is not None for key in self._TELEMETRY_KEYS)
+
     def _check_restore_control_entities(self) -> bool:
         """Preflight every mapped entity used by restore_normal."""
         numeric_controls = (

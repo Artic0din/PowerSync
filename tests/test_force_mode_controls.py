@@ -2110,7 +2110,7 @@ def test_optimizer_force_modes_are_not_reissued_after_restart():
     assert "SERVICE_FORCE_CHARGE" not in optimizer_branch
 
 
-def test_saj_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
+def test_native_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(tree, "restore_force_mode_from_persistence")
@@ -2118,7 +2118,9 @@ def test_saj_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
 
     assert function_source is not None
     assert "async def _restore_persisted_normal" in function_source
-    assert 'saj_data.get("telemetry_ready") is True' in function_source
+    assert '"battery_energy_coordinator"' in function_source
+    assert "_uses_native_battery_integration(coordinator)" in function_source
+    assert '"startup_control_ready"' in function_source
     assert "while entry.entry_id in hass.data.get(DOMAIN, {})" in function_source
     assert "preserving state for retry" in function_source
     optimizer_branch = function_source.split(
@@ -2136,15 +2138,29 @@ def test_saj_optimizer_startup_restore_waits_and_preserves_failed_cleanup():
     )
 
 
-def test_saj_persisted_cleanup_retries_readiness_and_restore_failure():
+def test_native_persisted_cleanup_retries_readiness_and_restore_failure():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
+    coordinator_helper = _find_function(
+        tree,
+        "_native_battery_control_coordinator",
+    )
+    wait_helper = _find_function(
+        tree,
+        "_wait_for_native_battery_control_ready",
+    )
     restore_helper = _find_function(tree, "_restore_persisted_normal")
     helper_module = ast.fix_missing_locations(
-        ast.Module(body=[restore_helper], type_ignores=[])
+        ast.Module(
+            body=[coordinator_helper, wait_helper, restore_helper],
+            type_ignores=[],
+        )
     )
 
     coordinator = SimpleNamespace(data={"telemetry_ready": False})
+    coordinator.startup_control_ready = (
+        lambda: coordinator.data.get("telemetry_ready") is True
+    )
     service_attempts = 0
     sleep_attempts = 0
 
@@ -2156,7 +2172,11 @@ def test_saj_persisted_cleanup_retries_readiness_and_restore_failure():
                 raise RuntimeError("transient restore failure")
 
     hass = SimpleNamespace(
-        data={"power_sync": {"entry": {"saj_h2_coordinator": coordinator}}},
+        data={
+            "power_sync": {
+                "entry": {"battery_energy_coordinator": coordinator}
+            }
+        },
         services=_Services(),
     )
 
@@ -2177,13 +2197,34 @@ def test_saj_persisted_cleanup_retries_readiness_and_restore_failure():
         "asyncio": SimpleNamespace(sleep=_sleep),
         "entry": SimpleNamespace(entry_id="entry"),
         "hass": hass,
-        "is_saj_h2": True,
+        "_uses_native_battery_integration": lambda value: value is coordinator,
     }
     exec(compile(helper_module, str(INIT_PATH), "exec"), namespace)
 
     assert asyncio.run(namespace["_restore_persisted_normal"]({"source": "optimizer"}))
     assert sleep_attempts == 2
     assert service_attempts == 2
+
+
+def test_native_force_replay_rechecks_expiry_after_startup_wait():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "restore_force_mode_from_persistence")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    for mode in ("charge", "discharge"):
+        replay_marker = f'"Persisted force {mode} replay"'
+        replay_branch = function_source.split(replay_marker, 1)[1]
+        if mode == "charge":
+            replay_branch = replay_branch.split(
+                'elif mode == "discharge":',
+                1,
+            )[0]
+        assert "expires_at - dt_util.utcnow()" in replay_branch
+        assert "if replay_remaining_seconds <= 0:" in replay_branch
+        assert "_restore_persisted_normal(" in replay_branch
+        assert "math.ceil(replay_remaining_seconds / 60)" in replay_branch
 
 
 def test_expired_persisted_force_state_clears_only_after_confirmed_restore():
@@ -3371,11 +3412,18 @@ def test_goodwe_hold_soc_dispatches_conserve_and_rejects_unverified_udp_path():
         calls.append((mode, power_w))
         return True
 
-    ems_self = SimpleNamespace(_ems_prefix="goodwe", _ems_set_mode=_ems_set_mode)
+    ems_self = SimpleNamespace(
+        _ems_prefix="goodwe",
+        _ems_set_mode=_ems_set_mode,
+        _native_control_allowed=lambda _operation: True,
+    )
     assert asyncio.run(set_backup_mode(ems_self)) is True
     assert calls == [("conserve", 0)]
 
-    udp_self = SimpleNamespace(_ems_prefix=None)
+    udp_self = SimpleNamespace(
+        _ems_prefix=None,
+        _native_control_allowed=lambda _operation: True,
+    )
     assert asyncio.run(set_backup_mode(udp_self)) is False
     assert warnings == [
         "GoodWe Hold SoC requires EMS entity control; direct UDP hold semantics are not verified"

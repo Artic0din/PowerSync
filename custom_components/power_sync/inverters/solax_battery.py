@@ -22,6 +22,7 @@ Solax entity conventions (wills106):
 
 from datetime import timedelta
 import logging
+import math
 import re
 from typing import Any
 
@@ -418,7 +419,8 @@ class SolaxBatteryController:
     def get_status(self) -> dict[str, Any]:
         """Read current inverter state and return PowerSync-canonical dict."""
         self._ensure_entity_map()
-        soc = self._read_float("battery_level") or 0.0
+        soc = self._read_float("battery_level")
+        telemetry_ready = self.telemetry_ready()
         bat_w_raw = self._read_float("battery_power_raw") or 0.0
         grid_w = self._read_float("grid_power") or 0.0
         pv1_w = self._read_float("pv1_power") or 0.0
@@ -470,6 +472,7 @@ class SolaxBatteryController:
         mode = mode_state.state if mode_state else None
 
         return {
+            "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -494,6 +497,28 @@ class SolaxBatteryController:
             "daily_battery_charge_kwh": daily_charge_kwh,
             "daily_battery_discharge_kwh": daily_discharge_kwh,
         }
+
+    def telemetry_ready(self) -> bool:
+        """Return whether the upstream SolaX telemetry has finished restoring."""
+        self._ensure_entity_map()
+        mapped_pv_keys = [
+            key
+            for key in ("pv1_power", "pv2_power", "pv3_power")
+            if key in self._entity_map
+        ]
+        solar_ready = (
+            "solar_power" not in self._entity_map
+            and not mapped_pv_keys
+        ) or self._read_float("solar_power") is not None or (
+            bool(mapped_pv_keys)
+            and all(self._read_float(key) is not None for key in mapped_pv_keys)
+        )
+        return (
+            self._read_float("battery_level") is not None
+            and self._read_float("battery_power_raw") is not None
+            and self._read_float("grid_power") is not None
+            and solar_ready
+        )
 
     # -- Force charge / discharge -----------------------------------------
 
@@ -828,7 +853,8 @@ class SolaxBatteryController:
         if not state or state.state in ("unavailable", "unknown", ""):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (ValueError, TypeError):
             return None
 

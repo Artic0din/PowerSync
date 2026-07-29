@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from homeassistant.helpers import device_registry as dr
@@ -149,6 +150,7 @@ class FoxESSEntityController:
         self._ensure_entity_map()
 
         soc = self._read_float("battery_level")
+        telemetry_ready = self.telemetry_ready()
         battery_kw = self._battery_power_kw()
         grid_kw = self._grid_power_kw()
         solar_kw = self._solar_power_kw()
@@ -157,6 +159,7 @@ class FoxESSEntityController:
             load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
 
         status: dict[str, Any] = {
+            "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -199,6 +202,32 @@ class FoxESSEntityController:
             )
 
         return status
+
+    def telemetry_ready(self) -> bool:
+        """Return whether every input needed for safe battery control is usable."""
+        self._ensure_entity_map()
+        battery_ready = self._power_kw("battery_power") is not None or (
+            self._power_kw("battery_charge") is not None
+            and self._power_kw("battery_discharge") is not None
+        )
+        grid_ready = self._power_kw("grid_power") is not None or (
+            self._power_kw("grid_consumption") is not None
+            and self._power_kw("grid_feed_in") is not None
+        )
+        mapped_solar_keys = [
+            key
+            for key in ("solar_power", *(f"pv{idx}_power" for idx in range(1, 7)))
+            if key in self._entity_map
+        ]
+        solar_ready = not mapped_solar_keys or any(
+            self._power_kw(key) is not None for key in mapped_solar_keys
+        )
+        return (
+            self._read_float("battery_level") is not None
+            and battery_ready
+            and grid_ready
+            and solar_ready
+        )
 
     async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Force charge by setting Nathan's remote-control power and work mode."""
@@ -911,7 +940,8 @@ class FoxESSEntityController:
         if not state or str(state.state) in _UNAVAILABLE:
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 

@@ -195,7 +195,32 @@ def test_mode1_profile_validates_without_manual_mode_entities():
     status = controller.get_status()
     assert status["battery_level"] == 55.0
     assert status["battery_power"] == -0.12
+    assert status["telemetry_ready"] is True
     assert hass.services.calls == []
+
+
+def test_startup_readiness_rejects_unavailable_values_but_accepts_zeroes():
+    states = _base_states() + _mode1_states()
+    next(
+        state
+        for state in states
+        if state.entity_id == "sensor.solax_measured_power"
+    ).state = "unknown"
+    unavailable = SolaxBatteryController(
+        _FakeHass(states),
+        entity_prefix="solax",
+    )
+    assert unavailable.get_status()["telemetry_ready"] is False
+
+    zero_states = _base_states() + _mode1_states()
+    for state in zero_states:
+        if state.entity_id.startswith("sensor."):
+            state.state = "0"
+    zero = SolaxBatteryController(
+        _FakeHass(zero_states),
+        entity_prefix="solax",
+    )
+    assert zero.get_status()["telemetry_ready"] is True
 
 
 def test_mode1_profile_preferred_when_manual_mode_also_exists():

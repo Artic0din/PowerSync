@@ -220,6 +220,31 @@ def test_config_entry_discovery_prefers_combined_sensors():
     assert status["battery_level"] == 56.0
     assert status["battery_capacity_kwh"] == 20.1
     assert status["battery_soh"] == 98.0
+    assert status["telemetry_ready"] is True
+
+
+def test_neovolt_startup_readiness_rejects_unavailable_and_accepts_zeroes():
+    states = _combined_states() + _control_states()
+    next(
+        state
+        for state in states
+        if state.entity_id == "sensor.neovolt_1_combined_house_load"
+    ).state = "unavailable"
+    unavailable = NeovoltBatteryController(
+        _hass_for(states),
+        "neovolt-entry",
+    )
+    assert unavailable.get_status()["telemetry_ready"] is False
+
+    zero_states = _combined_states() + _control_states()
+    for state in zero_states:
+        if state.entity_id.startswith("sensor."):
+            state.state = "0"
+    zero = NeovoltBatteryController(
+        _hass_for(zero_states),
+        "neovolt-entry",
+    )
+    assert zero.get_status()["telemetry_ready"] is True
 
 
 def test_host_sensor_fallback_and_power_signs():

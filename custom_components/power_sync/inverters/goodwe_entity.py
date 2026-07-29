@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from .base import InverterController, InverterState, InverterStatus
@@ -132,6 +133,7 @@ class GoodWeEntityTelemetryController:
             load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
 
         data: dict[str, Any] = {
+            "telemetry_ready": self.telemetry_ready(),
             "solar_power": max(0.0, solar_kw),
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -159,6 +161,14 @@ class GoodWeEntityTelemetryController:
                 data[status_key] = value
 
         return data
+
+    def telemetry_ready(self) -> bool:
+        """Return whether required GoodWe entity telemetry is currently usable."""
+        self._ensure_entity_map()
+        if self._missing_required():
+            return False
+        solar_entity = self._entity_map.get("solar_power")
+        return solar_entity is None or self._power_kw("solar_power") is not None
 
     async def disconnect(self) -> None:
         """No direct connection to close."""
@@ -313,7 +323,8 @@ class GoodWeEntityTelemetryController:
         if not state or str(state.state) in _UNAVAILABLE:
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 

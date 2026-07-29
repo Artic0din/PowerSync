@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -204,20 +207,185 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
     assert "self._energy_telemetry_ready()" in deferred_restore_source
 
 
-def test_saj_energy_coordinator_propagates_startup_telemetry_readiness():
+def test_native_energy_coordinators_propagate_startup_telemetry_readiness():
     source = ENERGY_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
-    update = _find_class_method(
-        tree,
+    coordinator_classes = (
+        "FoxESSEntityEnergyCoordinator",
+        "GoodWeEnergyCoordinator",
+        "SolaxBatteryEnergyCoordinator",
+        "SolarEdgeEnergyCoordinator",
         "SajH2EnergyCoordinator",
-        "_async_update_data",
+        "FroniusReservaEnergyCoordinator",
+        "NeovoltEnergyCoordinator",
+        "AnkerSolixEnergyCoordinator",
+        "ESYSunhomeEnergyCoordinator",
     )
-    update_source = ast.get_source_segment(source, update)
 
-    assert update_source is not None
-    assert 'status.get("telemetry_ready", True)' in update_source
-    assert "if telemetry_ready:" in update_source
-    assert '"telemetry_ready": telemetry_ready' in update_source
+    for class_name in coordinator_classes:
+        class_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        assert any(
+            isinstance(base, ast.Name)
+            and base.id == "NativeBatteryIntegrationReadinessMixin"
+            for base in class_node.bases
+        ), class_name
+        update = _find_class_method(tree, class_name, "_async_update_data")
+        update_source = ast.get_source_segment(source, update)
+        assert update_source is not None
+        assert "telemetry_ready" in update_source, class_name
+        assert "if telemetry_ready:" in update_source, class_name
+
+
+def test_native_readiness_mixin_requires_snapshot_and_live_entities():
+    source = ENERGY_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "NativeBatteryIntegrationReadinessMixin"
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(body=[class_node], type_ignores=[])
+    )
+    warnings: list[str] = []
+    namespace = {
+        "Any": Any,
+        "_LOGGER": SimpleNamespace(
+            warning=lambda message, *args: warnings.append(
+                message % args if args else message
+            )
+        ),
+    }
+    exec(compile(module, str(ENERGY_COORDINATOR_PATH), "exec"), namespace)
+    mixin = namespace["NativeBatteryIntegrationReadinessMixin"]()
+    live = SimpleNamespace(ready=False)
+    mixin._controller = SimpleNamespace(
+        telemetry_ready=lambda: live.ready
+    )
+    mixin.data = {"telemetry_ready": False}
+
+    assert mixin.startup_control_ready() is False
+    assert mixin._native_control_allowed("test write") is False
+
+    mixin.data = {"telemetry_ready": True}
+    assert mixin.startup_control_ready() is False
+
+    live.ready = True
+    assert mixin.startup_control_ready() is True
+    assert mixin._native_control_allowed("test write") is True
+    assert mixin._native_stale_data()["telemetry_ready"] is False
+
+    mixin._native_integration_enabled = lambda: False
+    mixin.data = None
+    live.ready = False
+    assert mixin.startup_control_ready() is True
+    assert mixin._native_control_allowed("direct write") is True
+    assert len(warnings) == 1
+
+
+def test_esy_native_readiness_rejects_non_finite_entity_values():
+    source = ENERGY_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    state_float = _find_class_method(
+        tree,
+        "ESYSunhomeEnergyCoordinator",
+        "_state_float",
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(body=[state_float], type_ignores=[])
+    )
+    namespace: dict[str, Any] = {"math": math}
+    exec(compile(module, str(ENERGY_COORDINATOR_PATH), "exec"), namespace)
+
+    state = SimpleNamespace(state="nan")
+    coordinator = SimpleNamespace(
+        _entity_map={"batterySoc": "sensor.esy_soc"},
+        hass=SimpleNamespace(
+            states=SimpleNamespace(get=lambda _entity_id: state)
+        ),
+    )
+
+    assert namespace["_state_float"](coordinator, "batterySoc") is None
+    state.state = "inf"
+    assert namespace["_state_float"](coordinator, "batterySoc") is None
+    state.state = "0"
+    assert namespace["_state_float"](coordinator, "batterySoc") == 0.0
+
+
+def test_esy_native_readiness_rediscovers_late_startup_entities():
+    source = ENERGY_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    readiness = _find_class_method(
+        tree,
+        "ESYSunhomeEnergyCoordinator",
+        "_native_live_telemetry_ready",
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(body=[readiness], type_ignores=[])
+    )
+    namespace: dict[str, Any] = {}
+    exec(compile(module, str(ENERGY_COORDINATOR_PATH), "exec"), namespace)
+
+    coordinator = SimpleNamespace(
+        _entity_map={"batterySoc": "sensor.esy_soc"},
+    )
+    discovery_calls = 0
+
+    def _discover_entities() -> None:
+        nonlocal discovery_calls
+        discovery_calls += 1
+        coordinator._entity_map.update(
+            {
+                "pvPower": "sensor.esy_pv",
+                "gridPower": "sensor.esy_grid",
+                "loadPower": "sensor.esy_load",
+                "batteryPower": "sensor.esy_battery",
+            }
+        )
+
+    coordinator._discover_entities = _discover_entities
+    coordinator._state_float = (
+        lambda key: 0.0 if key in coordinator._entity_map else None
+    )
+
+    assert namespace["_native_live_telemetry_ready"](coordinator) is True
+    assert discovery_calls == 1
+
+
+def test_native_startup_restore_waits_instead_of_using_a_fixed_delay():
+    optimizer_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    optimizer_tree = ast.parse(optimizer_source)
+    readiness = ast.get_source_segment(
+        optimizer_source,
+        _find_class_method(
+            optimizer_tree,
+            "OptimizationCoordinator",
+            "_energy_telemetry_ready",
+        ),
+    )
+    deferred = ast.get_source_segment(
+        optimizer_source,
+        _find_class_method(
+            optimizer_tree,
+            "OptimizationCoordinator",
+            "_deferred_enable_restore",
+        ),
+    )
+    assert readiness is not None
+    assert deferred is not None
+    assert '"startup_control_ready"' in readiness
+    assert "while self._enabled and not self._energy_telemetry_ready()" in deferred
+    assert "min(30, 5 * attempt)" in deferred
+    assert "self._energy_uses_native_battery_integration()" in deferred
+
+    init_source = INIT_PATH.read_text()
+    assert '"battery_energy_coordinator": energy_coord_for_demand' in init_source
+    assert "def _uses_native_battery_integration" in init_source
 
 
 def test_initial_vpp_aemo_spike_check_is_backgrounded():

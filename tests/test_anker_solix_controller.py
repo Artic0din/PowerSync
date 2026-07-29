@@ -274,6 +274,67 @@ def test_cloud_bridge_can_be_telemetry_only_when_write_entities_are_missing():
         assert status["battery_level"] == 55.0
         assert status["solar_power"] == 1.2
         assert status["battery_power"] == 0.3
+        assert status["telemetry_ready"] is True
         assert asyncio.run(controller.force_discharge(30, 1000)) is False
+    finally:
+        restore_module()
+
+
+def test_anker_entity_readiness_rejects_unavailable_and_accepts_zeroes():
+    module, restore_module = _load_anker_module()
+    try:
+        unavailable_hass = _Hass(
+            {
+                "sensor.solarbank_state_of_charge": "55",
+                "sensor.solarbank_input_power": "1200",
+                "sensor.solarbank_output_power": "unavailable",
+            }
+        )
+        unavailable = module.AnkerSolixEntityController(
+            unavailable_hass,
+            integration_domain="anker_solix",
+            config_entry_id="entry-1",
+        )
+        assert unavailable.get_status()["telemetry_ready"] is False
+
+        zero_hass = _Hass(
+            {
+                "sensor.solarbank_state_of_charge": "0",
+                "sensor.solarbank_input_power": "0",
+                "sensor.solarbank_output_power": "0",
+            }
+        )
+        zero = module.AnkerSolixEntityController(
+            zero_hass,
+            integration_domain="anker_solix",
+            config_entry_id="entry-1",
+        )
+        assert zero.get_status()["telemetry_ready"] is True
+    finally:
+        restore_module()
+
+
+def test_anker_entity_readiness_rediscovers_late_startup_entities():
+    module, restore_module = _load_anker_module()
+    try:
+        hass = _Hass({"sensor.solarbank_state_of_charge": "55"})
+        controller = module.AnkerSolixEntityController(
+            hass,
+            integration_domain="anker_solix",
+            config_entry_id="entry-1",
+        )
+
+        assert controller.get_status()["telemetry_ready"] is False
+
+        late_states = {
+            "sensor.solarbank_input_power": "0",
+            "sensor.solarbank_output_power": "0",
+        }
+        hass.states._values.update(late_states)
+        hass.entity_registry.entries_by_entry_id["entry-1"].extend(
+            _RegistryEntry(entity_id) for entity_id in late_states
+        )
+
+        assert controller.telemetry_ready() is True
     finally:
         restore_module()

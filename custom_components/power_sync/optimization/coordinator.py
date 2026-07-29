@@ -2098,11 +2098,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _energy_telemetry_ready(self) -> bool:
         """Return False only when a coordinator explicitly reports stale telemetry."""
+        checker = getattr(self.energy_coordinator, "startup_control_ready", None)
+        if callable(checker):
+            return bool(checker())
         data = self._get_energy_data()
         return not (
             isinstance(data, dict)
             and data.get("telemetry_ready") is False
         )
+
+    def _energy_uses_native_battery_integration(self) -> bool:
+        """Return whether battery control is delegated to another HA integration."""
+        coordinator = self.energy_coordinator
+        if not getattr(coordinator, "uses_native_battery_integration", False):
+            return False
+        enabled = getattr(coordinator, "_native_integration_enabled", None)
+        return bool(enabled()) if callable(enabled) else True
 
     def _resolve_max_grid_export_w(self) -> int | None:
         """Return the configured or reported grid export cap for optimizer planning."""
@@ -3861,11 +3872,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._enabled:
             return
-        if not self._energy_telemetry_ready():
-            _LOGGER.info(
-                "Optimizer startup: battery telemetry is not ready — "
-                "deferring mode writes until a later optimization cycle"
-            )
+        attempt = 0
+        while self._enabled and not self._energy_telemetry_ready():
+            attempt += 1
+            if attempt == 1:
+                _LOGGER.info(
+                    "Optimizer startup: native battery integration is not "
+                    "ready — waiting before mode writes"
+                )
+            await asyncio.sleep(min(30, 5 * attempt))
+        if not self._enabled:
             return
         # Start in self-consumption mode so the battery serves home load
         # immediately. Without this, the first LP action might be IDLE
@@ -3875,7 +3891,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if battery:
             async def _set_startup_self_consumption() -> bool:
                 if (
-                    self.battery_system == "saj_h2"
+                    self._energy_uses_native_battery_integration()
                     and self.energy_coordinator
                     and hasattr(self.energy_coordinator, "restore_normal")
                 ):
@@ -3985,7 +4001,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if (
             self.energy_coordinator
             and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
-            and self.battery_system != "saj_h2"
+            and not self._energy_uses_native_battery_integration()
             and not _monitoring
             and not _force_active
         ):

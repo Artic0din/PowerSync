@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from homeassistant.helpers import entity_registry as er
@@ -388,6 +389,7 @@ class AnkerSolixEntityController:
             capacity_kwh = capacity_wh / 1000.0 if capacity_wh else None
 
         return {
+            "telemetry_ready": self.telemetry_ready(),
             "solar_power": max(0.0, (self._read_float("solar_power") or 0.0) / 1000.0),
             "grid_power": grid_w / 1000.0,
             "battery_power": battery_w / 1000.0,
@@ -402,6 +404,21 @@ class AnkerSolixEntityController:
             "control_path": self.integration_domain,
             "dispatch_supported": self.is_dispatch_supported(),
         }
+
+    def telemetry_ready(self) -> bool:
+        """Return whether the selected HA integration has supplied live telemetry."""
+        required = ["battery_level", "solar_power"]
+        if not all(key in self._entity_map for key in required):
+            self._discover_entities()
+        optional_keys = (
+            "battery_charge_power",
+            "battery_discharge_power",
+            "grid_import_power",
+            "grid_export_power",
+            "load_power",
+        )
+        required.extend(key for key in optional_keys if key in self._entity_map)
+        return all(self._read_float(key) is not None for key in required)
 
     def is_dispatch_supported(self) -> bool:
         if self.is_official:
@@ -544,7 +561,8 @@ class AnkerSolixEntityController:
         if text is None:
             return None
         try:
-            return float(text)
+            value = float(text)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 

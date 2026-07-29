@@ -497,6 +497,20 @@ def test_solaredge_energy_bridge_discovers_control_entities():
     assert controller._control_entity_map["backup_reserve"] == (
         "number.solaredge_backup_reserve"
     )
+    assert controller.get_status()["telemetry_ready"] is True
+
+
+def test_solaredge_startup_readiness_rejects_unavailable_and_accepts_zeroes():
+    hass = _SEHass()
+    hass.states.get("sensor.solaredge_b1_dc_power").state = "unavailable"
+    unavailable = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert unavailable.get_status()["telemetry_ready"] is False
+
+    zero_hass = _SEHass()
+    zero_hass.states.get("sensor.solaredge_b1_state_of_energy").state = "0"
+    zero_hass.states.get("sensor.solaredge_b1_dc_power").state = "0"
+    zero = SolarEdgeEnergyController(zero_hass, entity_prefix="solaredge")
+    assert zero.get_status()["telemetry_ready"] is True
 
 
 def test_solaredge_energy_bridge_discovers_remote_command_mode_alias():

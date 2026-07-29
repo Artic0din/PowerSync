@@ -14,6 +14,7 @@ Sign conventions:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any
 
@@ -181,11 +182,12 @@ class NeovoltBatteryController:
         load_w = self._read_float("load_power") or 0.0
 
         return {
+            "telemetry_ready": self.telemetry_ready(),
             "solar_power": max(0.0, solar_w / 1000.0),
             "grid_power": grid_w / 1000.0,
             "battery_power": battery_w / 1000.0,
             "load_power": max(0.0, load_w / 1000.0),
-            "battery_level": self._read_float("battery_level") or 0.0,
+            "battery_level": self._read_float("battery_level"),
             "battery_capacity_kwh": self._battery_capacity_kwh
             if self._battery_capacity_kwh is not None
             else self._read_float("battery_capacity_kwh"),
@@ -193,6 +195,12 @@ class NeovoltBatteryController:
             "battery_max_charge_power_w": self._max_charge_kw * 1000.0,
             "battery_max_discharge_power_w": self._max_discharge_kw * 1000.0,
         }
+
+    def telemetry_ready(self) -> bool:
+        """Return whether all required Neovolt telemetry entities are numeric."""
+        if not self._entity_map:
+            self._discover_entities()
+        return all(self._read_float(key) is not None for key in _READ_REQUIRED)
 
     def get_dispatch_mode(self) -> str | None:
         """Return the current dispatch mode select state."""
@@ -466,7 +474,8 @@ class NeovoltBatteryController:
         if not state or state.state in ("unavailable", "unknown", ""):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 
@@ -609,6 +618,9 @@ class NeovoltFleetBatteryController:
         load_power = balanced_load if len(statuses) > 1 else reported_load
 
         return {
+            "telemetry_ready": all(
+                status.get("telemetry_ready") is True for status in statuses
+            ),
             "solar_power": solar_power,
             "grid_power": grid_power,
             "battery_power": battery_power,
@@ -627,6 +639,10 @@ class NeovoltFleetBatteryController:
             "controller_statuses": statuses,
             "surplus_balancer": dict(self._surplus_balance),
         }
+
+    def telemetry_ready(self) -> bool:
+        """Return True only when every configured Neovolt stack is ready."""
+        return all(controller.telemetry_ready() for controller in self._controllers)
 
     async def balance_solar_surplus(self, status: dict[str, Any] | None = None) -> dict[str, Any]:
         """Use otherwise-exported solar to top up one anti-fighting NeoVolt stack.

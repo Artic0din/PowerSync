@@ -6586,7 +6586,69 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
         return data
 
 
-class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
+class NativeBatteryIntegrationReadinessMixin:
+    """Shared startup guard for battery paths owned by another HA integration."""
+
+    uses_native_battery_integration = True
+
+    def _native_integration_enabled(self) -> bool:
+        """Return whether this coordinator is using an upstream HA integration."""
+        return True
+
+    def _native_live_telemetry_ready(self) -> bool:
+        """Read the upstream entity surface again immediately before a write."""
+        controller = getattr(self, "_controller", None)
+        checker = getattr(controller, "telemetry_ready", None)
+        return bool(checker()) if callable(checker) else True
+
+    def _native_control_surface_ready(self) -> bool:
+        """Return whether command entities are available, when separately known."""
+        return True
+
+    def startup_control_ready(self) -> bool:
+        """Return True only after live native telemetry has completed startup."""
+        if not self._native_integration_enabled():
+            return True
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict) or data.get("telemetry_ready") is not True:
+            return False
+        try:
+            return (
+                self._native_live_telemetry_ready()
+                and self._native_control_surface_ready()
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Native battery readiness check is still unavailable: %s",
+                exc,
+            )
+            return False
+
+    def _native_control_allowed(self, operation: str) -> bool:
+        """Refuse a write while the upstream integration is still restoring."""
+        if self.startup_control_ready():
+            return True
+        _LOGGER.warning(
+            "%s deferred — native Home Assistant battery integration "
+            "telemetry/control is not ready",
+            operation,
+        )
+        return False
+
+    def _native_stale_data(self) -> dict[str, Any] | None:
+        """Return stale display data marked unsafe for optimization/control."""
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return None
+        stale = dict(data)
+        stale["telemetry_ready"] = False
+        return stale
+
+
+class FoxESSEntityEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for FoxESS via nathanmarlor/foxess_modbus entities."""
 
     def __init__(
@@ -6625,22 +6687,32 @@ class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
                 self._validated = True
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning(
                     "FoxESS entity bridge read failed, returning stale data: %s",
                     exc,
                 )
-                return self.data
+                return stale
             raise UpdateFailed(f"FoxESS entity bridge read failed: {exc}") from exc
 
+        telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
         energy_summary = self._energy_acc.as_dict()
         for status_key, summary_key in (
             ("daily_solar_energy_kwh", "pv_today_kwh"),
@@ -6654,6 +6726,7 @@ class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
                 energy_summary[summary_key] = round(float(value), 3)
 
         data = {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -6703,6 +6776,8 @@ class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
         power_w: float = 0,
         min_timeout_seconds: float | None = None,
     ) -> bool:
+        if not self._native_control_allowed("FoxESS force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(
@@ -6711,39 +6786,61 @@ class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
         power_w: float = 0,
         min_timeout_seconds: float | None = None,
     ) -> bool:
+        if not self._native_control_allowed("FoxESS force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("FoxESS restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("FoxESS set_backup_reserve"):
+            return False
         return await self._controller.set_backup_reserve(percent)
 
     async def get_backup_reserve(self) -> int | None:
         return await self._controller.get_backup_reserve()
 
     async def set_backup_mode(self) -> bool:
+        if not self._native_control_allowed("FoxESS set_backup_mode"):
+            return False
         return await self._controller.set_backup_mode()
 
     async def restore_work_mode_from_idle(self) -> bool:
+        if not self._native_control_allowed("FoxESS restore_work_mode_from_idle"):
+            return False
         return await self._controller.restore_work_mode_from_idle()
 
     async def set_work_mode(self, mode: int | str) -> bool:
+        if not self._native_control_allowed("FoxESS set_work_mode"):
+            return False
         return await self._controller.set_work_mode(mode)
 
     async def set_operation_mode(self, mode: str) -> bool:
+        if not self._native_control_allowed("FoxESS set_operation_mode"):
+            return False
         return await self._controller.set_operation_mode(mode)
 
     async def set_charge_rate_limit(self, amps: float) -> bool:
+        if not self._native_control_allowed("FoxESS set_charge_rate_limit"):
+            return False
         return await self._controller.set_charge_rate_limit(amps)
 
     async def set_discharge_rate_limit(self, amps: float) -> bool:
+        if not self._native_control_allowed("FoxESS set_discharge_rate_limit"):
+            return False
         return await self._controller.set_discharge_rate_limit(amps)
 
     async def curtail(self, home_load_w: int | None = None) -> bool:
+        if not self._native_control_allowed("FoxESS curtail"):
+            return False
         return await self._controller.curtail(home_load_w)
 
     async def restore_curtailment(self) -> bool:
+        if not self._native_control_allowed("FoxESS restore_curtailment"):
+            return False
         return await self._controller.restore()
 
     async def async_shutdown(self) -> None:
@@ -7078,7 +7175,10 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
         await self._client.close()
 
 
-class GoodWeEnergyCoordinator(DataUpdateCoordinator):
+class GoodWeEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Coordinator to fetch GoodWe battery system data via goodwe library.
 
     Polls the GoodWe inverter to get real-time power data (solar, battery,
@@ -7134,6 +7234,28 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             name="GoodWe Energy",
             update_interval=timedelta(seconds=30),
         )
+
+    def _native_integration_enabled(self) -> bool:
+        return self._using_entity_telemetry or bool(self._ems_prefix)
+
+    def _native_live_telemetry_ready(self) -> bool:
+        if not self._using_entity_telemetry:
+            return True
+        checker = getattr(self._telemetry_controller, "telemetry_ready", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _native_control_surface_ready(self) -> bool:
+        if not self._ems_prefix:
+            return True
+        unavailable = {"", "unknown", "unavailable", "none"}
+        for entity_id in (
+            f"select.{self._ems_prefix}_ems_mode",
+            f"number.{self._ems_prefix}_ems_power_limit",
+        ):
+            state = self.hass.states.get(entity_id)
+            if state is None or str(state.state).strip().lower() in unavailable:
+                return False
+        return True
 
     async def _probe_entity_telemetry_rated_power(self) -> int | None:
         """Best-effort one-time direct probe for GoodWe nameplate power."""
@@ -7191,10 +7313,23 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             grid_kw = data["grid_power"]
             battery_kw = data["battery_power"]
             load_kw = data["load_power"]
+            telemetry_ready = (
+                data.get("telemetry_ready") is True
+                if self._using_entity_telemetry
+                else True
+            )
 
             # Accumulate daily energy from power readings (with cost tracking)
-            buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            if telemetry_ready:
+                buy, sell = _get_current_prices(self.hass, self._entry_id)
+                self._energy_acc.update(
+                    max(0, solar_kw),
+                    grid_kw,
+                    battery_kw,
+                    load_kw,
+                    buy,
+                    sell,
+                )
 
             energy_data = {
                 "solar_power": solar_kw,
@@ -7225,6 +7360,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
                 ),
                 "energy_summary": self._energy_acc.as_dict(),
             }
+            if self._native_integration_enabled():
+                energy_data["telemetry_ready"] = telemetry_ready
             if data.get("work_mode") is not None:
                 energy_data["work_mode"] = data.get("work_mode")
                 energy_data["work_mode_name"] = data.get("work_mode_name")
@@ -7254,12 +7391,17 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             return energy_data
 
         except Exception as err:
-            if self._using_entity_telemetry and self.data:
+            stale = (
+                self._native_stale_data()
+                if self._native_integration_enabled()
+                else None
+            )
+            if self._using_entity_telemetry and stale:
                 _LOGGER.warning(
                     "GoodWe entity telemetry read failed, returning stale data: %s",
                     err,
                 )
-                return self.data
+                return stale
             if self._using_entity_telemetry:
                 self._telemetry_validated = False
             else:
@@ -7444,6 +7586,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Set GoodWe to force charge mode."""
+        if not self._native_control_allowed("GoodWe force_charge"):
+            return False
         if self._ems_prefix:
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
@@ -7457,6 +7601,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Set GoodWe to force discharge mode."""
+        if not self._native_control_allowed("GoodWe force_discharge"):
+            return False
         if self._ems_prefix:
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
@@ -7470,6 +7616,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_backup_mode(self) -> bool:
         """Hold on-grid discharge through the verified GoodWe EMS path."""
+        if not self._native_control_allowed("GoodWe set_backup_mode"):
+            return False
         if self._ems_prefix:
             return await self._ems_set_mode("conserve", 0)
         _LOGGER.warning(
@@ -7480,6 +7628,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_normal(self) -> bool:
         """Restore GoodWe to normal operation."""
+        if not self._native_control_allowed("GoodWe restore_normal"):
+            return False
         if self._ems_prefix:
             return await self._ems_set_mode(
                 "auto",
@@ -7494,6 +7644,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set minimum SOC (backup reserve) via DOD."""
+        if not self._native_control_allowed("GoodWe set_backup_reserve"):
+            return False
         if not self._connected:
             await self._controller.connect()
             self._connected = True
@@ -7508,7 +7660,10 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         self._connected = False
 
 
-class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
+class SolaxBatteryEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for Solax Hybrid via the wills106/homeassistant-solax-modbus integration.
 
     Reads entity states published by the solax_modbus integration and assembles
@@ -7554,19 +7709,29 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
         try:
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning("Solax entity read failed, returning stale data: %s", exc)
-                return self.data
+                return stale
             raise UpdateFailed(f"Solax entity read failed: {exc}") from exc
 
+        telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
         energy_summary = self._energy_acc.as_dict()
         for status_key, summary_key in (
             ("daily_solar_energy_kwh", "pv_today_kwh"),
@@ -7580,6 +7745,7 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
                 energy_summary[summary_key] = round(float(value), 3)
 
         return {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -7602,12 +7768,18 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
         }
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("SolaX force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("SolaX force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("SolaX restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     def get_force_restore_state(self) -> dict[str, str]:
@@ -7619,22 +7791,33 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
         self._controller.set_force_restore_state(state)
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("SolaX set_backup_reserve"):
+            return False
         return await self._controller.set_backup_reserve(percent)
 
     async def set_operation_mode(self, mode: str) -> bool:
+        if not self._native_control_allowed("SolaX set_operation_mode"):
+            return False
         return await self._controller.set_operation_mode(mode)
 
     async def curtail(self, home_load_w: int | None = None) -> bool:
+        if not self._native_control_allowed("SolaX curtail"):
+            return False
         return await self._controller.curtail(home_load_w)
 
     async def restore_curtailment(self) -> bool:
+        if not self._native_control_allowed("SolaX restore_curtailment"):
+            return False
         return await self._controller.restore()
 
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
 
-class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
+class SolarEdgeEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for SolarEdge Home battery telemetry via HA entities."""
 
     def __init__(
@@ -7683,14 +7866,16 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
                 self._validated = True
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning(
                     "SolarEdge entity bridge read failed, returning stale data: %s",
                     exc,
                 )
-                return self.data
+                return stale
             raise UpdateFailed(f"SolarEdge entity bridge read failed: {exc}") from exc
 
+        telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
@@ -7698,10 +7883,19 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         soc = status.get("battery_level")
         ev_power_kw = status.get("ev_power")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
         energy_summary = self._energy_acc.as_dict()
-        await self._apply_daily_total_deltas(status, energy_summary)
+        if telemetry_ready:
+            await self._apply_daily_total_deltas(status, energy_summary)
         for status_key, summary_key in (
             ("daily_solar_energy_kwh", "pv_today_kwh"),
             ("daily_grid_import_kwh", "grid_import_today_kwh"),
@@ -7714,6 +7908,7 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
                 energy_summary[summary_key] = round(float(value), 3)
 
         data = {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -7998,31 +8193,48 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
     async def force_charge(self, duration_minutes: int = 30, power_w: int = 0) -> bool:
+        if not self._native_control_allowed("SolarEdge force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(self, duration_minutes: int = 30, power_w: int = 0) -> bool:
+        if not self._native_control_allowed("SolarEdge force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("SolarEdge restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_backup_mode(self) -> bool:
+        if not self._native_control_allowed("SolarEdge set_backup_mode"):
+            return False
         return await self._controller.set_backup_mode()
 
     async def restore_work_mode_from_idle(self) -> bool:
+        if not self._native_control_allowed("SolarEdge restore_work_mode_from_idle"):
+            return False
         return await self._controller.restore_work_mode_from_idle()
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("SolarEdge set_backup_reserve"):
+            return False
         return await self._controller.set_backup_reserve(percent)
 
     async def get_backup_reserve(self) -> int | None:
         return await self._controller.get_backup_reserve()
 
     async def set_operation_mode(self, mode: str) -> bool:
+        if not self._native_control_allowed("SolarEdge set_operation_mode"):
+            return False
         return await self._controller.set_operation_mode(mode)
 
 
-class SajH2EnergyCoordinator(DataUpdateCoordinator):
+class SajH2EnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for SAJ H2 / HS2 via the saj_h2_modbus integration."""
 
     def __init__(
@@ -8068,9 +8280,10 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
         try:
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning("SAJ H2 entity read failed, returning stale data: %s", exc)
-                return self.data
+                return stale
             raise UpdateFailed(f"SAJ H2 entity read failed: {exc}") from exc
 
         telemetry_ready = bool(status.get("telemetry_ready", True))
@@ -8120,27 +8333,40 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
         }
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("SAJ H2 force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("SAJ H2 force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("SAJ H2 restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_backup_mode(self) -> bool:
         """IDLE hold — lock battery at current SOC, no discharge."""
+        if not self._native_control_allowed("SAJ H2 set_backup_mode"):
+            return False
         return await self._controller.set_idle()
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Exit IDLE — restore full self-consumption."""
+        if not self._native_control_allowed("SAJ H2 restore_work_mode_from_idle"):
+            return False
         return await self._controller.restore_normal()
 
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
 
-class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
+class FroniusReservaEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for Fronius GEN24 storage via the fronius_modbus integration."""
 
     def __init__(
@@ -8182,11 +8408,13 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
         try:
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning("Fronius GEN24 storage entity read failed, returning stale data: %s", exc)
-                return self.data
+                return stale
             raise UpdateFailed(f"Fronius GEN24 storage entity read failed: {exc}") from exc
 
+        telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
@@ -8200,10 +8428,19 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
                     soc,
                 )
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
 
         return {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "solar_power_valid": status.get("solar_power_valid", True),
             "grid_power": grid_kw,
@@ -8229,15 +8466,23 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
         }
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("Fronius force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("Fronius force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("Fronius restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("Fronius set_backup_reserve"):
+            return False
         return await self._controller.set_backup_reserve(percent)
 
     async def get_backup_reserve(self) -> int | None:
@@ -8245,17 +8490,24 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_backup_mode(self) -> bool:
         """IDLE hold — lock battery at current SOC, no charge or discharge."""
+        if not self._native_control_allowed("Fronius set_backup_mode"):
+            return False
         return await self._controller.set_idle()
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Exit IDLE — restore automatic storage control."""
+        if not self._native_control_allowed("Fronius restore_work_mode_from_idle"):
+            return False
         return await self._controller.restore_normal()
 
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
 
-class NeovoltEnergyCoordinator(DataUpdateCoordinator):
+class NeovoltEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for Neovolt / Bytewatt via the Neovolt Modbus integration."""
 
     def __init__(
@@ -8312,27 +8564,41 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         try:
             status = self._controller.get_status()
         except Exception as exc:
-            if self.data:
+            stale = self._native_stale_data()
+            if stale:
                 _LOGGER.warning("Neovolt entity read failed, returning stale data: %s", exc)
-                return self.data
+                return stale
             raise UpdateFailed(f"Neovolt entity read failed: {exc}") from exc
 
-        try:
-            surplus_balancer = await self._controller.balance_solar_surplus(status)
-        except Exception as exc:
-            _LOGGER.warning("Neovolt surplus balancer skipped: %s", exc)
+        telemetry_ready = status.get("telemetry_ready") is True
+        if telemetry_ready:
+            try:
+                surplus_balancer = await self._controller.balance_solar_surplus(status)
+            except Exception as exc:
+                _LOGGER.warning("Neovolt surplus balancer skipped: %s", exc)
+                surplus_balancer = status.get("surplus_balancer", {})
+        else:
             surplus_balancer = status.get("surplus_balancer", {})
 
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
 
         return {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -8353,6 +8619,8 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         *,
         preserve_restore_modes: bool = False,
     ) -> bool:
+        if not self._native_control_allowed("Neovolt force_charge"):
+            return False
         return await self._controller.force_charge(
             duration_minutes,
             power_w,
@@ -8366,6 +8634,8 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         *,
         preserve_restore_modes: bool = False,
     ) -> bool:
+        if not self._native_control_allowed("Neovolt force_discharge"):
+            return False
         return await self._controller.force_discharge(
             duration_minutes,
             power_w,
@@ -8373,22 +8643,33 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         )
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("Neovolt restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("Neovolt set_backup_reserve"):
+            return False
         return await self._controller.set_backup_reserve(percent)
 
     async def set_backup_mode(self) -> bool:
+        if not self._native_control_allowed("Neovolt set_backup_mode"):
+            return False
         return await self._controller.set_idle()
 
     async def restore_work_mode_from_idle(self) -> bool:
+        if not self._native_control_allowed("Neovolt restore_work_mode_from_idle"):
+            return False
         return await self._controller.restore_normal()
 
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
 
-class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
+class AnkerSolixEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Coordinator for Anker Solix direct Modbus or HA entity bridge."""
 
     def __init__(
@@ -8443,6 +8724,11 @@ class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=30),
         )
 
+    def _native_integration_enabled(self) -> bool:
+        from .const import ANKER_SOLIX_CONNECTION_MODBUS
+
+        return self.connection_type != ANKER_SOLIX_CONNECTION_MODBUS
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Return Anker Solix data from direct Modbus or HA entity states."""
         if not self._energy_acc._last_update:
@@ -8453,19 +8739,34 @@ class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
         except Exception as exc:
             if self.data:
                 _LOGGER.warning("Anker Solix read failed, returning stale data: %s", exc)
+                if self._native_integration_enabled():
+                    return self._native_stale_data() or self.data
                 return self.data
             raise UpdateFailed(f"Anker Solix read failed: {exc}") from exc
 
+        telemetry_ready = (
+            status.get("telemetry_ready") is True
+            if self._native_integration_enabled()
+            else True
+        )
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
 
-        return {
+        data = {
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -8480,32 +8781,49 @@ class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
             "dispatch_supported": status.get("dispatch_supported", True),
             "energy_summary": self._energy_acc.as_dict(),
         }
+        if self._native_integration_enabled():
+            data["telemetry_ready"] = telemetry_ready
+        return data
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("Anker Solix force_charge"):
+            return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        if not self._native_control_allowed("Anker Solix force_discharge"):
+            return False
         return await self._controller.force_discharge(duration_minutes, power_w)
 
     async def restore_normal(self) -> bool:
+        if not self._native_control_allowed("Anker Solix restore_normal"):
+            return False
         return await self._controller.restore_normal()
 
     async def set_self_consumption_mode(self) -> bool:
+        if not self._native_control_allowed("Anker Solix set_self_consumption_mode"):
+            return False
         if hasattr(self._controller, "set_self_consumption_mode"):
             return await self._controller.set_self_consumption_mode()
         return await self.restore_normal()
 
     async def set_backup_mode(self) -> bool:
+        if not self._native_control_allowed("Anker Solix set_backup_mode"):
+            return False
         if hasattr(self._controller, "set_backup_mode"):
             return await self._controller.set_backup_mode()
         return False
 
     async def restore_work_mode_from_idle(self) -> bool:
+        if not self._native_control_allowed("Anker Solix restore_work_mode_from_idle"):
+            return False
         if hasattr(self._controller, "restore_work_mode_from_idle"):
             return await self._controller.restore_work_mode_from_idle()
         return await self.restore_normal()
 
     async def set_backup_reserve(self, percent: int) -> bool:
+        if not self._native_control_allowed("Anker Solix set_backup_reserve"):
+            return False
         if hasattr(self._controller, "set_backup_reserve"):
             return await self._controller.set_backup_reserve(percent)
         return False
@@ -8519,7 +8837,10 @@ class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
-class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
+class ESYSunhomeEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    DataUpdateCoordinator,
+):
     """Bridge coordinator for ESY Sunhome via the upstream esy_sunhome integration.
 
     Reads entity states published by the esy_sunhome integration (which handles the
@@ -8616,9 +8937,49 @@ class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
         if not state or state.state in ("unavailable", "unknown", ""):
             return default
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else default
         except (ValueError, TypeError):
             return default
+
+    def _native_live_telemetry_ready(self) -> bool:
+        core_keys = ("batterySoc", "pvPower", "gridPower", "loadPower")
+        has_battery_route = (
+            "batteryPower" in self._entity_map
+            or (
+                "batteryImport" in self._entity_map
+                and "batteryExport" in self._entity_map
+            )
+        )
+        if (
+            not all(key in self._entity_map for key in core_keys)
+            or not has_battery_route
+        ):
+            self._discover_entities()
+        core_ready = all(
+            self._state_float(key) is not None
+            for key in core_keys
+        )
+        split_battery_ready = (
+            self._state_float("batteryImport") is not None
+            and self._state_float("batteryExport") is not None
+        )
+        return core_ready and (
+            split_battery_ready
+            or self._state_float("batteryPower") is not None
+        )
+
+    def _native_control_surface_ready(self) -> bool:
+        if not self._mode_select_entity_id:
+            self._discover_entities()
+        if not self._mode_select_entity_id:
+            return False
+        state = self.hass.states.get(self._mode_select_entity_id)
+        return bool(
+            state
+            and str(state.state).strip().lower()
+            not in ("", "unknown", "unavailable", "none")
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Return ESY Sunhome data assembled from HA entity states."""
@@ -8652,6 +9013,7 @@ class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
         battery_kw = battery_w / 1000.0
         load_kw = load_w / 1000.0
         battery_level = self._state_float("batterySoc")
+        telemetry_ready = self._native_live_telemetry_ready()
 
         rated_w = self._state_float("ratedPower", 5000.0) or 5000.0
 
@@ -8661,8 +9023,16 @@ class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
             if ms and ms.state not in ("unavailable", "unknown"):
                 work_mode_name = ms.state
 
-        buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        if telemetry_ready:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(
+                max(0.0, solar_kw),
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
 
         _LOGGER.debug(
             "ESY Sunhome data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
@@ -8670,6 +9040,7 @@ class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
         )
 
         return {
+            "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
             "battery_power": battery_kw,
@@ -8701,6 +9072,8 @@ class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
 
     async def _set_mode(self, option: str) -> bool:
         """Switch the ESY operating mode via its mode-select entity."""
+        if not self._native_control_allowed(f"ESY Sunhome set mode {option}"):
+            return False
         if not self._mode_select_entity_id:
             self._discover_entities()
         if not self._mode_select_entity_id:

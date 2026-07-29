@@ -154,6 +154,27 @@ def test_goodwe_entity_controller_reads_prefixed_runtime_data():
         assert data["work_mode"] == "General"
         assert data["daily_solar_energy_kwh"] == 12.345
         assert data["entity_telemetry"] is True
+        assert data["telemetry_ready"] is True
+    finally:
+        restore_module()
+
+
+def test_goodwe_entity_readiness_accepts_genuine_zero_telemetry():
+    module, restore_module = _load_goodwe_entity_module()
+    try:
+        states = _state_map()
+        for entity_id, state in states.items():
+            if entity_id.endswith(
+                ("_battery_soc", "_battery_power", "_active_power", "_ppv")
+            ):
+                state.state = 0
+        controller = module.GoodWeEntityTelemetryController(
+            _Hass(states),
+            entity_prefix="goodwe",
+        )
+
+        assert asyncio.run(controller.connect())
+        assert controller.get_runtime_data()["telemetry_ready"] is True
     finally:
         restore_module()
 

@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import pathlib
 import time
 from datetime import datetime, timedelta, timezone
@@ -895,6 +896,14 @@ def _is_solaredge_entity_bridge_startup_failure(coordinator: Any, exc: Exception
         isinstance(coordinator, SolarEdgeEnergyCoordinator)
         and "solaredge_missing_entities:" in str(exc)
     )
+
+
+def _uses_native_battery_integration(coordinator: Any) -> bool:
+    """Return whether battery telemetry/control is owned by another HA integration."""
+    if not getattr(coordinator, "uses_native_battery_integration", False):
+        return False
+    enabled = getattr(coordinator, "_native_integration_enabled", None)
+    return bool(enabled()) if callable(enabled) else True
 
 
 def _configured_battery_capacity_kwh(entry: ConfigEntry) -> float | None:
@@ -20103,7 +20112,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await foxess_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("FoxESS coordinator initialized successfully")
         except Exception as e:
-            if _is_foxess_entity_bridge_startup_failure(foxess_coordinator, e):
+            if (
+                _is_foxess_entity_bridge_startup_failure(foxess_coordinator, e)
+                or _uses_native_battery_integration(foxess_coordinator)
+            ):
                 _LOGGER.warning(
                     "FoxESS entity bridge entities are not ready yet; "
                     "keeping coordinator active so it can retry: %s",
@@ -20118,7 +20130,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await goodwe_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("GoodWe coordinator initialized successfully")
         except Exception as e:
-            if _is_goodwe_entity_telemetry_startup_failure(goodwe_coordinator, e):
+            if (
+                _is_goodwe_entity_telemetry_startup_failure(goodwe_coordinator, e)
+                or _uses_native_battery_integration(goodwe_coordinator)
+            ):
                 _LOGGER.warning(
                     "GoodWe entity telemetry sensors are not ready yet; "
                     "keeping coordinator active so it can retry: %s",
@@ -20139,42 +20154,75 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await esy_sunhome_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("ESY Sunhome coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("ESY Sunhome coordinator failed to initialize: %s", e)
-            esy_sunhome_coordinator = None
+            if _uses_native_battery_integration(esy_sunhome_coordinator):
+                _LOGGER.warning(
+                    "ESY Sunhome entities are not ready yet; keeping "
+                    "coordinator active so it can retry: %s",
+                    e,
+                )
+            else:
+                esy_sunhome_coordinator = None
     if solax_coordinator:
         try:
             await solax_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("Solax coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Solax coordinator failed to initialize: %s", e)
-            solax_coordinator = None
+            if _uses_native_battery_integration(solax_coordinator):
+                _LOGGER.warning(
+                    "SolaX entities are not ready yet; keeping coordinator "
+                    "active so it can retry: %s",
+                    e,
+                )
+            else:
+                solax_coordinator = None
     if saj_h2_coordinator:
         try:
             await saj_h2_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("SAJ H2 coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("SAJ H2 coordinator failed to initialize: %s", e)
-            saj_h2_coordinator = None
+            if _uses_native_battery_integration(saj_h2_coordinator):
+                _LOGGER.warning(
+                    "SAJ H2 entities are not ready yet; keeping coordinator "
+                    "active so it can retry: %s",
+                    e,
+                )
+            else:
+                saj_h2_coordinator = None
     if fronius_reserva_coordinator:
         try:
             await fronius_reserva_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("Fronius GEN24 storage coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Fronius GEN24 storage coordinator failed to initialize: %s", e)
-            fronius_reserva_coordinator = None
+            if _uses_native_battery_integration(fronius_reserva_coordinator):
+                _LOGGER.warning(
+                    "Fronius storage entities are not ready yet; keeping "
+                    "coordinator active so it can retry: %s",
+                    e,
+                )
+            else:
+                fronius_reserva_coordinator = None
     if neovolt_coordinator:
         try:
             await neovolt_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("Neovolt coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Neovolt coordinator failed to initialize: %s", e)
-            neovolt_coordinator = None
+            if _uses_native_battery_integration(neovolt_coordinator):
+                _LOGGER.warning(
+                    "Neovolt entities are not ready yet; keeping coordinator "
+                    "active so it can retry: %s",
+                    e,
+                )
+            else:
+                neovolt_coordinator = None
     if solaredge_coordinator:
         try:
             await solaredge_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("SolarEdge energy coordinator initialized successfully")
         except Exception as e:
-            if _is_solaredge_entity_bridge_startup_failure(solaredge_coordinator, e):
+            if (
+                _is_solaredge_entity_bridge_startup_failure(solaredge_coordinator, e)
+                or _uses_native_battery_integration(solaredge_coordinator)
+            ):
                 _LOGGER.warning(
                     "SolarEdge battery entities are not ready yet; "
                     "keeping coordinator active so it can retry: %s",
@@ -20188,8 +20236,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await anker_solix_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("Anker Solix coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Anker Solix coordinator failed to initialize: %s", e)
-            anker_solix_coordinator = None
+            if _uses_native_battery_integration(anker_solix_coordinator):
+                _LOGGER.warning(
+                    "Anker Solix HA entities are not ready yet; keeping "
+                    "coordinator active so it can retry: %s",
+                    e,
+                )
+            else:
+                _LOGGER.warning("Anker Solix coordinator failed to initialize: %s", e)
+                anker_solix_coordinator = None
     if custom_energy_coordinator:
         try:
             await custom_energy_coordinator.async_config_entry_first_refresh()
@@ -20887,6 +20942,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "anker_solix_coordinator": anker_solix_coordinator,  # For Anker Solix X1/HA bridge telemetry and control
+        "battery_energy_coordinator": energy_coord_for_demand,  # Active battery coordinator used for startup readiness
         "custom_energy_coordinator": custom_energy_coordinator,  # For custom external-controller HA entity telemetry
         "powerwall_local": powerwall_local_runtime or {"client": None, "coordinator": None, "pairing_manager": None},
         "demand_charge_coordinator": demand_charge_coordinator,
@@ -26677,11 +26733,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not persisted_force_state:
             return
 
+        def _native_battery_control_coordinator() -> Any | None:
+            coordinator = (
+                hass.data.get(DOMAIN, {})
+                .get(entry.entry_id, {})
+                .get("battery_energy_coordinator")
+            )
+            return (
+                coordinator
+                if _uses_native_battery_integration(coordinator)
+                else None
+            )
+
+        async def _wait_for_native_battery_control_ready(operation: str) -> bool:
+            """Wait for the upstream integration without imposing a fixed timeout."""
+            coordinator = _native_battery_control_coordinator()
+            if coordinator is None:
+                return True
+
+            attempt = 0
+            while entry.entry_id in hass.data.get(DOMAIN, {}):
+                checker = getattr(coordinator, "startup_control_ready", None)
+                if callable(checker) and checker():
+                    return True
+                attempt += 1
+                if attempt == 1:
+                    _LOGGER.info(
+                        "%s is waiting for the native Home Assistant battery "
+                        "integration to become ready",
+                        operation,
+                    )
+                await asyncio.sleep(min(30, 5 * attempt))
+
+            _LOGGER.info(
+                "%s stopped waiting because the config entry was unloaded",
+                operation,
+            )
+            return False
+
         async def _restore_persisted_normal(
             service_data: dict[str, Any],
         ) -> bool:
-            """Restore persisted state, retrying SAJ once telemetry is usable."""
-            if not is_saj_h2:
+            """Restore persisted state once the active battery integration is ready."""
+            coordinator = _native_battery_control_coordinator()
+            if not await _wait_for_native_battery_control_ready(
+                "Persisted force cleanup"
+            ):
+                return False
+
+            attempt = 0
+            while entry.entry_id in hass.data.get(DOMAIN, {}):
                 try:
                     await hass.services.async_call(
                         DOMAIN,
@@ -26691,49 +26792,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     return True
                 except Exception as err:
-                    _LOGGER.error(
-                        "Persisted force cleanup failed: %s",
-                        err,
-                        exc_info=True,
-                    )
-                    return False
-
-            attempt = 0
-            while entry.entry_id in hass.data.get(DOMAIN, {}):
-                saj_coord = (
-                    hass.data.get(DOMAIN, {})
-                    .get(entry.entry_id, {})
-                    .get("saj_h2_coordinator")
-                )
-                saj_data = getattr(saj_coord, "data", None)
-                if (
-                    saj_coord is not None
-                    and isinstance(saj_data, dict)
-                    and saj_data.get("telemetry_ready") is True
-                ):
-                    try:
-                        await hass.services.async_call(
-                            DOMAIN,
-                            SERVICE_RESTORE_NORMAL,
-                            service_data,
-                            blocking=True,
+                    if coordinator is None:
+                        _LOGGER.error(
+                            "Persisted force cleanup failed: %s",
+                            err,
+                            exc_info=True,
                         )
-                        return True
-                    except Exception as err:
+                        return False
+                    attempt += 1
+                    if attempt == 1:
                         _LOGGER.warning(
-                            "SAJ H2 persisted cleanup attempt failed; "
+                            "Native battery persisted cleanup attempt failed; "
                             "preserving state for retry: %s",
                             err,
                         )
-                attempt += 1
-                if attempt == 1:
-                    _LOGGER.info(
-                        "SAJ H2 persisted cleanup is waiting for ready telemetry"
-                    )
-                await asyncio.sleep(min(30, 5 * attempt))
+                    if not await _wait_for_native_battery_control_ready(
+                        "Persisted force cleanup retry"
+                    ):
+                        return False
+                    await asyncio.sleep(min(30, 5 * attempt))
 
             _LOGGER.info(
-                "SAJ H2 persisted cleanup stopped because the config entry "
+                "Native battery persisted cleanup stopped because the config entry "
                 "was unloaded"
             )
             return False
@@ -26805,17 +26885,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     self_consumption_state["duration"] = duration or 0
                     self_consumption_state["engaged_at"] = engaged_at
 
-                    try:
-                        await hass.services.async_call(
-                            DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
-                        )
+                    restore_completed = await _restore_persisted_normal(
+                        {"source": "user"}
+                    )
+                    if restore_completed:
                         _LOGGER.info("✅ Restored normal operation after expired self-consumption override")
-                    except Exception as e:
-                        _LOGGER.error(f"Error restoring after expired self-consumption override: {e}", exc_info=True)
-
-                    stored_data = await store.async_load() or {}
-                    stored_data["force_mode_state"] = None
-                    await store.async_save(stored_data)
+                        stored_data = await store.async_load() or {}
+                        stored_data["force_mode_state"] = None
+                        await store.async_save(stored_data)
+                    else:
+                        _LOGGER.warning(
+                            "Expired self-consumption cleanup remains stored "
+                            "for retry"
+                        )
                 else:
                     remaining_seconds = (expires_at - now).total_seconds()
                     remaining_minutes = remaining_seconds / 60
@@ -26836,8 +26918,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             return
                         if self_consumption_state["active"]:
                             _LOGGER.info("⏰ Self-consumption override expired (restored timer), auto-restoring")
-                            await hass.services.async_call(
-                                DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                            await _restore_persisted_normal(
+                                {"source": "user"}
                             )
 
                     self_consumption_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -26881,21 +26963,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
                     hold_soc_state["brand"] = persisted_force_state.get("brand")
 
-                    try:
-                        await hass.services.async_call(
-                            DOMAIN,
-                            SERVICE_RESTORE_NORMAL,
-                            {"source": "hold_soc_cleanup", "_force_restore": True},
-                            blocking=True,
-                        )
+                    restore_completed = await _restore_persisted_normal(
+                        {
+                            "source": "hold_soc_cleanup",
+                            "_force_restore": True,
+                        }
+                    )
+                    if restore_completed:
                         if hold_soc_state.get("active"):
                             _LOGGER.warning(
                                 "Expired Hold SoC restore did not complete; preserving state for retry"
                             )
                         else:
                             _LOGGER.info("✅ Restored normal operation after expired Hold SoC")
-                    except Exception as e:
-                        _LOGGER.error(f"Error restoring after expired Hold SoC: {e}", exc_info=True)
+                    else:
+                        _LOGGER.warning(
+                            "Expired Hold SoC cleanup remains stored for retry"
+                        )
 
                     if not hold_soc_state.get("active"):
                         stored_data = await store.async_load() or {}
@@ -26933,11 +27017,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             return
                         if hold_soc_state["active"]:
                             _LOGGER.info("⏰ Hold SoC expired (restored timer), auto-restoring")
-                            await hass.services.async_call(
-                                DOMAIN,
-                                SERVICE_RESTORE_NORMAL,
+                            await _restore_persisted_normal(
                                 {"source": "hold_soc_cleanup", "_force_restore": True},
-                                blocking=True,
                             )
 
                     hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -27138,8 +27219,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["saved_grid_charging_enabled"] = persisted_force_state.get("saved_grid_charging_enabled")
 
                     # Re-issue the charge command to the inverter
+                    if not await _wait_for_native_battery_control_ready(
+                        "Persisted force charge replay"
+                    ):
+                        return
+                    replay_remaining_seconds = (
+                        expires_at - dt_util.utcnow()
+                    ).total_seconds()
+                    if replay_remaining_seconds <= 0:
+                        _LOGGER.info(
+                            "Persisted force charge expired while waiting for "
+                            "the native battery integration; restoring normal "
+                            "operation instead of replaying it"
+                        )
+                        if await _restore_persisted_normal(
+                            {
+                                "source": "force_timer",
+                                "_allow_monitoring_restore": True,
+                            }
+                        ):
+                            stored_data = await store.async_load() or {}
+                            stored_data["force_mode_state"] = None
+                            await store.async_save(stored_data)
+                        return
                     try:
-                        remaining_min = int(remaining_minutes)
+                        remaining_min = max(
+                            1,
+                            math.ceil(replay_remaining_seconds / 60),
+                        )
                         service_data = {"duration": remaining_min}
                         if persisted_power_w > 0:
                             service_data["power_w"] = persisted_power_w
@@ -27199,8 +27306,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Re-issue the discharge command to the inverter.
                     # After restart, the inverter reverts to normal mode —
                     # the state flag alone doesn't resume hardware discharge.
+                    if not await _wait_for_native_battery_control_ready(
+                        "Persisted force discharge replay"
+                    ):
+                        return
+                    replay_remaining_seconds = (
+                        expires_at - dt_util.utcnow()
+                    ).total_seconds()
+                    if replay_remaining_seconds <= 0:
+                        _LOGGER.info(
+                            "Persisted force discharge expired while waiting "
+                            "for the native battery integration; restoring "
+                            "normal operation instead of replaying it"
+                        )
+                        if await _restore_persisted_normal(
+                            {
+                                "source": "force_timer",
+                                "_allow_monitoring_restore": True,
+                            }
+                        ):
+                            stored_data = await store.async_load() or {}
+                            stored_data["force_mode_state"] = None
+                            await store.async_save(stored_data)
+                        return
                     try:
-                        remaining_min = int(remaining_minutes)
+                        remaining_min = max(
+                            1,
+                            math.ceil(replay_remaining_seconds / 60),
+                        )
                         service_data = {"duration": remaining_min}
                         if persisted_power_w > 0:
                             service_data["power_w"] = persisted_power_w
@@ -31646,6 +31779,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "[MONITORING] Allowing force-mode restore cleanup so existing hardware control is released"
             )
 
+        native_coordinator = (
+            hass.data.get(DOMAIN, {})
+            .get(entry.entry_id, {})
+            .get("battery_energy_coordinator")
+        )
+        if _uses_native_battery_integration(native_coordinator):
+            readiness = getattr(native_coordinator, "startup_control_ready", None)
+            if not callable(readiness) or not readiness():
+                raise HomeAssistantError(
+                    "Native Home Assistant battery integration is not ready; "
+                    "restore has been preserved for retry"
+                )
+
         # Clear user-facing state toggles (Hold SoC and Self-Use buttons).
         # These are mobile-only visual flags; clearing them on user-sourced
         # restores keeps the Controls screen in sync without forcing the
@@ -32040,10 +32186,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 foxess_coord = entry_data.get("foxess_coordinator")
-                if foxess_coord:
-                    await foxess_coord.restore_normal()
-                    entry_data["foxess_curtailment_state"] = "normal"
-                    entry_data.pop("_last_foxess_curtailment_reapply", None)
+                if not foxess_coord or not bool(await foxess_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "FoxESS did not confirm restore_normal"
+                    )
+                entry_data["foxess_curtailment_state"] = "normal"
+                entry_data.pop("_last_foxess_curtailment_reapply", None)
 
                 if _restore_superseded("FoxESS restore"):
                     return
@@ -32071,6 +32219,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in FoxESS restore normal: {e}", exc_info=True)
                 return
@@ -32085,10 +32235,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
                 if not restore_succeeded:
-                    _LOGGER.error(
-                        "GoodWe restore normal returned False; preserving active control state for retry"
+                    raise HomeAssistantError(
+                        "GoodWe restore_normal was not confirmed; preserving active control state for retry"
                     )
-                    return
 
                 if _restore_superseded("GoodWe restore"):
                     return
@@ -32119,6 +32268,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in GoodWe restore normal: {e}", exc_info=True)
                 return
@@ -32171,8 +32322,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 esy_coord = entry_data.get("esy_sunhome_coordinator")
-                if esy_coord:
-                    await esy_coord.restore_normal()
+                if not esy_coord or not bool(await esy_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "ESY Sunhome did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("ESY Sunhome restore"):
                     return
@@ -32200,6 +32353,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in ESY Sunhome restore normal: {e}", exc_info=True)
                 return
@@ -32213,8 +32368,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 solax_coord = entry_data.get("solax_coordinator")
-                if solax_coord:
-                    await solax_coord.restore_normal()
+                if not solax_coord or not bool(await solax_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "SolaX did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("Solax restore"):
                     return
@@ -32242,6 +32399,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Solax restore normal: {e}", exc_info=True)
                 return
@@ -32299,8 +32458,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
-                if fronius_coord:
-                    await fronius_coord.restore_normal()
+                if not fronius_coord or not bool(await fronius_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "Fronius GEN24 storage did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("Fronius Reserva restore"):
                     return
@@ -32328,6 +32489,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Fronius GEN24 storage restore normal: {e}", exc_info=True)
                 return
@@ -32337,8 +32500,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 neovolt_coord = entry_data.get("neovolt_coordinator")
-                if neovolt_coord:
-                    await neovolt_coord.restore_normal()
+                if not neovolt_coord or not bool(await neovolt_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "Neovolt did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("Neovolt restore"):
                     return
@@ -32366,6 +32531,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Neovolt restore normal: {e}", exc_info=True)
                 return
@@ -32379,10 +32546,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 solaredge_coord = entry_data.get("solaredge_coordinator")
-                if solaredge_coord:
+                if not solaredge_coord or not bool(
                     await solaredge_coord.restore_normal()
-                else:
-                    _LOGGER.warning("Restore normal: SolarEdge coordinator not available")
+                ):
+                    raise HomeAssistantError(
+                        "SolarEdge did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("SolarEdge restore"):
                     return
@@ -32410,6 +32579,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in SolarEdge restore normal: {e}", exc_info=True)
                 return
@@ -32419,10 +32590,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 anker_coord = entry_data.get("anker_solix_coordinator")
-                if anker_coord:
-                    await anker_coord.restore_normal()
-                else:
-                    _LOGGER.warning("Restore normal: Anker Solix coordinator not available")
+                if not anker_coord or not bool(await anker_coord.restore_normal()):
+                    raise HomeAssistantError(
+                        "Anker Solix did not confirm restore_normal"
+                    )
 
                 if _restore_superseded("Anker Solix restore"):
                     return
@@ -32450,6 +32621,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Anker Solix restore normal: {e}", exc_info=True)
                 return

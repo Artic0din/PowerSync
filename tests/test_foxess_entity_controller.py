@@ -258,6 +258,31 @@ def test_prefix_discovery_maps_telemetry_and_daily_energy():
     assert status["pv1_voltage"] == 405.0
     assert status["pv1_current"] == 5.2
     assert status["battery_max_charge_power_w"] == 10250
+    assert status["telemetry_ready"] is True
+
+
+def test_startup_readiness_rejects_unavailable_values_but_accepts_zeroes():
+    states = _base_states()
+    next(
+        state
+        for state in states
+        if state.entity_id == "sensor.foxess_grid_ct"
+    ).state = "unavailable"
+    controller = FoxESSEntityController(
+        _FakeHass(states),
+        entity_prefix="foxess",
+    )
+    assert controller.get_status()["telemetry_ready"] is False
+
+    zero_states = _base_states()
+    for state in zero_states:
+        if state.entity_id.startswith("sensor."):
+            state.state = "0"
+    zero_controller = FoxESSEntityController(
+        _FakeHass(zero_states),
+        entity_prefix="foxess",
+    )
+    assert zero_controller.get_status()["telemetry_ready"] is True
 
 
 def test_fallback_sensors_normalize_grid_and_battery_signs():

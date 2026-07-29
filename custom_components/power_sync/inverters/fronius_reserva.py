@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from homeassistant.helpers import entity_registry as er
@@ -287,6 +288,7 @@ class FroniusReservaBatteryController:
         mode = self._read_state("storage_control_mode") or self._read_state("storage_control_mode_sensor")
 
         return {
+            "telemetry_ready": self.telemetry_ready(),
             "battery_level": self._read_float("battery_level"),
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -312,6 +314,25 @@ class FroniusReservaBatteryController:
             "min_soc": reserve,
             "mode": mode,
         }
+
+    def telemetry_ready(self) -> bool:
+        """Return whether the upstream Fronius telemetry is usable for control."""
+        if not self._entity_map:
+            self._discover_entities()
+        optional_site_keys = (
+            "battery_charge_power",
+            "battery_discharge_power",
+            "grid_power",
+            "solar_power",
+        )
+        return (
+            self._read_float("battery_level") is not None
+            and all(
+                self._read_float(key) is not None
+                for key in optional_site_keys
+                if key in self._entity_map
+            )
+        )
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         """Force charge from grid at the requested wattage."""
@@ -499,7 +520,8 @@ class FroniusReservaBatteryController:
         if state is None:
             return None
         try:
-            return float(state)
+            value = float(state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 

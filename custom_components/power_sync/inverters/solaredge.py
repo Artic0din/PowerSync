@@ -670,6 +670,7 @@ class SolarEdgeEnergyController:
         grid_export_is_total = self._is_lifetime_energy_total("daily_grid_export")
 
         status: dict[str, Any] = {
+            "telemetry_ready": self.telemetry_ready(),
             "battery_level": self._read_float("battery_level"),
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -700,6 +701,44 @@ class SolarEdgeEnergyController:
             status[f"pv{idx}_power"] = self._power_kw(f"pv{idx}_power")
 
         return status
+
+    def telemetry_ready(self) -> bool:
+        """Return whether the entity bridge has complete optimizer telemetry."""
+        self._ensure_entity_map()
+        battery_mapped = any(
+            key in self._entity_map
+            for key in ("battery_power", "battery_charge", "battery_discharge")
+        )
+        battery_ready = not battery_mapped or self._power_kw("battery_power") is not None or (
+            self._power_kw("battery_charge") is not None
+            and self._power_kw("battery_discharge") is not None
+        )
+        grid_mapped = any(
+            key in self._entity_map
+            for key in ("grid_power", "grid_import", "grid_export")
+        )
+        grid_ready = not grid_mapped or self._power_kw("grid_power") is not None or (
+            self._power_kw("grid_import") is not None
+            and self._power_kw("grid_export") is not None
+        )
+        mapped_pv_keys = [
+            f"pv{idx}_power"
+            for idx in range(1, 5)
+            if f"pv{idx}_power" in self._entity_map
+        ]
+        solar_ready = (
+            "solar_power" not in self._entity_map
+            and not mapped_pv_keys
+        ) or self._power_kw("solar_power") is not None or (
+            bool(mapped_pv_keys)
+            and all(self._power_kw(key) is not None for key in mapped_pv_keys)
+        )
+        return (
+            self._read_float("battery_level") is not None
+            and battery_ready
+            and grid_ready
+            and solar_ready
+        )
 
     async def disconnect(self) -> None:
         """No persistent connection to close."""
@@ -1005,7 +1044,8 @@ class SolarEdgeEnergyController:
         if not state or str(state.state) in _UNAVAILABLE:
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
+            return value if math.isfinite(value) else None
         except (TypeError, ValueError):
             return None
 

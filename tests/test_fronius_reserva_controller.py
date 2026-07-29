@@ -183,6 +183,7 @@ def test_status_keeps_unavailable_soc_unknown_instead_of_zero():
     status = controller.get_status()
 
     assert status["battery_level"] is None
+    assert status["telemetry_ready"] is False
 
 
 def test_status_marks_unavailable_solar_as_invalid_instead_of_real_zero():
@@ -198,6 +199,7 @@ def test_status_marks_unavailable_solar_as_invalid_instead_of_real_zero():
 
     assert status["solar_power"] == 0.0
     assert status["solar_power_valid"] is False
+    assert status["telemetry_ready"] is False
 
 
 def test_status_marks_all_zero_startup_power_snapshot_as_invalid():
@@ -220,6 +222,7 @@ def test_status_marks_all_zero_startup_power_snapshot_as_invalid():
 
     assert status["solar_power"] == 0.0
     assert status["solar_power_valid"] is False
+    assert status["telemetry_ready"] is True
 
 
 def test_status_keeps_real_zero_solar_valid_when_site_power_is_active():
