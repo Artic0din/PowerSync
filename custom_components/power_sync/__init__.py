@@ -33314,6 +33314,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_charge_state["expires_at"] = None
             force_charge_state["_skip_backup_reserve_restore"] = False
 
+            # A user Hold SoC can coexist with optimizer-owned force metadata.
+            # In that mixed state ``hold_only_restore`` is false, so cleanup
+            # reaches this full Tesla restore path instead.  Clear the hold
+            # only after every restore write has verified; otherwise the
+            # persistence write below re-saves the expired hold and reloads
+            # keep presenting it as active.
+            if restore_was_hold_soc:
+                _clear_hold_soc_state()
+
             _LOGGER.info("NORMAL OPERATION RESTORED")
 
             # Send push notification for successful restore
@@ -39627,6 +39636,7 @@ class OptimizationSettingsView(HomeAssistantView):
             opt_coordinator = None
             config_entry = None
             entry_id = None
+            entry_data = None
 
             # First, find the config entry directly
             entries = self._hass.config_entries.async_entries(DOMAIN)
@@ -39641,6 +39651,142 @@ class OptimizationSettingsView(HomeAssistantView):
 
             # If coordinator exists, use it
             if opt_coordinator:
+                transition_task = (
+                    entry_data.get("_optimization_settings_transition_task")
+                    if isinstance(entry_data, dict)
+                    else None
+                )
+                transition_active = bool(
+                    transition_task and not transition_task.done()
+                )
+                target_enabled = (
+                    entry_data.get(
+                        "_optimization_settings_target_enabled",
+                        opt_coordinator.enabled,
+                    )
+                    if isinstance(entry_data, dict)
+                    else opt_coordinator.enabled
+                )
+                enabled_transition = (
+                    "enabled" in settings
+                    and bool(settings["enabled"]) != bool(target_enabled)
+                )
+
+                # Enabling/disabling can restore inverter state, refresh a
+                # tariff, and wait for hardware readback.  That work may
+                # legitimately exceed the mobile client's eight-second HTTP
+                # deadline, so serialize enabled-state requests in the
+                # background.  Ordinary setting writes remain synchronous.
+                if "enabled" in settings and (
+                    enabled_transition or transition_active
+                ):
+                    transition_settings = dict(settings)
+                    requested_enabled = bool(settings["enabled"])
+                    previous_task = (
+                        transition_task if transition_active else None
+                    )
+                    if isinstance(entry_data, dict):
+                        entry_data[
+                            "_optimization_settings_target_enabled"
+                        ] = requested_enabled
+
+                    async def _apply_optimizer_settings_transition() -> None:
+                        if previous_task is not None:
+                            try:
+                                await previous_task
+                            except asyncio.CancelledError:
+                                return
+                            except Exception as err:
+                                _LOGGER.warning(
+                                    "Previous optimizer settings transition "
+                                    "failed: %s",
+                                    err,
+                                )
+
+                        # Persist the requested toggle before the first slow
+                        # hardware await.  The coordinator repeats this write
+                        # after applying the transition, but it is then a no-op.
+                        if config_entry and isinstance(entry_data, dict):
+                            new_options = dict(config_entry.options)
+                            if (
+                                new_options.get(
+                                    CONF_OPTIMIZATION_ENABLED,
+                                    False,
+                                )
+                                != requested_enabled
+                            ):
+                                new_options[
+                                    CONF_OPTIMIZATION_ENABLED
+                                ] = requested_enabled
+                                entry_data["_skip_reload"] = True
+                                self._hass.config_entries.async_update_entry(
+                                    config_entry,
+                                    options=new_options,
+                                )
+
+                        try:
+                            result = await opt_coordinator.set_settings(
+                                transition_settings
+                            )
+                            if not result.get("success", False):
+                                _LOGGER.error(
+                                    "Optimizer settings transition failed: %s",
+                                    result.get("error", "unknown error"),
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as err:
+                            _LOGGER.error(
+                                "Optimizer settings transition failed: %s",
+                                err,
+                                exc_info=True,
+                            )
+
+                    queued_task = self._hass.async_create_task(
+                        _apply_optimizer_settings_transition()
+                    )
+                    if isinstance(entry_data, dict):
+                        entry_data[
+                            "_optimization_settings_transition_task"
+                        ] = queued_task
+
+                        def _clear_completed_transition(
+                            completed_task: asyncio.Task,
+                        ) -> None:
+                            current_entry_data = self._hass.data.get(
+                                DOMAIN,
+                                {},
+                            ).get(entry_id, {})
+                            if (
+                                isinstance(current_entry_data, dict)
+                                and current_entry_data.get(
+                                    "_optimization_settings_transition_task"
+                                )
+                                is completed_task
+                            ):
+                                current_entry_data.pop(
+                                    "_optimization_settings_transition_task",
+                                    None,
+                                )
+                                current_entry_data.pop(
+                                    "_optimization_settings_target_enabled",
+                                    None,
+                                )
+
+                        queued_task.add_done_callback(
+                            _clear_completed_transition
+                        )
+
+                    return web.json_response({
+                        "success": True,
+                        "changes": [
+                            "queued optimizer enabled-state transition"
+                        ],
+                        "message": (
+                            "Optimizer transition continuing in background"
+                        ),
+                    })
+
                 result = await opt_coordinator.set_settings(settings)
                 return web.json_response(result)
 

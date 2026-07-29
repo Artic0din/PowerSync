@@ -277,14 +277,20 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
         "datetime": datetime,
         "dt_util": SimpleNamespace(utcnow=lambda: fixed_now, UTC=timezone.utc),
         "_coerce_force_power_w": lambda v: 0,
+        "_uses_native_battery_integration": lambda _coordinator: False,
         "hold_soc_state": hold_state,
-        "hass": SimpleNamespace(services=_FakeServices()),
+        "hass": SimpleNamespace(
+            services=_FakeServices(),
+            data={"power_sync": {"entry-1": {}}},
+        ),
+        "entry": SimpleNamespace(entry_id="entry-1"),
         "DOMAIN": "power_sync",
         "SERVICE_RESTORE_NORMAL": "restore_normal",
         "store": fake_store,
         "_LOGGER": SimpleNamespace(
             info=lambda *a, **k: None,
             debug=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
             error=lambda msg, *a, **k: errors.append(msg),
         ),
     }

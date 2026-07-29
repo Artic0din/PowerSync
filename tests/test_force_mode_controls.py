@@ -1537,6 +1537,39 @@ def test_tesla_hold_soc_cleanup_retains_state_until_reserve_verifies():
     assert 'hold_soc_state.get("brand") == "tesla"' in restore_source
 
 
+def test_tesla_full_force_restore_clears_concurrent_hold_state_before_persisting():
+    """A mixed optimizer-force + user-hold restore must clear both owners.
+
+    When a Tesla Hold SoC is active while the optimizer owns a force action,
+    ``hold_only_restore`` is false and cleanup follows the full force-restore
+    branch.  A successful restore must not then persist the stale Hold SoC
+    state and re-arm it on the next integration reload.
+    """
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_restore_normal"),
+    )
+
+    assert restore_source is not None
+    full_restore_success = restore_source.split(
+        "if tesla_restore_failed:",
+        1,
+    )[1].split(
+        "except Exception as e:",
+        1,
+    )[0]
+    hold_clear = (
+        "if restore_was_hold_soc:\n"
+        "                _clear_hold_soc_state()"
+    )
+    assert hold_clear in full_restore_success
+    assert full_restore_success.index(hold_clear) < full_restore_success.rindex(
+        "await persist_force_mode_state()"
+    )
+
+
 def test_optional_write_guard_rechecks_before_cloud_fallback_attempt():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

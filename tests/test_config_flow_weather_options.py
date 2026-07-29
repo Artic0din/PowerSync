@@ -7,6 +7,7 @@ import asyncio
 import json
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1314,6 +1315,123 @@ def test_optimization_settings_api_treats_omitted_fields_as_unchanged():
         assert f'if "{key}" in settings:' in post_source
 
     assert "new_options.update(settings)" not in post_source
+
+
+def test_optimization_settings_api_backgrounds_slow_enabled_transitions():
+    """Mobile settings writes must return before inverter restore completes."""
+    source = INIT_PATH.read_text()
+    post_method = _init_class_method("OptimizationSettingsView", "post")
+    post_source = ast.get_source_segment(source, post_method)
+
+    assert post_source is not None
+    coordinator_branch = post_source.split(
+        "# If coordinator exists, use it",
+        1,
+    )[1].split(
+        "# Otherwise, update config entry directly",
+        1,
+    )[0]
+    assert '"enabled" in settings' in coordinator_branch
+    assert "async def _apply_optimizer_settings_transition" in coordinator_branch
+    assert "async_create_task(" in coordinator_branch
+    assert "_optimization_settings_transition_task" in coordinator_branch
+    assert "_optimization_settings_target_enabled" in coordinator_branch
+    assert "Optimizer transition continuing in background" in coordinator_branch
+
+
+def test_optimization_settings_api_returns_before_slow_disable_completes():
+    """Behavioral: the HTTP response is not coupled to hardware cleanup."""
+    post_source = textwrap.dedent(
+        ast.get_source_segment(
+            INIT_PATH.read_text(),
+            _init_class_method("OptimizationSettingsView", "post"),
+        )
+    )
+
+    class _FakeEntry:
+        entry_id = "entry-1"
+        data = {}
+        options = {"optimization_enabled": True}
+
+    entry = _FakeEntry()
+
+    class _FakeConfigEntries:
+        def async_entries(self, _domain):
+            return [entry]
+
+        def async_update_entry(self, target, *, options=None, data=None):
+            if options is not None:
+                target.options = dict(options)
+            if data is not None:
+                target.data = dict(data)
+
+    class _FakeCoordinator:
+        enabled = True
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def set_settings(self, settings):
+            self.started.set()
+            await self.release.wait()
+            self.enabled = bool(settings["enabled"])
+            return {"success": True, "changes": ["disabled"]}
+
+    coordinator = _FakeCoordinator()
+    entry_data = {"optimization_coordinator": coordinator}
+    hass = SimpleNamespace(
+        config_entries=_FakeConfigEntries(),
+        data={"power_sync": {"entry-1": entry_data}},
+        async_create_task=asyncio.create_task,
+    )
+    namespace = {
+        "asyncio": asyncio,
+        "CONF_OPTIMIZATION_ENABLED": "optimization_enabled",
+        "DOMAIN": "power_sync",
+        "_LOGGER": SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        "web": SimpleNamespace(
+            Request=object,
+            Response=object,
+            json_response=lambda payload, status=200: {
+                **payload,
+                "_status": status,
+            },
+        ),
+    }
+    exec(post_source, namespace)
+
+    async def scenario():
+        request = SimpleNamespace(
+            json=lambda: _async_value({"enabled": False})
+        )
+        response = await asyncio.wait_for(
+            namespace["post"](SimpleNamespace(_hass=hass), request),
+            timeout=0.1,
+        )
+        assert response["success"] is True
+        assert response["message"] == (
+            "Optimizer transition continuing in background"
+        )
+
+        await asyncio.wait_for(coordinator.started.wait(), timeout=0.1)
+        assert entry.options["optimization_enabled"] is False
+        transition = entry_data["_optimization_settings_transition_task"]
+        assert not transition.done()
+
+        coordinator.release.set()
+        await asyncio.wait_for(transition, timeout=0.1)
+        await asyncio.sleep(0)
+        assert coordinator.enabled is False
+        assert "_optimization_settings_transition_task" not in entry_data
+
+    async def _async_value(value):
+        return value
+
+    asyncio.run(scenario())
 
 
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
