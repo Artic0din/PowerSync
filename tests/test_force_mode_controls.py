@@ -2461,6 +2461,64 @@ def test_optimization_coordinator_exposes_optimizer_force_state():
     assert "return self._get_active_force_state()" in method_source
 
 
+def test_sigenergy_optimizer_discharge_rejects_unconfirmed_hardware_write():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert function_source is not None
+    hardware_branch = function_source.split(
+        "# Hardware-only path: fires for BOTH",
+        1,
+    )[1].split("sungrow_coord =", 1)[0]
+    assert hardware_branch.count(
+        "sigenergy_result = await _guarded_force_discharge_write("
+    ) == 2
+    assert hardware_branch.count("if not sigenergy_result:") == 2
+    assert hardware_branch.count(
+        '"Sigenergy force discharge hardware refresh was not confirmed"'
+    ) == 2
+    missing_host_branch = hardware_branch.split(
+        "if entry.data.get(CONF_SIGENERGY_STATION_ID):",
+        1,
+    )[1]
+    assert 'if source == "optimizer":' in missing_host_branch
+    assert '"Optimizer force discharge requires a configured "' in missing_host_branch
+    assert '"Sigenergy Modbus host"' in missing_host_branch
+
+
+def test_optimizer_discharge_early_blocks_raise_service_error():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert function_source is not None
+    monitoring_block = function_source.split(
+        "if _monitoring_mode_should_block_control(call):",
+        1,
+    )[1].split(
+        "# Every service-originated export path",
+        1,
+    )[0]
+    network_block = function_source.split(
+        "if command_power_w <= 0:",
+        1,
+    )[1].split(
+        "async def _guarded_force_discharge_write",
+        1,
+    )[0]
+    assert 'if source == "optimizer":' in monitoring_block
+    assert '"Optimizer force discharge blocked by monitoring mode"' in monitoring_block
+    assert 'if source == "optimizer":' in network_block
+    assert '"Optimizer force discharge blocked by network envelope"' in network_block
+
+
 def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

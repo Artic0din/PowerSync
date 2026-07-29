@@ -28346,6 +28346,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 source,
                 command_power_w,
             )
+            if source == "optimizer":
+                raise HomeAssistantError(
+                    "Optimizer force discharge blocked by monitoring mode"
+                )
             return
 
         # Every service-originated export path (manual, automation, optimizer
@@ -28364,6 +28368,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Force discharge blocked by network envelope (%s)",
                     snapshot.fault or snapshot.reason or snapshot.mode,
                 )
+                if source == "optimizer":
+                    raise HomeAssistantError(
+                        "Optimizer force discharge blocked by network envelope"
+                    )
                 return
 
         async def _guarded_force_discharge_write(writer) -> bool:
@@ -28398,11 +28406,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sig_coord = entry_data.get("sigenergy_coordinator")
             if sig_coord and getattr(sig_coord, "_controller", None):
                 controller = sig_coord._controller
-                await _guarded_force_discharge_write(
+                sigenergy_result = await _guarded_force_discharge_write(
                     lambda guarded_w: controller.force_discharge(
                         power_kw=guarded_w / 1000
                     )
                 )
+                if not sigenergy_result:
+                    raise HomeAssistantError(
+                        "Sigenergy force discharge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"Sigenergy force discharge hardware extended ({duration}min)")
                 return
             if entry.data.get(CONF_SIGENERGY_STATION_ID):
@@ -28432,11 +28444,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ),
                     )
                     try:
-                        await _guarded_force_discharge_write(
+                        sigenergy_result = await _guarded_force_discharge_write(
                             lambda guarded_w: controller.force_discharge(
                                 power_kw=guarded_w / 1000
                             )
                         )
+                        if not sigenergy_result:
+                            raise HomeAssistantError(
+                                "Sigenergy force discharge hardware refresh was not confirmed"
+                            )
                         _LOGGER.debug(
                             "Sigenergy force discharge hardware extended without coordinator (%dmin)",
                             duration,
@@ -28444,6 +28460,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         return
                     finally:
                         await controller.disconnect()
+                if source == "optimizer":
+                    raise HomeAssistantError(
+                        "Optimizer force discharge requires a configured "
+                        "Sigenergy Modbus host"
+                    )
             sungrow_coord = entry_data.get("sungrow_coordinator")
             if sungrow_coord:
                 opt_coord = entry_data.get("optimization_coordinator")

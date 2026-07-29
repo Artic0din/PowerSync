@@ -2745,6 +2745,7 @@ class _FakeBattery:
         hardware_mode: str | None = None,
         backup_reserve: int | None = None,
         force_charge_result: bool | None = None,
+        force_discharge_result: bool | None = None,
     ) -> None:
         self.hardware_mode = hardware_mode
         self.backup_reserve = backup_reserve
@@ -2754,6 +2755,7 @@ class _FakeBattery:
         self.force_charge_calls = []
         self.force_charge_result = force_charge_result
         self.force_discharge_calls = []
+        self.force_discharge_result = force_discharge_result
 
     async def get_tesla_operation_mode(self):
         return self.hardware_mode
@@ -2784,6 +2786,7 @@ class _FakeBattery:
         self.force_discharge_calls.append(
             (duration_minutes, power_w, _extend_hardware, _tariff_duration)
         )
+        return self.force_discharge_result
 
 
 class _FakeEnergyCoordinator:
@@ -2844,6 +2847,24 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
 
     coordinator._get_battery_state = _battery_state
     return coordinator
+
+
+def test_rejected_optimizer_export_does_not_record_active_force_state(opt_module):
+    battery = _FakeBattery(force_discharge_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "sigenergy"
+    action = SimpleNamespace(
+        action="export",
+        power_w=5000,
+        timestamp=datetime(2026, 7, 30, 7, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 5000, False, None)]
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def _api_action(timestamp: datetime, action: str, power_w: float, soc: float):
