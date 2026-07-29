@@ -2277,6 +2277,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const soc = Array.isArray(schedule.soc) ? schedule.soc : [];
     const charge = Array.isArray(schedule.charge_w) ? schedule.charge_w : [];
     const discharge = Array.isArray(schedule.discharge_w) ? schedule.discharge_w : [];
+    const gridImport = Array.isArray(schedule.grid_import_w) ? schedule.grid_import_w : null;
     const detailed = Array.isArray(schedule.battery_consume_w) && Array.isArray(schedule.battery_export_w);
     const consume = detailed ? schedule.battery_consume_w : [];
     const exportPower = detailed ? schedule.battery_export_w : [];
@@ -2302,12 +2303,20 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     );
     const points = [];
     for (let i = 0; i < count; i++) {
+      const gridImportValue = gridImport && i < gridImport.length ? gridImport[i] : null;
+      const gridImportKw = (
+        gridImportValue !== null
+        && gridImportValue !== undefined
+        && gridImportValue !== ''
+        && Number.isFinite(Number(gridImportValue))
+      ) ? this._kw(gridImportValue) : null;
       points.push({
         index: i,
         timestamp: timestamps[i],
         soc: this._percent(soc[i]),
         chargeKw: this._kw(charge[i]),
         dischargeKw: this._kw(discharge[i]),
+        gridImportKw,
         consumeKw: detailed ? this._kw(consume[i]) : 0,
         exportKw: detailed ? this._kw(exportPower[i]) : 0,
         evKw: this._kw(ev[i]),
@@ -2793,7 +2802,15 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         total + Math.max(0, Math.min(pointEnd, range.end) - Math.max(pointStart, range.start))
       ), 0));
       if (overlapMs <= 0) continue;
-      const powerKw = Math.max(0, Number(point[powerKey]) || 0);
+      let powerKw = Math.max(0, Number(point[powerKey]) || 0);
+      const hasGridImport = point.gridImportKw !== null && point.gridImportKw !== undefined;
+      const gridImportKw = hasGridImport ? Number(point.gridImportKw) : NaN;
+      if (action === 'charge' && Number.isFinite(gridImportKw)) {
+        // Charge power can be supplied by both forecast solar and the grid.
+        // Attribute only the grid-backed share to the paid energy/cost shown
+        // on the dashboard, matching runtime grid-charge accounting.
+        powerKw = Math.min(powerKw, Math.max(0, gridImportKw));
+      }
       const intervalEnergyKwh = powerKw * overlapMs / 3600000;
       energyKwh += intervalEnergyKwh;
       const minorPrice = Number(point[priceKey]);

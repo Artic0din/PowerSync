@@ -139,6 +139,153 @@ def test_optimizer_battery_windows_show_integrated_energy_and_value():
     assert "window.power_w * window.durationMinutes" not in source
 
 
+def test_optimizer_charge_window_cost_counts_only_grid_sourced_battery_energy():
+    """Concurrent forecast solar must not be priced as paid battery energy."""
+    source = STRATEGY_PATH.read_text()
+    method = re.search(
+        r"  _energyValueForSegments\(segments, action, model\) \{"
+        r"(?P<body>.*?)\n  \}\n\n"
+        r"  _actionRangesFromApi\(\)",
+        source,
+        re.DOTALL,
+    )
+    assert method is not None
+    build_method = re.search(
+        r"  _buildModel\(\) \{(?P<body>.*?)\n  \}\n\n"
+        r"  _renderChips\(model, priceMeta\)",
+        source,
+        re.DOTALL,
+    )
+    assert build_method is not None
+
+    runtime = f"""
+      const energyValueForSegments = function(segments, action, model) {{{method.group("body")}}};
+      const buildModel = function() {{{build_method.group("body")}}};
+      const start = '2026-07-29T13:05:00+10:00';
+      const end = '2026-07-29T13:10:00+10:00';
+      const makeModel = (gridImport) => {{
+        const schedule = {{
+          timestamps: [start],
+          soc: [0.3],
+          charge_w: [10000],
+          discharge_w: [0],
+          battery_consume_w: [0],
+          battery_export_w: [0],
+          import_price: [0.186],
+          export_price: [0],
+        }};
+        if (gridImport !== undefined) schedule.grid_import_w = gridImport;
+        return buildModel.call({{
+          _data: {{ schedule }},
+          _intervalMinutes: () => 5,
+          _percent: value => Number(value) * 100,
+          _kw: value => Number(value) / 1000,
+          _minorPrice: value => Number(value) * 100,
+          _optimizerReserve: () => ({{
+            percent: null,
+            calculated: false,
+            exportPercent: null,
+            exportCalculated: false,
+          }}),
+          _idleHoldReserve: () => ({{ active: false, percent: null }}),
+          _demandRanges: () => [],
+        }});
+      }};
+      const result = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel([6500]),
+      );
+      const expectedEnergy = 6.5 * 5 / 60;
+      const expectedCost = expectedEnergy * 0.186;
+      const fallback = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel(undefined),
+      );
+      const invalidSlot = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel([null]),
+      );
+      const sparseGrid = [];
+      sparseGrid.length = 1;
+      const sparseSlot = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel(sparseGrid),
+      );
+      const shortArray = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel([]),
+      );
+      const zeroGrid = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel([0]),
+      );
+      const blankSlot = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel(['']),
+      );
+      const invalidValue = energyValueForSegments.call(
+        {{}},
+        [{{ timestamp: start, end_time: end }}],
+        'charge',
+        makeModel(['unavailable']),
+      );
+      const fallbackEnergy = 10 * 5 / 60;
+      const fallbackCost = fallbackEnergy * 0.186;
+      if (
+        !result
+        || Math.abs(result.energyKwh - expectedEnergy) > 1e-9
+        || Math.abs(result.value - expectedCost) > 1e-9
+        || !fallback
+        || Math.abs(fallback.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(fallback.value - fallbackCost) > 1e-9
+        || !invalidSlot
+        || Math.abs(invalidSlot.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(invalidSlot.value - fallbackCost) > 1e-9
+        || !sparseSlot
+        || Math.abs(sparseSlot.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(sparseSlot.value - fallbackCost) > 1e-9
+        || !shortArray
+        || Math.abs(shortArray.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(shortArray.value - fallbackCost) > 1e-9
+        || zeroGrid !== null
+        || !blankSlot
+        || Math.abs(blankSlot.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(blankSlot.value - fallbackCost) > 1e-9
+        || !invalidValue
+        || Math.abs(invalidValue.energyKwh - fallbackEnergy) > 1e-9
+        || Math.abs(invalidValue.value - fallbackCost) > 1e-9
+      ) {{
+        throw new Error(
+          `charge cost attribution failed: ${{JSON.stringify({{
+            result,
+            fallback,
+            invalidSlot,
+            sparseSlot,
+            shortArray,
+            zeroGrid,
+            blankSlot,
+            invalidValue,
+          }})}}`
+        );
+      }}
+    """
+    subprocess.run(["node", "-e", runtime], check=True)
+
+
 def test_optimizer_action_plan_renders_full_scrollable_list():
     """The 24-hour action plan should expose every action instead of hiding overflow."""
     source = STRATEGY_PATH.read_text()
