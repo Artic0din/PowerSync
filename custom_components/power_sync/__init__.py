@@ -38899,7 +38899,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_ELECTRICITY_PROVIDER,
                 entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
             )
-            if electricity_provider_for_vpp in ("globird", "aemo_vpp"):
+            if (
+                aemo_spike_enabled
+                and electricity_provider_for_vpp in ("globird", "aemo_vpp")
+            ):
                 aemo_region = entry.options.get(
                     CONF_AEMO_REGION,
                     entry.data.get(CONF_AEMO_REGION, "QLD1")
