@@ -6663,6 +6663,17 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
           : 'temporary hold';
         line1 += ' - ' + holdText;
       }
+      if (current.attributes?.charge_by_time_enabled) {
+        const targetSocValue = current.attributes?.charge_by_time_target_soc;
+        const targetSoc = targetSocValue === null || targetSocValue === undefined || targetSocValue === ''
+          ? NaN
+          : Number(targetSocValue);
+        const targetTime = String(current.attributes?.charge_by_time_target_time || '').trim();
+        const targetParts = [];
+        if (Number.isFinite(targetSoc)) targetParts.push(Math.round(targetSoc) + '%');
+        if (targetTime) targetParts.push('by ' + targetTime);
+        line1 += ' | Charge By Time' + (targetParts.length ? ': ' + targetParts.join(' ') : '');
+      }
       if (next && next.state && next.state !== 'unknown' && next.state !== 'unavailable') {
         const nextAction = (next.state || '').replace('_', ' ');
         const nextTime = next.attributes?.time;

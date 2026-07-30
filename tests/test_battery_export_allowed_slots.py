@@ -2055,6 +2055,19 @@ def test_charge_by_time_setting_change_schedules_background_reoptimization(
         charge_by_time_target_soc=1.0,
     )
     updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+        "config": {
+            "charge_by_time_target_time": (
+                coordinator._config.charge_by_time_target_time
+            ),
+            "charge_by_time_target_soc": int(
+                round(coordinator._config.charge_by_time_target_soc * 100)
+            ),
+        },
+    }
+    coordinator.async_set_updated_data = published.append
 
     result = asyncio.run(coordinator.set_settings(settings))
 
@@ -2067,6 +2080,76 @@ def test_charge_by_time_setting_change_schedules_background_reoptimization(
         assert coordinator._config.charge_by_time_target_time == "16:00"
     if "target_soc" in next(iter(settings)):
         assert coordinator._config.charge_by_time_target_soc == 0.8
+    assert published == [coordinator.get_api_data()]
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_charge_by_time_switch_setter_publishes_when_optimizer_disabled(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        charge_by_time=False,
+    )
+    _prepare_enabled_settings_coordinator(coordinator)
+    coordinator._enabled = False
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+    }
+    coordinator.async_set_updated_data = published.append
+
+    assert coordinator.set_charge_by_time_enabled(True) is True
+    assert published == [{"charge_by_time_enabled": True}]
+
+    assert coordinator.set_charge_by_time_enabled(True) is False
+    assert published == [{"charge_by_time_enabled": True}]
+
+
+def test_combined_charge_by_time_settings_publish_one_final_snapshot(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        charge_by_time=False,
+        charge_by_time_target_time="17:15",
+        charge_by_time_target_soc=1.0,
+    )
+    _updates, _run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+        "config": {
+            "charge_by_time_target_time": (
+                coordinator._config.charge_by_time_target_time
+            ),
+            "charge_by_time_target_soc": int(
+                round(coordinator._config.charge_by_time_target_soc * 100)
+            ),
+        },
+    }
+    coordinator.async_set_updated_data = published.append
+
+    result = asyncio.run(
+        coordinator.set_settings(
+            {
+                "charge_by_time_enabled": True,
+                "charge_by_time_target_time": "16:00",
+                "charge_by_time_target_soc": 80,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert published == [
+        {
+            "charge_by_time_enabled": True,
+            "config": {
+                "charge_by_time_target_time": "16:00",
+                "charge_by_time_target_soc": 80,
+            },
+        }
+    ]
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 

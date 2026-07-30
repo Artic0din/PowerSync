@@ -1110,7 +1110,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
         return True
 
-    def set_charge_by_time_enabled(self, enabled: bool) -> bool:
+    def set_charge_by_time_enabled(
+        self,
+        enabled: bool,
+        *,
+        publish: bool = True,
+    ) -> bool:
         """Enable or disable charge-by-time prefill mode."""
         enabled = bool(enabled)
         if self._config.charge_by_time_enabled == enabled:
@@ -1136,6 +1141,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_options[CONF_CHARGE_BY_TIME_ENABLED] = enabled
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        if publish:
+            self.async_set_updated_data(self.get_api_data())
         return True
 
     def set_disable_idle_enabled(self, enabled: bool) -> bool:
@@ -12926,6 +12933,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         settings = dict(settings)
         response = {"success": True, "changes": []}
         rerun_after_settings = False
+        charge_by_time_display_changed = False
 
         # A non-positive battery specification means "clear the manual
         # override", matching the mobile Reset to Auto action. Never push a
@@ -13288,12 +13296,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if "charge_by_time_enabled" in settings:
             new_val = bool(settings["charge_by_time_enabled"])
-            changed = self.set_charge_by_time_enabled(new_val)
+            changed = self.set_charge_by_time_enabled(new_val, publish=False)
             if changed:
                 response["changes"].append(
                     f"charge_by_time_enabled: {settings['charge_by_time_enabled']}"
                 )
                 rerun_after_settings = True
+                charge_by_time_display_changed = True
 
         if "spread_export_enabled" in settings:
             new_val = bool(settings["spread_export_enabled"])
@@ -13417,6 +13426,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             response["changes"].append(f"{target_time_key}: {target_time}")
             if changed:
                 rerun_after_settings = True
+                charge_by_time_display_changed = True
 
         target_soc_key = (
             "charge_by_time_target_soc"
@@ -13460,6 +13470,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if changed:
                 rerun_after_settings = True
+                charge_by_time_display_changed = True
 
         # Handle EV integration toggle
         if "ev_integration" in settings:
@@ -13478,6 +13489,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # started/stopped; an in-place flag flip is incomplete.
                 if not persisted_changed:
                     _LOGGER.debug("EV integration setting was already %s", ev_enabled)
+
+        if charge_by_time_display_changed:
+            self.async_set_updated_data(self.get_api_data())
 
         if rerun_after_settings and getattr(self, "_enabled", False):
             self._schedule_settings_reoptimization()

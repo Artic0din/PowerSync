@@ -660,6 +660,20 @@ def test_optimizer_plan_shows_temporary_idle_hold_separately():
     assert "holding SOC at" in source
 
 
+def test_optimizer_status_shows_active_charge_by_time_target_read_only():
+    """Active Charge By Time settings should be visible without opening config."""
+    source = STRATEGY_PATH.read_text()
+    optimizer_status = source[
+        source.index("function _optimizerStatus"):
+        source.index("function _loadIncludesGenericEv")
+    ]
+
+    assert "current.attributes?.charge_by_time_enabled" in optimizer_status
+    assert "current.attributes?.charge_by_time_target_soc" in optimizer_status
+    assert "current.attributes?.charge_by_time_target_time" in optimizer_status
+    assert "Charge By Time" in optimizer_status
+
+
 def test_dashboard_battery_controls_include_self_consumption_action():
     """Manual battery controls should expose the self-consumption service."""
     source = STRATEGY_PATH.read_text()

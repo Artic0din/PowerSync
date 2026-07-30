@@ -1375,6 +1375,13 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "idle_hold_active": data.get("idle_hold_active", False),
             "idle_hold_reserve": data.get("idle_hold_reserve"),
             "idle_hold_reserve_percent": data.get("idle_hold_reserve_percent"),
+            "charge_by_time_enabled": data.get("charge_by_time_enabled", False),
+            "charge_by_time_target_time": (data.get("config") or {}).get(
+                "charge_by_time_target_time"
+            ),
+            "charge_by_time_target_soc": (data.get("config") or {}).get(
+                "charge_by_time_target_soc"
+            ),
         } if data else {},
     ),
     PowerSyncSensorEntityDescription(
