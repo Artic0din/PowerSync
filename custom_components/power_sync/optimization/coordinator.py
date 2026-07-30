@@ -723,6 +723,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return True
 
+        # Fronius IDLE already holds SOC with temporary 0 W PV-charge and
+        # discharge limits. Raising the persistent minimum-SOC entity as well
+        # is redundant and can strand the inverter at the current SOC after
+        # Auto mode is restored.
+        if self.battery_system == "fronius_reserva":
+            if not self.energy_coordinator or not hasattr(
+                self.energy_coordinator, "set_backup_mode"
+            ):
+                _LOGGER.warning(
+                    "Optimizer: Fronius IDLE power-limit control is unavailable"
+                )
+                return False
+            if await self.energy_coordinator.set_backup_mode() is False:
+                return False
+            _LOGGER.info(
+                "Optimizer: IDLE — Fronius power-limit hold at %d%% SOC "
+                "(minimum SOC unchanged)",
+                soc_pct,
+            )
+            return True
+
         if (
             preserve_charge
             and self.energy_coordinator
@@ -6963,7 +6984,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.energy_coordinator
                     and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
                 ):
-                    await self.energy_coordinator.restore_work_mode_from_idle()
+                    work_mode_restored = (
+                        await self.energy_coordinator.restore_work_mode_from_idle()
+                    )
+                    if work_mode_restored is False:
+                        _LOGGER.warning(
+                            "Optimizer: Failed to restore work mode while exiting "
+                            "IDLE (will retry next cycle)"
+                        )
+                        return
                 restored = await self._restore_pre_idle_backup_reserve(
                     battery,
                     f"exiting IDLE to {effective_action}",

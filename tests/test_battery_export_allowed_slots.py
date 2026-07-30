@@ -4664,6 +4664,108 @@ def test_sungrow_idle_uses_discharge_cap_without_backup_reserve_write(opt_module
     assert coordinator._last_executed_action == "idle"
 
 
+def test_fronius_idle_uses_power_limits_without_backup_reserve_write(opt_module):
+    class FroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backup_mode_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return True
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._startup_backup_reserve = 4
+    energy_coordinator = FroniusEnergyCoordinator()
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
+@pytest.mark.parametrize("failure_mode", ["unavailable", "rejected"])
+def test_fronius_idle_never_falls_back_to_backup_reserve_write(
+    opt_module,
+    failure_mode,
+):
+    class RejectingFroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        async def set_backup_mode(self):
+            return False
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = (
+        _FakeEnergyCoordinator()
+        if failure_mode == "unavailable"
+        else RejectingFroniusEnergyCoordinator()
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_fronius_exit_idle_restores_auto_without_reserve_write(opt_module):
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.75)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator._last_executed_action = "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert coordinator.energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_fronius_rejected_auto_restore_keeps_idle_for_retry(opt_module):
+    class RejectingFroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        async def restore_work_mode_from_idle(self):
+            self.restore_work_mode_from_idle_calls += 1
+            return False
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.75)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = RejectingFroniusEnergyCoordinator()
+    coordinator._last_executed_action = "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert coordinator.energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "idle"
+
+
 @pytest.mark.parametrize("failure_mode", ["unavailable", "rejected"])
 def test_sungrow_idle_never_falls_back_to_backup_reserve_write(
     opt_module,
