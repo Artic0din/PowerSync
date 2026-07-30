@@ -636,11 +636,15 @@ class AutomationEngine:
                 or data.get("foxess_coordinator")
                 or data.get("goodwe_coordinator")
                 or data.get("alphaess_coordinator")
+                or data.get("esy_sunhome_coordinator")
                 or data.get("solax_coordinator")
                 or data.get("esy_coordinator")
                 or data.get("saj_h2_coordinator")
                 or data.get("fronius_reserva_coordinator")
                 or data.get("neovolt_coordinator")
+                or data.get("solaredge_coordinator")
+                or data.get("anker_solix_coordinator")
+                or data.get("custom_energy_coordinator")
             )
 
             if coordinator and coordinator.data:

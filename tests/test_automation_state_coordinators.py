@@ -55,10 +55,15 @@ def test_automation_current_state_includes_supported_battery_coordinators():
         "foxess_coordinator",
         "goodwe_coordinator",
         "alphaess_coordinator",
+        "esy_sunhome_coordinator",
         "solax_coordinator",
         "esy_coordinator",
         "saj_h2_coordinator",
+        "fronius_reserva_coordinator",
         "neovolt_coordinator",
+        "solaredge_coordinator",
+        "anker_solix_coordinator",
+        "custom_energy_coordinator",
     ):
         assert coordinator_key in source
 
