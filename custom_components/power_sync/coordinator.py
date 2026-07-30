@@ -4091,7 +4091,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             session: aiohttp client session for API requests
             surcharge: Fixed surcharge in ct/kWh (network fees, levies)
             tax_percent: Tax percentage (e.g. 21 for Belgian VAT)
-            export_rate: Fixed feed-in rate in ct/kWh (0 = use wholesale price)
+            export_rate: Fixed feed-in rate in ct/kWh (0 = unconfigured)
         """
         from .epex_api import EPEXAPIClient
 
