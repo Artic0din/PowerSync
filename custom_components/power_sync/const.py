@@ -223,7 +223,17 @@ CONF_CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 CONF_SUNGROW_HOST = "sungrow_host"
 CONF_SUNGROW_PORT = "sungrow_port"
 CONF_SUNGROW_SLAVE_ID = "sungrow_slave_id"
+CONF_SUNGROW_CONNECTION_TYPE = "sungrow_connection_type"
+SUNGROW_CONNECTION_DIRECT = "direct"
+SUNGROW_CONNECTION_IHOMEMANAGER = "ihomemanager"
+SUNGROW_CONNECTION_TYPES = {
+    SUNGROW_CONNECTION_DIRECT: "Direct inverter / WiNet-S",
+    SUNGROW_CONNECTION_IHOMEMANAGER: (
+        "iHomeManager forwarding channel — telemetry only"
+    ),
+}
 DEFAULT_SUNGROW_PORT = 502
+DEFAULT_SUNGROW_IHOMEMANAGER_PORT = 503
 DEFAULT_SUNGROW_SLAVE_ID = 1
 
 # Dual Sungrow (secondary inverter, optional)

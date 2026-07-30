@@ -480,15 +480,17 @@
       },
       "sungrow": {
         "title": "Sungrow Modbus connection",
-        "description": "Connect to your Sungrow SH-series hybrid inverter via Modbus TCP.",
+        "description": "Connect directly to a Sungrow SH-series inverter, or read it through an iHomeManager plaintext forwarding channel. iHomeManager connections are telemetry-only.",
         "data": {
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Connect"
@@ -1046,6 +1048,7 @@
       "no_station_selected": "Select a Sigenergy station from the list to continue.",
       "modbus_host_required": "IP address is required -- enter the local IP of your Sigenergy inverter or gateway.",
       "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
+      "sungrow_ihomemanager_plaintext_port_required": "iHomeManager support requires a non-SSL forwarding channel on port 503 or 504. Enable that channel in iHomeManager settings and enter the matching port.",
       "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
       "sungrow_modbus_conflict": "The AC inverter curtailment path cannot use the same Sungrow Modbus IP, port, and slave ID as the battery system. Disable this option for a hybrid-only setup, or configure a separate AC-coupled/string inverter endpoint.",
       "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
@@ -1382,15 +1385,17 @@
       },
       "sungrow_connection": {
         "title": "Sungrow Modbus connection",
-        "description": "Update your Sungrow inverter Modbus settings. Changes take effect immediately.",
+        "description": "Update the direct Sungrow or telemetry-only iHomeManager forwarding connection. Changes take effect immediately.",
         "data": {
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Save"
@@ -1674,16 +1679,18 @@
       },
       "init_sungrow": {
         "title": "Sungrow settings",
-        "description": "Configure pricing and Sungrow Modbus connection. Modbus is required for energy data and battery control.",
+        "description": "Configure pricing and a direct Sungrow or telemetry-only iHomeManager Modbus forwarding connection.",
         "data": {
           "electricity_provider": "Electricity provider",
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Save"

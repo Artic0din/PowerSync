@@ -4131,9 +4131,11 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             current_prices = []
             forecast_prices = []
 
+            parsed_prices: list[
+                tuple[dict[str, Any], datetime, datetime | None]
+            ] = []
             for entry in prices:
                 starts_at_str = entry.get("startsAt", "")
-                total_ct = entry.get("total", 0)
 
                 if not starts_at_str:
                     continue
@@ -4142,9 +4144,39 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                     starts_at = datetime.fromisoformat(starts_at_str)
                     if starts_at.tzinfo is None:
                         starts_at = starts_at.replace(tzinfo=dt_util.UTC)
-                    ends_at = starts_at + timedelta(hours=1)
                 except (ValueError, TypeError):
                     continue
+
+                explicit_end = None
+                ends_at_str = entry.get("endsAt") or entry.get("endTime")
+                if ends_at_str:
+                    try:
+                        explicit_end = datetime.fromisoformat(ends_at_str)
+                        if explicit_end.tzinfo is None:
+                            explicit_end = explicit_end.replace(tzinfo=dt_util.UTC)
+                    except (ValueError, TypeError):
+                        explicit_end = None
+                parsed_prices.append((entry, starts_at, explicit_end))
+
+            parsed_prices.sort(key=lambda item: item[1])
+            default_duration = 15 if self.region.upper() == "BE" else 60
+
+            for index, (entry, starts_at, explicit_end) in enumerate(parsed_prices):
+                total_ct = entry.get("total", 0)
+                next_start = (
+                    parsed_prices[index + 1][1]
+                    if index + 1 < len(parsed_prices)
+                    else None
+                )
+                ends_at = explicit_end
+                if ends_at is None and next_start is not None and next_start > starts_at:
+                    ends_at = next_start
+                if ends_at is None or ends_at <= starts_at:
+                    ends_at = starts_at + timedelta(minutes=default_duration)
+                duration_minutes = max(
+                    1,
+                    int(round((ends_at - starts_at).total_seconds() / 60)),
+                )
 
                 # Determine interval type
                 if starts_at <= now < ends_at:
@@ -4156,11 +4188,13 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
 
                 # Import price entry (ct/kWh = Amber's perKwh format)
                 import_entry = {
+                    "startTime": starts_at.isoformat(),
+                    "endTime": ends_at.isoformat(),
                     "nemTime": ends_at.isoformat(),
                     "perKwh": total_ct,
                     "channelType": "general",
                     "type": interval_type,
-                    "duration": 60,
+                    "duration": duration_minutes,
                 }
 
                 # Export price: use fixed rate if configured. The EPEX
@@ -4192,11 +4226,13 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                         self._warned_export_rate_unset = True
 
                 export_entry = {
+                    "startTime": starts_at.isoformat(),
+                    "endTime": ends_at.isoformat(),
                     "nemTime": ends_at.isoformat(),
                     "perKwh": export_ct,
                     "channelType": "feedIn",
                     "type": interval_type,
-                    "duration": 60,
+                    "duration": duration_minutes,
                 }
 
                 if interval_type == "CurrentInterval":
@@ -4873,6 +4909,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         slave_id: int = 1,
         entry_id: str = "",
         ac_inverter_source_id: str | None = None,
+        telemetry_only: bool = False,
     ) -> None:
         """Initialize the coordinator.
 
@@ -4890,6 +4927,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self.slave_id = slave_id
         self._entry_id = entry_id
         self._ac_inverter_source_id = ac_inverter_source_id
+        self._telemetry_only = bool(telemetry_only)
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
         self._export_control_store = (
@@ -4935,6 +4973,16 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             name=f"{DOMAIN}_sungrow_energy",
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
+
+    def _native_control_allowed(self, operation: str) -> bool:
+        """Return whether this connection may write Sungrow registers."""
+        if not getattr(self, "_telemetry_only", False):
+            return True
+        _LOGGER.warning(
+            "%s blocked: Sungrow iHomeManager forwarding is telemetry-only",
+            operation,
+        )
+        return False
 
     def _update_total_baselines(self, data: dict) -> None:
         """Track midnight baselines for total import/export registers.
@@ -5279,6 +5327,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "load_power": load_kw,  # kW
                 "battery_level": raw_soc,  # %
                 "last_update": dt_util.utcnow(),
+                "control_available": not getattr(self, "_telemetry_only", False),
+                "telemetry_source": (
+                    "sungrow_ihomemanager"
+                    if getattr(self, "_telemetry_only", False)
+                    else "sungrow_direct"
+                ),
                 # Sungrow-specific data
                 "battery_soh": data.get("battery_soh"),  # % State of Health
                 "battery_voltage": data.get("battery_voltage"),
@@ -5352,6 +5406,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow force charge"):
+            return False
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
             return await self._controller.force_charge(power_w=target_power_w)
@@ -5366,6 +5422,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow force discharge"):
+            return False
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
             return await self._controller.force_discharge(power_w=target_power_w)
@@ -5382,6 +5440,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         limit so home load spikes can still be served by the battery, and use
         Sungrow's export-limit register to constrain export to grid.
         """
+        if not self._native_control_allowed("Sungrow force grid export"):
+            return False
         async with self._modbus_lock, self._controller:
             target_export_w = max(0, int(round(export_limit_w or 0)))
 
@@ -5464,6 +5524,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow restore normal"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             export_limit_ok = await self._restore_captured_export_limit()
@@ -5480,6 +5542,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set maximum SOC"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_max_soc(percent)
 
@@ -5492,11 +5556,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set backup reserve"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_backup_reserve(percent)
 
     async def set_backup_mode(self) -> bool:
         """Block Sungrow discharge for IDLE while still allowing battery charge."""
+        if not self._native_control_allowed("Sungrow set backup mode"):
+            return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
             limit_ok = await self._controller.set_discharge_rate_limit(0)
@@ -5508,6 +5576,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_no_discharge_mode(self) -> bool:
         """Block Sungrow battery discharge while still allowing battery charge."""
+        if not self._native_control_allowed("Sungrow set no-discharge mode"):
+            return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
             limit_ok = await self._controller.set_discharge_rate_limit(0)
@@ -5517,6 +5587,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sungrow from scheduled EV no-discharge preserve mode."""
+        if not self._native_control_allowed("Sungrow restore no-discharge mode"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             limit_ok = await self._restore_captured_discharge_limit()
@@ -5617,6 +5689,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def async_restore_persisted_export_control(self) -> bool:
         """Recover an optimizer-owned Sungrow export limit after a reload."""
+        if not self._native_control_allowed(
+            "Sungrow restore persisted export control"
+        ):
+            return False
         store = getattr(self, "_export_control_store", None)
         if store is None:
             return True
@@ -5996,6 +6072,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode and discharge limit after IDLE."""
+        if not self._native_control_allowed("Sungrow restore from idle"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             charge_limit_ok = await self._restore_captured_charge_limit()
@@ -6011,6 +6089,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set charge rate limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_charge_rate_limit(kw)
 
@@ -6023,6 +6103,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set discharge rate limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_discharge_rate_limit(kw)
 
@@ -6035,6 +6117,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set export limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_export_limit(watts)
 

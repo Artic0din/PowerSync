@@ -111,6 +111,25 @@ def test_first_setup_before_quota_windows_establishes_authoritative_baselines() 
     assert ledger.bucket("free").effective_price_c_per_kwh == 0
 
 
+def test_single_direction_rule_requires_only_its_meter_baseline() -> None:
+    rule = QuotaRule(
+        "free",
+        "import",
+        "Australia/Brisbane",
+        (("11:00", "14:00"),),
+        24,
+        8.101,
+        8.101,
+    )
+    ledger = QuotaLedger((rule,))
+    before_window = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+
+    ledger.observe_cumulative("import", 100.0, before_window)
+
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.bucket("free").effective_price_c_per_kwh == 0
+
+
 def test_saved_pre_window_unknown_baseline_recovers_after_upgrade() -> None:
     first_sample = datetime(2026, 7, 14, 8, 59, tzinfo=AEST)
     state = QuotaLedgerState(

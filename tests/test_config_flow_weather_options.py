@@ -1784,7 +1784,8 @@ def test_options_optimization_uses_effective_battery_system():
     assert "battery_system = self._effective_battery_system()" in method_source
     assert "is_custom = battery_system == BATTERY_SYSTEM_CUSTOM" in method_source
     assert "if is_custom:\n                optimization_provider = OPT_PROVIDER_POWERSYNC" in method_source
-    assert "if is_custom:\n                monitoring_mode = True" in method_source
+    assert "if is_custom or is_sungrow_ihomemanager:" in method_source
+    assert "monitoring_mode = True" in method_source
 
 
 def test_anker_and_alphaess_have_options_connection_pages():
@@ -2118,6 +2119,38 @@ def test_sungrow_options_flow_removes_retired_dual_config():
     assert "return self.async_create_entry(title=\"\", data=new_options)" in method_source
     assert "CONF_SUNGROW_HOST_2" not in method_source
     assert "CONF_SUNGROW_BATTERY_CAPACITY_2" not in method_source
+
+
+def test_sungrow_options_support_telemetry_only_ihomemanager_forwarding():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_sungrow_connection")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "CONF_SUNGROW_CONNECTION_TYPE" in method_source
+    assert "SUNGROW_CONNECTION_TYPES.items()" in method_source
+    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in method_source
+    assert "int(sungrow_port) not in (503, 504)" in method_source
+    assert "new_data[CONF_MONITORING_MODE] = True" in method_source
+    assert "new_options[CONF_MONITORING_MODE] = True" in method_source
+    assert "await async_prepare_monitoring_handoff(" in method_source
+
+
+def test_sungrow_init_options_clean_up_control_before_ihomemanager_switch():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_init_sungrow")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in method_source
+    assert "new_data[CONF_MONITORING_MODE] = True" in method_source
+    assert "new_options[CONF_MONITORING_MODE] = True" in method_source
+    assert "await async_prepare_monitoring_handoff(" in method_source
+    assert method_source.index(
+        "await async_prepare_monitoring_handoff("
+    ) < method_source.index(
+        "self.hass.config_entries.async_update_entry("
+    )
 
 
 def test_sungrow_dual_setup_is_not_used_at_runtime():

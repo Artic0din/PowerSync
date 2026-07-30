@@ -199,11 +199,16 @@ from .const import (
     ALPHAESS_CONNECTION_MODBUS_CLOUD,
     ALPHAESS_CONNECTION_CLOUD_ONLY,
     # Sungrow battery system configuration
+    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
+    DEFAULT_SUNGROW_IHOMEMANAGER_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    SUNGROW_CONNECTION_DIRECT,
+    SUNGROW_CONNECTION_IHOMEMANAGER,
+    SUNGROW_CONNECTION_TYPES,
     CONF_SUNGROW_HOST_2,
     CONF_SUNGROW_PORT_2,
     CONF_SUNGROW_SLAVE_ID_2,
@@ -605,6 +610,7 @@ BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
         CONF_SIGENERGY_MODBUS_SLAVE_ID,
     ),
     BATTERY_SYSTEM_SUNGROW: (
+        CONF_SUNGROW_CONNECTION_TYPE,
         CONF_SUNGROW_HOST,
         CONF_SUNGROW_PORT,
         CONF_SUNGROW_SLAVE_ID,
@@ -2564,6 +2570,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
         if self._ml_options:
             data.update(self._ml_options)
+        if data.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            # iHomeManager is an explicitly telemetry-only forwarding path.
+            # Never allow later optimizer defaults to turn control back on.
+            data[CONF_MONITORING_MODE] = True
 
         # Tesla EV API provider (chosen during async_step_tesla_provider).
         # Defaults to "none" so non-Tesla setups stay clean.
@@ -5000,12 +5013,26 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             host = user_input.get(CONF_SUNGROW_HOST, "").strip()
-            port = user_input.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            port = user_input.get(CONF_SUNGROW_PORT, default_port)
             slave_id = user_input.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
 
             if not host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
             else:
                 # Test Modbus connection
                 test_result = await test_sungrow_connection(
@@ -5015,12 +5042,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if test_result["success"]:
                     # Store Sungrow configuration
                     self._sungrow_data = {
+                        CONF_SUNGROW_CONNECTION_TYPE: connection_type,
                         CONF_SUNGROW_HOST: host,
                         CONF_SUNGROW_PORT: port,
                         CONF_SUNGROW_SLAVE_ID: slave_id,
                     }
+                    if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                        self._sungrow_data[CONF_MONITORING_MODE] = True
                     _LOGGER.info(
-                        "Sungrow Modbus connection successful: host=%s, SOC=%.1f%%, SOH=%.1f%%",
+                        "Sungrow %s Modbus connection successful: host=%s, SOC=%.1f%%, SOH=%.1f%%",
+                        connection_type,
                         host,
                         test_result.get("battery_soc", 0),
                         test_result.get("battery_soh", 0),
@@ -5034,6 +5065,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sungrow",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=SUNGROW_CONNECTION_DIRECT,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(CONF_SUNGROW_HOST): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
@@ -9143,34 +9186,99 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(sungrow_port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
             else:
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_port = user_input.get(
-                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
-                )
                 sungrow_slave_id = user_input.get(
                     CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
                 )
+                new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
                 new_data[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                new_options[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_options[CONF_SUNGROW_HOST] = modbus_host
                 new_options[CONF_SUNGROW_PORT] = sungrow_port
                 new_options[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
+                monitoring_handoff = (
+                    connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                    and not bool(
+                        self._get_option(
+                            CONF_MONITORING_MODE,
+                            self.config_entry.data.get(
+                                CONF_MONITORING_MODE,
+                                False,
+                            ),
+                        )
+                    )
                 )
+                if monitoring_handoff:
+                    try:
+                        await async_prepare_monitoring_handoff(
+                            self.hass,
+                            self.config_entry,
+                        )
+                    except Exception as err:
+                        finish_monitoring_handoff(self.hass, self.config_entry)
+                        _LOGGER.warning(
+                            "Sungrow iHomeManager telemetry-only mode was not "
+                            "enabled because control cleanup failed: %s",
+                            err,
+                        )
+                        return self.async_abort(
+                            reason="monitoring_cleanup_failed"
+                        )
+                try:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data=new_data,
+                        options=new_options,
+                    )
+                finally:
+                    if monitoring_handoff:
+                        finish_monitoring_handoff(
+                            self.hass,
+                            self.config_entry,
+                        )
                 self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=new_options)
 
+        current_connection_type = self._get_option(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        )
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
-        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_port = self._get_option(
+            CONF_SUNGROW_PORT,
+            (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if current_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            ),
+        )
         current_slave_id = self._get_option(
             CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
         )
@@ -9179,6 +9287,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="sungrow_connection",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=current_connection_type,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,
@@ -10314,6 +10434,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         battery_system = self._effective_battery_system()
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
         is_custom = battery_system == BATTERY_SYSTEM_CUSTOM
+        is_sungrow_ihomemanager = (
+            battery_system == BATTERY_SYSTEM_SUNGROW
+            and self._get_option(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
+            == SUNGROW_CONNECTION_IHOMEMANAGER
+        )
         if user_input is not None:
             optimization_provider = user_input.get(
                 CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
@@ -10355,7 +10483,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
             new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
             monitoring_mode = bool(user_input.get(CONF_MONITORING_MODE, False))
-            if is_custom:
+            if is_custom or is_sungrow_ihomemanager:
                 monitoring_mode = True
             new_data[CONF_MONITORING_MODE] = monitoring_mode
             new_options[CONF_MONITORING_MODE] = monitoring_mode
@@ -11693,9 +11821,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             # Validate Modbus host
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(sungrow_port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
             else:
                 # Store provider and Sungrow settings
                 self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -11703,24 +11846,66 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 # Update config entry data with Sungrow Modbus settings
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_port = user_input.get(
-                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
-                )
                 sungrow_slave_id = user_input.get(
                     CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
                 )
+                new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
                 new_data[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                new_options[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_options[CONF_SUNGROW_HOST] = modbus_host
                 new_options[CONF_SUNGROW_PORT] = sungrow_port
                 new_options[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
                 if not errors:
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry, data=new_data, options=new_options
+                    monitoring_handoff = (
+                        connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                        and not bool(
+                            self._get_option(
+                                CONF_MONITORING_MODE,
+                                self.config_entry.data.get(
+                                    CONF_MONITORING_MODE,
+                                    False,
+                                ),
+                            )
+                        )
                     )
+                    if monitoring_handoff:
+                        try:
+                            await async_prepare_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
+                        except Exception as err:
+                            finish_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
+                            _LOGGER.warning(
+                                "Sungrow iHomeManager telemetry-only mode was "
+                                "not enabled because control cleanup failed: %s",
+                                err,
+                            )
+                            return self.async_abort(
+                                reason="monitoring_cleanup_failed"
+                            )
+                    try:
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry,
+                            data=new_data,
+                            options=new_options,
+                        )
+                    finally:
+                        if monitoring_handoff:
+                            finish_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
 
                     # Route to provider-specific step
                     if self._provider == "amber":
@@ -11737,8 +11922,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_connection_type = self._get_option(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        )
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
-        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_port = self._get_option(
+            CONF_SUNGROW_PORT,
+            (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if current_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            ),
+        )
         current_slave_id = self._get_option(
             CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
         )
@@ -11756,6 +11952,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                     )),
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=current_connection_type,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,

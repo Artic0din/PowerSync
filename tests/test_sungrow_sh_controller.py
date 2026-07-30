@@ -689,6 +689,7 @@ class _FakeEnergyAccumulator:
 def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator = SungrowEnergyCoordinator.__new__(SungrowEnergyCoordinator)
     coordinator._controller = fake_controller
+    coordinator._telemetry_only = False
     coordinator._modbus_lock = asyncio.Lock()
     coordinator._total_import_baseline = None
     coordinator._total_export_baseline = None
@@ -699,6 +700,60 @@ def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator._ac_inverter_daily_energy_kwh = None
     coordinator._ac_inverter_daily_energy_date = None
     return coordinator
+
+
+def test_sungrow_ihomemanager_telemetry_only_blocks_all_native_writes():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class WriteTrap:
+        def __getattr__(self, name):
+            raise AssertionError(f"telemetry-only path attempted controller access: {name}")
+
+    async def run_checks():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            WriteTrap(),
+        )
+        coordinator._telemetry_only = True
+
+        results = [
+            await coordinator.force_charge(),
+            await coordinator.force_discharge(),
+            await coordinator.force_grid_export(export_limit_w=5000),
+            await coordinator.restore_normal(),
+            await coordinator.set_max_soc(90),
+            await coordinator.set_backup_reserve(20),
+            await coordinator.set_backup_mode(),
+            await coordinator.set_no_discharge_mode(),
+            await coordinator.restore_no_discharge_mode(),
+            await coordinator.async_restore_persisted_export_control(),
+            await coordinator.restore_work_mode_from_idle(),
+            await coordinator.set_charge_rate_limit(2.5),
+            await coordinator.set_discharge_rate_limit(2.5),
+            await coordinator.set_export_limit(5000),
+        ]
+
+        return results
+
+    try:
+        results = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert results == [False] * 14
+
+
+def test_sungrow_direct_connection_keeps_native_control_enabled():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        assert coordinator._native_control_allowed("test write") is True
+    finally:
+        restore()
 
 
 def test_sungrow_coordinator_combines_separate_ac_inverter_solar_telemetry():

@@ -41,6 +41,91 @@ SOLAR_SOAK_10AM_2PM = [
 
 
 TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "ergon_solar_sharer_12f_2026": {
+        "id": "ergon_solar_sharer_12f_2026",
+        "template_id": "ergon_solar_sharer_12f_2026",
+        "name": "Ergon Energy Solar Sharer (12F) — 2026",
+        "utility": "Ergon Energy",
+        "description": (
+            "Official rates from 1 July 2026: first 24 kWh free from "
+            "11am-2pm, then 8.101 c/kWh; 8.101 c/kWh 2-4pm, "
+            "48.902 c/kWh 4-9pm, and 26.412 c/kWh 9pm-11am. "
+            "Set your applicable feed-in tariff before saving."
+        ),
+        "currency": "AUD",
+        "daily_supply_charge": 1.77853,
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "SUPER_OFF_PEAK": [
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 11,
+                            "toHour": 14,
+                        }
+                    ],
+                    "SHOULDER": [
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 14,
+                            "toHour": 16,
+                        }
+                    ],
+                    "PEAK": [
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 16,
+                            "toHour": 21,
+                        }
+                    ],
+                    "OFF_PEAK": [
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 11,
+                        },
+                    ],
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "SUPER_OFF_PEAK": 0.08101,
+                "SHOULDER": 0.08101,
+                "PEAK": 0.48902,
+                "OFF_PEAK": 0.26412,
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.0,
+                }
+            }
+        },
+        "import_quota": {
+            "enabled": True,
+            "name": "Solar Sharer free allowance",
+            "timezone_token": "Australia/Brisbane",
+            "windows": [["11:00", "14:00"]],
+            "daily_cap_kwh": 24.0,
+            "base_price_c_per_kwh": 8.101,
+            "bonus_price_c_per_kwh": 8.101,
+            "stop_grid_charging_at_quota": True,
+        },
+    },
     "globird_tou": {
         "id": "globird_tou",
         "name": "Globird Time of Use",

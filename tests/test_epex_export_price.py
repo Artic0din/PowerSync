@@ -171,3 +171,69 @@ def test_epex_configured_export_rate_branch_is_unchanged():
     assert export_entries[0]["perKwh"] == -8.5
     # Configured-rate branch never needs the "not configured" warning.
     assert len(warnings) == 0
+
+
+def test_epex_belgium_preserves_native_quarter_hour_boundaries():
+    warnings: list = []
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[
+            {
+                "startsAt": "2026-07-08T10:30:00+00:00",
+                "total": 21.0,
+            },
+            {
+                "startsAt": "2026-07-08T10:45:00+00:00",
+                "total": 18.0,
+            },
+            {
+                "startsAt": "2026-07-08T11:00:00+00:00",
+                "total": 15.0,
+            },
+        ],
+        warnings=warnings,
+    )
+    self_obj.region = "BE"
+
+    data = _run_update_data(self_obj, warnings)
+    imports = [
+        entry
+        for entry in data["current"] + data["forecast"]
+        if entry["channelType"] == "general"
+    ]
+
+    assert [entry["duration"] for entry in imports] == [15, 15, 15]
+    assert imports[0]["startTime"] == "2026-07-08T10:30:00+00:00"
+    assert imports[0]["endTime"] == "2026-07-08T10:45:00+00:00"
+    assert imports[0]["nemTime"] == imports[0]["endTime"]
+    assert imports[1]["startTime"] == imports[0]["endTime"]
+
+
+def test_epex_explicit_interval_end_takes_precedence_over_inference():
+    warnings: list = []
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[
+            {
+                "startsAt": "2026-07-08T10:30:00+00:00",
+                "endsAt": "2026-07-08T10:50:00+00:00",
+                "total": 21.0,
+            },
+            {
+                "startsAt": "2026-07-08T11:00:00+00:00",
+                "total": 15.0,
+            },
+        ],
+        warnings=warnings,
+    )
+    self_obj.region = "BE"
+
+    data = _run_update_data(self_obj, warnings)
+    current_import = next(
+        entry
+        for entry in data["current"]
+        if entry["channelType"] == "general"
+    )
+
+    assert current_import["duration"] == 20
+    assert current_import["endTime"] == "2026-07-08T10:50:00+00:00"

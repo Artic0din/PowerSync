@@ -672,11 +672,14 @@ from .const import (
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
     # Sungrow battery system configuration
+    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    SUNGROW_CONNECTION_DIRECT,
+    SUNGROW_CONNECTION_IHOMEMANAGER,
     # FoxESS battery system configuration
     BATTERY_SYSTEM_FOXESS,
     CONF_FOXESS_HOST,
@@ -11768,6 +11771,33 @@ class CustomTariffView(HomeAssistantView):
                     status=400
                 )
 
+            raw_import_quota = data.get("import_quota")
+            if (
+                isinstance(raw_import_quota, dict)
+                and raw_import_quota.get("enabled", True) is not False
+            ):
+                from .tariff_quota import custom_tariff_import_quota_rule
+
+                quota_rule = custom_tariff_import_quota_rule(
+                    data,
+                    default_timezone=getattr(
+                        getattr(self._hass, "config", None),
+                        "time_zone",
+                        "LOCAL",
+                    ),
+                )
+                if quota_rule is None:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Import allowance requires a valid HH:MM window, "
+                                "positive daily kWh cap, and non-negative prices"
+                            ),
+                        },
+                        status=400,
+                    )
+
             entry_data = self._get_entry_data()
             entry = entry_data.get("entry") if entry_data else None
             tariff_currency = normalize_currency(
@@ -19105,6 +19135,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and not alphaess_coordinator.supports_dispatch
         ):
             return True
+        if entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            return True
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if isinstance(entry_data, dict) and entry_data.get(
             "_monitoring_handoff_active", False
@@ -19501,6 +19539,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Running in Sungrow mode - Tesla credentials not required")
 
         # Initialize Sungrow Modbus coordinator
+        sungrow_connection_type = entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        )
+        sungrow_telemetry_only = (
+            sungrow_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+        )
         sungrow_host = entry.options.get(
             CONF_SUNGROW_HOST,
             entry.data.get(CONF_SUNGROW_HOST)
@@ -19514,8 +19562,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
         )
         _LOGGER.info(
-            "Initializing Sungrow Modbus coordinator: %s:%s (slave %s)",
-            sungrow_host, sungrow_port, sungrow_slave_id
+            "Initializing Sungrow %s Modbus coordinator: %s:%s (slave %s%s)",
+            sungrow_connection_type,
+            sungrow_host,
+            sungrow_port,
+            sungrow_slave_id,
+            ", telemetry only" if sungrow_telemetry_only else "",
         )
         ac_inverter_enabled = entry.options.get(
             CONF_AC_INVERTER_CURTAILMENT_ENABLED,
@@ -19562,6 +19614,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             slave_id=sungrow_slave_id,
             entry_id=entry.entry_id,
             ac_inverter_source_id=ac_inverter_source_id,
+            telemetry_only=sungrow_telemetry_only,
         )
 
     elif is_foxess:

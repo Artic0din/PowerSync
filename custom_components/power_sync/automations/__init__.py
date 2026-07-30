@@ -37,6 +37,7 @@ class AutomationStore:
         self._hass = hass
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: Dict[str, Any] = {"automations": [], "next_id": 1, "push_tokens": {}}
+        self._runtime_dirty = False
 
     async def async_load(self) -> None:
         """Load automations from storage."""
@@ -52,6 +53,7 @@ class AutomationStore:
     async def async_save(self) -> None:
         """Save automations to storage."""
         await self._store.async_save(self._data)
+        self._runtime_dirty = False
 
     def get_all(self) -> List[Dict[str, Any]]:
         """Get all automations."""
@@ -107,6 +109,7 @@ class AutomationStore:
             "last_triggered_at": None,
             "last_evaluated_value": None,
             "last_evaluated_at": None,
+            "trigger_runtime": None,
         }
 
         self._data["automations"].append(automation)
@@ -136,6 +139,7 @@ class AutomationStore:
                     # Reset trigger state when trigger config changes
                     # This allows re-evaluation with fresh state (e.g., after changing time window)
                     auto["last_evaluated_value"] = None
+                    auto["trigger_runtime"] = None
                     _LOGGER.debug(f"Reset trigger state for automation {automation_id} due to trigger config change")
                 if "actions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
@@ -195,6 +199,34 @@ class AutomationStore:
                 auto["last_evaluated_value"] = value
                 auto["last_evaluated_at"] = datetime.utcnow().isoformat() + "Z"
                 break
+
+    def get_trigger_runtime(self, automation_id: int) -> Optional[Dict[str, Any]]:
+        """Return persisted runtime state for a stateful trigger."""
+        automation = self.get_by_id(automation_id)
+        if not automation:
+            return None
+        runtime = automation.get("trigger_runtime")
+        return dict(runtime) if isinstance(runtime, dict) else None
+
+    def update_trigger_runtime(
+        self,
+        automation_id: int,
+        runtime: Optional[Dict[str, Any]],
+    ) -> None:
+        """Update stateful trigger runtime and mark it for periodic persistence."""
+        automation = self.get_by_id(automation_id)
+        if not automation:
+            return
+        new_runtime = dict(runtime) if isinstance(runtime, dict) else None
+        if automation.get("trigger_runtime") == new_runtime:
+            return
+        automation["trigger_runtime"] = new_runtime
+        self._runtime_dirty = True
+
+    @property
+    def runtime_dirty(self) -> bool:
+        """Return whether stateful trigger runtime needs persistence."""
+        return self._runtime_dirty
 
     def mark_triggered(self, automation_id: int) -> None:
         """Mark automation as triggered."""
@@ -390,6 +422,7 @@ class AutomationEngine:
         self._weather_cache_time: Optional[datetime] = None
         self._tariff_cache: Optional[Dict[str, Any]] = None
         self._tariff_cache_time: Optional[datetime] = None
+        self._last_runtime_save: Optional[datetime] = None
 
     async def async_evaluate_all(self) -> int:
         """
@@ -485,6 +518,15 @@ class AutomationEngine:
                 except Exception:
                     pass
 
+        if self._store.runtime_dirty:
+            now_utc = datetime.now(timezone.utc)
+            if (
+                self._last_runtime_save is None
+                or (now_utc - self._last_runtime_save).total_seconds() >= 60
+            ):
+                await self._store.async_save()
+                self._last_runtime_save = now_utc
+
         return triggered_count
 
     async def _async_get_current_state(self) -> Dict[str, Any]:
@@ -553,6 +595,8 @@ class AutomationEngine:
             "battery_percent": None,
             "solar_power_kw": None,
             "grid_import_kw": None,
+            "grid_import_energy_power_kw": None,
+            "grid_import_today_kwh": None,
             "grid_export_kw": None,
             "home_usage_kw": None,
             "battery_charge_kw": None,
@@ -619,10 +663,30 @@ class AutomationEngine:
                 # Grid: positive = import, negative = export
                 if grid_w >= 0:
                     state["grid_import_kw"] = grid_w / 1000
+                    # Coordinator energy data is normalized to kW. Keep this
+                    # dedicated value correctly scaled for the cumulative
+                    # energy fallback without changing legacy flow-trigger
+                    # behavior.
+                    state["grid_import_energy_power_kw"] = grid_w
                     state["grid_export_kw"] = 0
                 else:
                     state["grid_import_kw"] = 0
                     state["grid_export_kw"] = abs(grid_w) / 1000
+
+                energy_summary = coord_data.get("energy_summary")
+                if isinstance(energy_summary, dict):
+                    grid_import_today = energy_summary.get(
+                        "grid_import_today_kwh"
+                    )
+                    try:
+                        grid_import_today = float(grid_import_today)
+                    except (TypeError, ValueError):
+                        grid_import_today = None
+                    if (
+                        grid_import_today is not None
+                        and grid_import_today >= 0
+                    ):
+                        state["grid_import_today_kwh"] = grid_import_today
 
                 # Battery: positive = discharge, negative = charge
                 if battery_w >= 0:

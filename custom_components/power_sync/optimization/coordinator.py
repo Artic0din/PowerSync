@@ -54,6 +54,12 @@ from ..quota import (
     import_legacy_settled_state,
     tariff_datetime,
 )
+from ..tariff_quota import (
+    CUSTOM_TARIFF_IMPORT_RULE_ID,
+    custom_tariff_import_quota_rule,
+    custom_tariff_quota_contract,
+    custom_tariff_quota_hash,
+)
 from ..tariff_time import find_matching_tou_period, period_entries
 from ..zerohero import (
     ZeroHeroConfig,
@@ -413,6 +419,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_import_bonus_caps_by_group: dict[str, float] | None = None
         self._last_export_bonus_caps_by_group: dict[str, float] | None = None
         self._covau_ledger: QuotaLedger | None = None
+        self._custom_tariff_quota_ledger: QuotaLedger | None = None
+        self._custom_tariff_quota_hash: str | None = None
         self._globird_quota_state: QuotaLedgerState | None = None
         self._covau_snapshot_cache: CovaUPlanSnapshot | None = None
         self._covau_snapshot_hash: str | None = None
@@ -421,6 +429,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "import": 0.0,
             "export": 0.0,
         }
+        self._pending_custom_tariff_quota_settlement = 0.0
         self._solar_nowcast_derate: float = 1.0
         self._last_solar_nowcast_ratio: float | None = None
         self._last_logged_solar_nowcast_derate: float | None = None
@@ -2609,6 +2618,118 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "export": pending.get("export", 0.0) + delta["export"],
         }
 
+    def _custom_tariff(self) -> dict[str, Any] | None:
+        """Return the entry's editable custom tariff, when available."""
+        from ..const import DOMAIN
+
+        runtime_entry_id = getattr(
+            self,
+            "entry_id",
+            getattr(getattr(self, "_entry", None), "entry_id", ""),
+        )
+        store = (
+            self.hass.data.get(DOMAIN, {})
+            .get(runtime_entry_id, {})
+            .get("automation_store")
+        )
+        tariff = store.get_custom_tariff() if store is not None else None
+        return tariff if isinstance(tariff, dict) else None
+
+    def _ensure_custom_tariff_quota_ledger(
+        self,
+        state: QuotaLedgerState | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[dict[str, Any], Any, QuotaLedger, str] | None:
+        """Return the current custom-tariff quota contract and ledger."""
+        tariff = self._custom_tariff()
+        if tariff is None:
+            return None
+        rule = custom_tariff_import_quota_rule(
+            tariff,
+            default_timezone=getattr(
+                getattr(self.hass, "config", None),
+                "time_zone",
+                "LOCAL",
+            ),
+        )
+        if rule is None:
+            return None
+        content_hash = custom_tariff_quota_hash(tariff, rule)
+        cached_hash = getattr(self, "_custom_tariff_quota_hash", None)
+        if cached_hash is not None and cached_hash != content_hash:
+            self._custom_tariff_quota_ledger = None
+        ledger = getattr(self, "_custom_tariff_quota_ledger", None)
+        if ledger is None or state is not None:
+            ledger = QuotaLedger((rule,), state)
+            self._custom_tariff_quota_ledger = ledger
+        self._custom_tariff_quota_hash = content_hash
+        ledger.advance_to(now or dt_util.now())
+        return tariff, rule, ledger, content_hash
+
+    @staticmethod
+    def _energy_summary_total_kwh(
+        data: dict[str, Any],
+        direction: str,
+    ) -> float | None:
+        """Return a validated daily cumulative import/export total."""
+        summary = data.get("energy_summary")
+        if not isinstance(summary, dict):
+            return None
+        value = summary.get(f"grid_{direction}_today_kwh")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+    def _settle_custom_tariff_quota_measurements(
+        self,
+        now: datetime,
+        grid_import_kw: float,
+    ) -> float:
+        """Settle the custom import allowance from measured site energy."""
+        runtime = self._ensure_custom_tariff_quota_ledger(now=now)
+        if runtime is None:
+            return 0.0
+        _tariff, _rule, ledger, _content_hash = runtime
+        data = self._get_energy_data() or {}
+        total_kwh = self._energy_summary_total_kwh(data, "import")
+        if total_kwh is not None:
+            settled = ledger.observe_cumulative("import", total_kwh, now)
+        else:
+            settled = ledger.observe_power(
+                "import",
+                max(0.0, grid_import_kw) * 1000.0,
+                now,
+            )
+        self._schedule_cost_save()
+        return settled
+
+    def _capture_provider_quota_measurements_before_plan(self) -> None:
+        """Settle the active provider allowance before calculating caps."""
+        if self._provider_key() == "covau":
+            self._capture_covau_measurements_before_plan()
+            return
+        runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
+        if runtime is None:
+            return
+        data = self._get_energy_data()
+        if not data:
+            return
+        try:
+            grid_power_kw = float(data.get("grid_power", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        settled = self._settle_custom_tariff_quota_measurements(
+            dt_util.now(),
+            max(0.0, grid_power_kw),
+        )
+        self._pending_custom_tariff_quota_settlement = (
+            getattr(self, "_pending_custom_tariff_quota_settlement", 0.0)
+            + settled
+        )
+
     def _covau_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Build local-time CovaU base prices and marginal quota bonuses."""
         runtime = self._ensure_covau_ledger(now=dt_util.now())
@@ -2714,6 +2835,66 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if export_cap > 0 and any(export_bonus):
             _LOGGER.info("CovaU optimizer: %.2fkWh premium-export quota remaining", export_cap)
 
+    def _apply_custom_tariff_quota_optimizer_inputs(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+    ) -> None:
+        """Apply a custom tariff's capped import allowance to the solve."""
+        n = min(len(import_prices), len(export_prices))
+        self._last_zerocharge_bonus_prices = [0.0] * n
+        self._last_zerocharge_bonus_cap_kwh = 0.0
+        self._last_zerohero_bonus_prices = [0.0] * n
+        self._last_zerohero_bonus_cap_kwh = 0.0
+        self._last_import_bonus_group_ids = None
+        self._last_export_bonus_group_ids = None
+        self._last_import_bonus_caps_by_group = None
+        self._last_export_bonus_caps_by_group = None
+        runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
+        if runtime is None or n <= 0:
+            return
+        _tariff, rule, ledger, _content_hash = runtime
+        if ledger.state.confidence == "unknown":
+            return
+
+        timestamps = self._price_timestamps(n)
+        current_day = ledger.state.tariff_day
+        bonuses = [0.0] * n
+        groups: list[str | None] = []
+        caps: dict[str, float] = {}
+        bonus_price = rule.bonus_price_c_per_kwh / 100.0
+        for idx, timestamp in enumerate(timestamps):
+            if not rule.contains(timestamp):
+                groups.append(None)
+                continue
+            day = tariff_datetime(timestamp, rule.timezone_token).date().isoformat()
+            groups.append(day)
+            bonuses[idx] = bonus_price
+            caps[day] = (
+                ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID)
+                if day == current_day
+                else rule.daily_cap_kwh
+            )
+            if idx < len(self._last_display_import_prices or []):
+                self._last_display_import_prices[idx] = max(
+                    0.0,
+                    import_prices[idx] - bonus_price,
+                )
+
+        self._last_zerocharge_bonus_prices = bonuses
+        self._last_import_bonus_group_ids = groups
+        self._last_import_bonus_caps_by_group = caps
+        self._last_zerocharge_bonus_cap_kwh = sum(caps.values())
+        if self._last_display_import_prices:
+            self._last_grid_charge_cap_import_prices = list(
+                self._last_display_import_prices
+            )
+        if caps and any(bonuses):
+            _LOGGER.info(
+                "Custom tariff optimizer: %.2fkWh import allowance remaining today",
+                ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID),
+            )
+
     def _set_covau_bonus_groups(
         self,
         snapshot: CovaUPlanSnapshot,
@@ -2760,6 +2941,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Apply capped-tariff inputs without changing provider semantics."""
         if self._provider_key() == "covau":
             self._apply_covau_optimizer_inputs(import_prices, export_prices)
+            return
+        if self._ensure_custom_tariff_quota_ledger(now=dt_util.now()) is not None:
+            self._apply_custom_tariff_quota_optimizer_inputs(
+                import_prices,
+                export_prices,
+            )
             return
         self._apply_zerohero_optimizer_inputs(import_prices, export_prices)
 
@@ -2825,19 +3012,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_provider_contract(self) -> dict[str, Any] | None:
         """Return the stable provider/runtime contract used by HA and mobile."""
         runtime = self._ensure_covau_ledger(now=dt_util.now())
-        if runtime is None:
-            return None
-        snapshot, ledger = runtime
-        planned_import, planned_export = self._covau_planned_quota_kwh()
-        return covau_provider_contract(
-            snapshot,
-            ledger,
-            planned_import_kwh=planned_import,
-            planned_export_kwh=planned_export,
-            now=dt_util.now(),
-            import_energy_entity=self._covau_energy_entity_id("import"),
-            export_energy_entity=self._covau_energy_entity_id("export"),
+        if runtime is not None:
+            snapshot, ledger = runtime
+            planned_import, planned_export = self._covau_planned_quota_kwh()
+            return covau_provider_contract(
+                snapshot,
+                ledger,
+                planned_import_kwh=planned_import,
+                planned_export_kwh=planned_export,
+                now=dt_util.now(),
+                import_energy_entity=self._covau_energy_entity_id("import"),
+                export_energy_entity=self._covau_energy_entity_id("export"),
+            )
+        custom_runtime = self._ensure_custom_tariff_quota_ledger(
+            now=dt_util.now()
         )
+        if custom_runtime is None:
+            return None
+        tariff, rule, ledger, _content_hash = custom_runtime
+        return custom_tariff_quota_contract(tariff, rule, ledger)
 
     def _zerohero_config(self) -> ZeroHeroConfig | None:
         """Return resolved GloBird ZeroHero settings for this entry."""
@@ -2922,6 +3115,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_zerohero_bonus_cap_kwh = None
         self._last_zerocharge_bonus_prices = [0.0] * n
         self._last_zerocharge_bonus_cap_kwh = None
+        self._last_import_bonus_group_ids = None
+        self._last_export_bonus_group_ids = None
+        self._last_import_bonus_caps_by_group = None
+        self._last_export_bonus_caps_by_group = None
 
         config = self._zerohero_config()
         if config is None or n <= 0:
@@ -4278,7 +4475,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Collect forecast data
             self._last_export_boost_allowed_slots = []
-            self._capture_covau_measurements_before_plan()
+            self._capture_provider_quota_measurements_before_plan()
             prices = await self._get_price_forecast()
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
@@ -4449,6 +4646,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 load_forecast,
                 soc,
             )
+            grid_charge_allowed = self._apply_custom_tariff_quota_grid_charge_limit(
+                grid_charge_allowed,
+                solar_forecast,
+                load_forecast,
+            )
             price_cap = self._coerce_optional_price(
                 self._config.max_grid_charge_price
             )
@@ -4523,26 +4725,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if callable(quota_group_setter):
                 quota_group_setter(
-                    import_group_ids=(
-                        self._last_import_bonus_group_ids
-                        if self._provider_key() == "covau"
-                        else None
-                    ),
-                    import_caps_by_group=(
-                        self._last_import_bonus_caps_by_group
-                        if self._provider_key() == "covau"
-                        else None
-                    ),
-                    export_group_ids=(
-                        self._last_export_bonus_group_ids
-                        if self._provider_key() == "covau"
-                        else None
-                    ),
-                    export_caps_by_group=(
-                        self._last_export_bonus_caps_by_group
-                        if self._provider_key() == "covau"
-                        else None
-                    ),
+                    import_group_ids=self._last_import_bonus_group_ids,
+                    import_caps_by_group=self._last_import_bonus_caps_by_group,
+                    export_group_ids=self._last_export_bonus_group_ids,
+                    export_caps_by_group=self._last_export_bonus_caps_by_group,
                 )
 
             reference_reserve_floor = (
@@ -4597,7 +4783,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         any(priority_export_slots),
                         self._should_disable_idle_schedule(),
                         grid_export_limits_w,
-                        self._provider_key() == "covau",
+                        bool(
+                            self._last_import_bonus_group_ids
+                            or self._last_export_bonus_group_ids
+                        ),
                     )
                 finally:
                     if reserve_floor is not None:
@@ -9469,6 +9658,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if vf:
             return vf
 
+        # Coordinators that receive native market products can preserve the
+        # provider's exact boundary instead of reconstructing it from a
+        # rounded duration.
+        explicit_start = e.get("startTime") or e.get("startsAt")
+        if explicit_start:
+            return explicit_start
+
         # Amber/AEMO format: nemTime is the interval END
         nem = e.get("nemTime")
         dur = e.get("duration")
@@ -9495,6 +9691,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         vt = e.get("valid_to")
         if vt:
             return vt
+        explicit_end = e.get("endTime") or e.get("endsAt")
+        if explicit_end:
+            return explicit_end
         nem = e.get("nemTime")
         if nem:
             return nem
@@ -11246,6 +11445,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # rollover is independent of HA's local daily-cost date.
         if self._provider_key() == "covau":
             self._ensure_covau_ledger(now=dt_util.now())
+        else:
+            self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         try:
             data = await self._cost_store.async_load()
         except Exception as e:
@@ -11276,6 +11477,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._covau_ledger.state.settled_kwh.get(COVAU_IMPORT_RULE_ID, 0.0),
                 self._covau_ledger.state.settled_kwh.get(COVAU_EXPORT_RULE_ID, 0.0),
             )
+        custom_runtime = self._ensure_custom_tariff_quota_ledger(
+            now=dt_util.now()
+        )
+        if (
+            custom_runtime is not None
+            and isinstance(quota_state, dict)
+            and quota_state.get("provider") == "custom_tariff"
+            and quota_state.get("plan_content_hash") == custom_runtime[3]
+        ):
+            custom_runtime = self._ensure_custom_tariff_quota_ledger(
+                QuotaLedgerState.from_dict(quota_state),
+                now=dt_util.now(),
+            )
+            if custom_runtime is not None:
+                _tariff, _rule, ledger, _content_hash = custom_runtime
+                _LOGGER.info(
+                    "Restored custom tariff import quota: tariff_day=%s "
+                    "confidence=%s import=%.3fkWh",
+                    ledger.state.tariff_day,
+                    ledger.state.confidence,
+                    ledger.state.settled_kwh.get(
+                        CUSTOM_TARIFF_IMPORT_RULE_ID,
+                        0.0,
+                    ),
+                )
 
         restored_globird_quota_state = None
         if (
@@ -11401,6 +11627,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "provider": "covau",
                     "plan_id": snapshot.plan_id,
                     "plan_content_hash": snapshot.content_hash,
+                }
+            )
+            return payload
+
+        custom_runtime = self._ensure_custom_tariff_quota_ledger(
+            now=dt_util.now()
+        )
+        if custom_runtime is not None:
+            tariff, _rule, ledger, content_hash = custom_runtime
+            payload = ledger.state.to_dict()
+            payload.update(
+                {
+                    "provider": "custom_tariff",
+                    "plan_id": tariff.get("template_id") or tariff.get("name"),
+                    "plan_content_hash": content_hash,
                 }
             )
             return payload
@@ -11735,6 +11976,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     import_price = actual_import_cost / grid_import_kwh
                 if grid_export_kwh > 1e-9:
                     export_price = actual_export_earnings / grid_export_kwh
+        else:
+            custom_runtime = self._ensure_custom_tariff_quota_ledger(now=now)
+            if custom_runtime is not None:
+                _tariff, rule, _ledger, _content_hash = custom_runtime
+                eligible_import = getattr(
+                    self,
+                    "_pending_custom_tariff_quota_settlement",
+                    0.0,
+                )
+                eligible_import += self._settle_custom_tariff_quota_measurements(
+                    now,
+                    grid_import_kw,
+                )
+                self._pending_custom_tariff_quota_settlement = 0.0
+                base_import_price = rule.base_price_c_per_kwh / 100.0
+                actual_import_cost = (
+                    grid_import_kwh * base_import_price
+                    - max(0.0, eligible_import)
+                    * (rule.bonus_price_c_per_kwh / 100.0)
+                )
+                if grid_import_kwh > 1e-9:
+                    import_price = actual_import_cost / grid_import_kwh
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None:
@@ -12306,6 +12569,65 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return allowed
 
+    def _apply_custom_tariff_quota_grid_charge_limit(
+        self,
+        allowed: list[bool],
+        solar_forecast: list[float],
+        load_forecast: list[float],
+    ) -> list[bool]:
+        """Stop discretionary battery charging before an import cap is exceeded."""
+        runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
+        if runtime is None:
+            return allowed
+        tariff, rule, ledger, _content_hash = runtime
+        raw_quota = tariff.get("import_quota")
+        if (
+            not isinstance(raw_quota, dict)
+            or raw_quota.get("stop_grid_charging_at_quota", False) is not True
+        ):
+            return allowed
+
+        result = list(allowed)
+        timestamps = self._price_timestamps(len(result))
+        current_day = ledger.state.tariff_day
+        budgets: dict[str, float] = {}
+        dt_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
+        max_battery_import_kwh = (
+            max(0.0, float(self._config.max_charge_w)) / 1000.0 * dt_hours
+        )
+        for idx, timestamp in enumerate(timestamps):
+            if not rule.contains(timestamp):
+                continue
+            day = tariff_datetime(timestamp, rule.timezone_token).date().isoformat()
+            if day not in budgets:
+                budgets[day] = (
+                    ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID)
+                    if day == current_day
+                    and ledger.state.confidence != "unknown"
+                    else rule.daily_cap_kwh
+                    if day != current_day
+                    else 0.0
+                )
+            solar_kw = (
+                max(0.0, float(solar_forecast[idx]))
+                if idx < len(solar_forecast)
+                else 0.0
+            )
+            load_kw = (
+                max(0.0, float(load_forecast[idx]))
+                if idx < len(load_forecast)
+                else 0.0
+            )
+            expected_site_import_kwh = max(0.0, load_kw - solar_kw) * dt_hours
+            budgets[day] = max(0.0, budgets[day] - expected_site_import_kwh)
+            if not result[idx]:
+                continue
+            if budgets[day] + 1e-9 < max_battery_import_kwh:
+                result[idx] = False
+                continue
+            budgets[day] -= max_battery_import_kwh
+        return result
+
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
         await self._run_optimization(force=True)
@@ -12756,7 +13078,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         provider_contract = self.get_provider_contract()
         if provider_contract is not None:
             data["provider_contract"] = provider_contract
-            data["daily_cost_breakdown"]["covau"] = provider_contract
+            provider_key = (
+                "covau"
+                if provider_contract.get("plan", {}).get("source_kind")
+                != "custom_tariff"
+                else "custom_tariff"
+            )
+            data["daily_cost_breakdown"][provider_key] = provider_contract
 
         # Add EV status if EV coordination is active
         if self._ev_coordinator:

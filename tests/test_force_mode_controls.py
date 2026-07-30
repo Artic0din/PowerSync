@@ -715,6 +715,26 @@ def test_monitoring_switch_preserves_grid_charge_policy_options():
         assert "options=new_options" in method_source
 
 
+def test_monitoring_switch_cannot_disable_ihomemanager_telemetry_only_mode():
+    source = SWITCH_PATH.read_text()
+    tree = ast.parse(source)
+    current_value = _find_class_method(tree, "MonitoringModeSwitch", "_current_value")
+    turn_off = _find_class_method(tree, "MonitoringModeSwitch", "async_turn_off")
+    current_source = ast.get_source_segment(source, current_value)
+    turn_off_source = ast.get_source_segment(source, turn_off)
+
+    assert current_source is not None
+    assert turn_off_source is not None
+    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in current_source
+    assert "return True" in current_source
+    assert "SUNGROW_CONNECTION_IHOMEMANAGER" in turn_off_source
+    assert "Monitoring mode cannot be disabled" in turn_off_source
+    assert "self._attr_is_on = True" in turn_off_source
+    assert turn_off_source.index("return") < turn_off_source.index(
+        "normal battery/inverter control resumed"
+    )
+
+
 def test_restore_normal_force_restore_releases_tesla_even_without_saved_state():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

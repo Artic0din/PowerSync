@@ -36,8 +36,11 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_SIGENERGY_STATION_ID,
+    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_TESLA_ENERGY_SITE_ID,
     BATTERY_SYSTEM_TESLA,
+    SUNGROW_CONNECTION_DIRECT,
+    SUNGROW_CONNECTION_IHOMEMANAGER,
     OPT_PROVIDER_POWERSYNC,
     TARGET_CHARGE_POWER_BATTERY_SYSTEMS,
     TARGET_EXPORT_POWER_BATTERY_SYSTEMS,
@@ -1151,6 +1154,14 @@ class MonitoringModeSwitch(SwitchEntity):
 
     def _current_value(self) -> bool:
         """Read the current config-entry option instead of a startup cache."""
+        if self._entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            self._entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            return True
         return bool(
             self._entry.options.get(
                 CONF_MONITORING_MODE,
@@ -1213,6 +1224,20 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable monitoring mode — resume normal battery/inverter control."""
+        if self._entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            self._entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            _LOGGER.warning(
+                "Monitoring mode cannot be disabled for the telemetry-only "
+                "Sungrow iHomeManager connection"
+            )
+            self._attr_is_on = True
+            self.async_write_ha_state()
+            return
         _LOGGER.info("Monitoring mode DISABLED — normal battery/inverter control resumed")
         self._attr_is_on = False
 

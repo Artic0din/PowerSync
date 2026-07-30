@@ -239,6 +239,26 @@ class FlowPowerKWatchPriceCoordinator(AEMOPriceCoordinator):
     pass
 
 
+def test_native_price_boundaries_are_preserved_for_optimizer_slots(opt_module):
+    coordinator_class = opt_module.OptimizationCoordinator
+    entry = {
+        "startTime": "2026-07-08T10:15:00+02:00",
+        "endTime": "2026-07-08T10:30:00+02:00",
+        "nemTime": "2026-07-08T10:30:00+02:00",
+        "duration": 15,
+    }
+    window = datetime(2026, 7, 8, 8, 0, tzinfo=timezone.utc)
+
+    assert coordinator_class._get_entry_start_time(entry) == entry["startTime"]
+    assert coordinator_class._get_entry_end_time(entry) == entry["endTime"]
+    assert coordinator_class._entry_slot_bounds(
+        entry,
+        window,
+        interval_minutes=5,
+        n_steps=12,
+    ) == (3, 6)
+
+
 class _State:
     def __init__(
         self,
