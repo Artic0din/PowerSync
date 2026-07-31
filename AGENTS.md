@@ -10,8 +10,7 @@ It supports multiple external providers and hardware families, so changes can af
 - `custom_components/power_sync/` is the integration implementation and contract source.
 - `custom_components/power_sync/manifest.json`, `hacs.json`, and `.github/workflows/validate.yml` define Home Assistant and HACS metadata validation.
 - `tests/`, `pytest.ini`, and `conftest.py` define local regression coverage.
-- `README.md`, `CONTRIBUTING.md`, `docs/`, and the repository wiki define supported setup and behaviour.
-- `.github/pull_request_template.md` defines required pull-request evidence.
+- `README.md`, `docs/`, and the repository wiki define supported setup and behaviour.
 
 ## Setup and validation
 
@@ -32,7 +31,7 @@ For metadata or integration-structure changes, ensure the HACS and Hassfest CI j
 - Do not test control commands against a live Home Assistant instance or real hardware unless explicitly authorised.
 - Keep changes focused and do not relocate application code unless explicitly requested.
 - Preserve upstream compatibility, licensing, and repository contribution requirements.
-- Update `README.md`, `docs/`, or `CHANGELOG.md` with code or configuration changes and use the current pull-request template.
+- Update `README.md`, `docs/`, or `CHANGELOG.md` with code or configuration changes and include exact validation evidence in the pull-request body.
 
 ## Work tracking
 

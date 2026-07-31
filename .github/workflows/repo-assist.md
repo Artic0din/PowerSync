@@ -6,7 +6,7 @@ description: |
   - Comments helpfully on open issues to unblock contributors and onboard newcomers
   - Identifies issues that can be fixed and creates draft pull requests with fixes
   - Improves performance, testing, and code quality via PRs
-  - Makes engineering investments: dependency updates, CI improvements, tooling
+  - Makes engineering investments: dependency updates, CI diagnostics, tooling
   - Updates its own PRs when CI fails or merge conflicts arise
   - Nudges stale PRs waiting for author response
   - Takes the repository forward with proactive improvements
@@ -183,13 +183,15 @@ steps:
 
       # Weighted sample without replacement (pick 3 distinct tasks)
       NUM_TASKS_PER_RUN = 3
-      chosen, seen = [], set()
-      for t in rng.choices(task_ids, weights=task_weights, k=30):
-          if t not in seen:
-              seen.add(t)
-              chosen.append(t)
-          if len(chosen) == NUM_TASKS_PER_RUN:
-              break
+      chosen = []
+      available_ids = task_ids.copy()
+      available_weights = task_weights.copy()
+      for _ in range(min(NUM_TASKS_PER_RUN, len(available_ids))):
+          task = rng.choices(available_ids, weights=available_weights, k=1)[0]
+          task_index = available_ids.index(task)
+          chosen.append(task)
+          available_ids.pop(task_index)
+          available_weights.pop(task_index)
 
       print('=== Repo Assist Task Selection ===')
       print(f'Open issues       : {open_issues}')
@@ -312,8 +314,8 @@ Update memory with labels applied and cursor position.
    b. Create a fresh branch off the default branch of the repository: `repo-assist/fix-issue-<N>-<desc>`.
    c. Implement a minimal, surgical fix. Do not refactor unrelated code.
    d. **Build and test (required)**: do not create a PR if the build fails or tests fail due to your changes. If tests fail due to infrastructure, create the PR but document it.
-   e. Add a test for the bug if feasible; re-run tests.
-   f. Create a draft PR with: AI disclosure, `Closes #N`, root cause, fix rationale, trade-offs, and a Test Status section showing build/test outcome.
+   e. Add and pass a focused regression test. For battery, inverter, grid, tariff, scheduling, reserve, or EV behaviour, write exact tests before changing production code. If a reliable regression test is not possible, comment on the issue and do not create a fix PR.
+   f. Create a draft PR with: AI disclosure, `Fixes #N`, root cause, fix rationale, trade-offs, and a Test Status section showing build/test outcome.
    g. Post a single brief comment on the issue linking to the PR.
 3. Update memory with fix attempts and outcomes.
 
@@ -322,7 +324,7 @@ Update memory with labels applied and cursor position.
 Improve the engineering foundations of the repository. Consider:
 
 - **Dependency updates**: Check for outdated dependencies. Prefer minor/patch updates; propose major bumps only with clear benefit. **Bundle Dependabot PRs**: If multiple open Dependabot PRs exist, create a single bundled PR applying all compatible updates. Reference the original PRs so maintainers can close them after merging.
-- **CI improvements**: Speed up CI pipelines, fix flaky tests, improve caching, upgrade actions.
+- **CI diagnostics**: Investigate slow or flaky CI and open a focused issue with evidence. Do not modify `.github/`; workflow files are protected and require maintainer-controlled delivery.
 - **Tooling and SDK versions**: Update runtime versions, linters, formatters.
 - **Build system**: Simplify or modernise the build configuration.
 
