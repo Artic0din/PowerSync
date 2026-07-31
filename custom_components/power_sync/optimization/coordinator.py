@@ -7889,6 +7889,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         allowed = [False] * n
         slot_sources = [
+            self._agl_battery_reward_export_slots(n, export_prices),
             self._flow_power_export_window_slots(n),
             self._export_boost_mask_for_run(n, export_prices),
             self._saving_session_export_slots(n),
@@ -8531,6 +8532,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result[t] = in_window
 
         return result
+
+    def _agl_battery_reward_export_slots(
+        self,
+        n: int,
+        export_prices: list[float] | None = None,
+    ) -> list[bool]:
+        """Return AGL's contractual evening reward slots with a usable rate."""
+        if self._provider_key() != "agl" or n <= 0 or not export_prices:
+            return [False] * max(0, n)
+
+        from ..const import (
+            AGL_BATTERY_REWARDS_END_HOUR,
+            AGL_BATTERY_REWARDS_START_HOUR,
+        )
+
+        allowed = [False] * n
+        for idx, timestamp in enumerate(self._price_timestamps(n)):
+            if idx >= len(export_prices):
+                break
+            try:
+                export_price = float(export_prices[idx] or 0.0)
+            except (TypeError, ValueError):
+                continue
+            allowed[idx] = (
+                export_price > 0.001
+                and AGL_BATTERY_REWARDS_START_HOUR
+                <= timestamp.hour
+                < AGL_BATTERY_REWARDS_END_HOUR
+            )
+        return allowed
 
     def _flow_power_profit_export_slots(self, n: int) -> list[bool]:
         """Allow Flow Power profit exports only during Happy Hour."""

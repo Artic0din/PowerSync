@@ -2195,6 +2195,57 @@ def test_priority_export_applies_to_generic_export_windows(
     assert max(result.grid_export_w[12:24]) > 1000
 
 
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_agl_reward_export_pairs_with_profitable_future_recharge(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    if backend == "highs" and not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS")
+    monkeypatch.setattr(
+        battery_optimizer_module,
+        "HIGHS_AVAILABLE",
+        backend == "highs",
+    )
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=40_000,
+        max_charge_w=28_200,
+        max_discharge_w=20_000,
+        efficiency=0.92,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=4,
+        terminal_weight=0.3,
+    )
+    n = 48
+    reward_slots = [idx < 12 for idx in range(n)]
+    result = optimizer.optimize(
+        import_prices=[0.5341] * 12 + [0.162] * 36,
+        export_prices=[0.26] * 12 + [0.01] * 36,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.887,
+        acquisition_cost_kwh=0.5341,
+        allow_battery_export=[True] * n,
+        block_battery_charge=[False] * n,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * n,
+        priority_export_slots=reward_slots,
+        priority_export_enabled=True,
+    )
+
+    assert result.schedule.actions[0].action == "export"
+    assert max(result.grid_export_w[:12]) > 1_000
+    assert max(
+        action.battery_charge_w
+        for action in result.schedule.actions[12:]
+    ) > 1_000
+    assert min(action.soc for action in result.schedule.actions) >= 0.10
+
+
 def test_priority_export_bonus_is_not_counted_in_predicted_cost(
     battery_optimizer_module,
 ):

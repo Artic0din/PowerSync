@@ -139,6 +139,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
     const_module.CONF_FP_TWAP_OVERRIDE = "fp_twap_override"
+    const_module.AGL_BATTERY_REWARDS_START_HOUR = 17
+    const_module.AGL_BATTERY_REWARDS_END_HOUR = 21
     const_module.CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
     const_module.CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
     const_module.CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
@@ -2483,6 +2485,24 @@ def test_flow_power_profit_window_is_priority_export(opt_module):
     slots = coordinator._priority_export_slots_for_run(288, [0.45] * 288)
 
     assert _true_indexes(slots) == list(range(108, 132))
+
+
+def test_agl_reward_window_is_priority_export_only_with_a_usable_rate(opt_module):
+    coordinator = _coordinator(opt_module, "agl")
+    n = 51
+    coordinator._last_price_timestamps = [
+        datetime(2026, 7, 31, 16, 55, tzinfo=timezone.utc)
+        + timedelta(minutes=5 * idx)
+        for idx in range(n)
+    ]
+    export_prices = [0.26] * n
+    export_prices[12] = 0.0
+
+    slots = coordinator._priority_export_slots_for_run(n, export_prices)
+
+    expected = list(range(1, 49))
+    expected.remove(12)
+    assert _true_indexes(slots) == expected
 
 
 def test_flow_power_happy_hour_is_priority_export_without_profit_max(opt_module):
