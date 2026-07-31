@@ -4900,6 +4900,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
     _EXPORT_CONTROL_STORAGE_VERSION = 1
     _AC_INVERTER_ENERGY_STORAGE_VERSION = 1
+    _DAILY_ENERGY_BASELINE_STORAGE_VERSION = 1
+    _INVALID_U32_ENERGY_KWH = 0xFFFFFFFF * 0.1
 
     def __init__(
         self,
@@ -4930,6 +4932,17 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._telemetry_only = bool(telemetry_only)
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
+        self._daily_energy_baseline_store = (
+            Store(
+                hass,
+                self._DAILY_ENERGY_BASELINE_STORAGE_VERSION,
+                f"{DOMAIN}.sungrow_daily_energy_baseline.{entry_id}",
+            )
+            if entry_id
+            else None
+        )
+        self._daily_energy_baselines_restored = False
+        self._daily_energy_baselines_dirty = False
         self._export_control_store = (
             Store(
                 hass,
@@ -5010,25 +5023,112 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 return False
         return 0 <= float(data["battery_level"]) <= 100
 
+    @staticmethod
+    def _valid_daily_total(value: Any) -> float | None:
+        """Return a finite non-negative lifetime energy total."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(parsed)
+            or parsed < 0
+            or parsed == SungrowEnergyCoordinator._INVALID_U32_ENERGY_KWH
+        ):
+            return None
+        return parsed
+
+    async def _async_restore_daily_energy_baselines(self) -> None:
+        """Restore today's lifetime-counter baselines before the first poll."""
+        if getattr(self, "_daily_energy_baselines_restored", False):
+            return
+        store = getattr(self, "_daily_energy_baseline_store", None)
+        if store is None:
+            self._daily_energy_baselines_restored = True
+            return
+        try:
+            stored = await store.async_load()
+        except Exception as exc:
+            _LOGGER.debug(
+                "Could not restore Sungrow daily energy baselines: %s",
+                exc,
+            )
+            return
+        self._daily_energy_baselines_restored = True
+        today = dt_util.now().date().isoformat()
+        if not isinstance(stored, dict) or stored.get("date") != today:
+            return
+        self._baseline_date = today
+        self._total_import_baseline = self._valid_daily_total(
+            stored.get("import_baseline_kwh")
+        )
+        self._total_export_baseline = self._valid_daily_total(
+            stored.get("export_baseline_kwh")
+        )
+
+    async def _async_save_daily_energy_baselines(self) -> None:
+        """Persist lifetime-counter baselines after initialization or rollover."""
+        if not getattr(self, "_daily_energy_baselines_dirty", False):
+            return
+        store = getattr(self, "_daily_energy_baseline_store", None)
+        if store is None:
+            self._daily_energy_baselines_dirty = False
+            return
+        try:
+            await store.async_save(
+                {
+                    "date": self._baseline_date,
+                    "import_baseline_kwh": self._total_import_baseline,
+                    "export_baseline_kwh": self._total_export_baseline,
+                }
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Could not save Sungrow daily energy baselines: %s",
+                exc,
+            )
+            return
+        self._daily_energy_baselines_dirty = False
+
     def _update_total_baselines(self, data: dict) -> None:
         """Track midnight baselines for total import/export registers.
 
         Some Sungrow systems (e.g. SH10RS + SBH) have no working daily
         import/export registers — they permanently read 0.  We derive
-        daily values from the total (lifetime) registers by subtracting
-        a baseline captured at midnight (or on first read of the day).
+        daily values from the total (lifetime) registers by subtracting a
+        persisted baseline captured at midnight (or on the first read of the
+        day). Persisting that baseline prevents a mid-day reload from treating
+        the current lifetime counter as midnight and resetting daily energy.
         """
+        if (
+            getattr(self, "_daily_energy_baseline_store", None) is not None
+            and not getattr(self, "_daily_energy_baselines_restored", False)
+        ):
+            # A transient Store load failure must not let this poll replace a
+            # valid same-day baseline with the current lifetime counter.
+            return
         today = dt_util.now().date().isoformat()
-        total_import = data.get("total_import")
-        total_export = data.get("total_export")
+        total_import = self._valid_daily_total(data.get("total_import"))
+        total_export = self._valid_daily_total(data.get("total_export"))
+        changed = False
 
         if self._baseline_date != today:
-            # New day — capture baselines from current total values
-            if total_import is not None:
-                self._total_import_baseline = total_import
-            if total_export is not None:
-                self._total_export_baseline = total_export
+            # New day — discard yesterday's baselines before initializing each
+            # available lifetime counter independently.
+            self._total_import_baseline = None
+            self._total_export_baseline = None
             self._baseline_date = today
+            changed = True
+
+        if self._total_import_baseline is None and total_import is not None:
+            self._total_import_baseline = total_import
+            changed = True
+        if self._total_export_baseline is None and total_export is not None:
+            self._total_export_baseline = total_export
+            changed = True
+
+        if changed:
+            self._daily_energy_baselines_dirty = True
             _LOGGER.info(
                 "Sungrow daily baseline reset: import=%.1f export=%.1f kWh (total)",
                 self._total_import_baseline or 0, self._total_export_baseline or 0,
@@ -5079,7 +5179,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             summary["grid_import_today_kwh"] = daily_import
         else:
             # Daily register missing or 0 — derive from total register delta
-            total_import = data.get("total_import")
+            total_import = self._valid_daily_total(data.get("total_import"))
             if total_import is not None and self._total_import_baseline is not None:
                 derived = round(total_import - self._total_import_baseline, 2)
                 if derived >= 0:
@@ -5090,7 +5190,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             summary["grid_export_today_kwh"] = daily_export
         else:
             # Daily register missing or 0 — derive from total register delta
-            total_export = data.get("total_export")
+            total_export = self._valid_daily_total(data.get("total_export"))
             if total_export is not None and self._total_export_baseline is not None:
                 derived = round(total_export - self._total_export_baseline, 2)
                 if derived >= 0:
@@ -5200,6 +5300,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """Fetch data from Sungrow system via Modbus."""
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
+        await self._async_restore_daily_energy_baselines()
         await self._async_restore_ac_inverter_daily_energy()
         try:
             async with self._modbus_lock:
@@ -5401,6 +5502,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 ),
                 "energy_summary": self._build_energy_summary(data),
             }
+            await self._async_save_daily_energy_baselines()
 
             if getattr(
                 self,
@@ -6172,6 +6274,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Stop polling and disconnect from Sungrow after active Modbus work."""
         self.update_interval = None
+        await self._async_save_daily_energy_baselines()
         async with self._modbus_lock:
             await self._controller.disconnect()
 

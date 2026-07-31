@@ -878,6 +878,240 @@ def test_sungrow_failed_poll_marks_cached_telemetry_not_ready():
     assert ready is False
 
 
+def test_sungrow_daily_grid_totals_survive_same_day_reload():
+    """Persisted lifetime baselines must outrank a polluted accumulator."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class PollutedAccumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.20
+            data["grid_export_today_kwh"] = 25.14
+            return data
+
+    async def run_checks():
+        store = _FakeStore(
+            {
+                "date": "2026-05-20",
+                "import_baseline_kwh": 2073.9,
+                "export_baseline_kwh": 17315.5,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = PollutedAccumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        first = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 2074.0,
+                "total_export": 17315.8,
+            }
+        )
+        second = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 2074.1,
+                "total_export": 17316.0,
+            }
+        )
+        return first, second
+
+    try:
+        first, second = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert first["grid_import_today_kwh"] == pytest.approx(0.1)
+    assert first["grid_export_today_kwh"] == pytest.approx(0.3)
+    assert second["grid_import_today_kwh"] == pytest.approx(0.2)
+    assert second["grid_export_today_kwh"] == pytest.approx(0.5)
+
+
+def test_sungrow_daily_grid_baselines_initialize_and_persist_independently():
+    """A late lifetime register must not reset the baseline already available."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_checks():
+        store = _FakeStore()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        first = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_export": 500.0,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+        second = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.0,
+                "total_export": 500.2,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+        return first, second, store.data
+
+    try:
+        first, second, stored = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert first["grid_export_today_kwh"] == 0.0
+    assert second["grid_import_today_kwh"] == 0.0
+    assert second["grid_export_today_kwh"] == pytest.approx(0.2)
+    assert stored == {
+        "date": "2026-05-20",
+        "import_baseline_kwh": 100.0,
+        "export_baseline_kwh": 500.0,
+    }
+
+
+def test_sungrow_lifetime_counter_rollback_keeps_accumulator_fallback():
+    """A reset lifetime counter must not publish a negative daily total."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class Accumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.4
+            data["grid_export_today_kwh"] = 0.7
+            return data
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = Accumulator()
+        coordinator._baseline_date = "2026-05-20"
+        coordinator._total_import_baseline = 100.0
+        coordinator._total_export_baseline = 500.0
+        rollback = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 99.0,
+                "total_export": 499.0,
+            }
+        )
+        invalid = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 0xFFFFFFFF * 0.1,
+                "total_export": 0xFFFFFFFF * 0.1,
+            }
+        )
+        assert coordinator._valid_daily_total("unavailable") is None
+        assert coordinator._valid_daily_total(float("nan")) is None
+    finally:
+        restore()
+
+    assert rollback["grid_import_today_kwh"] == 0.4
+    assert rollback["grid_export_today_kwh"] == 0.7
+    assert invalid["grid_import_today_kwh"] == 0.4
+    assert invalid["grid_export_today_kwh"] == 0.7
+
+
+def test_sungrow_daily_grid_baseline_load_failure_retries_without_overwrite():
+    """A transient Store load failure must not replace a valid baseline."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class Accumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.4
+            data["grid_export_today_kwh"] = 0.7
+            return data
+
+    class FlakyStore(_FakeStore):
+        def __init__(self):
+            super().__init__(
+                {
+                    "date": "2026-05-20",
+                    "import_baseline_kwh": 100.0,
+                    "export_baseline_kwh": 500.0,
+                }
+            )
+            self.load_calls = 0
+            self.save_calls = 0
+
+        async def async_load(self):
+            self.load_calls += 1
+            if self.load_calls == 1:
+                raise OSError("temporary Store read failure")
+            return self.data
+
+        async def async_save(self, data):
+            self.save_calls += 1
+            await super().async_save(data)
+
+    async def run_checks():
+        store = FlakyStore()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = Accumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        fallback = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.4,
+                "total_export": 500.7,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+
+        await coordinator._async_restore_daily_energy_baselines()
+        restored = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.5,
+                "total_export": 500.8,
+            }
+        )
+        return fallback, restored, store
+
+    try:
+        fallback, restored, store = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert fallback["grid_import_today_kwh"] == 0.4
+    assert fallback["grid_export_today_kwh"] == 0.7
+    assert restored["grid_import_today_kwh"] == 0.5
+    assert restored["grid_export_today_kwh"] == 0.8
+    assert store.load_calls == 2
+    assert store.save_calls == 0
+
+
 def test_sungrow_successful_retry_rechecks_persisted_export_recovery_once():
     """The first recovered snapshot must finish interrupted export cleanup."""
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
