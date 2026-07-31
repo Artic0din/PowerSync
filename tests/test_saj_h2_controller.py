@@ -82,12 +82,14 @@ class _FakeServices:
         states: _FakeStates,
         *,
         switch_turn_on_sticks: bool = True,
+        switch_turn_on_after_reads: int = 0,
         fail_on: tuple[str, str, str] | None = None,
         mirror_app_mode: bool = True,
         app_mode_mirror_after_reads: int = 0,
     ):
         self._states = states
         self._switch_turn_on_sticks = switch_turn_on_sticks
+        self._switch_turn_on_after_reads = switch_turn_on_after_reads
         self._fail_on = fail_on
         self._mirror_app_mode = mirror_app_mode
         self._app_mode_mirror_after_reads = app_mode_mirror_after_reads
@@ -112,7 +114,14 @@ class _FakeServices:
         elif domain == "text" and service == "set_value":
             self._states.set(entity_id, str(data["value"]))
         elif domain == "switch" and service == "turn_on" and self._switch_turn_on_sticks:
-            self._states.set(entity_id, "on")
+            if self._switch_turn_on_after_reads > 0:
+                self._states.defer_set(
+                    entity_id,
+                    "on",
+                    self._switch_turn_on_after_reads,
+                )
+            else:
+                self._states.set(entity_id, "on")
         elif domain == "switch" and service == "turn_off":
             self._states.set(entity_id, "off")
 
@@ -134,6 +143,7 @@ class _FakeHass:
         states: list[_FakeState],
         *,
         switch_turn_on_sticks: bool = True,
+        switch_turn_on_after_reads: int = 0,
         fail_on: tuple[str, str, str] | None = None,
         mirror_app_mode: bool = True,
         app_mode_mirror_after_reads: int = 0,
@@ -143,6 +153,7 @@ class _FakeHass:
         self.services = _FakeServices(
             self.states,
             switch_turn_on_sticks=switch_turn_on_sticks,
+            switch_turn_on_after_reads=switch_turn_on_after_reads,
             fail_on=fail_on,
             mirror_app_mode=mirror_app_mode,
             app_mode_mirror_after_reads=app_mode_mirror_after_reads,
@@ -807,6 +818,65 @@ def test_set_idle_fails_when_passive_switch_does_not_stick_on():
         {"entity_id": "switch.saj_passive_charge_control"},
     ) in hass.services.calls
     assert hass.states.get("switch.saj_passive_charge_control").state == "off"
+
+
+def test_set_idle_waits_for_queued_passive_switch_confirmation():
+    hass = _FakeHass(
+        _passive_states()
+        + [
+            _FakeState("sensor.saj_app_mode", "0"),
+            _FakeState("number.saj_app_mode_input", "0"),
+        ],
+        switch_turn_on_after_reads=20,
+    )
+    controller = _controller(hass)
+    controller._SWITCH_VERIFY_DELAY_SEC = 0
+    controller._entity_map.update(
+        {
+            "app_mode": "sensor.saj_app_mode",
+            "app_mode_writable": "number.saj_app_mode_input",
+        }
+    )
+
+    assert asyncio.run(controller.set_idle())
+
+    turn_on_calls = [
+        call
+        for call in hass.services.calls
+        if call
+        == (
+            "switch",
+            "turn_on",
+            {"entity_id": "switch.saj_passive_charge_control"},
+        )
+    ]
+    assert len(turn_on_calls) == 1
+    assert hass.states.get("switch.saj_passive_charge_control").state == "on"
+    assert hass.states.get("sensor.saj_app_mode").state == "3"
+
+
+def test_set_idle_restores_when_app_mode_does_not_confirm():
+    hass = _FakeHass(
+        _passive_states()
+        + [
+            _FakeState("sensor.saj_app_mode", "0"),
+            _FakeState("number.saj_app_mode_input", "0"),
+        ],
+        mirror_app_mode=False,
+    )
+    controller = _controller(hass)
+    controller._APP_MODE_VERIFY_DELAY_SEC = 0
+    controller._entity_map.update(
+        {
+            "app_mode": "sensor.saj_app_mode",
+            "app_mode_writable": "number.saj_app_mode_input",
+        }
+    )
+
+    assert not asyncio.run(controller.set_idle())
+
+    assert hass.states.get("switch.saj_passive_charge_control").state == "off"
+    assert hass.states.get("sensor.saj_app_mode").state == "0"
 
 
 def test_set_idle_refuses_writes_while_startup_telemetry_is_unavailable():

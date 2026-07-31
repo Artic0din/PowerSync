@@ -4825,6 +4825,42 @@ def test_fronius_exit_idle_restores_auto_without_reserve_write(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+@pytest.mark.parametrize("result", [False, True])
+def test_saj_idle_propagates_result_without_backup_reserve_write(
+    opt_module,
+    result,
+):
+    class SajEnergyCoordinator(_FakeEnergyCoordinator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backup_mode_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return result
+
+    battery = _FakeBattery(backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.216)
+    coordinator.battery_system = "saj_h2"
+    coordinator._config.backup_reserve = 0.56
+    energy_coordinator = SajEnergyCoordinator()
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == (
+        "idle" if result else "self_consumption"
+    )
+
+
 def test_fronius_rejected_auto_restore_keeps_idle_for_retry(opt_module):
     class RejectingFroniusEnergyCoordinator(_FakeEnergyCoordinator):
         async def restore_work_mode_from_idle(self):

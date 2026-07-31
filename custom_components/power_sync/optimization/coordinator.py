@@ -753,6 +753,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return True
 
+        # SAJ H2 holds SOC through its passive AppMode control. It has no
+        # writable backup reserve, and the queued upstream switch transition
+        # can explicitly fail verification. Preserve that result so the
+        # executor retries instead of reporting an IDLE hold that never engaged.
+        if self.battery_system == "saj_h2":
+            if not self.energy_coordinator or not hasattr(
+                self.energy_coordinator, "set_backup_mode"
+            ):
+                _LOGGER.warning(
+                    "Optimizer: SAJ H2 IDLE passive control is unavailable"
+                )
+                return False
+            if await self.energy_coordinator.set_backup_mode() is False:
+                return False
+            _LOGGER.info(
+                "Optimizer: IDLE — SAJ H2 passive hold at %d%% SOC "
+                "(backup reserve unchanged)",
+                soc_pct,
+            )
+            self._idle_hold_reserve = None
+            return True
+
         if (
             preserve_charge
             and self.energy_coordinator
