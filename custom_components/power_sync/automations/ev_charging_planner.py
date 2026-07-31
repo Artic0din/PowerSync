@@ -2205,7 +2205,12 @@ class PriceForecaster:
         )
         for period_name in sorted_priority:
             period_data = tou_periods[period_name]
-            periods_list = period_data if isinstance(period_data, list) else []
+            if isinstance(period_data, list):
+                periods_list = period_data
+            elif isinstance(period_data, dict):
+                periods_list = period_data.get("periods", [])
+            else:
+                periods_list = []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
                 to_dow = period.get("toDayOfWeek", 6)

@@ -496,6 +496,55 @@ def test_time_critical_uses_feasible_free_grid_before_paid_deadline(monkeypatch)
     assert plan.estimated_cost_cents == 0
 
 
+def test_tariff_forecast_reads_nested_tesla_tou_periods(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 31, 12, 20, tzinfo=brisbane_tz),
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["tariff_schedule"] = {
+        "buy_rates": {
+            "ON_PEAK": 0.51,
+            "PARTIAL_PEAK": 0.31,
+            "SUPER_OFF_PEAK": 0,
+        },
+        "sell_rates": {"ALL": 0},
+        "tou_periods": {
+            "ON_PEAK": {
+                "periods": [
+                    {"fromHour": 18, "toHour": 21, "toDayOfWeek": 6}
+                ]
+            },
+            "PARTIAL_PEAK": {
+                "periods": [
+                    {"toHour": 10, "toDayOfWeek": 6},
+                    {"fromHour": 14, "toHour": 18, "toDayOfWeek": 6},
+                    {"fromHour": 21, "toDayOfWeek": 6},
+                ]
+            },
+            "SUPER_OFF_PEAK": {
+                "periods": [
+                    {"fromHour": 10, "toHour": 14, "toDayOfWeek": 6}
+                ]
+            },
+        },
+        "current_season": "Summer",
+    }
+    forecaster = ev_planner.PriceForecaster(hass, _FakeConfigEntry())
+
+    forecast = asyncio.run(forecaster._get_tariff_forecast(hours=3))
+
+    assert forecast is not None
+    assert [item.import_cents for item in forecast] == [0, 0, 31]
+    assert [item.period for item in forecast] == [
+        "offpeak",
+        "offpeak",
+        "peak",
+    ]
+
+
 def test_time_critical_matches_grid_price_to_surplus_hour(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(
