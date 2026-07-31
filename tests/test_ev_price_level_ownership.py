@@ -3662,6 +3662,221 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
 
 
 @pytest.mark.parametrize(
+    ("active_owner_mode", "selected_source", "restore_curtailment"),
+    (
+        ("smart_schedule", "solar_surplus", False),
+        ("smart_schedule_solar_surplus", "grid_offpeak", True),
+    ),
+)
+def test_auto_schedule_switches_active_controller_when_source_family_changes(
+    monkeypatch,
+    active_owner_mode,
+    selected_source,
+    restore_curtailment,
+):
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def vehicle_soc(self, vehicle_id):
+        return 40
+
+    class TransitionPlanner:
+        async def should_charge_now(self, **kwargs):
+            return True, f"{selected_source} selected", selected_source
+
+        def _is_grid_charging_blocked_at(self, when):
+            return False
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
+        VIN: {
+            "owner": "powersync",
+            "owner_mode": active_owner_mode,
+        }
+    }
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=TransitionPlanner(),
+    )
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._restore_curtailment = AsyncMock()
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        target_soc=80,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    state.is_charging = True
+    executor._state[VIN] = state
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            VIN,
+            settings,
+            {
+                "battery_soc": 80,
+                "solar_power": 7000,
+                "load_power": 1000,
+                "grid_power": -1000,
+            },
+            current_price_cents=0,
+        )
+    )
+
+    executor._start_charging.assert_awaited_once()
+    assert (
+        executor._start_charging.await_args.args[3]
+        == selected_source
+    )
+    assert executor._restore_curtailment.await_count == int(restore_curtailment)
+    assert state.last_decision == "switched"
+
+
+@pytest.mark.parametrize(
+    (
+        "active_owner_mode",
+        "selected_source",
+        "release_previous_owner",
+        "expected_is_charging",
+        "expected_decision",
+        "expected_restore_count",
+    ),
+    (
+        (
+            "smart_schedule",
+            "solar_surplus",
+            False,
+            True,
+            "charging",
+            1,
+        ),
+        (
+            "smart_schedule",
+            "solar_surplus",
+            True,
+            False,
+            "waiting",
+            1,
+        ),
+        (
+            "smart_schedule_solar_surplus",
+            "grid_offpeak",
+            False,
+            True,
+            "charging",
+            0,
+        ),
+        (
+            "smart_schedule_solar_surplus",
+            "grid_offpeak",
+            True,
+            False,
+            "waiting",
+            1,
+        ),
+    ),
+)
+def test_auto_schedule_reconciles_failed_source_family_switch(
+    monkeypatch,
+    active_owner_mode,
+    selected_source,
+    release_previous_owner,
+    expected_is_charging,
+    expected_decision,
+    expected_restore_count,
+):
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def vehicle_soc(self, vehicle_id):
+        return 40
+
+    class TransitionPlanner:
+        async def should_charge_now(self, **kwargs):
+            return True, f"{selected_source} selected", selected_source
+
+        def _is_grid_charging_blocked_at(self, when):
+            return False
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    hass = _FakeHass()
+    ownership = {
+        VIN: {
+            "owner": "powersync",
+            "owner_mode": active_owner_mode,
+        }
+    }
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = ownership
+
+    async def fail_switch(*args, **kwargs):
+        if release_previous_owner:
+            ownership.clear()
+        return False
+
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=TransitionPlanner(),
+    )
+    executor._start_charging = AsyncMock(side_effect=fail_switch)
+    executor._restore_curtailment = AsyncMock()
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        target_soc=80,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    state.is_charging = True
+    executor._state[VIN] = state
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            VIN,
+            settings,
+            {
+                "battery_soc": 80,
+                "solar_power": 7000,
+                "load_power": 1000,
+                "grid_power": -1000,
+            },
+            current_price_cents=0,
+        )
+    )
+
+    assert state.is_charging is expected_is_charging
+    assert state.last_decision == expected_decision
+    assert executor._restore_curtailment.await_count == expected_restore_count
+
+
+@pytest.mark.parametrize(
     (
         "schedule_vehicle_id",
         "resolved_vehicle_id",

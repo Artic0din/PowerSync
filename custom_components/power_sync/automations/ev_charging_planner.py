@@ -5387,8 +5387,35 @@ class AutoScheduleExecutor:
             f"reason={reason}, source={source}, is_charging={state.is_charging}"
         )
 
+        # A running Smart Schedule controller must follow the newly selected
+        # source family. Reusing a grid ``battery_target`` session after the
+        # planner moves to live solar surplus can keep drawing against grid
+        # headroom; the inverse transition leaves the solar-only controller in
+        # charge. Re-enter the shared start path only when the active ownership
+        # mode proves that one of those transitions occurred.
+        desired_owner_mode = (
+            "smart_schedule_solar_surplus"
+            if source == "solar_surplus"
+            else "smart_schedule"
+        )
+        active_owner_mode = None
+        switch_active_controller = False
+        if should_charge and state.is_charging:
+            from .ev_ownership import get_active_ev_owner_mode
+
+            active_owner_mode = get_active_ev_owner_mode(
+                self.hass,
+                self.config_entry,
+                vehicle_vin or vehicle_id,
+            )
+            switch_active_controller = (
+                active_owner_mode
+                in {"smart_schedule", "smart_schedule_solar_surplus"}
+                and active_owner_mode != desired_owner_mode
+            )
+
         # Take action
-        if should_charge and not state.is_charging:
+        if should_charge and (not state.is_charging or switch_active_controller):
             started = await self._start_charging(
                 vehicle_id,
                 settings,
@@ -5402,11 +5429,48 @@ class AutoScheduleExecutor:
                 ),
             )
             if started is not False and state.is_charging:
-                state.last_decision = "started"
+                if (
+                    switch_active_controller
+                    and desired_owner_mode == "smart_schedule"
+                ):
+                    await self._restore_curtailment(state)
+                state.last_decision = (
+                    "switched" if switch_active_controller else "started"
+                )
                 state.last_decision_reason = reason
+                if switch_active_controller:
+                    _LOGGER.info(
+                        "Auto-schedule: Switched %s controller from %s to %s",
+                        vehicle_id,
+                        active_owner_mode,
+                        desired_owner_mode,
+                    )
             else:
-                state.last_decision = "waiting"
-                reason = f"{reason}; start retry scheduled"
+                if switch_active_controller:
+                    # A replacement can fail either before or after the shared
+                    # start path releases the previous controller. Reconcile
+                    # the executor with ownership instead of assuming teardown
+                    # happened.
+                    remaining_owner_mode = get_active_ev_owner_mode(
+                        self.hass,
+                        self.config_entry,
+                        vehicle_vin or vehicle_id,
+                    )
+                    state.is_charging = remaining_owner_mode in {
+                        "smart_schedule",
+                        "smart_schedule_solar_surplus",
+                    }
+                    if (
+                        remaining_owner_mode
+                        != "smart_schedule_solar_surplus"
+                    ):
+                        await self._restore_curtailment(state)
+                if state.is_charging:
+                    state.last_decision = "charging"
+                    reason = f"{reason}; controller switch retry scheduled"
+                else:
+                    state.last_decision = "waiting"
+                    reason = f"{reason}; start retry scheduled"
                 state.last_decision_reason = reason
         elif not should_charge:
             self._clear_start_failure(vehicle_id)
