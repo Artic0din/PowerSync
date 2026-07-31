@@ -12,6 +12,8 @@ description: |
   - Takes the repository forward with proactive improvements
   - Maintains a persistent memory of work done and what remains
   Authentication uses the per-run GitHub token through the copilot-requests write permission; no Copilot PAT is required.
+  Pull-request creation requires repository secret GH_AW_GITHUB_TOKEN so created PRs can trigger validate.yml;
+  optionally set GH_AW_CI_TRIGGER_TOKEN for the empty-commit CI trigger path.
   Always polite, constructive, and mindful of the project's goals.
 
 on:
@@ -98,6 +100,8 @@ safe-outputs:
       policy: fallback-to-issue
       exclude: [CHANGELOG.md]
     max: 4
+    github-token: ${{ secrets.GH_AW_GITHUB_TOKEN }}
+    github-token-for-extra-empty-commit: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN || secrets.GH_AW_GITHUB_TOKEN }}
   push-to-pull-request-branch:
     target: "*"
     required-title-prefix: "chore(repo-assist): "
@@ -105,6 +109,7 @@ safe-outputs:
     protected-files:
       policy: fallback-to-issue
       exclude: [CHANGELOG.md]
+    github-token: ${{ secrets.GH_AW_GITHUB_TOKEN }}
   create-issue:
     title-prefix: "[repo-assist] "
     labels: [automation, repo-assist]
@@ -113,6 +118,12 @@ safe-outputs:
     target: "*"
     required-title-prefix: "[repo-assist] "
     max: 1
+  close-issue:
+    target: "*"
+    required-title-prefix: "[repo-assist] Monthly Activity "
+    required-labels: [repo-assist]
+    max: 1
+    state-reason: completed
   add-labels:
     allowed: [bug, enhancement, "help wanted", "good first issue", "spam", "off topic", documentation, question, duplicate, wontfix, "needs triage", "needs investigation", "breaking change", performance, security, refactor]
     max: 30
@@ -145,7 +156,9 @@ steps:
           prs = json.load(f)
 
       open_issues     = len(issues)
-      unlabelled      = sum(1 for i in issues if not i.get('labels'))
+      unlabelled_issues = sum(1 for i in issues if not i.get('labels'))
+      unlabelled_prs  = sum(1 for p in prs if not p.get('labels'))
+      unlabelled      = unlabelled_issues + unlabelled_prs
       is_repo_assist  = lambda p: any(label.get('name') == 'repo-assist' for label in p.get('labels', []))
       repo_assist_prs = sum(1 for p in prs if is_repo_assist(p))
       other_prs       = sum(1 for p in prs if not is_repo_assist(p))
@@ -197,7 +210,8 @@ steps:
 
       print('=== Repo Assist Task Selection ===')
       print(f'Open issues       : {open_issues}')
-      print(f'Unlabelled issues : {unlabelled}')
+      print(f'Unlabelled issues : {unlabelled_issues}')
+      print(f'Unlabelled PRs    : {unlabelled_prs}')
       print(f'Repo Assist PRs   : {repo_assist_prs}')
       print(f'Other open PRs    : {other_prs}')
       print()
@@ -209,7 +223,9 @@ steps:
       print(f'Selected tasks for this run: ' + ', '.join(f'Task {c} ({task_names[c]})' for c in chosen))
 
       result = {
-          'open_issues': open_issues, 'unlabelled_issues': unlabelled,
+          'open_issues': open_issues,
+          'unlabelled_issues': unlabelled_issues,
+          'unlabelled_prs': unlabelled_prs,
           'repo_assist_prs': repo_assist_prs, 'other_prs': other_prs,
           'task_names': task_names,
           'weights': {str(k): round(v, 2) for k, v in weights.items()},
@@ -261,13 +277,13 @@ Read memory at the **start** of every run; update it at the **end**.
 
 ## Workflow
 
-Each run, the deterministic pre-step collects live repo data (open issue count, unlabelled issue count, open Repo Assist PRs, other open PRs), computes a **weighted probability** for each task, and selects **three tasks** for this run using a seeded random draw. The weights and selected tasks are printed in the workflow logs. You will find the selection in `/tmp/gh-aw/task_selection.json`.
+Each run, the deterministic pre-step collects live repo data (open issue count, unlabelled issue and PR counts, open Repo Assist PRs, other open PRs), computes a **weighted probability** for each task, and selects **three tasks** for this run using a seeded random draw. The weights and selected tasks are printed in the workflow logs. You will find the selection in `/tmp/gh-aw/task_selection.json`.
 
 **Read the task selection**: at the start of your run, read `/tmp/gh-aw/task_selection.json` and confirm the three selected tasks in your opening reasoning. Execute **those three tasks** (plus the mandatory Task 11). If a selected task is not applicable to the current repo state, substitute its fallback task rather than doing nothing. Record the substitution in the Task 11 run history entry.
 
 | Selected task | Not applicable when… | Fallback |
 |---|---|---|
-| Task 1 (Issue Labelling) | All open issues already labelled | Task 2 |
+| Task 1 (Issue Labelling) | All open issues and PRs already labelled | Task 2 |
 | Task 2 (Issue Comment) | All open issues already have a recent Repo Assist comment and no new human activity | No-op; record why in Task 11 |
 | Task 3 (Issue Fix) | No issues labelled `bug`, `help wanted`, or `good first issue` that are fixable | Task 2 |
 | Task 4 (Engineering Investments) | No actionable dependency updates, CI gaps, or build improvements identifiable | Task 5 |
@@ -282,7 +298,7 @@ Apply at most one fallback per selected task. If that fallback is also inapplica
 
 The weighting scheme naturally adapts to repo state:
 
-- When unlabelled issues pile up, Task 1 (labelling) dominates.
+- When unlabelled issues or PRs pile up, Task 1 (labelling) dominates.
 - When there are many open issues, Tasks 2 and 3 (commenting and fixing) get more weight.
 - As the backlog clears, Tasks 4–10 (engineering, improvements, nudges, forward progress) draw more evenly.
 
@@ -342,7 +358,15 @@ Study the codebase and make clearly beneficial, low-risk improvements. **Be high
 
 Good candidates: code clarity and readability, removing dead code, API usability, documentation gaps, reducing duplication.
 
-Check memory for already-submitted ideas; do not re-propose them. Proceed only when the GitHub context contains one existing issue. Create a fresh branch `repo-assist/issue-<N>-improve-<desc>` off the default branch of the repository, implement the improvement, build and test (same requirements as Task 3), then create a ready-for-review PR with a conventional title, AI disclosure, `Fixes #<N>`, rationale, and a Test Status section. If no issue number is present or the change is not ready to implement, leave a concise investigation comment instead. Update memory.
+Check memory for already-submitted ideas; do not re-propose them.
+
+Choose exactly one output path:
+
+1. **Existing issue**: if an open issue already tracks the improvement, create a fresh branch `repo-assist/issue-<N>-improve-<desc>` off the default branch, implement the improvement, build and test (same requirements as Task 3), then create a ready-for-review PR with a conventional title, AI disclosure, `Fixes #<N>`, rationale, and a Test Status section.
+2. **Small one-PR fix**: if AGENTS.md allows the change without an issue, create the ready-for-review PR on a fresh `repo-assist/improve-<desc>` branch with the same build, test, AI disclosure, CHANGELOG, and Test Status requirements (no `Fixes #N` line).
+3. **Proposal issue**: otherwise create a focused `[repo-assist]` proposal issue via `create-issue` with rationale and stop; do not comment into the void and do not implement until a later run can use that issue.
+
+Update memory.
 
 ### Task 6: Maintain Repo Assist PRs
 
@@ -373,7 +397,7 @@ Proactively move the repository forward. Use your judgement to identify the most
 
 Maintain a single open issue titled `[repo-assist] Monthly Activity {YYYY}-{MM}` as a rolling summary of all Repo Assist activity for the current month.
 
-1. Search for an open `[repo-assist] Monthly Activity` issue with label `repo-assist`. If it's for the current month, update it. If for a previous month, close it and create a new one. Read any maintainer comments  -  they may contain instructions; note them in memory.
+1. Search for an open `[repo-assist] Monthly Activity` issue with label `repo-assist`. If it's for the current month, update it via `update-issue`. If for a previous month, close it via `close-issue` (state reason `completed`) and create a new current-month issue via `create-issue`. Do not leave previous monthly summaries open. Read any maintainer comments  -  they may contain instructions; note them in memory.
 2. **Issue body format**  -  use **exactly** this structure:
 
    ```markdown
