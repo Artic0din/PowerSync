@@ -36,7 +36,7 @@ on:
       run: |
         MAX_OPEN_PRS=8
         if [[ "$GITHUB_EVENT_NAME" != "schedule" ]]; then exit 0; fi
-        COUNT=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search 'in:title "[repo-assist]"' --json number --jq 'length')
+        COUNT=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label repo-assist --json number --jq 'length')
         [[ "$COUNT" -lt "$MAX_OPEN_PRS" ]]
       # exits 0 if not scheduled or <MAX_OPEN_PRS open PRs, 1 if ≥MAX_OPEN_PRS
 
@@ -90,15 +90,19 @@ safe-outputs:
     hide-older-comments: true
   create-pull-request:
     draft: true
-    title-prefix: "[repo-assist] "
+    title-prefix: "chore(repo-assist): "
     labels: [automation, repo-assist]
-    protected-files: fallback-to-issue
+    protected-files:
+      policy: fallback-to-issue
+      exclude: [CHANGELOG.md]
     max: 4
   push-to-pull-request-branch:
     target: "*"
-    required-title-prefix: "[repo-assist] "
+    required-title-prefix: "chore(repo-assist): "
     max: 4
-    protected-files: fallback-to-issue
+    protected-files:
+      policy: fallback-to-issue
+      exclude: [CHANGELOG.md]
   create-issue:
     title-prefix: "[repo-assist] "
     labels: [automation, repo-assist]
@@ -126,8 +130,8 @@ steps:
       # Fetch open issues with labels (up to 500)
       gh issue list --state open --limit 500 --json number,labels > /tmp/gh-aw/issues.json
 
-      # Fetch open PRs with titles (up to 200)
-      gh pr list --state open --limit 200 --json number,title > /tmp/gh-aw/prs.json
+      # Fetch open PRs with titles and labels (up to 200)
+      gh pr list --state open --limit 200 --json number,title,labels > /tmp/gh-aw/prs.json
 
       # Compute task weights and select three tasks for this run
       python3 - << 'EOF'
@@ -140,8 +144,9 @@ steps:
 
       open_issues     = len(issues)
       unlabelled      = sum(1 for i in issues if not i.get('labels'))
-      repo_assist_prs = sum(1 for p in prs if p['title'].startswith('[repo-assist]'))
-      other_prs       = sum(1 for p in prs if not p['title'].startswith('[repo-assist]'))
+      is_repo_assist  = lambda p: any(label.get('name') == 'repo-assist' for label in p.get('labels', []))
+      repo_assist_prs = sum(1 for p in prs if is_repo_assist(p))
+      other_prs       = sum(1 for p in prs if not is_repo_assist(p))
 
       task_names = {
           1:  'Issue Labelling',
@@ -279,7 +284,7 @@ The weighting scheme naturally adapts to repo state:
 
 **Progress Imperative**: Your primary purpose is to make forward progress on the repository. A "no action taken" outcome should be rare and only occur when every open issue has been addressed, all labelling is complete, and there are genuinely no improvements, fixes, or triage actions possible. If your memory flags backlog items, **act on them now** rather than deferring.
 
-Always do Task 11 (Update Monthly Activity Summary Issue) every run. In all comments and PR descriptions, identify yourself as "Repo Assist". When engaging with first-time contributors, welcome them warmly and point them to README and CONTRIBUTING — this is good default behaviour regardless of which tasks are selected.
+Always do Task 11 (Update Monthly Activity Summary Issue) every run. In all comments and PR descriptions, identify yourself as "Repo Assist". When engaging with first-time contributors, welcome them warmly and point them to README — this is good default behaviour regardless of which tasks are selected.
 
 ### Task 1: Issue Labelling
 
@@ -293,7 +298,7 @@ Update memory with labels applied and cursor position.
 
 1. List open issues sorted by creation date ascending (oldest first). Resume from your memory's backlog cursor; reset when you reach the end.
 2. **Prioritise issues that have never received a Repo Assist comment.** Read the issue comments and check memory's `comments_made` field. Engage on an issue only if you have something insightful, accurate, helpful, and constructive to say. Expect to engage substantively on 1–3 issues per run; you may scan many more to find good candidates. Only re-engage on already-commented issues if new human comments have appeared since your last comment.
-3. Respond based on type: bugs → investigate the code and suggest a root cause or workaround; feature requests → discuss feasibility and implementation approach; questions → answer concisely with references to relevant code; onboarding → point to README/CONTRIBUTING. Never post vague acknowledgements, restatements, or follow-ups to your own comments.
+3. Respond based on type: bugs → investigate the code and suggest a root cause or workaround; feature requests → discuss feasibility and implementation approach; questions → answer concisely with references to relevant code; onboarding → point to README. Never post vague acknowledgements, restatements, or follow-ups to your own comments.
 4. Begin every comment with: `🤖 *This is an automated response from Repo Assist.*`
 5. Update memory with comments made and the new cursor position.
 
@@ -333,7 +338,7 @@ Check memory for already-submitted ideas; do not re-propose them. Create a fresh
 
 ### Task 6: Maintain Repo Assist PRs
 
-1. List all open PRs with the `[repo-assist]` title prefix.
+1. List all open PRs carrying the `repo-assist` label.
 2. For each PR: fix CI failures caused by your changes by pushing updates; resolve merge conflicts. If you've retried multiple times without success, comment and leave for human review.
 3. Do not push updates for infrastructure-only failures — comment instead.
 4. Update memory.
