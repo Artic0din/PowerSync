@@ -4,9 +4,9 @@ description: |
   Can also be triggered on-demand via '/repo-assist <instructions>' to perform specific tasks.
   - Labels and triages open issues
   - Comments helpfully on open issues to unblock contributors and onboard newcomers
-  - Identifies issues that can be fixed and creates draft pull requests with fixes
+  - Identifies issues that can be fixed and creates ready-for-review pull requests with fixes
   - Improves performance, testing, and code quality via PRs
-  - Makes engineering investments: dependency updates, CI diagnostics, tooling
+  - Makes engineering investments: dependency diagnostics, CI diagnostics, tooling
   - Updates its own PRs when CI fails or merge conflicts arise
   - Nudges stale PRs waiting for author response
   - Takes the repository forward with proactive improvements
@@ -89,7 +89,7 @@ safe-outputs:
     target: "*"
     hide-older-comments: true
   create-pull-request:
-    draft: true
+    draft: false
     title-prefix: "chore(repo-assist): "
     labels: [automation, repo-assist]
     protected-files:
@@ -315,7 +315,7 @@ Update memory with labels applied and cursor position.
    c. Implement a minimal, surgical fix. Do not refactor unrelated code.
    d. **Build and test (required)**: do not create a PR if the build fails or tests fail due to your changes. If tests fail due to infrastructure, create the PR but document it.
    e. Add and pass a focused regression test. For battery, inverter, grid, tariff, scheduling, reserve, or EV behaviour, write exact tests before changing production code. If a reliable regression test is not possible, comment on the issue and do not create a fix PR.
-   f. Create a draft PR with: AI disclosure, `Fixes #N`, root cause, fix rationale, trade-offs, and a Test Status section showing build/test outcome.
+   f. Create a ready-for-review PR with: AI disclosure, `Fixes #N`, root cause, fix rationale, trade-offs, and a Test Status section showing build/test outcome.
    g. Post a single brief comment on the issue linking to the PR.
 3. Update memory with fix attempts and outcomes.
 
