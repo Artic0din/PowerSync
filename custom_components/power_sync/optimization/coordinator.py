@@ -2890,13 +2890,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 groups.append(None)
                 continue
             day = tariff_datetime(timestamp, rule.timezone_token).date().isoformat()
-            groups.append(day)
-            bonuses[idx] = bonus_price
-            caps[day] = (
+            remaining_kwh = (
                 ledger.remaining_kwh(CUSTOM_TARIFF_IMPORT_RULE_ID)
                 if day == current_day
                 else rule.daily_cap_kwh
             )
+            if remaining_kwh <= 1e-9:
+                groups.append(None)
+                continue
+            groups.append(day)
+            bonuses[idx] = bonus_price
+            caps[day] = remaining_kwh
             if idx < len(self._last_display_import_prices or []):
                 self._last_display_import_prices[idx] = max(
                     0.0,

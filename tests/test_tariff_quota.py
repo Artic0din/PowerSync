@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import sys
+import textwrap
 import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,3 +143,103 @@ def test_optimizer_wires_custom_quota_groups_limits_and_persistence() -> None:
     api_source = (COMPONENT_ROOT / "__init__.py").read_text()
     assert "raw_import_quota = data.get(\"import_quota\")" in api_source
     assert "Import allowance requires a valid HH:MM window" in api_source
+
+
+def test_exhausted_allowance_restores_post_cap_display_price() -> None:
+    coordinator_path = COMPONENT_ROOT / "optimization" / "coordinator.py"
+    source = coordinator_path.read_text()
+    module = ast.parse(source)
+    method = next(
+        child
+        for node in module.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "OptimizationCoordinator"
+        for child in node.body
+        if isinstance(child, ast.FunctionDef)
+        and child.name == "_apply_custom_tariff_quota_optimizer_inputs"
+    )
+    namespace = {
+        "CUSTOM_TARIFF_IMPORT_RULE_ID": (
+            tariff_quota.CUSTOM_TARIFF_IMPORT_RULE_ID
+        ),
+        "_LOGGER": SimpleNamespace(info=lambda *args, **kwargs: None),
+        "dt_util": SimpleNamespace(
+            now=lambda: datetime(
+                2026,
+                7,
+                31,
+                11,
+                0,
+                tzinfo=timezone(timedelta(hours=10)),
+            )
+        ),
+        "tariff_datetime": quota.tariff_datetime,
+    }
+    segment = ast.get_source_segment(source, method)
+    assert segment is not None
+    exec(textwrap.dedent(segment), namespace)
+
+    tariff = _ergon_tariff()
+    rule = tariff_quota.custom_tariff_import_quota_rule(
+        tariff,
+        default_timezone="Australia/Brisbane",
+    )
+    assert rule is not None
+    state = quota.QuotaLedgerState(
+        tariff_day="2026-07-31",
+        timezone_token="Australia/Brisbane",
+        confidence="authoritative",
+        settled_kwh={
+            tariff_quota.CUSTOM_TARIFF_IMPORT_RULE_ID: rule.daily_cap_kwh,
+        },
+    )
+    ledger = quota.QuotaLedger((rule,), state)
+    timestamps = [
+        datetime(
+            2026,
+            7,
+            31,
+            11,
+            0,
+            tzinfo=timezone(timedelta(hours=10)),
+        ),
+        datetime(
+            2026,
+            8,
+            1,
+            11,
+            0,
+            tzinfo=timezone(timedelta(hours=10)),
+        ),
+    ]
+    coordinator = SimpleNamespace(
+        _last_display_import_prices=[0.08101, 0.08101],
+        _last_grid_charge_cap_import_prices=[0.08101, 0.08101],
+        _ensure_custom_tariff_quota_ledger=lambda now=None: (
+            tariff,
+            rule,
+            ledger,
+            "hash",
+        ),
+        _price_timestamps=lambda count: timestamps[:count],
+    )
+
+    namespace["_apply_custom_tariff_quota_optimizer_inputs"](
+        coordinator,
+        [0.08101, 0.08101],
+        [0.0, 0.0],
+    )
+
+    assert coordinator._last_display_import_prices == pytest.approx(
+        [0.08101, 0.0]
+    )
+    assert coordinator._last_grid_charge_cap_import_prices == pytest.approx(
+        [0.08101, 0.0]
+    )
+    assert coordinator._last_zerocharge_bonus_prices == pytest.approx(
+        [0.0, 0.08101]
+    )
+    assert coordinator._last_import_bonus_group_ids == [None, "2026-08-01"]
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08-01": pytest.approx(24.0),
+    }
