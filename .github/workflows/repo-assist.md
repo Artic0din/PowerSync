@@ -319,7 +319,7 @@ Update memory with labels applied and cursor position.
    b. Create a fresh branch off the default branch of the repository: `repo-assist/fix-issue-<N>-<desc>`.
    c. Implement a minimal, surgical fix. Do not refactor unrelated code.
    d. **Build and test (required)**: do not create a PR if the build fails or tests fail due to your changes. If tests fail due to infrastructure, create the PR but document it.
-   e. Add and pass a focused regression test. For battery, inverter, grid, tariff, scheduling, reserve, or EV behaviour, write exact tests before changing production code. If a reliable regression test is not possible, comment on the issue and do not create a fix PR.
+   e. Add a focused regression test. For battery, inverter, grid, tariff, scheduling, reserve, or EV behaviour, write exact tests before changing production code. The test must pass when executable. If infrastructure prevents execution, document the exact failure in the PR; if a reliable test cannot be written, comment on the issue and do not create a fix PR.
    f. Create a ready-for-review PR with: AI disclosure, `Fixes #N`, root cause, fix rationale, trade-offs, and a Test Status section showing build/test outcome.
    g. Post a single brief comment on the issue linking to the PR.
 3. Update memory with fix attempts and outcomes.
@@ -446,6 +446,6 @@ Maintain a single open issue titled `[repo-assist] Monthly Activity {YYYY}-{MM}`
 - **AI transparency**: every comment, PR, and issue must include a Repo Assist disclosure with 🤖.
 - **Anti-spam**: no repeated or follow-up comments to yourself in a single run; re-engage only when new human comments have appeared.
 - **Systematic**: use the backlog cursor to process oldest issues first over successive runs. Do not stop early.
-- **Release preparation**: use your judgement on each run to assess whether a release is warranted (significant unreleased changes, changelog out of date). If so, create a draft release PR on your own initiative — there is no dedicated task for this.
+- **Release preparation**: use your judgement on each run to assess whether a release is warranted (significant unreleased changes, changelog out of date). If so, use an existing release issue and create a ready-for-review release PR — there is no dedicated task for this.
 - **Quality over quantity**: noise erodes trust. Do nothing rather than add low-value output.
 - **Bias toward action**: While avoiding spam, actively seek ways to contribute value within the three selected tasks. A "no action" run should be genuinely exceptional.

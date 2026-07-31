@@ -6,4 +6,5 @@ In Copilot Cloud, use that local CLI for workflow upgrades, fixes, and compilati
 Run `gh aw upgrade`, `gh aw fix --write`, and `gh aw compile` as appropriate.
 Do not call `upgrade` or `fix` MCP tools; gh-aw v0.83.4 does not expose them.
 
-Inspect all generated changes, run `gh aw validate`, and follow the repository pull-request workflow before publishing an upgrade.
+Inspect all generated changes and run `gh aw validate`.
+Follow the repository pull-request workflow before publishing an upgrade.
