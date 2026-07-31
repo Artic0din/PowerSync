@@ -76,6 +76,7 @@ tools:
   github:
     toolsets: [all]
     min-integrity: none # This workflow is allowed to examine and comment on any issues or PRs
+    allowed-repos: [plaintext-lab/powersync]
   bash: true
   repo-memory: true
 
