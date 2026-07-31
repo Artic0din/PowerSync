@@ -10047,10 +10047,19 @@ class ProviderConfigView(HomeAssistantView):
                 CONF_AUTO_SYNC_ENABLED,
                 entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
             )
-            config["monitoring_mode"] = entry.options.get(
-                CONF_MONITORING_MODE,
-                entry.data.get(CONF_MONITORING_MODE, False)
-            )
+            if entry.options.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                entry.data.get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
+            ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+                config["monitoring_mode"] = True
+            else:
+                config["monitoring_mode"] = entry.options.get(
+                    CONF_MONITORING_MODE,
+                    entry.data.get(CONF_MONITORING_MODE, False),
+                )
 
             result = {
                 "success": True,
@@ -10211,6 +10220,15 @@ class ProviderConfigView(HomeAssistantView):
             for key, value in data.items():
                 if key in key_mapping:
                     new_options[key_mapping[key]] = value
+
+            if entry.options.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                entry.data.get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
+            ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+                new_options[CONF_MONITORING_MODE] = True
 
             active_provider = new_options.get(
                 CONF_ELECTRICITY_PROVIDER,
@@ -19481,6 +19499,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     is_solaredge = active_battery_system == BATTERY_SYSTEM_SOLAREDGE
     is_anker_solix = active_battery_system == BATTERY_SYSTEM_ANKER_SOLIX
     is_custom_battery = active_battery_system == BATTERY_SYSTEM_CUSTOM
+
+    def ac_inverter_is_same_hybrid() -> bool:
+        """Return whether the AC path targets the active Sungrow connection."""
+        if not is_sungrow:
+            return False
+
+        inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND,
+            entry.data.get(CONF_INVERTER_BRAND, ""),
+        )
+        if inverter_brand != "sungrow":
+            return False
+
+        inverter_host = entry.options.get(
+            CONF_INVERTER_HOST,
+            entry.data.get(CONF_INVERTER_HOST, ""),
+        )
+        inverter_port = entry.options.get(
+            CONF_INVERTER_PORT,
+            entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+        )
+        inverter_slave_id = entry.options.get(
+            CONF_INVERTER_SLAVE_ID,
+            entry.data.get(
+                CONF_INVERTER_SLAVE_ID,
+                DEFAULT_INVERTER_SLAVE_ID,
+            ),
+        )
+        sungrow_host = entry.options.get(
+            CONF_SUNGROW_HOST,
+            entry.data.get(CONF_SUNGROW_HOST, ""),
+        )
+        sungrow_port = entry.options.get(
+            CONF_SUNGROW_PORT,
+            entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT),
+        )
+        sungrow_slave_id = entry.options.get(
+            CONF_SUNGROW_SLAVE_ID,
+            entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID),
+        )
+        try:
+            return (
+                str(inverter_host).strip() == str(sungrow_host).strip()
+                and int(inverter_port) == int(sungrow_port)
+                and int(inverter_slave_id) == int(sungrow_slave_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -25259,34 +25326,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("sungrow_curtailment_state", "normal")
-
-        def ac_inverter_is_same_hybrid() -> bool:
-            inverter_brand = entry.options.get(
-                CONF_INVERTER_BRAND,
-                entry.data.get(CONF_INVERTER_BRAND, ""),
-            )
-            if inverter_brand != "sungrow":
-                return False
-
-            inverter_host = entry.options.get(
-                CONF_INVERTER_HOST,
-                entry.data.get(CONF_INVERTER_HOST, ""),
-            )
-            inverter_port = entry.options.get(
-                CONF_INVERTER_PORT,
-                entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
-            )
-            inverter_slave_id = entry.options.get(
-                CONF_INVERTER_SLAVE_ID,
-                entry.data.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID),
-            )
-            return (
-                inverter_host == entry.data.get(CONF_SUNGROW_HOST, "")
-                and inverter_port
-                == entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
-                and inverter_slave_id
-                == entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
-            )
 
         if feedin_price is None:
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
@@ -36003,6 +36042,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Inverter curtailment not enabled in config")
             return
 
+        if ac_inverter_is_same_hybrid():
+            _LOGGER.warning(
+                "Manual inverter curtailment blocked: the configured Sungrow AC "
+                "endpoint matches the active battery/telemetry connection"
+            )
+            return
+
         inverter_brand = entry.options.get(
             CONF_INVERTER_BRAND,
             entry.data.get(CONF_INVERTER_BRAND, "sungrow")
@@ -36151,6 +36197,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if not inverter_enabled:
             _LOGGER.warning("Inverter curtailment not enabled in config")
+            return
+
+        if ac_inverter_is_same_hybrid():
+            _LOGGER.warning(
+                "Manual inverter restore blocked: the configured Sungrow AC "
+                "endpoint matches the active battery/telemetry connection"
+            )
             return
 
         inverter_brand = entry.options.get(

@@ -7374,6 +7374,36 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
             options.pop(key, None)
 
+    def _sungrow_ac_inverter_conflicts(
+        self,
+        sungrow_host: str,
+        sungrow_port: int,
+        sungrow_slave_id: int,
+    ) -> bool:
+        """Return whether an enabled Sungrow AC path reuses this endpoint."""
+        if not self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False):
+            return False
+        if self._get_option(CONF_INVERTER_BRAND, "") != "sungrow":
+            return False
+
+        inverter_host = str(self._get_option(CONF_INVERTER_HOST, "")).strip()
+        inverter_port = self._get_option(
+            CONF_INVERTER_PORT,
+            DEFAULT_INVERTER_PORT,
+        )
+        inverter_slave_id = self._get_option(
+            CONF_INVERTER_SLAVE_ID,
+            DEFAULT_INVERTER_SLAVE_ID,
+        )
+        try:
+            return (
+                inverter_host == str(sungrow_host).strip()
+                and int(inverter_port) == int(sungrow_port)
+                and int(inverter_slave_id) == int(sungrow_slave_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _has_weather_entities(self) -> bool:
         """Return whether HA currently exposes any weather entities."""
         try:
@@ -9197,6 +9227,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 else DEFAULT_SUNGROW_PORT
             )
             sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
+            sungrow_slave_id = user_input.get(
+                CONF_SUNGROW_SLAVE_ID,
+                DEFAULT_SUNGROW_SLAVE_ID,
+            )
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
             elif (
@@ -9204,12 +9238,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 and int(sungrow_port) not in (503, 504)
             ):
                 errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
+            elif self._sungrow_ac_inverter_conflicts(
+                modbus_host,
+                sungrow_port,
+                sungrow_slave_id,
+            ):
+                errors["base"] = "sungrow_modbus_conflict"
             else:
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_slave_id = user_input.get(
-                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
-                )
                 new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
@@ -11832,6 +11869,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 else DEFAULT_SUNGROW_PORT
             )
             sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
+            sungrow_slave_id = user_input.get(
+                CONF_SUNGROW_SLAVE_ID,
+                DEFAULT_SUNGROW_SLAVE_ID,
+            )
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
             elif (
@@ -11839,6 +11880,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 and int(sungrow_port) not in (503, 504)
             ):
                 errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
+            elif self._sungrow_ac_inverter_conflicts(
+                modbus_host,
+                sungrow_port,
+                sungrow_slave_id,
+            ):
+                errors["base"] = "sungrow_modbus_conflict"
             else:
                 # Store provider and Sungrow settings
                 self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -11846,9 +11893,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 # Update config entry data with Sungrow Modbus settings
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_slave_id = user_input.get(
-                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
-                )
                 new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port

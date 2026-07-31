@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
+CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 
 # Stable Home Assistant config keys referenced by ac_inverter_is_same_hybrid.
 # Mirrors the hard-coded-namespace pattern in test_sungrow_curtailment_runtime.py
@@ -35,6 +36,16 @@ _CONST_NAMESPACE = {
     "CONF_SUNGROW_SLAVE_ID": "sungrow_slave_id",
     "DEFAULT_SUNGROW_PORT": 502,
     "DEFAULT_SUNGROW_SLAVE_ID": 1,
+}
+
+_CONFIG_FLOW_CONST_NAMESPACE = {
+    "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_inverter_curtailment_enabled",
+    "CONF_INVERTER_BRAND": "inverter_brand",
+    "CONF_INVERTER_HOST": "inverter_host",
+    "CONF_INVERTER_PORT": "inverter_port",
+    "CONF_INVERTER_SLAVE_ID": "inverter_slave_id",
+    "DEFAULT_INVERTER_PORT": 502,
+    "DEFAULT_INVERTER_SLAVE_ID": 1,
 }
 
 # The battery's own Sungrow SH / WiNet-S Modbus endpoint.
@@ -58,9 +69,27 @@ def _nested_function_source(source_path: Path, name: str) -> str:
     raise AssertionError(f"{name} not found in {source_path}")
 
 
+def _class_method_source(source_path: Path, class_name: str, method_name: str) -> str:
+    """Extract one named class method from a source file."""
+    source = source_path.read_text()
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for child in node.body:
+                if (
+                    isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and child.name == method_name
+                ):
+                    segment = ast.get_source_segment(source, child)
+                    assert segment is not None
+                    return segment
+    raise AssertionError(f"{class_name}.{method_name} not found in {source_path}")
+
+
 def _build_guard(entry, source_path: Path = INIT_PATH):
     namespace = dict(_CONST_NAMESPACE)
     namespace["entry"] = entry
+    namespace["is_sungrow"] = True
     exec(
         textwrap.dedent(
             _nested_function_source(source_path, "ac_inverter_is_same_hybrid")
@@ -85,6 +114,29 @@ def _entry(*, brand="sungrow", model, host, port, slave):
             "sungrow_slave_id": _BATTERY_SLAVE,
         },
     )
+
+
+def _build_config_conflict(*, data, options=None):
+    """Extract the options-flow inverse endpoint-conflict guard."""
+    namespace = dict(_CONFIG_FLOW_CONST_NAMESPACE)
+    exec(
+        textwrap.dedent(
+            _class_method_source(
+                CONFIG_FLOW_PATH,
+                "PowerSyncOptionsFlow",
+                "_sungrow_ac_inverter_conflicts",
+            )
+        ),
+        namespace,
+    )
+    options = options or {}
+    fake_self = SimpleNamespace(
+        _get_option=lambda key, default=None: options.get(
+            key,
+            data.get(key, default),
+        )
+    )
+    return namespace["_sungrow_ac_inverter_conflicts"].__get__(fake_self)
 
 
 def test_same_endpoint_non_sh_model_is_treated_as_same_hybrid():
@@ -152,3 +204,53 @@ def test_non_sungrow_ac_inverter_is_never_same_hybrid():
         )
     )
     assert guard() is False
+
+
+def test_sungrow_connection_transition_rejects_existing_same_endpoint_ac_path():
+    """Changing the battery connection must validate the already-saved AC path."""
+    data = {
+        "ac_inverter_curtailment_enabled": True,
+        "inverter_brand": "sungrow",
+        "inverter_host": _BATTERY_HOST,
+        "inverter_port": 503,
+        "inverter_slave_id": _BATTERY_SLAVE,
+    }
+    conflicts = _build_config_conflict(data=data)
+
+    assert conflicts(_BATTERY_HOST, 503, _BATTERY_SLAVE) is True
+    assert conflicts(_BATTERY_HOST, 504, _BATTERY_SLAVE) is False
+
+    for method_name in ("async_step_sungrow_connection", "async_step_init_sungrow"):
+        method_source = _class_method_source(
+            CONFIG_FLOW_PATH,
+            "PowerSyncOptionsFlow",
+            method_name,
+        )
+        assert "self._sungrow_ac_inverter_conflicts(" in method_source
+        assert 'errors["base"] = "sungrow_modbus_conflict"' in method_source
+        assert method_source.index("self._sungrow_ac_inverter_conflicts(") < method_source.index(
+            "self.hass.config_entries.async_update_entry("
+        )
+
+
+def test_manual_ac_services_block_same_sungrow_endpoint_before_controller_creation():
+    """Manual curtail/restore must not bypass the shared same-endpoint guard."""
+    for handler_name in ("handle_curtail_inverter", "handle_restore_inverter"):
+        handler_source = _nested_function_source(INIT_PATH, handler_name)
+        guard = "if ac_inverter_is_same_hybrid():"
+        assert guard in handler_source
+        assert handler_source.index(guard) < handler_source.index(
+            "controller = get_inverter_controller("
+        )
+
+
+def test_provider_api_keeps_ihomemanager_monitoring_mode_forced_on():
+    """Provider GET/POST must expose and persist the effective safety state."""
+    get_source = _class_method_source(INIT_PATH, "ProviderConfigView", "get")
+    post_source = _class_method_source(INIT_PATH, "ProviderConfigView", "post")
+
+    for method_source in (get_source, post_source):
+        assert "SUNGROW_CONNECTION_IHOMEMANAGER" in method_source
+        assert "CONF_SUNGROW_CONNECTION_TYPE" in method_source
+    assert 'config["monitoring_mode"] = True' in get_source
+    assert "new_options[CONF_MONITORING_MODE] = True" in post_source
