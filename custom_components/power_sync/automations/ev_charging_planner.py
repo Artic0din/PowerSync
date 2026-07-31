@@ -98,12 +98,44 @@ EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
+FREE_GRID_PRICE_EPSILON_CENTS = 0.001
 
 
 def _format_price_log_value(price_cents: Optional[float]) -> str:
     if price_cents is None:
         return "unknown"
     return f"{price_cents:.1f}c"
+
+
+def _is_free_grid_window(window: Any) -> bool:
+    """Return whether a planned window is guaranteed free grid energy."""
+    return bool(
+        window
+        and str(getattr(window, "source", "")).startswith("grid")
+        and float(getattr(window, "price_cents_kwh", float("inf")))
+        <= FREE_GRID_PRICE_EPSILON_CENTS
+    )
+
+
+def _should_force_deadline_max_rate(
+    *,
+    is_time_critical: bool,
+    source: str,
+    limit_grid_import: bool,
+    current_window: Any,
+) -> bool:
+    """Use full EV rate only for paid/urgent deadline windows.
+
+    A feasible free-grid deadline window should retain battery-target control:
+    the home battery receives its configured maximum first and the EV consumes
+    only residual site headroom. Paid deadline recovery remains full-rate.
+    """
+    return bool(
+        is_time_critical
+        and source != "solar_surplus"
+        and not limit_grid_import
+        and not _is_free_grid_window(current_window)
+    )
 
 
 def _should_block_smart_schedule_solar_start(
@@ -2911,7 +2943,7 @@ class ChargingPlanner:
             # Grid option
             # When grid is free (0c) or negative, use full charger power - don't reduce for solar
             # Solar forecast is uncertain, but free grid is guaranteed
-            if price.import_cents <= 0:
+            if price.import_cents <= FREE_GRID_PRICE_EPSILON_CENTS:
                 grid_power = charger_power_kw  # Full power when grid is free/negative
             else:
                 grid_power = charger_power_kw - max(0, solar_available)
@@ -2939,7 +2971,11 @@ class ChargingPlanner:
             prices = [opt["cost_cents"] for opt in charging_options]
             grid_options = [opt for opt in charging_options if opt["source"].startswith("grid")]
             negative_price_windows = [opt for opt in grid_options if opt["cost_cents"] < 0]
-            free_grid_windows = [opt for opt in grid_options if opt["cost_cents"] == 0]
+            free_grid_windows = [
+                opt
+                for opt in grid_options
+                if opt["cost_cents"] <= FREE_GRID_PRICE_EPSILON_CENTS
+            ]
 
             _LOGGER.info(
                 f"Found {len(charging_options)} charging options, "
@@ -2964,10 +3000,23 @@ class ChargingPlanner:
         def sort_key(x):
             cost = x["cost_cents"]
             time = x["hour_dt"]
-            # When cost is <= 0 (free or negative), prefer grid over solar
+            # Treat tariff rounding noise at or below the shared free-price
+            # threshold as zero. When grid is free/negative, prefer it over
+            # forecast solar because grid availability is guaranteed.
+            effective_cost = (
+                0
+                if x["source"].startswith("grid")
+                and cost <= FREE_GRID_PRICE_EPSILON_CENTS
+                else cost
+            )
             # 0 = grid (preferred), 1 = solar
-            source_pref = 0 if x["source"].startswith("grid") and cost <= 0 else 1
-            return (cost, time, source_pref)
+            source_pref = (
+                0
+                if x["source"].startswith("grid")
+                and cost <= FREE_GRID_PRICE_EPSILON_CENTS
+                else 1
+            )
+            return (effective_cost, time, source_pref)
 
         charging_options.sort(key=sort_key)
 
@@ -2976,7 +3025,10 @@ class ChargingPlanner:
             price_note = ""
             if opt["cost_cents"] < 0:
                 price_note = " 💰 GET PAID"
-            elif opt["cost_cents"] == 0 and opt["source"].startswith("grid"):
+            elif (
+                opt["cost_cents"] <= FREE_GRID_PRICE_EPSILON_CENTS
+                and opt["source"].startswith("grid")
+            ):
                 price_note = " ⚡ FREE"
             _LOGGER.debug(
                 f"  Option {i+1}: {opt['hour_dt'].strftime('%H:%M')} - "
@@ -3083,6 +3135,31 @@ class ChargingPlanner:
                 surplus_forecast, price_forecast,
                 battery_power_schedule=battery_power_schedule,
             )
+
+        # If the target can be met entirely inside guaranteed free-grid
+        # windows, use those windows instead of deferring a time-critical plan
+        # to the last paid hours before departure. Execution keeps battery
+        # target control for these free windows and falls back to full EV rate
+        # only when later paid deadline recovery is actually required.
+        cost_plan = await self._plan_cost_optimized(
+            vehicle_id,
+            current_soc,
+            target_soc,
+            target_time,
+            energy_needed_kwh,
+            charger_power_kw,
+            surplus_forecast,
+            price_forecast,
+            battery_power_schedule=battery_power_schedule,
+        )
+        if (
+            cost_plan.can_meet_target
+            and cost_plan.windows
+            and all(_is_free_grid_window(window) for window in cost_plan.windows)
+        ):
+            for window in cost_plan.windows:
+                window.reason = "target_deadline_free_grid"
+            return cost_plan
 
         # Calculate minimum hours needed (0.85 efficiency: AC-DC losses, ramp-up, thermal)
         hours_needed = energy_needed_kwh / (charger_power_kw * 0.85)
@@ -5118,7 +5195,16 @@ class AutoScheduleExecutor:
                 )
                 if state.is_charging:
                     await self._stop_charging(vehicle_id, settings, state)
-                state.last_decision = "waiting"
+                    state.last_decision = "stopped"
+                elif await self._stop_external_charging_if_needed(
+                    vehicle_id,
+                    settings,
+                    state,
+                    reason,
+                ):
+                    state.last_decision = "stopped"
+                else:
+                    state.last_decision = "waiting"
                 state.last_decision_reason = reason
                 self._sync_active_charging_preserve_intent(
                     vehicle_id,
@@ -5303,10 +5389,11 @@ class AutoScheduleExecutor:
                 settings,
                 state,
                 source,
-                force_max_rate=(
-                    is_time_critical
-                    and source != "solar_surplus"
-                    and not effective_limit_grid
+                force_max_rate=_should_force_deadline_max_rate(
+                    is_time_critical=is_time_critical,
+                    source=source,
+                    limit_grid_import=effective_limit_grid,
+                    current_window=current_window,
                 ),
             )
             if started is not False and state.is_charging:
