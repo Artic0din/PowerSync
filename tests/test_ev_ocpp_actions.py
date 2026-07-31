@@ -2607,12 +2607,23 @@ def test_solar_surplus_active_default_session_debounces_resolved_vin_unplug(
 
 
 def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": 0,
+            "grid_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+            "ev_power": 0,
+            "battery_soc": 100,
+        }
+
     async def fake_start(*args, **kwargs):
         return True
 
     async def fake_set_vehicle_amps(*args, **kwargs):
         return True
 
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
 
@@ -2645,6 +2656,301 @@ def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
     assert result is True
     params = actions._dynamic_ev_state["entry-1"]["VIN123"]["params"]
     assert params["max_grid_import_kw"] == 19.2
+
+
+def test_dynamic_single_smart_schedule_start_waits_for_site_headroom(monkeypatch):
+    """A first Smart Schedule EV must not worsen an existing site-cap breach."""
+    start_calls: list[int | None] = []
+    set_amps_calls: list[int] = []
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -15000,
+            "grid_power": 13590,
+            "solar_power": 7100,
+            "load_power": 5690,
+            "ev_power": 0,
+            "battery_soc": 78,
+        }
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append(params.get("amps"))
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 16,
+                "voltage": 240,
+                "phases": 3,
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert start_calls == []
+    assert set_amps_calls == []
+    assert actions._dynamic_ev_state == {}
+
+
+def test_dynamic_single_smart_schedule_start_uses_safe_site_headroom(monkeypatch):
+    """The first Tesla command must use the live site budget, not charger max."""
+    command_order: list[tuple[str, int | None]] = []
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -15000,
+            "grid_power": 13590,
+            "solar_power": 7100,
+            "load_power": 5690,
+            "ev_power": 0,
+            "battery_soc": 78,
+        }
+
+    async def fake_start(hass, config_entry, params, context=None):
+        command_order.append(("start", params.get("amps")))
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        command_order.append(("set_amps", amps))
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 20,
+                "min_charge_amps": 5,
+                "max_charge_amps": 16,
+                "voltage": 240,
+                "phases": 3,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert command_order == [("set_amps", 8), ("start", 8)]
+    state = actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]
+    assert state["current_amps"] == 8
+    assert state["params"]["max_grid_import_kw"] == 20
+
+
+def test_dynamic_single_smart_schedule_start_waits_for_live_site_status(monkeypatch):
+    """Missing live telemetry must not permit an unbounded first Tesla start."""
+    start_calls: list[bool] = []
+    set_amps_calls: list[int] = []
+
+    async def missing_live_status(*args, **kwargs):
+        return None
+
+    async def fake_start(*args, **kwargs):
+        start_calls.append(True)
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", missing_live_status)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 20,
+                "min_charge_amps": 5,
+                "max_charge_amps": 16,
+                "voltage": 240,
+                "phases": 3,
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert start_calls == []
+    assert set_amps_calls == []
+    assert actions._dynamic_ev_state == {}
+
+
+def test_dynamic_single_smart_schedule_start_rejects_unusable_coordinator(monkeypatch):
+    """Missing, failed, or stale cached telemetry must not authorize a start."""
+    start_calls: list[bool] = []
+    set_amps_calls: list[int] = []
+    now = datetime(2026, 7, 31, 1, 30)
+
+    async def fake_start(*args, **kwargs):
+        start_calls.append(True)
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+
+    complete_data = {
+        "grid_power": 1.0,
+        "solar_power": 7.0,
+        "battery_power": -5.0,
+        "load_power": 3.0,
+        "battery_level": 78,
+        "telemetry_ready": True,
+    }
+    cases = (
+        SimpleNamespace(
+            data={key: value for key, value in complete_data.items() if key != "grid_power"},
+            last_update_success=True,
+        ),
+        SimpleNamespace(
+            data=complete_data,
+            last_update_success=True,
+        ),
+        SimpleNamespace(
+            data=complete_data,
+            last_update_success=False,
+        ),
+        SimpleNamespace(
+            data=complete_data,
+            last_update_success=True,
+            last_update_success_time=now - timedelta(minutes=5),
+            update_interval=timedelta(seconds=30),
+        ),
+    )
+
+    for coordinator in cases:
+        hass = _Hass([])
+        hass.data["power_sync"]["entry-1"]["sungrow_coordinator"] = coordinator
+        actions._dynamic_ev_state.clear()
+        result = asyncio.run(
+            actions._action_start_ev_charging_dynamic(
+                hass,
+                _Entry(),
+                {
+                    "vehicle_vin": "ble_tesla_yf88",
+                    "dynamic_mode": "battery_target",
+                    "owner_mode": "smart_schedule",
+                    "charger_type": "tesla",
+                    "target_battery_charge_kw": 15,
+                    "max_grid_import_kw": 20,
+                    "min_charge_amps": 5,
+                    "max_charge_amps": 16,
+                    "voltage": 240,
+                    "phases": 3,
+                },
+                context=None,
+            )
+        )
+
+        assert result is False
+        assert actions._dynamic_ev_state == {}
+
+    assert start_calls == []
+    assert set_amps_calls == []
+
+
+def test_dynamic_single_smart_schedule_start_refreshes_coordinator(monkeypatch):
+    """A production-shaped coordinator must refresh before the first write."""
+    command_order: list[tuple[str, int | None]] = []
+
+    class Coordinator:
+        data = {
+            "grid_power": 13.59,
+            "solar_power": 7.1,
+            "battery_power": -15.0,
+            "load_power": 5.69,
+            "battery_level": 78,
+            "telemetry_ready": True,
+        }
+        last_update_success = True
+        update_interval = timedelta(seconds=30)
+
+        def __init__(self):
+            self.refresh_calls = 0
+
+        async def async_refresh(self):
+            self.refresh_calls += 1
+
+    async def fake_start(hass, config_entry, params, context=None):
+        command_order.append(("start", params.get("amps")))
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        command_order.append(("set_amps", amps))
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    coordinator = Coordinator()
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = coordinator
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 20,
+                "min_charge_amps": 5,
+                "max_charge_amps": 16,
+                "voltage": 240,
+                "phases": 3,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert coordinator.refresh_calls == 1
+    assert command_order == [("set_amps", 8), ("start", 8)]
 
 
 def test_dynamic_start_defers_second_battery_target_vehicle(monkeypatch):
@@ -2773,12 +3079,26 @@ def test_dynamic_start_does_not_defer_no_grid_import_vehicle(monkeypatch):
 
 
 def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatch):
+    async def refresh_site():
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": 0,
+            "grid_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+            "ev_power": 0,
+            "battery_soc": 100,
+        }
+
     async def fake_start(*args, **kwargs):
         return True
 
     async def fake_set_vehicle_amps(*args, **kwargs):
         return True
 
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
 
@@ -2793,7 +3113,16 @@ def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatc
         }
     )
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
-        _site_info_cache={"max_site_meter_power_ac": 16.1}
+        _site_info_cache={"max_site_meter_power_ac": 16.1},
+        data={
+            "battery_power": 0,
+            "grid_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+            "battery_level": 100,
+        },
+        last_update_success=True,
+        async_refresh=refresh_site,
     )
     actions._dynamic_ev_state.clear()
 

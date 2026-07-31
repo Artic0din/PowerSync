@@ -28,6 +28,7 @@ EV Actions (Tesla Fleet/Teslemetry, Tesla BLE, OCPP, generic HA, Zaptec, or HA-n
 
 import logging
 import asyncio
+import math
 from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
@@ -5456,6 +5457,99 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         return None
 
 
+def _coordinator_has_usable_ev_start_snapshot(
+    coordinator: Any,
+    *,
+    freshly_refreshed: bool = False,
+) -> bool:
+    """Return whether cached coordinator data is safe for an initial EV write."""
+    if getattr(coordinator, "last_update_success", False) is not True:
+        return False
+
+    data = getattr(coordinator, "data", None)
+    if not isinstance(data, dict) or data.get("telemetry_ready") is False:
+        return False
+    for key in ("grid_power", "solar_power", "battery_power"):
+        value = data.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            return False
+
+    last_update = getattr(coordinator, "last_update_success_time", None)
+    update_interval = getattr(coordinator, "update_interval", None)
+    if last_update is None:
+        return freshly_refreshed
+    try:
+        stale_after = max(
+            update_interval * 4
+            if update_interval is not None
+            else timedelta(seconds=120),
+            timedelta(seconds=60),
+        )
+        now = dt_util.utcnow()
+        if (
+            getattr(now, "tzinfo", None) is None
+            and getattr(last_update, "tzinfo", None) is not None
+        ):
+            now = now.replace(tzinfo=last_update.tzinfo)
+        elif (
+            getattr(now, "tzinfo", None) is not None
+            and getattr(last_update, "tzinfo", None) is None
+        ):
+            last_update = last_update.replace(tzinfo=now.tzinfo)
+        return (now - last_update) <= stale_after
+    except Exception:
+        return False
+
+
+async def _get_initial_smart_schedule_live_status(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+) -> Optional[Dict[str, Any]]:
+    """Return a fresh, complete live snapshot before the first EV command."""
+    from ..const import DOMAIN
+    from .live_status import coordinator_data_to_ev_live_status
+
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    coordinator_found = False
+    for coord_key in (
+        "tesla_coordinator",
+        "sigenergy_coordinator",
+        "sungrow_coordinator",
+    ):
+        coordinator = entry_data.get(coord_key)
+        if coordinator is None:
+            continue
+        coordinator_found = True
+        refresh = getattr(coordinator, "async_refresh", None)
+        freshly_refreshed = False
+        if callable(refresh):
+            try:
+                await refresh()
+                freshly_refreshed = True
+            except Exception as err:
+                _LOGGER.debug(
+                    "Dynamic EV: Site coordinator refresh failed before start: %s",
+                    err,
+                )
+                return None
+        if _coordinator_has_usable_ev_start_snapshot(
+            coordinator,
+            freshly_refreshed=freshly_refreshed,
+        ):
+            return coordinator_data_to_ev_live_status(coordinator.data)
+        return None
+
+    # Never route around a known unhealthy cached site coordinator. Without a
+    # coordinator, the normal helper may still obtain a fresh Tesla API sample.
+    if coordinator_found:
+        return None
+    return await _get_tesla_live_status(hass, config_entry)
+
+
 def _live_status_power_kw(live_status: dict, key: str) -> float:
     """Return a live_status power value in kW."""
     try:
@@ -5478,6 +5572,92 @@ def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float
 
     load_power_kw = _live_status_power_kw(live_status, "load_power")
     return max(0.0, load_power_kw - ev_kw)
+
+
+def _initial_smart_schedule_battery_target_amps(
+    live_status: dict,
+    *,
+    max_grid_import_kw: float,
+    target_battery_charge_kw: float,
+    min_amps: int,
+    max_amps: int,
+    voltage: float,
+    phases: int,
+) -> Optional[int]:
+    """Return a safe first Tesla rate from one usable live site sample."""
+    if not isinstance(live_status, dict):
+        return None
+
+    powers_kw: Dict[str, float] = {}
+    for key in ("grid_power", "solar_power", "battery_power"):
+        value = live_status.get(key)
+        if value is None:
+            return None
+        try:
+            value_kw = float(value) / 1000.0
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value_kw):
+            return None
+        powers_kw[key] = value_kw
+
+    try:
+        max_grid_import_kw = float(max_grid_import_kw)
+        target_battery_charge_kw = max(0.0, float(target_battery_charge_kw))
+        voltage = float(voltage)
+        phases = int(phases)
+        min_amps = int(min_amps)
+        max_amps = int(max_amps)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(max_grid_import_kw)
+        or not math.isfinite(target_battery_charge_kw)
+        or not math.isfinite(voltage)
+        or max_grid_import_kw <= 0
+        or voltage <= 0
+        or phases <= 0
+        or min_amps <= 0
+        or max_amps < min_amps
+    ):
+        return None
+
+    try:
+        battery_soc = float(live_status.get("battery_soc", 0) or 0)
+    except (TypeError, ValueError):
+        battery_soc = 0.0
+    if not math.isfinite(battery_soc):
+        return None
+
+    # No EV command has been sent yet, so the current grid import is the
+    # complete pre-start site baseline. Never add EV load above that envelope.
+    site_budget_kw = max(
+        0.0,
+        max_grid_import_kw - powers_kw["grid_power"],
+    )
+    budget_kw = site_budget_kw
+    if (
+        target_battery_charge_kw > 0
+        and battery_soc < _BATTERY_TAPER_BYPASS_SOC
+    ):
+        non_ev_home_kw = max(
+            0.0,
+            powers_kw["solar_power"]
+            + powers_kw["grid_power"]
+            + powers_kw["battery_power"],
+        )
+        battery_target_budget_kw = max(
+            0.0,
+            max_grid_import_kw
+            + powers_kw["solar_power"]
+            - non_ev_home_kw
+            - target_battery_charge_kw,
+        )
+        budget_kw = min(site_budget_kw, battery_target_budget_kw)
+
+    unit_kw = voltage * phases / 1000.0
+    safe_amps = min(max_amps, int((budget_kw + 1e-9) / unit_kw))
+    return safe_amps if safe_amps >= min_amps else 0
 
 
 def _smart_schedule_battery_target_states(
@@ -7473,12 +7653,15 @@ async def _action_start_ev_charging_dynamic_locked(
     charger_type = params.get("charger_type", "tesla")
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     priority = params.get("priority", 1)
-    defer_battery_target_start = (
+    adaptive_smart_schedule_start = (
         dynamic_mode == "battery_target"
         and params.get("owner_mode") == "smart_schedule"
         and params.get("charger_type", "tesla") == "tesla"
         and not params.get("no_grid_import", False)
         and not _coerce_positive_int(params.get("fixed_charge_amps"))
+    )
+    defer_battery_target_start = (
+        adaptive_smart_schedule_start
         and any(
             candidate_id != vehicle_id
             and candidate_state.get("active")
@@ -7596,7 +7779,84 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
                 return False
         else:
-            start_success = await _action_start_ev_charging(hass, config_entry, params, context)
+            initial_amps_pre_set = False
+            if adaptive_smart_schedule_start:
+                live_status = await _get_initial_smart_schedule_live_status(
+                    hass,
+                    config_entry,
+                )
+                initial_amps = _initial_smart_schedule_battery_target_amps(
+                    live_status,
+                    max_grid_import_kw=mode_params["max_grid_import_kw"],
+                    target_battery_charge_kw=target_battery_charge_kw,
+                    min_amps=min_charge_amps,
+                    max_amps=max_charge_amps,
+                    voltage=voltage,
+                    phases=resolved_phases,
+                )
+                if initial_amps is None:
+                    reason = "live site power is unavailable or invalid"
+                    _LOGGER.info(
+                        "Dynamic EV: Smart Schedule start waiting for %s",
+                        reason,
+                    )
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        command=f"start_{owner_mode}",
+                        success=False,
+                        reason=reason,
+                    )
+                    return False
+                if initial_amps <= 0:
+                    reason = (
+                        "site import headroom is below the configured "
+                        f"{min_charge_amps}A minimum"
+                    )
+                    _LOGGER.info(
+                        "Dynamic EV: Smart Schedule start waiting because %s",
+                        reason,
+                    )
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        command=f"start_{owner_mode}",
+                        success=False,
+                        reason=reason,
+                    )
+                    return False
+                start_amps = initial_amps
+                initial_amps_pre_set = await _set_vehicle_amps(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    start_amps,
+                    params,
+                )
+                if not initial_amps_pre_set:
+                    reason = (
+                        f"could not pre-set the safe initial rate to {start_amps}A"
+                    )
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        command=f"start_{owner_mode}",
+                        success=False,
+                        reason=reason,
+                    )
+                    return False
+
+            start_params = dict(params)
+            start_params["amps"] = start_amps
+            start_success = await _action_start_ev_charging(
+                hass,
+                config_entry,
+                start_params,
+                context,
+            )
             if not start_success:
                 _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
                 record_ev_command(
@@ -7611,12 +7871,13 @@ async def _action_start_ev_charging_dynamic_locked(
 
             # Set initial amps through the charger abstraction so OCPP and generic
             # chargers do not fall back to the Tesla-only amperage path.
-            amps_success = await _set_vehicle_amps(
-                hass, config_entry, vehicle_id, start_amps, params
-            )
-            if not amps_success:
-                # This is expected - Tesla reports lower max amps until charging actually starts
-                _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
+            if not initial_amps_pre_set:
+                amps_success = await _set_vehicle_amps(
+                    hass, config_entry, vehicle_id, start_amps, params
+                )
+                if not amps_success:
+                    # This is expected - Tesla reports lower max amps until charging actually starts
+                    _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
