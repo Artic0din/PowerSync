@@ -29,3 +29,7 @@ jobs:
         uses: github/gh-aw-actions/setup-cli@e89c65e17eb281bbd5ff2ff9e9199a03e96654c7 # v0.83.4
         with:
           version: v0.83.4
+      - name: Verify gh-aw CLI upgrade route
+        run: |
+          gh aw --version
+          gh aw upgrade --help >/dev/null

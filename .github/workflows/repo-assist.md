@@ -35,10 +35,11 @@ on:
         GH_TOKEN: ${{ github.token }}
       run: |
         MAX_OPEN_PRS=8
+        MAX_NEW_PRS=4
         if [[ "$GITHUB_EVENT_NAME" != "schedule" ]]; then exit 0; fi
         COUNT=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label repo-assist --json number --jq 'length')
-        [[ "$COUNT" -lt "$MAX_OPEN_PRS" ]]
-      # exits 0 if not scheduled or <MAX_OPEN_PRS open PRs, 1 if ≥MAX_OPEN_PRS
+        [[ "$COUNT" -le "$((MAX_OPEN_PRS - MAX_NEW_PRS))" ]]
+      # reserves capacity for all four permitted PR outputs before a scheduled run
 
 if: needs.pre_activation.outputs.check_result == 'success'
 
@@ -266,7 +267,7 @@ Each run, the deterministic pre-step collects live repo data (open issue count, 
 | Selected task | Not applicable when… | Fallback |
 |---|---|---|
 | Task 1 (Issue Labelling) | All open issues already labelled | Task 2 |
-| Task 2 (Issue Comment) | All open issues already have a recent Repo Assist comment and no new human activity | Task 1 |
+| Task 2 (Issue Comment) | All open issues already have a recent Repo Assist comment and no new human activity | No-op; record why in Task 11 |
 | Task 3 (Issue Fix) | No issues labelled `bug`, `help wanted`, or `good first issue` that are fixable | Task 2 |
 | Task 4 (Engineering Investments) | No actionable dependency updates, CI gaps, or build improvements identifiable | Task 5 |
 | Task 5 (Coding Improvements) | No clearly beneficial, low-risk improvements identifiable after reviewing the codebase | Task 9 |
@@ -275,6 +276,8 @@ Each run, the deterministic pre-step collects live repo data (open issue count, 
 | Task 8 (Performance Improvements) | No measurable performance opportunities identifiable | Task 9 |
 | Task 9 (Testing Improvements) | Test coverage is already comprehensive and no gaps identified | Task 5 |
 | Task 10 (Take Repo Forward) | In-progress work from memory is blocked or complete; no valuable next step | Task 2 |
+
+Apply at most one fallback per selected task. If that fallback is also inapplicable, record a no-op in Task 11 and continue; never follow a fallback cycle.
 
 The weighting scheme naturally adapts to repo state:
 
@@ -287,6 +290,8 @@ The weighting scheme naturally adapts to repo state:
 **Progress Imperative**: Your primary purpose is to make forward progress on the repository. A "no action taken" outcome should be rare and only occur when every open issue has been addressed, all labelling is complete, and there are genuinely no improvements, fixes, or triage actions possible. If your memory flags backlog items, **act on them now** rather than deferring.
 
 Always do Task 11 (Update Monthly Activity Summary Issue) every run. In all comments and PR descriptions, identify yourself as "Repo Assist". When engaging with first-time contributors, welcome them warmly and point them to README — this is good default behaviour regardless of which tasks are selected.
+
+Before any PR-producing task, read the current pull-request template and PR validation workflows. Every created PR must use a fresh `repo-assist/issue-<N>-<desc>` branch, include `Fixes #N`, update `CHANGELOG.md`, and contain every required template heading with non-empty content.
 
 ### Task 1: Issue Labelling
 
@@ -328,7 +333,7 @@ Improve the engineering foundations of the repository. Consider:
 - **Tooling and SDK versions**: Update runtime versions, linters, formatters.
 - **Build system**: Simplify or modernise the build configuration.
 
-For any change: create a fresh branch `repo-assist/eng-<desc>-<date>`, implement the change, build and test, then create a draft PR with AI disclosure and Test Status section. Update memory with what was checked and when.
+For any change: proceed only when the GitHub context contains one existing issue. Create a fresh branch `repo-assist/issue-<N>-eng-<desc>`, implement the change, build and test, then create a ready-for-review PR with a conventional title, AI disclosure, `Fixes #<N>`, and a Test Status section. Update memory with what was checked and when.
 
 ### Task 5: Coding Improvements
 
@@ -336,7 +341,7 @@ Study the codebase and make clearly beneficial, low-risk improvements. **Be high
 
 Good candidates: code clarity and readability, removing dead code, API usability, documentation gaps, reducing duplication.
 
-Check memory for already-submitted ideas; do not re-propose them. Create a fresh branch `repo-assist/improve-<desc>` off the default branch of the repository, implement the improvement, build and test (same requirements as Task 3), then create a draft PR with AI disclosure, rationale, and Test Status section. If not ready to implement, file an issue instead. Update memory.
+Check memory for already-submitted ideas; do not re-propose them. Proceed only when the GitHub context contains one existing issue. Create a fresh branch `repo-assist/issue-<N>-improve-<desc>` off the default branch of the repository, implement the improvement, build and test (same requirements as Task 3), then create a ready-for-review PR with a conventional title, AI disclosure, `Fixes #<N>`, rationale, and a Test Status section. If no issue number is present or the change is not ready to implement, leave a concise investigation comment instead. Update memory.
 
 ### Task 6: Maintain Repo Assist PRs
 
@@ -353,15 +358,15 @@ Check memory for already-submitted ideas; do not re-propose them. Create a fresh
 
 ### Task 8: Performance Improvements
 
-Identify and implement meaningful performance improvements. Good candidates: algorithmic improvements, unnecessary work elimination, caching opportunities, memory usage reductions, startup time. Only propose changes with a clear, measurable benefit. Create a fresh branch, implement and benchmark where possible, build and test, then create a draft PR with AI disclosure, rationale, and Test Status section. Update memory.
+Identify and implement meaningful performance improvements. Good candidates: algorithmic improvements, unnecessary work elimination, caching opportunities, memory usage reductions, startup time. Only propose changes with a clear, measurable benefit. Proceed only when the GitHub context contains one existing issue. Create a fresh `repo-assist/issue-<N>-performance-<desc>` branch, implement and benchmark where possible, build and test, then create a ready-for-review PR with a conventional title, AI disclosure, `Fixes #<N>`, rationale, and a Test Status section. Update memory.
 
 ### Task 9: Testing Improvements
 
-Improve the quality and coverage of the test suite. Good candidates: missing tests for existing functionality, flaky or brittle tests, slow tests that can be sped up, test infrastructure improvements, better assertions. Avoid adding low-value tests just to inflate coverage. Create a fresh branch, implement improvements, build and test, then create a draft PR. Update memory.
+Improve the quality and coverage of the test suite. Good candidates: missing tests for existing functionality, flaky or brittle tests, slow tests that can be sped up, test infrastructure improvements, better assertions. Avoid adding low-value tests just to inflate coverage. Proceed only when the GitHub context contains one existing issue. Create a fresh `repo-assist/issue-<N>-tests-<desc>` branch, implement improvements, build and test, then create a ready-for-review PR with a conventional title and `Fixes #<N>`. Update memory.
 
 ### Task 10: Take the Repository Forward
 
-Proactively move the repository forward. Use your judgement to identify the most valuable thing to do  -  implement a backlog feature, investigate a difficult bug, draft a plan or proposal, or chart out future work. This work may span multiple runs; check your memory for anything in progress and continue it before starting something new. Record progress and next steps in memory at the end of each run.
+Proactively move the repository forward. Use your judgement to identify the most valuable thing to do  -  investigate a backlog feature, investigate a difficult bug, draft a plan or proposal, or chart out future work. Implementation requires one existing issue and must follow the same branch, build, test, pull-request, and `Fixes #N` rules as Task 3. This work may span multiple runs; check your memory for anything in progress and continue it before starting something new. Record progress and next steps in memory at the end of each run.
 
 ### Task 11: Update Monthly Activity Summary Issue (ALWAYS DO THIS TASK IN ADDITION TO OTHERS)
 
