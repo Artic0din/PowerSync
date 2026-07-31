@@ -4966,6 +4966,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
+        self._persisted_export_control_recovery_pending = not self._telemetry_only
 
         super().__init__(
             hass,
@@ -4983,6 +4984,31 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             operation,
         )
         return False
+
+    def startup_control_ready(self) -> bool:
+        """Return True only after a complete, current Modbus snapshot."""
+        data = getattr(self, "data", None)
+        if (
+            getattr(self, "last_update_success", False) is not True
+            or not isinstance(data, dict)
+            or data.get("telemetry_ready") is not True
+        ):
+            return False
+        for key in (
+            "solar_power",
+            "grid_power",
+            "battery_power",
+            "load_power",
+            "battery_level",
+        ):
+            value = data.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                return False
+        return 0 <= float(data["battery_level"]) <= 100
 
     def _update_total_baselines(self, data: dict) -> None:
         """Track midnight baselines for total import/export registers.
@@ -5187,7 +5213,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning(
                         "Sungrow Modbus returned no battery data — keeping previous readings"
                     )
-                    return self.data
+                    stale_data = dict(self.data)
+                    stale_data["telemetry_ready"] = False
+                    return stale_data
                 raise UpdateFailed("Sungrow Modbus connection failed — no data available")
 
             # Map Sungrow data to standard format
@@ -5318,6 +5346,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 raw_soc = 0
 
             energy_data = {
+                "telemetry_ready": True,
                 "solar_power": max(0, site_solar_kw),  # kW, total configured site solar
                 "battery_inverter_solar_power": max(
                     0, battery_inverter_solar_kw
@@ -5372,6 +5401,24 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 ),
                 "energy_summary": self._build_energy_summary(data),
             }
+
+            if getattr(
+                self,
+                "_persisted_export_control_recovery_pending",
+                False,
+            ):
+                export_control_restored = (
+                    await self.async_restore_persisted_export_control()
+                )
+                self._persisted_export_control_recovery_pending = (
+                    not export_control_restored
+                )
+                if not export_control_restored:
+                    energy_data["telemetry_ready"] = False
+                    _LOGGER.warning(
+                        "Sungrow interrupted export control could not be fully "
+                        "restored; telemetry will remain control-blocked for retry"
+                    )
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
@@ -6159,6 +6206,22 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=30),
         )
 
+    def _children_control_ready(self) -> bool:
+        """Return whether both child snapshots can form a fresh aggregate."""
+        return (
+            self._coord1.startup_control_ready()
+            and self._coord2.startup_control_ready()
+        )
+
+    def startup_control_ready(self) -> bool:
+        """Require a successful current aggregate built from both inverters."""
+        data = getattr(self, "data", None)
+        return (
+            getattr(self, "last_update_success", False) is True
+            and isinstance(data, dict)
+            and data.get("telemetry_ready") is True
+        )
+
     # ------------------------------------------------------------------
     # SOC-proportional power splitting
     # ------------------------------------------------------------------
@@ -6291,6 +6354,7 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         discharge_limit_w = self._combined_power_limit_w("discharge")
 
         return {
+            "telemetry_ready": self._children_control_ready(),
             "solar_power": max(0, solar),
             "grid_power": grid,
             "battery_power": battery,

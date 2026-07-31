@@ -157,6 +157,12 @@ def _load_sungrow_energy_coordinator():
     return coordinator_module.SungrowEnergyCoordinator, restore
 
 
+def _load_dual_sungrow_coordinator():
+    """Load the aggregate coordinator alongside the existing HA stubs."""
+    _sungrow, restore = _load_sungrow_energy_coordinator()
+    return sys.modules["power_sync.coordinator"].DualSungrowCoordinator, restore
+
+
 def _controller_with_recorded_writes():
     controller = SungrowSHController("192.0.2.10")
     writes: list[tuple[int, int]] = []
@@ -699,6 +705,7 @@ def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator._ac_inverter_daily_energy_restored = False
     coordinator._ac_inverter_daily_energy_kwh = None
     coordinator._ac_inverter_daily_energy_date = None
+    coordinator.last_update_success = True
     return coordinator
 
 
@@ -754,6 +761,170 @@ def test_sungrow_direct_connection_keeps_native_control_enabled():
         assert coordinator._native_control_allowed("test write") is True
     finally:
         restore()
+
+
+def test_sungrow_startup_control_requires_a_valid_telemetry_snapshot():
+    """A retained coordinator must not authorize planning from empty defaults."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator.data = None
+        assert coordinator.startup_control_ready() is False
+
+        coordinator.data = {
+            "telemetry_ready": True,
+            "solar_power": 0.0,
+            "grid_power": 0.0,
+            "battery_power": 0.0,
+            "load_power": 0.0,
+            "battery_level": 0.0,
+        }
+        assert coordinator.startup_control_ready() is True
+
+        coordinator.last_update_success = False
+        assert coordinator.startup_control_ready() is False
+
+        coordinator.last_update_success = True
+        coordinator.data["battery_level"] = float("nan")
+        assert coordinator.startup_control_ready() is False
+    finally:
+        restore()
+
+
+def test_dual_sungrow_requires_both_coordinators_to_be_ready():
+    """Child and aggregate failures must both block optimizer control."""
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        def __init__(self, ready):
+            self.ready = ready
+            self.data = {
+                "telemetry_ready": ready,
+                "solar_power": 0.0,
+                "grid_power": 0.0,
+                "battery_power": 0.0,
+                "load_power": 0.0,
+                "battery_level": 50.0,
+            }
+
+        def startup_control_ready(self):
+            return self.ready
+
+    async def run_checks():
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        coordinator._coord1 = Child(True)
+        coordinator._coord2 = Child(False)
+        coordinator._soc_cap = 100
+        coordinator._cap1 = 10.0
+        coordinator._cap2 = 10.0
+        coordinator.last_update_success = False
+
+        assert coordinator.startup_control_ready() is False
+
+        coordinator._coord2.ready = True
+        first_snapshot = await coordinator._async_update_data()
+        assert first_snapshot["telemetry_ready"] is True
+
+        coordinator.data = first_snapshot
+        coordinator.last_update_success = True
+        assert coordinator.startup_control_ready() is True
+
+        coordinator.last_update_success = False
+        assert coordinator.startup_control_ready() is False
+
+    try:
+        asyncio.run(run_checks())
+    finally:
+        restore()
+
+
+def test_sungrow_failed_poll_marks_cached_telemetry_not_ready():
+    """A disconnected poll may preserve values, but never control readiness."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FailedController:
+        async def get_battery_data(self):
+            return {}
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            FailedController(),
+        )
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator.data = {
+            "telemetry_ready": True,
+            "solar_power": 1.0,
+            "grid_power": 0.0,
+            "battery_power": -0.5,
+            "load_power": 0.5,
+            "battery_level": 42.0,
+        }
+        stale = await coordinator._async_update_data()
+        coordinator.data = stale
+        return stale, coordinator.startup_control_ready()
+
+    try:
+        stale, ready = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert stale["battery_level"] == 42.0
+    assert stale["telemetry_ready"] is False
+    assert ready is False
+
+
+def test_sungrow_successful_retry_rechecks_persisted_export_recovery_once():
+    """The first recovered snapshot must finish interrupted export cleanup."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class RecoveredController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 42.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+            }
+
+    async def run_updates():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            RecoveredController(),
+        )
+        coordinator.hass = types.SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._persisted_export_control_recovery_pending = True
+        recovery_results = iter((False, True))
+        recovery_calls = 0
+
+        async def recover():
+            nonlocal recovery_calls
+            recovery_calls += 1
+            return next(recovery_results)
+
+        coordinator.async_restore_persisted_export_control = recover
+        first = await coordinator._async_update_data()
+        second = await coordinator._async_update_data()
+        third = await coordinator._async_update_data()
+        return first, second, third, recovery_calls
+
+    try:
+        first, second, third, recovery_calls = asyncio.run(run_updates())
+    finally:
+        restore()
+
+    assert first["telemetry_ready"] is False
+    assert second["telemetry_ready"] is True
+    assert third["telemetry_ready"] is True
+    assert recovery_calls == 2
 
 
 def test_sungrow_coordinator_combines_separate_ac_inverter_solar_telemetry():
