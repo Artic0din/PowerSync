@@ -7666,6 +7666,84 @@ def test_spread_import_schedule_flattens_planned_energy_across_same_price_window
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
 
 
+def test_spread_import_preserves_solar_charge_needed_for_deadline(opt_module):
+    """Spread Import must not discard LP-counted natural solar charging.
+
+    Charge By Time applies its SOC floor inside the LP.  Solar-surplus slots are
+    emitted as self_consumption with battery_charge_w, while deliberate grid
+    charging is emitted as charge.  Rewriting the whole equal-price window from
+    only the explicit charge energy makes the displayed and executable schedule
+    miss that already-solved SOC floor.
+    """
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "sungrow"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.interval_minutes = 5
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start,
+            action="charge",
+            power_w=5000,
+            battery_charge_w=5000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=5),
+            action="self_consumption",
+            power_w=2000,
+            battery_charge_w=2000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=10),
+            action="self_consumption",
+            power_w=2000,
+            battery_charge_w=2000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=15),
+            action="self_consumption",
+            power_w=0,
+            battery_charge_w=0,
+        ),
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_import_schedule(
+        schedule,
+        [0.066] * 4,
+        [False] * 4,
+        initial_soc=0.40,
+        solar_forecast=[0.0, 3.0, 3.0, 0.0],
+        load_forecast=[0.0, 1.0, 1.0, 0.0],
+    )
+
+    assert [action.action for action in spread.actions] == [
+        "charge",
+        "self_consumption",
+        "self_consumption",
+        "charge",
+    ]
+    assert [action.battery_charge_w for action in spread.actions] == [
+        2500.0,
+        2000,
+        2000,
+        2500.0,
+    ]
+    original_wh = sum(action.battery_charge_w for action in actions) * (5 / 60)
+    spread_wh = sum(action.battery_charge_w for action in spread.actions) * (5 / 60)
+    assert spread_wh == pytest.approx(original_wh, abs=0.1)
+    assert spread.actions[-1].soc == pytest.approx(0.475, abs=0.0001)
+    assert [action.soc for action in schedule.actions] == [None] * 4
+
+
 def test_spread_import_free_window_caps_to_available_battery_room(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"

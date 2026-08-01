@@ -8057,11 +8057,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                 continue
 
-            window_actions = actions[start:end]
+            # Self-consumption slots can still carry forecast solar charging
+            # already counted by LP SOC floors.  Keep those slots in place so
+            # spreading deliberate charge energy cannot erase deadline energy.
+            preserved_natural_positions = {
+                pos
+                for pos in range(start, end)
+                if getattr(actions[pos], "action", None) != "charge"
+                and max(
+                    0.0,
+                    float(
+                        getattr(actions[pos], "battery_charge_w", 0.0)
+                        or 0.0
+                    ),
+                )
+                > 0.0
+            }
+            spread_positions = [
+                pos
+                for pos in range(start, end)
+                if pos not in preserved_natural_positions
+            ]
             charge_wh = sum(
                 max(0.0, float(getattr(action, "battery_charge_w", 0.0) or 0.0))
                 * interval_hours
-                for action in window_actions
+                for action in actions[start:end]
                 if getattr(action, "action", None) == "charge"
             )
             if charge_wh <= 0 or max_charge_w <= 0:
@@ -8070,7 +8090,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             if price <= 0.001 and capacity_wh > 0:
-                available_wh = max(0.0, (1.0 - soc_cursor) * capacity_wh / max(efficiency, 0.001))
+                natural_charge_wh = sum(
+                    max(
+                        0.0,
+                        float(
+                            getattr(actions[pos], "battery_charge_w", 0.0)
+                            or 0.0
+                        ),
+                    )
+                    * interval_hours
+                    for pos in preserved_natural_positions
+                )
+                available_wh = max(
+                    0.0,
+                    (1.0 - soc_cursor)
+                    * capacity_wh
+                    / max(efficiency, 0.001)
+                    - natural_charge_wh,
+                )
                 charge_wh = min(charge_wh, available_wh)
                 if charge_wh <= 0:
                     for pos in range(start, end):
@@ -8080,24 +8117,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if cap_by_slot:
                 target_by_pos = _spread_power_by_cap(
                     charge_wh,
-                    [_slot_charge_cap_w(pos) for pos in range(start, end)],
+                    [_slot_charge_cap_w(pos) for pos in spread_positions],
                 )
             else:
                 target_w = min(
                     max_charge_w,
-                    charge_wh / (len(window_actions) * interval_hours),
+                    charge_wh / (len(spread_positions) * interval_hours),
                 )
                 target_w = round(max(0.0, target_w), 1)
-                target_by_pos = [target_w] * len(window_actions)
+                target_by_pos = [target_w] * len(spread_positions)
 
             if not any(target_w > 0 for target_w in target_by_pos):
                 for pos in range(start, end):
                     soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                 continue
 
+            spread_targets = dict(zip(spread_positions, target_by_pos))
             for pos in range(start, end):
                 original = actions[pos]
-                target_w = target_by_pos[pos - start]
+                if pos in preserved_natural_positions:
+                    soc_cursor = _advance_soc(soc_cursor, original)
+                    new_actions[pos] = ScheduleAction(
+                        timestamp=original.timestamp,
+                        action=original.action,
+                        power_w=original.power_w,
+                        soc=round(soc_cursor, 4),
+                        battery_charge_w=original.battery_charge_w,
+                        battery_discharge_w=original.battery_discharge_w,
+                    )
+                    continue
+                target_w = spread_targets[pos]
                 if target_w > 0:
                     new_actions[pos] = ScheduleAction(
                         timestamp=original.timestamp,
