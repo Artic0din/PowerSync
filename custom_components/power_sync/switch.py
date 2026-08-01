@@ -51,6 +51,7 @@ from .const import (
     SWITCH_TYPE_MONITORING_MODE,
     SWITCH_TYPE_AWAY_MODE,
     SWITCH_TYPE_PROFIT_MAX_MODE,
+    SWITCH_TYPE_COST_NEUTRAL,
     SWITCH_TYPE_CHARGE_BY_TIME,
     SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE,
     SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT,
@@ -316,6 +317,15 @@ async def async_setup_entry(
         async_add_entities([ProfitMaxModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
 
     hass.data[DOMAIN][entry.entry_id]["switch_add_profit_max"] = _add_profit_max_switch
+
+    def _add_cost_neutral_switch(coordinator: Any) -> None:
+        async_add_entities([
+            CostNeutralSwitch(hass=hass, entry=entry, coordinator=coordinator)
+        ])
+
+    hass.data[DOMAIN][entry.entry_id]["switch_add_cost_neutral"] = (
+        _add_cost_neutral_switch
+    )
 
     def _add_charge_by_time_switch(coordinator: Any) -> None:
         async_add_entities([ChargeByTimeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
@@ -1355,6 +1365,53 @@ class ProfitMaxModeSwitch(SwitchEntity):
         """Disable profit maximisation mode."""
         self._attr_is_on = False
         changed = self._coordinator.set_profit_max_mode(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
+        self.async_write_ha_state()
+
+
+class CostNeutralSwitch(SwitchEntity):
+    """Cap discretionary battery export once today's projected costs are covered."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_COST_NEUTRAL}"
+        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_COST_NEUTRAL}"
+        self._attr_name = "Cost Neutral"
+        self._attr_icon = "mdi:scale-balance"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._entry.entry_id}_cost_neutral",
+                self._handle_update,
+            )
+        )
+
+    @callback
+    def _handle_update(self, enabled: bool) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
+
+    @property
+    def is_on(self) -> bool:
+        return self._coordinator.cost_neutral_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        changed = self._coordinator.set_cost_neutral_enabled(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        changed = self._coordinator.set_cost_neutral_enabled(False)
         await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 

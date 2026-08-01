@@ -1922,6 +1922,44 @@ def test_profit_max_setting_change_schedules_background_reoptimization(opt_modul
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
+def test_cost_neutral_setting_atomically_disables_profit_max(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings({"cost_neutral_enabled": True})
+    )
+
+    assert result["success"] is True
+    assert result["changes"] == ["cost_neutral_enabled: True"]
+    assert coordinator._config.cost_neutral_enabled is True
+    assert coordinator._config.profit_max_enabled is False
+    assert updates[-1]["options"]["cost_neutral_enabled"] is True
+    assert updates[-1]["options"]["profit_max_enabled"] is False
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_optimizer_settings_reject_both_exclusive_modes(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=False)
+    _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings({
+        "profit_max_enabled": True,
+        "cost_neutral_enabled": True,
+    }))
+
+    assert result == {
+        "success": False,
+        "error": "Profit Max and Cost Neutral cannot both be enabled",
+        "changes": [],
+    }
+    assert coordinator._config.profit_max_enabled is False
+    assert coordinator._config.cost_neutral_enabled is False
+
+
 @pytest.mark.parametrize(
     ("settings", "expected_change"),
     [

@@ -806,6 +806,7 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
     CONF_PROFIT_MAX_ENABLED,
+    CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
     CONF_CHARGE_BY_TIME_TARGET_TIME,
     CONF_CHARGE_BY_TIME_TARGET_SOC,
@@ -39087,6 +39088,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             add_profit_max = hass.data[DOMAIN][entry.entry_id].pop("switch_add_profit_max", None)
             if add_profit_max:
                 add_profit_max(optimization_coordinator)
+            add_cost_neutral = hass.data[DOMAIN][entry.entry_id].pop(
+                "switch_add_cost_neutral", None
+            )
+            if add_cost_neutral:
+                add_cost_neutral(optimization_coordinator)
             add_charge_by_time = hass.data[DOMAIN][entry.entry_id].pop("switch_add_charge_by_time", None)
             if add_charge_by_time:
                 add_charge_by_time(optimization_coordinator)
@@ -39765,6 +39771,17 @@ class OptimizationSettingsView(HomeAssistantView):
                         CONF_PROFIT_MAX_ENABLED,
                         config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
                     )
+                    and not config_entry.options.get(
+                        CONF_COST_NEUTRAL_ENABLED,
+                        config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
+                    )
+                ),
+                "cost_neutral_enabled": bool(
+                    config_entry
+                    and config_entry.options.get(
+                        CONF_COST_NEUTRAL_ENABLED,
+                        config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
+                    )
                 ),
                 "charge_by_time_enabled": charge_by_time_enabled,
                 "spread_export_enabled": bool(
@@ -39902,6 +39919,7 @@ class OptimizationSettingsView(HomeAssistantView):
             "ev_integration": opt_coordinator._ev_integration_enabled,
             "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
             "profit_max_enabled": opt_coordinator.profit_max_mode,
+            "cost_neutral_enabled": opt_coordinator.cost_neutral_enabled,
             "charge_by_time_enabled": opt_coordinator.charge_by_time_enabled,
             "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
@@ -40053,6 +40071,18 @@ class OptimizationSettingsView(HomeAssistantView):
                             **ai_summary_settings(config_entry),
                         }
                     )
+
+            if (
+                settings.get("profit_max_enabled") is True
+                and settings.get("cost_neutral_enabled") is True
+            ):
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "Profit Max and Cost Neutral cannot both be enabled",
+                    },
+                    status=400,
+                )
 
             # If coordinator exists, use it
             if opt_coordinator:
@@ -40236,9 +40266,20 @@ class OptimizationSettingsView(HomeAssistantView):
                 changes.append(f"Set planned EV load entity to {entity_id or 'cleared'}")
 
             if "profit_max_enabled" in settings:
-                from .const import CONF_PROFIT_MAX_ENABLED
                 new_options[CONF_PROFIT_MAX_ENABLED] = bool(settings["profit_max_enabled"])
+                if settings["profit_max_enabled"]:
+                    new_options[CONF_COST_NEUTRAL_ENABLED] = False
                 changes.append(f"Set profit maximisation mode to {settings['profit_max_enabled']}")
+
+            if "cost_neutral_enabled" in settings:
+                new_options[CONF_COST_NEUTRAL_ENABLED] = bool(
+                    settings["cost_neutral_enabled"]
+                )
+                if settings["cost_neutral_enabled"]:
+                    new_options[CONF_PROFIT_MAX_ENABLED] = False
+                changes.append(
+                    f"Set Cost Neutral mode to {settings['cost_neutral_enabled']}"
+                )
 
             if "charge_by_time_enabled" in settings:
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = bool(settings["charge_by_time_enabled"])

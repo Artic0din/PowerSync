@@ -503,6 +503,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_PROFIT_MAX_ENABLED,
+    CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
     CONF_CHARGE_BY_TIME_TARGET_TIME,
     CONF_CHARGE_BY_TIME_TARGET_SOC,
@@ -3347,6 +3348,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OPTIMIZATION_DISABLE_IDLE: disable_idle,
                     CONF_PROFIT_MAX_ENABLED: bool(
                         user_input.get(CONF_PROFIT_MAX_ENABLED, False)
+                        and not user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
+                    ),
+                    CONF_COST_NEUTRAL_ENABLED: bool(
+                        user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
                     ),
                     CONF_CHARGE_BY_TIME_ENABLED: bool(
                         user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
@@ -3544,6 +3549,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields.update({
             vol.Required(
                 CONF_PROFIT_MAX_ENABLED,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_COST_NEUTRAL_ENABLED,
                 default=False,
             ): BooleanSelector(),
             vol.Required(
@@ -10660,6 +10669,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 profit_max_enabled = bool(
                     user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                 )
+                cost_neutral_enabled = bool(
+                    user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
+                )
+                if cost_neutral_enabled:
+                    profit_max_enabled = False
                 charge_by_time_enabled = bool(
                     user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                 )
@@ -10748,6 +10762,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity
                 new_data[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
+                new_data[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
+                new_options[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
                 new_data[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
@@ -10956,6 +10972,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "grid_charge_soc_cap": CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         "profit_max_enabled": CONF_PROFIT_MAX_ENABLED,
+                        "cost_neutral_enabled": CONF_COST_NEUTRAL_ENABLED,
                         "charge_by_time_enabled": CONF_CHARGE_BY_TIME_ENABLED,
                         "charge_by_time_target_time": (
                             CONF_CHARGE_BY_TIME_TARGET_TIME
@@ -11141,6 +11158,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_PROFIT_MAX_ENABLED,
             self.config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
         )
+        current_cost_neutral_enabled = self._get_option(
+            CONF_COST_NEUTRAL_ENABLED,
+            self.config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
+        )
+        if current_cost_neutral_enabled:
+            current_profit_max_enabled = False
         current_charge_by_time_enabled = self._get_option(
             CONF_CHARGE_BY_TIME_ENABLED,
             self.config_entry.data.get(
@@ -11227,6 +11250,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
             CONF_PROFIT_MAX_ENABLED: bool(current_profit_max_enabled),
+            CONF_COST_NEUTRAL_ENABLED: bool(current_cost_neutral_enabled),
             CONF_CHARGE_BY_TIME_ENABLED: bool(current_charge_by_time_enabled),
             CONF_CHARGE_BY_TIME_TARGET_TIME: current_charge_by_time_target_time,
             CONF_CHARGE_BY_TIME_TARGET_SOC: current_charge_by_time_target_soc,
@@ -11438,6 +11462,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=bool(current_profit_max_enabled),
                 ): BooleanSelector(),
                 vol.Required(
+                    CONF_COST_NEUTRAL_ENABLED,
+                    default=bool(current_cost_neutral_enabled),
+                ): BooleanSelector(),
+                vol.Required(
                     CONF_CHARGE_BY_TIME_ENABLED,
                     default=bool(current_charge_by_time_enabled),
                 ): BooleanSelector(),
@@ -11460,6 +11488,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_PROVIDER,
                 CONF_OPTIMIZATION_ENABLED,
                 CONF_PROFIT_MAX_ENABLED,
+                CONF_COST_NEUTRAL_ENABLED,
                 CONF_CHARGE_BY_TIME_ENABLED,
                 CONF_CHARGE_BY_TIME_TARGET_TIME,
                 CONF_CHARGE_BY_TIME_TARGET_SOC,

@@ -7,6 +7,7 @@ to produce a schedule, which the execution layer then applies.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
 import math
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 
 from .battery_controller import TRUSTED_FOR_PERSIST
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
+from .cost_neutral import CostNeutralBudget
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
@@ -114,6 +116,7 @@ OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
 GLOBIRD_QUOTA_EXPORT_RULE_ID = "globird_zerohero_bonus_export"
 GLOBIRD_QUOTA_IMPORT_RULE_ID = "globird_zerocharge_import"
+COST_NEUTRAL_OPTION = "cost_neutral_enabled"
 
 
 def sigenergy_capped_optimizer_limit_w(
@@ -214,6 +217,7 @@ class OptimizationConfig:
     horizon_hours: int = 48
     cost_function: str = "cost"
     profit_max_enabled: bool = False
+    cost_neutral_enabled: bool = False
     charge_by_time_enabled: bool = False
     charge_by_time_target_time: str = "17:15"
     charge_by_time_target_soc: float = 1.0
@@ -449,6 +453,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_discharge_kwh_today = 0.0
         self._actual_import_cost_today = 0.0    # Gross import cost ($)
         self._actual_export_earnings_today = 0.0  # Gross export earnings ($)
+        self._cost_neutral_status: dict[str, Any] = {
+            "enabled": False,
+            "effective_mode": "standard",
+            "reason": "disabled",
+        }
         # Grid-sourced battery charging only (excludes solar charging and
         # house-load import). Their ratio is the true $/kWh acquisition cost of
         # stored grid energy used by the export-profitability gate.
@@ -1003,6 +1012,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._config.profit_max_enabled
 
     @property
+    def cost_neutral_enabled(self) -> bool:
+        """Return whether the local-day Cost Neutral mode is active."""
+        return bool(self._config.cost_neutral_enabled)
+
+    @property
     def charge_by_time_enabled(self) -> bool:
         """Return whether charge-by-time prefill is active."""
         return self._config.charge_by_time_enabled
@@ -1116,9 +1130,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Enable or disable profit maximisation mode."""
         # No-op when unchanged (see set_spread_export_enabled) — avoids a
         # redundant cache invalidation + load-estimator refit on every sync.
-        if self._config.profit_max_enabled == bool(enabled):
+        enabled = bool(enabled)
+        cost_neutral_changed = enabled and self._config.cost_neutral_enabled
+        if self._config.profit_max_enabled == enabled and not cost_neutral_changed:
             return False
         self._config.profit_max_enabled = enabled
+        if cost_neutral_changed:
+            self._config.cost_neutral_enabled = False
         if self._optimizer:
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
         if self._load_estimator:
@@ -1134,12 +1152,64 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"{DOMAIN}_{self.entry_id}_profit_max_mode",
                 enabled,
             )
+            if cost_neutral_changed:
+                async_dispatcher_send(
+                    self.hass,
+                    f"{DOMAIN}_{self.entry_id}_cost_neutral",
+                    False,
+                )
         if self._entry:
             from ..const import CONF_PROFIT_MAX_ENABLED, DOMAIN
             new_options = dict(self._entry.options)
             new_options[CONF_PROFIT_MAX_ENABLED] = enabled
+            if cost_neutral_changed:
+                new_options[COST_NEUTRAL_OPTION] = False
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        return True
+
+    def set_cost_neutral_enabled(self, enabled: bool) -> bool:
+        """Enable Cost Neutral and atomically disable Profit Max."""
+        enabled = bool(enabled)
+        profit_changed = enabled and self._config.profit_max_enabled
+        if self._config.cost_neutral_enabled == enabled and not profit_changed:
+            return False
+        self._config.cost_neutral_enabled = enabled
+        if profit_changed:
+            self._config.profit_max_enabled = False
+            if self._optimizer:
+                self._optimizer.terminal_weight = self._profit_max_terminal_weight()
+        if self._load_estimator:
+            self._load_estimator.invalidate_cache()
+        _LOGGER.info("Cost Neutral mode %s", "ENABLED" if enabled else "DISABLED")
+        if self.hass and self.entry_id:
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+            from ..const import DOMAIN
+
+            async_dispatcher_send(
+                self.hass,
+                f"{DOMAIN}_{self.entry_id}_cost_neutral",
+                enabled,
+            )
+            if profit_changed:
+                async_dispatcher_send(
+                    self.hass,
+                    f"{DOMAIN}_{self.entry_id}_profit_max_mode",
+                    False,
+                )
+        if self._entry:
+            from ..const import CONF_PROFIT_MAX_ENABLED, DOMAIN
+
+            new_options = dict(self._entry.options)
+            new_options[COST_NEUTRAL_OPTION] = enabled
+            if profit_changed:
+                new_options[CONF_PROFIT_MAX_ENABLED] = False
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})[
+                "_skip_reload"
+            ] = True
+            self.hass.config_entries.async_update_entry(
+                self._entry, options=new_options
+            )
         return True
 
     def set_charge_by_time_enabled(
@@ -3524,7 +3594,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_PROFIT_MAX_ENABLED,
                 self._entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
             )
-            self._config.profit_max_enabled = bool(profit_max)
+            cost_neutral = self._entry.options.get(
+                COST_NEUTRAL_OPTION,
+                self._entry.data.get(COST_NEUTRAL_OPTION, False),
+            )
+            # Cost Neutral is the restrictive deterministic winner for legacy
+            # entries that somehow persisted both mutually-exclusive modes.
+            self._config.cost_neutral_enabled = bool(cost_neutral)
+            self._config.profit_max_enabled = bool(
+                profit_max and not self._config.cost_neutral_enabled
+            )
+            if bool(profit_max) and self._config.cost_neutral_enabled:
+                repaired = dict(self._entry.options)
+                repaired[CONF_PROFIT_MAX_ENABLED] = False
+                repaired[COST_NEUTRAL_OPTION] = True
+                self.hass.config_entries.async_update_entry(
+                    self._entry, options=repaired
+                )
             charge_by_time = self._entry.options.get(
                 CONF_CHARGE_BY_TIME_ENABLED,
                 self._entry.data.get(
@@ -4781,6 +4867,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     export_caps_by_group=self._last_export_bonus_caps_by_group,
                 )
 
+            cost_neutral_cap, cost_neutral_slots, cost_neutral_status = (
+                self._cost_neutral_solve_inputs(
+                    now=dt_util.now(),
+                    timestamps=schedule_timestamps,
+                    import_prices=import_prices,
+                    export_prices=export_prices,
+                    export_bonus_prices=self._last_zerohero_bonus_prices,
+                    export_bonus_cap_kwh=self._last_zerohero_bonus_cap_kwh,
+                    import_bonus_prices=self._last_zerocharge_bonus_prices,
+                    import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
+                    solar=solar_forecast,
+                    load=load_forecast,
+                    current_soc=soc,
+                )
+            )
+            self._cost_neutral_status = cost_neutral_status
+
             reference_reserve_floor = (
                 self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
             )
@@ -4837,6 +4940,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             self._last_import_bonus_group_ids
                             or self._last_export_bonus_group_ids
                         ),
+                        cost_neutral_cap,
+                        cost_neutral_slots,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -4898,6 +5003,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 import_bonus_prices=self._last_zerocharge_bonus_prices,
                 import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
                 initial_soc=soc,
+                cost_neutral_earnings_cap=cost_neutral_cap,
+                cost_neutral_slots=cost_neutral_slots,
             )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
@@ -4972,6 +5079,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     import_bonus_prices=self._last_zerocharge_bonus_prices,
                     import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
                     initial_soc=soc,
+                    cost_neutral_earnings_cap=cost_neutral_cap,
+                    cost_neutral_slots=cost_neutral_slots,
                 )
                 final_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
@@ -4989,6 +5098,57 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._current_schedule = result.schedule
                 self._last_optimizer_result = result
                 self._last_update_time = dt_util.now()
+            if cost_neutral_cap is not None:
+                planned = max(
+                    0.0,
+                    float(
+                        result.lp_stats.get(
+                            "cost_neutral_planned_earnings", 0.0
+                        )
+                    ),
+                )
+                uncovered = max(0.0, cost_neutral_cap - planned)
+                eligible_indices = [
+                    idx
+                    for idx, in_today in enumerate(cost_neutral_slots)
+                    if in_today
+                    and idx < len(battery_export_allowed)
+                    and bool(battery_export_allowed[idx])
+                    and idx < len(export_prices)
+                    and float(export_prices[idx] or 0.0) > 0.0
+                ]
+                blocking_reasons: list[str] = []
+                if cost_neutral_cap <= 1e-6:
+                    reason = "already_covered_by_measured_or_natural_export"
+                elif not eligible_indices:
+                    reason = "no_eligible_export_slots_before_midnight"
+                elif grid_export_limits_w is not None and all(
+                    idx >= len(grid_export_limits_w)
+                    or grid_export_limits_w[idx] is not None
+                    and float(grid_export_limits_w[idx] or 0.0) <= 0.0
+                    for idx in eligible_indices
+                ):
+                    reason = "site_or_network_export_limit"
+                    blocking_reasons.append("site_or_network_export_limit")
+                elif soc <= reference_reserve_floor + 1e-6 and planned <= 1e-6:
+                    reason = "battery_or_reserve_limit"
+                    blocking_reasons.append("reserve_floor")
+                elif uncovered <= 0.005:
+                    reason = "covered"
+                else:
+                    reason = "insufficient_eligible_capacity"
+                    if self.charge_by_time_enabled:
+                        blocking_reasons.append("charge_by_time_requirement")
+                    if self._should_spread_export_schedule():
+                        blocking_reasons.append("spread_export_limit")
+                self._cost_neutral_status = {
+                    **cost_neutral_status,
+                    "planned_battery_export_earnings": round(planned, 4),
+                    "uncovered_amount": round(uncovered, 4),
+                    "projected_net_daily_cost": round(uncovered, 4),
+                    "reason": reason,
+                    "blocking_reasons": blocking_reasons,
+                }
             self._set_active_export_reserve_floor_slots(None, None)
 
             # Store forecast data for LP forecast sensors. A current provider
@@ -12456,6 +12616,202 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return (predicted_cost, baseline_cost)
 
+    def _daily_supply_charge_for_cost_neutral(
+        self, now: datetime
+    ) -> tuple[float, str]:
+        """Return today's configured fixed supply charge and its source."""
+        if not self._entry:
+            return 0.0, "missing"
+        from ..const import CONF_DAILY_SUPPLY_CHARGE, CONF_MONTHLY_SUPPLY_CHARGE
+
+        options = self._entry.options
+        data = self._entry.data
+        if CONF_DAILY_SUPPLY_CHARGE in options or CONF_DAILY_SUPPLY_CHARGE in data:
+            raw = options.get(
+                CONF_DAILY_SUPPLY_CHARGE,
+                data.get(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+            )
+            try:
+                value = max(0.0, float(raw or 0.0))
+            except (TypeError, ValueError):
+                value = 0.0
+            return value, "configured_daily" if value > 0 else "configured_zero"
+        if CONF_MONTHLY_SUPPLY_CHARGE in options or CONF_MONTHLY_SUPPLY_CHARGE in data:
+            raw = options.get(
+                CONF_MONTHLY_SUPPLY_CHARGE,
+                data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+            )
+            try:
+                monthly = max(0.0, float(raw or 0.0))
+            except (TypeError, ValueError):
+                monthly = 0.0
+            if monthly <= 0:
+                return 0.0, "configured_zero"
+            days = calendar.monthrange(now.year, now.month)[1]
+            return monthly / days, "configured_monthly"
+        return 0.0, "missing"
+
+    def _cost_neutral_solve_inputs(
+        self,
+        *,
+        now: datetime,
+        timestamps: list[datetime],
+        import_prices: list[float],
+        export_prices: list[float],
+        export_bonus_prices: list[float] | None,
+        export_bonus_cap_kwh: float | None,
+        import_bonus_prices: list[float] | None,
+        import_bonus_cap_kwh: float | None,
+        solar: list[float],
+        load: list[float],
+        current_soc: float,
+    ) -> tuple[float | None, list[bool], dict[str, Any]]:
+        """Build a non-self-referential current-local-day earnings budget."""
+        local_midnight = now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        slots = [timestamp < local_midnight for timestamp in timestamps]
+        if not self.cost_neutral_enabled:
+            return None, slots, {
+                "enabled": False,
+                "effective_mode": (
+                    "profit_max" if self.profit_max_mode else "standard"
+                ),
+                "reason": "disabled",
+            }
+
+        n = min(
+            len(timestamps),
+            len(import_prices),
+            len(export_prices),
+            len(solar),
+            len(load),
+        )
+        measurement_as_of = self._last_cost_tracking_time or now
+        dt_hours = self._config.interval_minutes / 60.0
+        capacity_kwh = max(0.001, self._optimizer.capacity_kwh)
+        efficiency = max(0.01, min(1.0, self._optimizer.efficiency))
+        energy_kwh = max(0.0, min(1.0, current_soc)) * capacity_kwh
+        floor_kwh = (
+            self._optimizer._natural_self_consumption_floor(current_soc)
+            * capacity_kwh
+        )
+        forecast_import_kw = [0.0] * n
+        forecast_natural_export_kw = [0.0] * n
+        for idx in range(n):
+            if not slots[idx] or timestamps[idx] <= measurement_as_of:
+                continue
+            net_load_kw = float(load[idx] or 0.0) - float(solar[idx] or 0.0)
+            if net_load_kw > 0:
+                discharge_kw = min(
+                    self._optimizer.max_discharge_kw,
+                    net_load_kw,
+                    max(0.0, energy_kwh - floor_kwh)
+                    * efficiency
+                    / max(dt_hours, 1e-9),
+                )
+                forecast_import_kw[idx] = max(0.0, net_load_kw - discharge_kw)
+                energy_kwh = max(
+                    floor_kwh,
+                    energy_kwh - discharge_kw * dt_hours / efficiency,
+                )
+            elif net_load_kw < 0:
+                surplus_kw = -net_load_kw
+                charge_kw = min(
+                    self._optimizer.max_charge_kw,
+                    surplus_kw,
+                    max(0.0, capacity_kwh - energy_kwh)
+                    / max(efficiency * dt_hours, 1e-9),
+                )
+                energy_kwh = min(
+                    capacity_kwh,
+                    energy_kwh + charge_kw * efficiency * dt_hours,
+                )
+                export_kw = max(0.0, surplus_kw - charge_kw)
+                limit_kw = self._optimizer._grid_export_limit_kw_for_range(
+                    idx, idx + 1
+                )
+                if limit_kw is not None:
+                    export_kw = min(export_kw, limit_kw)
+                forecast_natural_export_kw[idx] = export_kw
+
+        export_bonus = self._optimizer._allocate_capped_bonus(
+            forecast_natural_export_kw,
+            export_bonus_prices or [0.0] * n,
+            export_bonus_cap_kwh,
+            self._last_export_bonus_group_ids,
+            self._last_export_bonus_caps_by_group,
+        )
+        import_bonus = self._optimizer._allocate_capped_bonus(
+            forecast_import_kw,
+            import_bonus_prices or [0.0] * n,
+            import_bonus_cap_kwh,
+            self._last_import_bonus_group_ids,
+            self._last_import_bonus_caps_by_group,
+        )
+        forecast_import_cost = sum(
+            (
+                float(import_prices[idx]) * forecast_import_kw[idx]
+                - float(
+                    import_bonus_prices[idx]
+                    if import_bonus_prices and idx < len(import_bonus_prices)
+                    else 0.0
+                ) * import_bonus[idx]
+            ) * dt_hours
+            for idx in range(n)
+        )
+        forecast_natural_export_earnings = sum(
+            (
+                float(export_prices[idx]) * forecast_natural_export_kw[idx]
+                + float(
+                    export_bonus_prices[idx]
+                    if export_bonus_prices and idx < len(export_bonus_prices)
+                    else 0.0
+                ) * export_bonus[idx]
+            ) * dt_hours
+            for idx in range(n)
+        )
+        supply_charge, supply_source = self._daily_supply_charge_for_cost_neutral(now)
+        budget = CostNeutralBudget(
+            supply_charge=supply_charge,
+            measured_import_cost=self._actual_import_cost_today,
+            measured_export_earnings=self._actual_export_earnings_today,
+            forecast_import_cost=forecast_import_cost,
+            forecast_natural_export_earnings=forecast_natural_export_earnings,
+        )
+        base_projected_cost = budget.base_projected_cost
+        cap = budget.battery_export_earnings_cap
+        status = {
+            "enabled": True,
+            "effective_mode": "cost_neutral",
+            "local_day_end": local_midnight.isoformat(),
+            "measurement_as_of": measurement_as_of.isoformat(),
+            "base_projected_cost": round(base_projected_cost, 4),
+            "battery_export_earnings_cap": round(cap, 4),
+            "planned_battery_export_earnings": 0.0,
+            "uncovered_amount": round(cap, 4),
+            "projected_net_daily_cost": round(cap, 4),
+            "supply_charge": {
+                "value": round(supply_charge, 4),
+                "source": supply_source,
+            },
+            "measured_import_cost": round(self._actual_import_cost_today, 4),
+            "measured_export_earnings": round(
+                self._actual_export_earnings_today, 4
+            ),
+            "forecast_import_cost": round(forecast_import_cost, 4),
+            "forecast_natural_export_earnings": round(
+                forecast_natural_export_earnings, 4
+            ),
+            "reason": (
+                "already_covered_by_measured_or_natural_export"
+                if cap <= 1e-6
+                else "insufficient_eligible_capacity"
+            ),
+            "blocking_reasons": [],
+        }
+        return cap, slots, status
+
     def _get_daily_cost(self) -> float:
         """Get today's total cost: actual (midnight→now) + predicted (now→midnight)."""
         predicted_remaining, _ = self._get_predicted_cost_to_midnight()
@@ -13068,6 +13424,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "disable_idle_enabled": self.disable_idle_enabled,
             "profit_max_enabled": self.profit_max_mode,
             "profit_max_mode": self.profit_max_mode,
+            "cost_neutral_enabled": self.cost_neutral_enabled,
+            "cost_neutral": dict(getattr(self, "_cost_neutral_status", {
+                "enabled": self.cost_neutral_enabled,
+                "effective_mode": (
+                    "cost_neutral" if self.cost_neutral_enabled else "standard"
+                ),
+                "reason": "disabled" if not self.cost_neutral_enabled else "pending_solve",
+            })),
             "charge_by_time_enabled": self.charge_by_time_enabled,
             "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
             "manual_backup_reserve": self.manual_backup_reserve,
@@ -13129,6 +13493,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "spread_import_enabled": self._config.spread_import_enabled,
                 "disable_idle_enabled": self.disable_idle_enabled,
                 "profit_max_enabled": self.profit_max_mode,
+                "cost_neutral_enabled": self.cost_neutral_enabled,
                 "charge_by_time_enabled": self.charge_by_time_enabled,
                 "charge_by_time_target_time": self._config.charge_by_time_target_time,
                 "charge_by_time_target_soc": int(
@@ -13440,6 +13805,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Update optimization settings from API."""
         settings = dict(settings)
         response = {"success": True, "changes": []}
+        if (
+            settings.get("profit_max_enabled") is True
+            and settings.get("cost_neutral_enabled") is True
+        ):
+            return {
+                "success": False,
+                "error": "Profit Max and Cost Neutral cannot both be enabled",
+                "changes": [],
+            }
         rerun_after_settings = False
         charge_by_time_display_changed = False
 
@@ -13800,6 +14174,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             changed = self.set_profit_max_mode(new_val)
             if changed:
                 response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
+                rerun_after_settings = True
+
+        if "cost_neutral_enabled" in settings:
+            new_val = bool(settings["cost_neutral_enabled"])
+            changed = self.set_cost_neutral_enabled(new_val)
+            if changed:
+                response["changes"].append(
+                    f"cost_neutral_enabled: {settings['cost_neutral_enabled']}"
+                )
                 rerun_after_settings = True
 
         if "charge_by_time_enabled" in settings:
