@@ -5351,11 +5351,11 @@ async def _calendar_time_series_from_statistics(
     end_date: str | None,
     coordinator: Any,
     preferred_entry_id: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Build calendar history from HA recorder statistics for daily sensors."""
     range_result = _calendar_period_range(period, end_date)
     if not range_result:
-        return []
+        return [], "invalid_range"
 
     start_dt, end_dt = range_result
     now = dt_util.now()
@@ -5369,9 +5369,20 @@ async def _calendar_time_series_from_statistics(
 
     entity_ids = _find_calendar_statistic_entity_ids(hass, preferred_entry_id)
     if not entity_ids:
-        return _calendar_time_series_from_energy_summary(coordinator) if includes_today else []
+        rows = (
+            _calendar_time_series_from_energy_summary(coordinator)
+            if includes_today
+            else []
+        )
+        source = (
+            "daily_energy_sensors_unavailable"
+            if period in ("month", "year")
+            else "live"
+        )
+        return rows, source
 
     time_series: dict[str, dict[str, Any]] = {}
+    statistics_failed = False
 
     if statistic_end_dt > start_dt:
         try:
@@ -5423,19 +5434,38 @@ async def _calendar_time_series_from_statistics(
                     )
                     row[field] += max(0, float(change)) * 1000
         except Exception as exc:
+            statistics_failed = True
             _LOGGER.debug("Failed to build calendar history from statistics: %s", exc)
 
     rows = [
         _calendar_entry_with_detail_aliases(time_series[key])
         for key in sorted(time_series)
     ]
-    if not rows and statistic_end_dt > start_dt:
+    history_source = "long_term_statistics" if rows else "live"
+    if (
+        not rows
+        and statistic_end_dt > start_dt
+        and period in ("day", "week")
+    ):
         rows = await _calendar_time_series_from_state_history(
             hass,
             period,
             start_dt,
             statistic_end_dt,
             entity_ids,
+        )
+        if rows:
+            history_source = "state_history"
+    elif not rows and statistic_end_dt > start_dt:
+        history_source = (
+            "long_term_statistics_error"
+            if statistics_failed
+            else "long_term_statistics_unavailable"
+        )
+        _LOGGER.warning(
+            "Calendar history has no usable long-term statistics for "
+            "period=%s; skipping the potentially expensive raw-history fallback",
+            period,
         )
     if includes_today:
         current_entry = _calendar_current_entry(
@@ -5450,7 +5480,7 @@ async def _calendar_time_series_from_statistics(
             else:
                 rows.append(current_entry)
 
-    return rows
+    return rows, history_source
 
 
 def _calendar_current_optimizer_cost_summary(
@@ -5508,7 +5538,7 @@ async def _calendar_result_from_energy_summary(
     source_system: str | None = None,
 ) -> dict[str, Any]:
     """Return calendar-history response data for energy-summary based systems."""
-    time_series = await _calendar_time_series_from_statistics(
+    time_series, history_source = await _calendar_time_series_from_statistics(
         hass,
         period,
         end_date,
@@ -5534,7 +5564,20 @@ async def _calendar_result_from_energy_summary(
         "time_series": time_series,
         "serial_number": None,
         "installation_date": None,
+        "history_source": history_source,
     }
+    limited_sources = {
+        "daily_energy_sensors_unavailable",
+        "long_term_statistics_error",
+        "long_term_statistics_unavailable",
+    }
+    if history_source in limited_sources:
+        result["history_limited"] = True
+        result["history_message"] = (
+            "No Home Assistant long-term statistics are available for this "
+            "period. Month and Year history requires Home Assistant to record "
+            "long-term statistics for PowerSync's daily energy sensors."
+        )
 
     if period == "day":
         cost_summary = await _calculate_cost_from_statistics(hass, period, end_date)
@@ -5643,13 +5686,12 @@ class CalendarHistoryView(HomeAssistantView):
 
     def _calendar_cache_key(
         self,
-        tesla_coordinator: Any,
+        source_key: str,
         period: str,
         end_date: str | None,
     ) -> tuple[str, str, str]:
         """Return a stable cache key for one calendar-history request."""
-        site_id = str(getattr(tesla_coordinator, "site_id", "") or "unknown")
-        return (site_id, period, end_date or "")
+        return (source_key, period, end_date or "")
 
     def _cached_calendar_result(
         self,
@@ -5676,7 +5718,7 @@ class CalendarHistoryView(HomeAssistantView):
         if status == 200 and result.get("success"):
             self._cache[key] = (time.monotonic(), dict(result), status)
 
-    async def _build_calendar_history_response(
+    async def _build_tesla_calendar_history_response(
         self,
         *,
         tesla_coordinator: Any,
@@ -5746,42 +5788,18 @@ class CalendarHistoryView(HomeAssistantView):
         _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
         return result, 200
 
-    async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request for calendar history."""
-        # Get period from query params (default: day)
-        period = request.query.get("period", "day")
-        # Get end_date from query params (format: YYYY-MM-DD)
-        end_date = request.query.get("end_date")
-
-        # Validate period
-        valid_periods = ["day", "week", "month", "year"]
-        if period not in valid_periods:
-            return web.json_response(
-                {"success": False, "error": f"Invalid period. Must be one of: {valid_periods}"},
-                status=400
-            )
-
-        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
-
-        # Find the power_sync entry and coordinator
-        # Check ALL entries, not just the first one (important during reload)
-        tesla_coordinator = None
-        for _entry_id, data in self._hass.data.get(DOMAIN, {}).items():
-            if isinstance(data, dict):
-                # Look for Tesla coordinator (this is the main data source for calendar history)
-                if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
-                    tesla_coordinator = data["tesla_coordinator"]
-                    break  # Found it, no need to continue
-
-        # Look up tariff schedule for cost calculation (shared across all battery types)
-        tariff_schedule = _find_calendar_tariff_schedule(self._hass)
-
-        summary_system, summary_coordinator, summary_entry_id = _find_calendar_energy_summary_source(self._hass)
-        if summary_coordinator and not tesla_coordinator:
-            _LOGGER.info(
-                "Calendar history using %s daily energy summary",
-                summary_system,
-            )
+    async def _build_energy_summary_calendar_response(
+        self,
+        *,
+        period: str,
+        end_date: str | None,
+        summary_coordinator: Any,
+        summary_entry_id: str | None,
+        tariff_schedule: dict | None,
+        summary_system: str | None,
+    ) -> tuple[dict[str, Any], int]:
+        """Build recorder-backed calendar history in a shielded background task."""
+        try:
             result = await _calendar_result_from_energy_summary(
                 self._hass,
                 period,
@@ -5791,33 +5809,40 @@ class CalendarHistoryView(HomeAssistantView):
                 tariff_schedule,
                 summary_system,
             )
-            return web.json_response(result)
+        except Exception as exc:
+            _LOGGER.exception(
+                "Error building %s calendar history",
+                summary_system or "energy-summary",
+            )
+            return {"success": False, "error": str(exc)}, 500
+        return result, 200
 
-        if not tesla_coordinator:
-            # Check if we have ANY power_sync entries - if yes, system might still be loading
-            has_entries = bool(self._hass.data.get(DOMAIN, {}))
-            if has_entries:
-                _LOGGER.debug("Calendar history requested but Tesla coordinator not ready yet (system loading)")
-                return web.json_response(
-                    {
-                        "success": False,
-                        "error": "System is still loading, please retry",
-                        "reason": "loading"
-                    },
-                    status=200  # Return 200 with error in body so mobile app handles gracefully
-                )
-            else:
-                _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
-                return web.json_response(
-                    {
-                        "success": False,
-                        "error": "Calendar history requires Tesla Powerwall",
-                        "reason": "tesla_not_configured"
-                    },
-                    status=200  # Return 200 with error in body so mobile app handles gracefully
-                )
+    def _calendar_task_done(
+        self,
+        cache_key: tuple[str, str, str],
+        task: asyncio.Task[tuple[dict[str, Any], int]],
+    ) -> None:
+        """Harvest a shielded history build even when the caller never retries."""
+        if self._inflight.get(cache_key) is not task:
+            return
+        self._inflight.pop(cache_key, None)
+        try:
+            result, status = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _LOGGER.warning("Calendar history background task failed: %s", exc)
+            return
+        self._store_calendar_result(cache_key, result, status)
 
-        cache_key = self._calendar_cache_key(tesla_coordinator, period, end_date)
+    async def _calendar_task_response(
+        self,
+        *,
+        cache_key: tuple[str, str, str],
+        task_name: str,
+        builder: Callable[[], Any],
+    ) -> web.Response:
+        """Return, cache, or continue one potentially slow history build."""
         cached = self._cached_calendar_result(cache_key)
         if cached:
             result, status = cached
@@ -5834,15 +5859,16 @@ class CalendarHistoryView(HomeAssistantView):
 
         if not task:
             task = self._hass.async_create_task(
-                self._build_calendar_history_response(
-                    tesla_coordinator=tesla_coordinator,
-                    tariff_schedule=tariff_schedule,
-                    period=period,
-                    end_date=end_date,
-                ),
-                name=f"powersync_calendar_history_{period}",
+                builder(),
+                name=task_name,
             )
             self._inflight[cache_key] = task
+            task.add_done_callback(
+                lambda completed, key=cache_key: self._calendar_task_done(
+                    key,
+                    completed,
+                )
+            )
 
         try:
             result, status = await asyncio.wait_for(
@@ -5881,6 +5907,106 @@ class CalendarHistoryView(HomeAssistantView):
             self._inflight.pop(cache_key, None)
         self._store_calendar_result(cache_key, result, status)
         return web.json_response(result, status=status)
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for calendar history."""
+        # Get period from query params (default: day)
+        period = request.query.get("period", "day")
+        # Get end_date from query params (format: YYYY-MM-DD)
+        end_date = request.query.get("end_date")
+
+        # Validate period
+        valid_periods = ["day", "week", "month", "year"]
+        if period not in valid_periods:
+            return web.json_response(
+                {"success": False, "error": f"Invalid period. Must be one of: {valid_periods}"},
+                status=400
+            )
+
+        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
+
+        # Find the power_sync entry and coordinator
+        # Check ALL entries, not just the first one (important during reload)
+        tesla_coordinator = None
+        for _entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict):
+                # Look for Tesla coordinator (this is the main data source for calendar history)
+                if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
+                    tesla_coordinator = data["tesla_coordinator"]
+                    break  # Found it, no need to continue
+
+        # Look up tariff schedule for cost calculation (shared across all battery types)
+        tariff_schedule = _find_calendar_tariff_schedule(self._hass)
+
+        summary_system, summary_coordinator, summary_entry_id = _find_calendar_energy_summary_source(self._hass)
+        if summary_coordinator and not tesla_coordinator:
+            _LOGGER.info(
+                "Calendar history using %s daily energy summary",
+                summary_system,
+            )
+            source_key = (
+                f"summary:{summary_entry_id}"
+                if summary_entry_id
+                else f"summary:{summary_system or 'unknown'}"
+            )
+            cache_key = self._calendar_cache_key(
+                source_key,
+                period,
+                end_date,
+            )
+            return await self._calendar_task_response(
+                cache_key=cache_key,
+                task_name=f"powersync_calendar_history_summary_{period}",
+                builder=lambda: self._build_energy_summary_calendar_response(
+                    period=period,
+                    end_date=end_date,
+                    summary_coordinator=summary_coordinator,
+                    summary_entry_id=summary_entry_id,
+                    tariff_schedule=tariff_schedule,
+                    summary_system=summary_system,
+                ),
+            )
+
+        if not tesla_coordinator:
+            # Check if we have ANY power_sync entries - if yes, system might still be loading
+            has_entries = bool(self._hass.data.get(DOMAIN, {}))
+            if has_entries:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not ready yet (system loading)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "System is still loading, please retry",
+                        "reason": "loading"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
+            else:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "Calendar history requires Tesla Powerwall",
+                        "reason": "tesla_not_configured"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
+
+        site_id = str(getattr(tesla_coordinator, "site_id", "") or "unknown")
+        cache_key = self._calendar_cache_key(
+            f"tesla:{site_id}",
+            period,
+            end_date,
+        )
+        return await self._calendar_task_response(
+            cache_key=cache_key,
+            task_name=f"powersync_calendar_history_tesla_{period}",
+            builder=lambda: self._build_tesla_calendar_history_response(
+                tesla_coordinator=tesla_coordinator,
+                tariff_schedule=tariff_schedule,
+                period=period,
+                end_date=end_date,
+            ),
+        )
 
 
 def _is_history_relink_entry(entry: ConfigEntry) -> bool:

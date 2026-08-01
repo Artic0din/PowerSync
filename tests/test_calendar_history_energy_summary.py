@@ -32,6 +32,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_entry_from_energy_sensor_states",
         "_merge_calendar_energy_entries",
         "_calendar_current_entry",
+        "_calendar_time_series_from_energy_summary",
         "_calendar_statistic_suffixes",
         "_find_calendar_statistic_entity_ids",
         "_calendar_residual_entry",
@@ -42,6 +43,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_history_bucket_timestamp",
         "_calendar_time_series_from_state_history_rows",
         "_calendar_time_series_from_state_history",
+        "_calendar_time_series_from_statistics",
         "_calendar_time_series_totals_kwh",
         "_find_calendar_tariff_schedule",
         "_calendar_tou_periods_from_price_keys",
@@ -90,6 +92,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "dt_util": SimpleNamespace(
             now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
             as_local=lambda value: value,
+            as_utc=lambda value: value,
         ),
         "_LOGGER": SimpleNamespace(
             info=lambda *args, **kwargs: None,
@@ -179,6 +182,40 @@ def _fake_recorder_history(get_significant_states):
     sys.modules["homeassistant.components"] = components
     sys.modules["homeassistant.components.recorder"] = recorder
     sys.modules["homeassistant.components.recorder.history"] = history
+    try:
+        yield
+    finally:
+        for module_name, previous in previous_modules.items():
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+
+
+@contextmanager
+def _fake_recorder_statistics(statistics_during_period):
+    class _Recorder:
+        async def async_add_executor_job(self, target, *args):
+            return target(*args)
+
+    recorder = SimpleNamespace(get_instance=lambda hass: _Recorder())
+    statistics = SimpleNamespace(
+        statistics_during_period=statistics_during_period
+    )
+    components = SimpleNamespace(recorder=recorder)
+    previous_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "homeassistant",
+            "homeassistant.components",
+            "homeassistant.components.recorder",
+            "homeassistant.components.recorder.statistics",
+        )
+    }
+    sys.modules["homeassistant"] = SimpleNamespace(components=components)
+    sys.modules["homeassistant.components"] = components
+    sys.modules["homeassistant.components.recorder"] = recorder
+    sys.modules["homeassistant.components.recorder.statistics"] = statistics
     try:
         yield
     finally:
@@ -638,6 +675,49 @@ def test_calendar_state_history_excludes_pre_midnight_start_state():
     assert sum(row["grid_import"] for row in rows) == 30
 
 
+def test_month_without_long_term_statistics_skips_raw_history_fallback():
+    namespace = _calendar_namespace()
+    entity_ids = {
+        "solar_generation": "sensor.power_sync_daily_solar_energy",
+    }
+    namespace["_find_calendar_statistic_entity_ids"] = (
+        lambda hass, entry_id: entity_ids
+    )
+
+    async def unexpected_raw_history(*_args, **_kwargs):
+        raise AssertionError("month history must not scan raw recorder states")
+
+    namespace["_calendar_time_series_from_state_history"] = unexpected_raw_history
+    hass = SimpleNamespace(
+        states=_States(
+            {
+                "sensor.power_sync_daily_solar_energy": _state("4.2"),
+            }
+        )
+    )
+    coordinator = SimpleNamespace(
+        data={"energy_summary": {"pv_today_kwh": 4.2}}
+    )
+
+    def no_statistics(*_args, **_kwargs):
+        return {}
+
+    with _fake_recorder_statistics(no_statistics):
+        rows, history_source = asyncio.run(
+            namespace["_calendar_time_series_from_statistics"](
+                hass,
+                "month",
+                None,
+                coordinator,
+                "entry-1",
+            )
+        )
+
+    assert history_source == "long_term_statistics_unavailable"
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 4_200
+
+
 def test_calendar_statistic_finder_accepts_foxess_daily_battery_aliases():
     namespace = _calendar_namespace()
     entities = {
@@ -808,8 +888,11 @@ def test_current_calendar_entry_does_not_invent_solar_or_battery_export_splits()
 def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
     namespace = _calendar_namespace()
 
-    async def fake_statistics(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
-        return [
+    async def fake_statistics(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        return ([
             {
                 "timestamp": "2026-07-01T00:00:00+10:00",
                 "grid_import": 100_000,
@@ -828,7 +911,7 @@ def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
                 "battery_discharge": 4_000,
                 "battery_charge": 3_000,
             },
-        ]
+        ], "long_term_statistics")
 
     async def reset_skewed_costs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
@@ -860,6 +943,7 @@ def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
     result = asyncio.run(result)
 
     assert result["cost_summary"]["estimated"] is True
+    assert result["history_source"] == "long_term_statistics"
     assert result["cost_summary"]["import_cost"] == 60.0
     assert result["cost_summary"]["export_earnings"] == 2.5
     assert result["cost_summary"]["net_cost"] == 57.5
@@ -883,8 +967,8 @@ def test_current_week_starting_today_uses_mobile_day_optimizer_costs():
 
     async def monday_only_statistics(
         *_args: Any, **_kwargs: Any
-    ) -> list[dict[str, Any]]:
-        return [monday_row]
+    ) -> tuple[list[dict[str, Any]], str]:
+        return [monday_row], "long_term_statistics"
 
     cost_periods: list[str] = []
 
@@ -953,8 +1037,8 @@ def test_current_week_future_end_date_does_not_use_today_optimizer_costs():
 
     async def period_statistics(
         *_args: Any, **_kwargs: Any
-    ) -> list[dict[str, Any]]:
-        return [
+    ) -> tuple[list[dict[str, Any]], str]:
+        return ([
             {
                 "timestamp": "2026-07-27T17:11:00+10:00",
                 "grid_import": 46_400,
@@ -964,7 +1048,7 @@ def test_current_week_future_end_date_does_not_use_today_optimizer_costs():
                 "battery_discharge": 0,
                 "battery_charge": 0,
             }
-        ]
+        ], "long_term_statistics")
 
     namespace["_calendar_time_series_from_statistics"] = period_statistics
     hass = SimpleNamespace(
