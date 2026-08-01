@@ -1818,6 +1818,20 @@ class SensitiveDataFilter(logging.Filter):
             flags=re.IGNORECASE
         )
 
+        # Handle user-supplied xAI and Gemini keys used for plan explanations.
+        # The normal path never logs these values; this is defense in depth for
+        # unexpected exception or third-party client output.
+        text = re.sub(
+            r'\b(xai-[a-zA-Z0-9_-]{20,})\b',
+            lambda m: self.obfuscate(m.group(1)),
+            text,
+        )
+        text = re.sub(
+            r'\b(AIza[a-zA-Z0-9_-]{20,})\b',
+            lambda m: self.obfuscate(m.group(1)),
+            text,
+        )
+
         # Handle authorization headers in websocket/API logs
         text = re.sub(
             r'(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})',
@@ -39222,6 +39236,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoints for Smart Optimization
     hass.http.register_view(OptimizationView(hass))
     hass.http.register_view(OptimizationSettingsView(hass))
+    hass.http.register_view(OptimizationAISummaryView(hass))
     _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
     # Reload integration when options change (e.g. optimizer toggled in config flow)
@@ -39256,6 +39271,27 @@ async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+def _optimization_ai_service(
+    hass: HomeAssistant,
+    entry_id: str,
+    opt_coordinator: Any,
+):
+    """Return the per-entry descriptive AI-summary service."""
+    from .optimization.ai_summary import AISummaryService
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id)
+    if not isinstance(entry_data, dict):
+        return None
+    service = entry_data.get("_optimization_ai_summary_service")
+    if service is None and opt_coordinator is not None:
+        service = AISummaryService(
+            async_get_clientsession(hass),
+            opt_coordinator.get_api_data,
+        )
+        entry_data["_optimization_ai_summary_service"] = service
+    return service
+
+
 class OptimizationView(HomeAssistantView):
     """HTTP view to get optimization schedule and status."""
 
@@ -39273,10 +39309,23 @@ class OptimizationView(HomeAssistantView):
 
         # Find the optimization coordinator
         opt_coordinator = None
+        optimization_entry_id = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict) and "optimization_coordinator" in data:
                 opt_coordinator = data["optimization_coordinator"]
+                optimization_entry_id = entry_id
                 break
+
+        config_entry = next(
+            (
+                entry
+                for entry in self._hass.config_entries.async_entries(DOMAIN)
+                if optimization_entry_id is None or entry.entry_id == optimization_entry_id
+            ),
+            None,
+        )
+        from .optimization.ai_summary import ai_summary_settings, configured_api_key
+        ai_settings = ai_summary_settings(config_entry)
 
         if not opt_coordinator:
             # Optimization not enabled - return disabled status
@@ -39286,10 +39335,31 @@ class OptimizationView(HomeAssistantView):
                 "enabled": False,
                 "optimizer_available": False,
                 "status": "not_configured",
-                "message": "Smart Optimization is not enabled. Enable it in settings."
+                "message": "Smart Optimization is not enabled. Enable it in settings.",
+                "features": {"ai_summary": True},
+                "ai_summary": {
+                    "configured": ai_settings["ai_summary_key_configured"],
+                    "state": "optimizer_unavailable"
+                    if ai_settings["ai_summary_key_configured"]
+                    else "not_configured",
+                    "summary": None,
+                    "last_error": None,
+                },
             })
 
         api_data = opt_coordinator.get_api_data()
+        api_data.setdefault("features", {})["ai_summary"] = True
+        service = _optimization_ai_service(
+            self._hass,
+            optimization_entry_id or opt_coordinator.entry_id,
+            opt_coordinator,
+        )
+        if service is not None:
+            api_data["ai_summary"] = service.status(
+                snapshot=api_data,
+                provider=ai_settings["ai_summary_provider"],
+                api_key=configured_api_key(config_entry),
+            )
         _LOGGER.debug(f"Optimization GET response: enabled={api_data.get('enabled')}, "
                       f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
                       f"savings=${api_data.get('predicted_savings', 0):.2f}, "
@@ -39533,8 +39603,10 @@ class OptimizationSettingsView(HomeAssistantView):
                 configured_reserve=backup_reserve,
                 manual_reserve=manual_reserve,
             )
+            from .optimization.ai_summary import ai_summary_settings
             return web.json_response({
                 "success": True,
+                **ai_summary_settings(config_entry),
                 "enabled": bool(
                     config_entry
                     and config_entry.options.get(CONF_OPTIMIZATION_ENABLED, False)
@@ -39694,8 +39766,10 @@ class OptimizationSettingsView(HomeAssistantView):
             else None
         )
 
+        from .optimization.ai_summary import ai_summary_settings
         return web.json_response({
             "success": True,
+            **ai_summary_settings(config_entry),
             "enabled": opt_coordinator.enabled,
             "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
@@ -39790,6 +39864,69 @@ class OptimizationSettingsView(HomeAssistantView):
                 entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                 if isinstance(entry_data, dict):
                     opt_coordinator = entry_data.get("optimization_coordinator")
+
+            ai_setting_keys = {
+                "ai_summary_provider",
+                "ai_summary_api_key",
+                "clear_ai_summary_api_key",
+            }
+            if ai_setting_keys.intersection(settings):
+                if config_entry is None:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "code": "integration_not_configured",
+                            "message": "PowerSync is not configured.",
+                        },
+                        status=400,
+                    )
+                from .optimization.ai_summary import (
+                    AISummaryError,
+                    ai_summary_settings,
+                    apply_ai_summary_settings,
+                )
+                try:
+                    new_options, ai_changes = apply_ai_summary_settings(
+                        config_entry.options,
+                        settings,
+                    )
+                except AISummaryError as err:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "code": err.code,
+                            "message": err.message,
+                        },
+                        status=err.http_status,
+                    )
+                if new_options != dict(config_entry.options):
+                    if isinstance(entry_data, dict):
+                        entry_data["_skip_reload"] = True
+                    self._hass.config_entries.async_update_entry(
+                        config_entry,
+                        options=new_options,
+                    )
+                    service = (
+                        entry_data.get("_optimization_ai_summary_service")
+                        if isinstance(entry_data, dict)
+                        else None
+                    )
+                    if service is not None:
+                        service.invalidate()
+                settings = {
+                    key: value
+                    for key, value in settings.items()
+                    if key not in ai_setting_keys
+                }
+                changes.extend(ai_changes)
+                if not settings:
+                    return web.json_response(
+                        {
+                            "success": True,
+                            "changes": changes,
+                            **ai_summary_settings(config_entry),
+                        }
+                    )
 
             # If coordinator exists, use it
             if opt_coordinator:
@@ -40233,6 +40370,108 @@ class OptimizationSettingsView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+
+class OptimizationAISummaryView(HomeAssistantView):
+    """Explicitly generate a descriptive explanation of the current plan."""
+
+    url = "/api/power_sync/optimization/ai_summary"
+    name = "api:power_sync:optimization:ai_summary"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Generate only after a deliberate authenticated request."""
+        from .optimization.ai_summary import (
+            AISummaryError,
+            ai_summary_settings,
+            configured_api_key,
+        )
+
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ValueError, TypeError):
+            payload = None
+        if not isinstance(payload, dict) or set(payload) - {"refresh"}:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "invalid_ai_summary_request",
+                    "message": "The request may contain only refresh: true or false.",
+                },
+                status=400,
+            )
+        refresh = payload.get("refresh", False)
+        if not isinstance(refresh, bool):
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "invalid_ai_summary_request",
+                    "message": "refresh must be true or false.",
+                },
+                status=400,
+            )
+
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        config_entry = entries[0] if entries else None
+        entry_data = (
+            self._hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+            if config_entry
+            else None
+        )
+        opt_coordinator = (
+            entry_data.get("optimization_coordinator")
+            if isinstance(entry_data, dict)
+            else None
+        )
+        if config_entry is None or opt_coordinator is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "optimizer_unavailable",
+                    "message": "Smart Optimization is unavailable, so there is no plan to explain.",
+                },
+                status=409,
+            )
+
+        public_settings = ai_summary_settings(config_entry)
+        service = _optimization_ai_service(
+            self._hass,
+            config_entry.entry_id,
+            opt_coordinator,
+        )
+        if service is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "optimizer_unavailable",
+                    "message": "The AI plan explanation service is unavailable.",
+                },
+                status=409,
+            )
+
+        try:
+            result = await service.generate(
+                provider=public_settings["ai_summary_provider"],
+                api_key=configured_api_key(config_entry),
+                refresh=refresh,
+            )
+        except AISummaryError as err:
+            _LOGGER.warning("AI plan explanation failed: %s", err.code)
+            return web.json_response(
+                {
+                    "success": False,
+                    "state": "error",
+                    "code": err.code,
+                    "message": err.message,
+                    "summary": None,
+                },
+                status=err.http_status,
+            )
+        return web.json_response({"success": True, **result})
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
