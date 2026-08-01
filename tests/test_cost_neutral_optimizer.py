@@ -102,6 +102,44 @@ def test_cost_neutral_caps_discretionary_battery_export_at_exact_earnings(
     assert max(result.schedule.battery_export_w) < 5_000
 
 
+def test_cost_neutral_prices_export_induced_later_import_in_same_constraint(
+    optimizer_module,
+):
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=1_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[1.00, 0.00],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[True, False],
+        priority_export_slots=[True, False],
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_earnings_cap=1.0,
+        cost_neutral_slots=[True, True],
+        cost_neutral_forecast_import_cost=0.0,
+    )
+
+    exported_kwh = result.battery_to_grid_w[0] / 1000.0
+    induced_import_kwh = result.grid_import_w[1] / 1000.0
+    assert exported_kwh == pytest.approx(1.0, abs=1e-4)
+    assert induced_import_kwh == pytest.approx(1.0, abs=1e-4)
+    assert exported_kwh - 0.20 * induced_import_kwh == pytest.approx(0.8)
+    assert result.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(1.2)
+    assert result.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(1.0)
+
+
 def test_zero_cap_preserves_natural_solar_export(optimizer_module):
     result = _optimizer(optimizer_module).optimize(
         import_prices=[0.20] * 2,
@@ -171,3 +209,37 @@ def test_final_schedule_guard_trims_overlay_without_touching_home_discharge(
     assert earnings == pytest.approx(0.5)
     assert trimmed.actions[0].battery_discharge_w == pytest.approx(1_500.0)
     assert trimmed.actions[0].power_w == pytest.approx(500.0)
+
+
+def test_final_schedule_guard_values_only_remaining_capped_export_bonus(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(1)[0]
+    schedule = module.OptimizationSchedule(
+        actions=[module.ScheduleAction(
+            timestamp=start,
+            action="export",
+            power_w=1_000,
+            soc=0.5,
+            battery_discharge_w=1_000,
+        )],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+        last_updated=start,
+    )
+
+    trimmed, earnings = optimizer.enforce_cost_neutral_schedule(
+        schedule,
+        export_prices=[0.10],
+        solar=[0.0],
+        load=[0.0],
+        earnings_cap=1.0,
+        cost_neutral_slots=[True],
+        export_bonus_prices=[0.90],
+        export_bonus_cap_kwh=0.10,
+    )
+
+    assert trimmed.actions[0].battery_discharge_w == pytest.approx(1_000.0)
+    assert earnings == pytest.approx(0.19)

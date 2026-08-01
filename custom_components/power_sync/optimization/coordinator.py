@@ -4883,6 +4883,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             self._cost_neutral_status = cost_neutral_status
+            cost_neutral_forecast_import_cost = float(
+                cost_neutral_status.get("forecast_import_cost", 0.0) or 0.0
+            )
 
             reference_reserve_floor = (
                 self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
@@ -4942,6 +4945,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                         cost_neutral_cap,
                         cost_neutral_slots,
+                        cost_neutral_forecast_import_cost,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5005,6 +5009,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 initial_soc=soc,
                 cost_neutral_earnings_cap=cost_neutral_cap,
                 cost_neutral_slots=cost_neutral_slots,
+                cost_neutral_forecast_import_cost=(
+                    cost_neutral_forecast_import_cost
+                ),
             )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
@@ -5081,6 +5088,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     initial_soc=soc,
                     cost_neutral_earnings_cap=cost_neutral_cap,
                     cost_neutral_slots=cost_neutral_slots,
+                    cost_neutral_forecast_import_cost=(
+                        cost_neutral_forecast_import_cost
+                    ),
                 )
                 final_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
@@ -5099,6 +5109,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_optimizer_result = result
                 self._last_update_time = dt_util.now()
             if cost_neutral_cap is not None:
+                effective_cost_neutral_cap = max(
+                    0.0,
+                    float(
+                        result.lp_stats.get(
+                            "cost_neutral_earnings_cap", cost_neutral_cap
+                        )
+                    ),
+                )
                 planned = max(
                     0.0,
                     float(
@@ -5107,7 +5125,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     ),
                 )
-                uncovered = max(0.0, cost_neutral_cap - planned)
+                uncovered = max(0.0, effective_cost_neutral_cap - planned)
                 eligible_indices = [
                     idx
                     for idx, in_today in enumerate(cost_neutral_slots)
@@ -5118,7 +5136,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and float(export_prices[idx] or 0.0) > 0.0
                 ]
                 blocking_reasons: list[str] = []
-                if cost_neutral_cap <= 1e-6:
+                if effective_cost_neutral_cap <= 1e-6:
                     reason = "already_covered_by_measured_or_natural_export"
                 elif not eligible_indices:
                     reason = "no_eligible_export_slots_before_midnight"
@@ -5143,6 +5161,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         blocking_reasons.append("spread_export_limit")
                 self._cost_neutral_status = {
                     **cost_neutral_status,
+                    "battery_export_earnings_cap": round(
+                        effective_cost_neutral_cap, 4
+                    ),
                     "planned_battery_export_earnings": round(planned, 4),
                     "uncovered_amount": round(uncovered, 4),
                     "projected_net_daily_cost": round(uncovered, 4),
