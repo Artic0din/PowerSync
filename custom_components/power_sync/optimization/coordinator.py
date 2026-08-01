@@ -30,6 +30,7 @@ from ..const import (
     DEFAULT_OPTIMIZATION_INTERVAL,
 )
 from ..coordinator import normalize_custom_power_kw
+from ..currency import currency_for_entry, currency_metadata
 from ..settings_metadata import (
     optimizer_settings_groups,
     optimizer_settings_schema,
@@ -13018,6 +13019,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data = {
             "success": True,
+            **currency_metadata(currency_for_entry(self._entry, self.hass)),
             "enabled": self._enabled,
             "monitoring_mode": monitoring_mode,
             "optimizer_available": optimizer_available,
@@ -13134,6 +13136,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "warnings": self._get_warnings(),
         }
 
+        energy_data = self._get_energy_data()
+        if isinstance(energy_data, dict):
+            try:
+                battery_soc_percent = float(energy_data.get("battery_level"))
+            except (TypeError, ValueError):
+                battery_soc_percent = math.nan
+            if math.isfinite(battery_soc_percent):
+                data["battery_soc_percent"] = round(
+                    max(0.0, min(100.0, battery_soc_percent)),
+                    1,
+                )
+
         network_manager = self.hass.data.get("power_sync", {}).get(
             self.entry_id, {}
         ).get("network_envelope_manager")
@@ -13142,8 +13156,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Add load forecast summary for mobile app
         load_summary = self._summarise_load_forecast()
+        forecast_summary: dict[str, Any] = {}
         if load_summary:
-            data["forecast_summary"] = {
+            forecast_summary.update({
                 "load_today_remaining_kwh": load_summary["today_remaining_kwh"],
                 "load_tomorrow_kwh": load_summary["tomorrow_kwh"],
                 "load_peak_kw": load_summary["peak_kw"],
@@ -13155,7 +13170,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "away_mode": load_summary["away_mode"],
                 "profit_max_mode": load_summary.get("profit_max_mode", False),
                 "charge_by_time_enabled": load_summary.get("charge_by_time_enabled", False),
-            }
+            })
+        if self._last_solar_forecast:
+            intervals_24h = min(
+                len(self._last_solar_forecast),
+                int(24 * 60 / max(1, self._config.interval_minutes)),
+            )
+            solar_24h = self._last_solar_forecast[:intervals_24h]
+            if solar_24h:
+                interval_hours = self._config.interval_minutes / 60
+                forecast_summary.update(
+                    {
+                        "solar_next_24h_kwh": round(
+                            sum(max(0.0, float(value or 0.0)) for value in solar_24h)
+                            * interval_hours,
+                            2,
+                        ),
+                        "solar_peak_kw": round(
+                            max(max(0.0, float(value or 0.0)) for value in solar_24h),
+                            2,
+                        ),
+                    }
+                )
+        if forecast_summary:
+            data["forecast_summary"] = forecast_summary
 
         if self._last_planned_ev_load_forecast_w:
             dt_h = self._config.interval_minutes / 60

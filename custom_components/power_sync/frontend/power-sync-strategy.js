@@ -3293,7 +3293,12 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     } catch (err) {
       if (requestToken !== this._requestToken) return;
       this._errorCode = err?.body?.code || err?.code || 'request_failed';
-      this._state = this._errorCode === 'ai_not_configured' ? 'not_configured' : 'error';
+      if (this._summary) {
+        this._meta = { ...this._meta, refreshError: this._errorCode };
+        this._state = 'content';
+      } else {
+        this._state = this._errorCode === 'ai_not_configured' ? 'not_configured' : 'error';
+      }
     }
     this._render();
   }
@@ -3304,7 +3309,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       optimizer_unavailable: 'Smart Optimization is unavailable, so there is no plan to explain.',
       plan_stale: 'The optimizer plan is not ready yet. Try again after the next optimization cycle.',
       plan_changed: 'The plan changed while the explanation was generated. Try again.',
-      provider_auth: 'The selected provider rejected the saved API key.',
+      provider_auth_failed: 'The selected provider rejected the saved API key.',
       provider_rate_limited: 'The selected provider rate-limited this request. Try again later.',
       provider_timeout: 'The selected provider timed out. Try again later.',
       provider_unavailable: 'The selected provider is currently unavailable.',
@@ -3341,6 +3346,23 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     parent.append(block);
   }
 
+  _timelineText(item) {
+    if (!item || typeof item.reason !== 'string') return null;
+    const formatTime = (value) => {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime())
+        ? ''
+        : parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+    const start = formatTime(item.start);
+    const end = formatTime(item.end);
+    const time = start ? (end && end !== start ? `${start} - ${end}` : start) : '';
+    const action = typeof item.action === 'string'
+      ? item.action.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+      : '';
+    return [time, action, item.reason.trim()].filter(Boolean).join(' — ');
+  }
+
   _renderContent(body) {
     const summary = this._summary || {};
     const badges = document.createElement('div');
@@ -3362,14 +3384,34 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       stale.textContent = 'This explanation describes an older plan. Refresh it to explain the current plan.';
       body.append(stale);
     }
-    this._appendTextBlock(body, 'Overview', summary.overview);
-    this._appendTextBlock(body, 'Strategy', summary.strategy);
-    this._appendList(body, 'Key actions', summary.action_explanations, (item) => {
-      if (!item || typeof item.reason !== 'string') return null;
-      const windowId = typeof item.window_id === 'string' ? item.window_id.trim() : '';
-      return windowId ? `${windowId}: ${item.reason}` : item.reason;
-    });
-    this._appendList(body, 'Caveats', summary.caveats, (item) => typeof item === 'string' ? item : null);
+    if (this._meta.refreshError) {
+      const refreshError = document.createElement('p');
+      refreshError.className = 'notice';
+      refreshError.textContent = `${this._errorText(this._meta.refreshError)} Showing the previous explanation.`;
+      body.append(refreshError);
+    }
+    const hasDecisionContract = ['now', 'next', 'why_it_matters', 'expected_outcome']
+      .some((key) => typeof summary[key] === 'string' && summary[key].trim());
+    if (typeof summary.headline === 'string' && summary.headline.trim()) {
+      const headline = document.createElement('p');
+      headline.className = 'headline';
+      headline.textContent = summary.headline;
+      body.append(headline);
+    }
+    if (hasDecisionContract) {
+      this._appendTextBlock(body, 'Right now', summary.now);
+      this._appendTextBlock(body, 'Next', summary.next);
+      this._appendTextBlock(body, 'Why this plan', summary.why_it_matters);
+      this._appendTextBlock(body, 'Expected outcome', summary.expected_outcome);
+    } else {
+      this._appendTextBlock(body, 'Overview', summary.overview);
+      this._appendTextBlock(body, 'Strategy', summary.strategy);
+    }
+    const timeline = Array.isArray(summary.important_actions)
+      ? summary.important_actions
+      : summary.action_explanations;
+    this._appendList(body, 'Optional timeline', timeline, (item) => this._timelineText(item));
+    this._appendList(body, 'What may change', summary.caveats, (item) => typeof item === 'string' ? item : null);
     if (typeof summary.generated_at === 'string') {
       const generated = document.createElement('p');
       generated.className = 'generated';
@@ -3396,6 +3438,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         .badges { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:10px; }
         .badges span { padding:3px 8px; border-radius:999px; background:rgba(var(--rgb-cyan-color, 0,188,212),0.13); font-size:11px; font-weight:700; }
         .notice { padding:9px 10px; border-radius:9px; background:rgba(var(--rgb-orange-color,255,152,0),0.13); }
+        .headline { font-size:16px; font-weight:700; line-height:1.4; }
         .status { color:var(--secondary-text-color); }
         .generated { margin-top:13px; color:var(--secondary-text-color); font-size:12px; }
         .actions { display:flex; gap:9px; margin-top:14px; }

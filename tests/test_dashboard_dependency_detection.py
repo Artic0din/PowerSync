@@ -73,9 +73,25 @@ def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():
     assert "refresh.addEventListener('click', () => this._generate(true))" in card_source
     assert "text.textContent = value" in card_source
     assert "item.textContent = value" in card_source
+    assert "summary.important_actions" in card_source
+    assert ": summary.action_explanations" in card_source
+    assert "item.window_id" not in card_source
+    assert "toLocaleTimeString" in card_source
+    assert "provider_auth_failed" in card_source
+    assert "Showing the previous explanation." in card_source
+    assert "Descriptive only. AI cannot change or execute the optimizer plan." in card_source
+    decision_labels = [
+        "'Right now'",
+        "'Next'",
+        "'Why this plan'",
+        "'Expected outcome'",
+        "'Optional timeline'",
+        "'What may change'",
+    ]
+    positions = [card_source.index(label) for label in decision_labels]
+    assert positions == sorted(positions)
     assert "setInterval" not in card_source
     assert "localStorage" not in card_source
-    assert "Descriptive only. AI cannot change or execute the optimizer plan." in card_source
 
 
 def test_lp_battery_power_chart_splits_home_consumption_from_export():

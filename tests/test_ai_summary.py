@@ -17,6 +17,9 @@ MODULE_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "ai_summary.py"
 )
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
+COORDINATOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+)
 
 
 def _load_module():
@@ -65,11 +68,17 @@ def _snapshot() -> dict:
         "optimization_status": "active",
         "last_optimization": "2026-08-01T12:00:00+10:00",
         "monitoring_mode": False,
+        "currency": "AUD",
+        "price_unit": "AUD/kWh",
+        "minor_price_unit": "c/kWh",
+        "battery_soc_percent": 25.0,
         "planned_current_action": "charge",
+        "planned_current_power_w": 5000,
         "current_action": "charge",
         "current_action_end_time": "2026-08-01T12:30:00+10:00",
         "next_action": "export",
         "next_action_time": "2026-08-01T13:00:00+10:00",
+        "next_action_power_w": 4500,
         "predicted_cost": 1.2,
         "predicted_savings": 2.3,
         "schedule": {
@@ -79,8 +88,8 @@ def _snapshot() -> dict:
                 "2026-08-01T13:00:00+10:00",
                 "2026-08-01T13:30:00+10:00",
             ],
-            "import_price": [10.0, 12.0, 40.0, 45.0],
-            "export_price": [3.0, 4.0, 65.0, 70.0],
+            "import_price": [0.10, 0.12, 0.40, 0.45],
+            "export_price": [0.03, 0.04, 0.65, 0.70],
             "soc": [0.25, 0.35, 0.45, 0.38],
             "serial_number": "must-not-leak",
         },
@@ -110,6 +119,8 @@ def _snapshot() -> dict:
             "load_today_remaining_kwh": 8.4,
             "load_tomorrow_kwh": 18.1,
             "load_peak_kw": 4.2,
+            "solar_next_24h_kwh": 21.6,
+            "solar_peak_kw": 6.4,
             "history_diagnostics": {"entity_id": "sensor.private"},
         },
         "warnings": [
@@ -143,8 +154,11 @@ def _snapshot() -> dict:
 
 def _model_output() -> dict:
     return {
-        "overview": "The plan charges before a valuable export period.",
-        "strategy": "It shifts stored energy into the strongest supplied price window.",
+        "headline": "Charge now, then export in the higher-value period.",
+        "now": "The battery is charging now at up to 5 kW.",
+        "next": "At 1:00 pm, the plan switches to exporting.",
+        "why_it_matters": "The supplied export price is higher at 1:00 pm than it is now.",
+        "expected_outcome": "PowerSync expects today's plan to save AUD 2.30 against its baseline.",
         "action_explanations": [
             {"window_id": "w1", "reason": "This window has the highest supplied export price."}
         ],
@@ -159,11 +173,13 @@ def test_context_is_compact_deterministic_and_excludes_private_fields():
 
     assert [window["window_id"] for window in context["action_windows"]] == ["w0", "w1"]
     assert context["action_windows"][0]["import_price"] == {
-        "min": 10.0,
-        "average": 11.0,
-        "max": 12.0,
+        "min": 0.1,
+        "average": 0.11,
+        "max": 0.12,
     }
-    assert context["action_windows"][1]["export_price"]["average"] == 67.5
+    assert context["action_windows"][1]["export_price"]["average"] == 0.675
+    assert context["action_windows"][0]["peak_power_kw"] == 5.0
+    assert context["action_windows"][0]["end_soc_percent"] == 35.0
     assert context["horizon"] == {
         "start": "2026-08-01T12:00:00+10:00",
         "end": "2026-08-01T14:00:00+10:00",
@@ -172,7 +188,20 @@ def test_context_is_compact_deterministic_and_excludes_private_fields():
     assert context["summary"] == {
         "predicted_cost_today": 1.2,
         "predicted_savings_today": 2.3,
+        "baseline_cost_today": 3.5,
     }
+    assert context["instruction_contract_version"] == "powersync.optimizer-explainer.v2"
+    assert context["units"] == {
+        "power": "kW",
+        "energy": "kWh",
+        "soc": "percent",
+        "price_values": "major_currency_per_kwh",
+        "currency": "AUD",
+        "price_unit": "AUD/kWh",
+        "minor_price_unit": "c/kWh",
+    }
+    assert context["current_status"]["battery_soc_percent"] == 25.0
+    assert context["ev"]["plan_available"] is True
     for secret in (
         "must-not-leak",
         "sensor.private",
@@ -189,10 +218,66 @@ def test_context_is_compact_deterministic_and_excludes_private_fields():
     assert module.context_fingerprint(context, "gemini", "model") == module.context_fingerprint(
         reordered, "gemini", "model"
     )
-    live_status_changed = {**context, "current_action": "export", "plan_generated_at": "later"}
-    assert module.context_fingerprint(context, "gemini", "model") == module.context_fingerprint(
+    live_status_changed = {
+        **context,
+        "current_status": {**context["current_status"], "planned_action": "export"},
+        "plan_generated_at": "later",
+    }
+    assert module.context_fingerprint(context, "gemini", "model") != module.context_fingerprint(
         live_status_changed, "gemini", "model"
     )
+    soc_only_changed = {
+        **context,
+        "current_status": {
+            **context["current_status"],
+            "battery_soc_percent": 24.8,
+        },
+    }
+    assert module.context_fingerprint(context, "gemini", "model") == module.context_fingerprint(
+        soc_only_changed, "gemini", "model"
+    )
+    soc_bucket_changed = {
+        **context,
+        "current_status": {
+            **context["current_status"],
+            "battery_soc_percent": 23.9,
+        },
+    }
+    assert module.context_fingerprint(context, "gemini", "model") != module.context_fingerprint(
+        soc_bucket_changed, "gemini", "model"
+    )
+    assert module.plan_guard_fingerprint(
+        context, "gemini", "model"
+    ) == module.plan_guard_fingerprint(soc_bucket_changed, "gemini", "model")
+    monitoring_changed = {**context, "monitoring_mode": True}
+    assert module.context_fingerprint(context, "gemini", "model") != module.context_fingerprint(
+        monitoring_changed, "gemini", "model"
+    )
+    assert module.plan_guard_fingerprint(
+        context, "gemini", "model"
+    ) != module.plan_guard_fingerprint(monitoring_changed, "gemini", "model")
+
+
+def test_price_summary_excludes_outliers_beyond_compact_horizon():
+    module = _load_module()
+    snapshot = _snapshot()
+    snapshot["schedule"]["timestamps"].append("2026-08-02T13:00:00+10:00")
+    snapshot["schedule"]["import_price"].append(99.0)
+    snapshot["schedule"]["export_price"].append(99.0)
+    snapshot["schedule"]["soc"].append(0.5)
+
+    context = module.build_compact_context(snapshot)
+
+    assert context["price_summary"]["import"] == {
+        "min": 0.1,
+        "average": 0.268,
+        "max": 0.45,
+    }
+    assert context["price_summary"]["export"] == {
+        "min": 0.03,
+        "average": 0.355,
+        "max": 0.7,
+    }
 
 
 def test_context_distinguishes_soft_missing_inputs_from_unusable_plan():
@@ -245,11 +330,62 @@ def test_context_treats_configured_ev_without_active_plan_as_valid_empty_state()
     assert "ev_plan" not in context["missing_inputs"]
 
 
+def test_v2_prompt_is_provider_neutral_decision_first_and_descriptive_only():
+    module = _load_module()
+
+    assert module.PROMPT_VERSION == "2"
+    assert module.SCHEMA_VERSION == "2"
+    assert "PowerSync Optimizer Explainer contract" in module.SYSTEM_PROMPT
+    assert "What is happening now" in module.SYSTEM_PROMPT
+    assert "What happens next and when" in module.SYSTEM_PROMPT
+    assert "cannot control, execute, modify, or" in module.SYSTEM_PROMPT
+    assert "Never calculate or invent prices" in module.SYSTEM_PROMPT
+    assert "supplied currency and" in module.SYSTEM_PROMPT
+    assert "Gemini" not in module.SYSTEM_PROMPT
+    assert "Grok" not in module.SYSTEM_PROMPT
+
+
+def test_verified_feedback_reports_observed_changes_without_invented_cause():
+    module = _load_module()
+    previous = module.build_compact_context(_snapshot())
+    current_snapshot = _snapshot()
+    current_snapshot["schedule"]["import_price"][0] = 0.25
+    current_snapshot["forecast_summary"]["solar_next_24h_kwh"] = 12.1
+    current_snapshot["battery_soc_percent"] = 22.0
+    current_snapshot["next_actions"][0]["action"] = "idle"
+    current = module.build_compact_context(current_snapshot)
+
+    unavailable = module.build_verified_feedback(None, current)
+    assert unavailable == {
+        "available": False,
+        "comparison": "no_previous_explained_plan",
+        "plan_changed": None,
+        "verified_input_changes": [],
+    }
+
+    feedback = module.build_verified_feedback(previous, current)
+    assert feedback["available"] is True
+    assert feedback["plan_changed"] is True
+    assert {item["kind"] for item in feedback["verified_input_changes"]} >= {
+        "tariff",
+        "forecast",
+        "battery_soc",
+    }
+    assert "cause" not in feedback
+
+
 def test_model_output_is_strict_and_server_owns_action_metadata():
     module = _load_module()
     context = module.build_compact_context(_snapshot())
     output = module.validate_model_output(_model_output(), context["action_windows"])
 
+    assert output["contract_version"] == "powersync.optimizer-explainer.v2"
+    assert output["overview"] == " ".join(
+        _model_output()[key] for key in ("headline", "now", "next")
+    )
+    assert output["strategy"] == " ".join(
+        _model_output()[key] for key in ("why_it_matters", "expected_outcome")
+    )
     assert output["important_actions"] == [
         {
             "window_id": "w1",
@@ -271,7 +407,7 @@ def test_model_output_is_strict_and_server_owns_action_metadata():
         module.validate_model_output(extra, context["action_windows"])
 
     excessive = _model_output()
-    excessive["overview"] = "x" * 501
+    excessive["headline"] = "x" * 181
     with pytest.raises(module.AISummaryError):
         module.validate_model_output(excessive, context["action_windows"])
 
@@ -537,6 +673,72 @@ def test_service_cache_refresh_deduplication_and_plan_change_guard():
     assert caught.value.code == "plan_changed"
 
 
+def test_service_sends_feedback_against_last_successfully_explained_plan():
+    module = _load_module()
+    snapshot = _snapshot()
+
+    class RecordingAdapter:
+        def __init__(self):
+            self.contexts = []
+
+        async def generate(self, **kwargs):
+            self.contexts.append(kwargs["context"])
+            return _model_output()
+
+    adapter = RecordingAdapter()
+    module.PROVIDER_ADAPTERS["gemini"] = adapter
+    service = module.AISummaryService(object(), lambda: snapshot)
+
+    asyncio.run(service.generate(provider="gemini", api_key="key", refresh=False))
+    snapshot["next_actions"][0]["action"] = "idle"
+    snapshot["schedule"]["import_price"][0] = 0.25
+    asyncio.run(service.generate(provider="gemini", api_key="key", refresh=False))
+
+    assert len(adapter.contexts) == 2
+    assert adapter.contexts[0]["feedback"]["available"] is False
+    second_feedback = adapter.contexts[1]["feedback"]
+    assert second_feedback["available"] is True
+    assert second_feedback["plan_changed"] is True
+    assert "tariff" in {
+        item["kind"] for item in second_feedback["verified_input_changes"]
+    }
+
+
+def test_malformed_refresh_keeps_last_valid_summary_as_fallback():
+    module = _load_module()
+    snapshot = _snapshot()
+
+    class Adapter:
+        def __init__(self):
+            self.fail = False
+
+        async def generate(self, **kwargs):
+            if self.fail:
+                raise module.AISummaryError(
+                    "invalid_provider_response",
+                    "The AI provider returned an invalid structured response.",
+                )
+            return _model_output()
+
+    adapter = Adapter()
+    module.PROVIDER_ADAPTERS["gemini"] = adapter
+    service = module.AISummaryService(object(), lambda: snapshot)
+    first = asyncio.run(
+        service.generate(provider="gemini", api_key="key", refresh=False)
+    )
+    adapter.fail = True
+
+    with pytest.raises(module.AISummaryError) as caught:
+        asyncio.run(
+            service.generate(provider="gemini", api_key="key", refresh=True)
+        )
+
+    assert caught.value.code == "invalid_provider_response"
+    status = service.status(snapshot=snapshot, provider="gemini", api_key="key")
+    assert status["state"] == "ready"
+    assert status["summary"] == first["summary"]
+
+
 def test_http_views_register_explicit_generation_and_never_return_key():
     source = INIT_PATH.read_text()
     assert "hass.http.register_view(OptimizationAISummaryView(hass))" in source
@@ -554,3 +756,13 @@ def test_http_views_register_explicit_generation_and_never_return_key():
     ]
     assert "xai-[a-zA-Z0-9_-]" in filter_source
     assert "AIza[a-zA-Z0-9_-]" in filter_source
+
+
+def test_optimizer_snapshot_exposes_verified_currency_soc_and_solar_context():
+    source = COORDINATOR_PATH.read_text()
+    api_source = source[source.index("def get_api_data") : source.index("async def set_settings")]
+
+    assert "currency_metadata(currency_for_entry(self._entry, self.hass))" in api_source
+    assert 'data["battery_soc_percent"]' in api_source
+    assert '"solar_next_24h_kwh"' in api_source
+    assert '"solar_peak_kw"' in api_source
