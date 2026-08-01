@@ -3200,6 +3200,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     this._statusRequested = false;
     this._requestToken = 0;
     this._connected = false;
+    this._expanded = true;
   }
 
   setConfig(config) {
@@ -3253,6 +3254,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
           stale: status.state === 'stale',
         };
         this._state = 'content';
+        this._expanded = false;
       } else if (status.state === 'optimizer_unavailable' || status.state === 'plan_stale') {
         this._errorCode = status.last_error?.code || status.state;
         this._state = 'unavailable';
@@ -3270,9 +3272,16 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     this._loadStatusOnce();
   }
 
+  _toggleExpanded() {
+    if (this._state !== 'content' || !this._summary) return;
+    this._expanded = !this._expanded;
+    this._render();
+  }
+
   async _generate(refresh) {
     if (!this._hass || typeof this._hass.callApi !== 'function' || this._state === 'loading') return;
     const requestToken = ++this._requestToken;
+    this._expanded = true;
     this._state = 'loading';
     this._errorCode = null;
     this._render();
@@ -3428,8 +3437,12 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         ha-card { padding: 18px; }
-        .header { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+        .header { display:flex; align-items:center; gap:10px; }
+        .header.open { margin-bottom:12px; }
         .header ha-icon { color:var(--cyan-color, #00bcd4); }
+        .toggle { margin-left:auto; width:36px; height:36px; padding:0; border-radius:50%; display:flex; align-items:center; justify-content:center; background:transparent; color:var(--primary-text-color); }
+        .toggle:hover { background:var(--secondary-background-color); }
+        .toggle ha-icon { color:inherit; }
         h3 { margin:0; font-size:18px; }
         h4 { margin:14px 0 5px; font-size:14px; }
         p { margin:0; line-height:1.45; }
@@ -3445,19 +3458,39 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         button { border:0; border-radius:9px; padding:9px 13px; cursor:pointer; background:var(--primary-color); color:var(--text-primary-color, white); font-weight:600; }
         button.secondary { background:var(--secondary-background-color); color:var(--primary-text-color); }
         button:disabled { opacity:.55; cursor:default; }
+        [hidden] { display:none !important; }
         .boundary { margin-top:12px; color:var(--secondary-text-color); font-size:12px; }
       </style>
       <ha-card>
-        <div class="header"><ha-icon icon="mdi:creation-outline"></ha-icon><h3>AI Plan Explanation</h3></div>
+        <div class="header" id="header"><ha-icon icon="mdi:creation-outline"></ha-icon><h3>AI Plan Explanation</h3><button class="toggle" id="toggle" type="button" hidden></button></div>
         <div id="body" aria-live="polite"></div>
         <div class="actions" id="actions"></div>
-        <p class="boundary">Descriptive only. AI cannot change or execute the optimizer plan.</p>
+        <p class="boundary" id="boundary">Descriptive only. AI cannot change or execute the optimizer plan.</p>
       </ha-card>`;
+    const header = this.shadowRoot.getElementById('header');
     const body = this.shadowRoot.getElementById('body');
     const actions = this.shadowRoot.getElementById('actions');
-    if (this._state === 'content') {
+    const boundary = this.shadowRoot.getElementById('boundary');
+    const toggle = this.shadowRoot.getElementById('toggle');
+    const hasContent = this._state === 'content' && !!this._summary;
+    if (hasContent) {
+      toggle.hidden = false;
+      toggle.setAttribute('aria-expanded', String(this._expanded));
+      toggle.setAttribute('aria-label', this._expanded ? 'Minimize AI explanation' : 'Expand AI explanation');
+      toggle.title = this._expanded ? 'Minimize explanation' : 'Expand explanation';
+      const toggleIcon = document.createElement('ha-icon');
+      toggleIcon.setAttribute('icon', this._expanded ? 'mdi:chevron-up' : 'mdi:chevron-down');
+      toggle.append(toggleIcon);
+      toggle.addEventListener('click', () => this._toggleExpanded());
+    }
+    const showDetails = !hasContent || this._expanded;
+    header.classList.toggle('open', showDetails);
+    body.hidden = !showDetails;
+    actions.hidden = !showDetails;
+    boundary.hidden = !showDetails;
+    if (hasContent && this._expanded) {
       this._renderContent(body);
-    } else {
+    } else if (!hasContent) {
       const status = document.createElement('p');
       status.className = 'status';
       const textByState = {
@@ -3479,7 +3512,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       generate.addEventListener('click', () => this._generate(false));
       actions.append(generate);
     }
-    if (this._state === 'content') {
+    if (hasContent && this._expanded) {
       const refresh = document.createElement('button');
       refresh.className = 'secondary';
       refresh.textContent = 'Refresh explanation';

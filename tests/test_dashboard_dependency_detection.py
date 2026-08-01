@@ -71,6 +71,14 @@ def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():
     assert card_source.count("callApi('POST'") == 1
     assert "generate.addEventListener('click', () => this._generate(false))" in card_source
     assert "refresh.addEventListener('click', () => this._generate(true))" in card_source
+    assert "this._expanded = false;" in card_source
+    assert "_toggleExpanded()" in card_source
+    assert "aria-expanded" in card_source
+    assert "Minimize AI explanation" in card_source
+    assert "Expand AI explanation" in card_source
+    assert "body.hidden = !showDetails" in card_source
+    assert "actions.hidden = !showDetails" in card_source
+    assert "toggle.addEventListener('click', () => this._toggleExpanded())" in card_source
     assert "text.textContent = value" in card_source
     assert "item.textContent = value" in card_source
     assert "summary.important_actions" in card_source
