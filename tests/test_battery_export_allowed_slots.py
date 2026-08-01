@@ -2034,6 +2034,143 @@ def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
     ) == [False] * 6
 
 
+def test_globird_zerocharge_exhausted_today_keeps_tomorrows_allowance(
+    opt_module,
+):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    n = 24 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+
+    allowed = coordinator._grid_charge_allowed_slots(
+        import_prices=[0.33] * n,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.8] * n,
+        current_soc=1.0,
+    )
+
+    tomorrow = (start + timedelta(days=1)).date()
+    tomorrow_zerocharge = [
+        idx
+        for idx, timestamp in enumerate(timestamps)
+        if timestamp.date() == tomorrow and 11 <= timestamp.hour < 14
+    ]
+    assert len(tomorrow_zerocharge) == 36
+    assert all(allowed[idx] for idx in tomorrow_zerocharge)
+
+
+def test_globird_zerocharge_partitions_bonus_caps_by_local_day(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    n = 24 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+    import_prices = [0.33] * n
+    export_prices = [0.0] * n
+
+    coordinator._apply_zerohero_optimizer_inputs(import_prices, export_prices)
+
+    tomorrow_key = (start + timedelta(days=1)).date().isoformat()
+    assert coordinator._last_zerocharge_bonus_cap_kwh == pytest.approx(50.0)
+    assert coordinator._last_import_bonus_caps_by_group == {
+        tomorrow_key: pytest.approx(50.0),
+    }
+    active_groups = {
+        group
+        for group in coordinator._last_import_bonus_group_ids
+        if group is not None
+    }
+    assert active_groups == {tomorrow_key}
+
+
+def test_globird_zerocharge_keeps_partial_today_and_full_tomorrow_isolated(
+    opt_module,
+):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 10, 55, tzinfo=aest)
+    n = 30 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 12.5
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08-01": pytest.approx(37.5),
+        "2026-08-02": pytest.approx(50.0),
+    }
+
+
+def test_globird_overnight_zerocharge_resets_at_local_calendar_midnight(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="23:00",
+        globird_zerocharge_end="02:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 22, 55, tzinfo=aest)
+    n = 4 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    active_groups = {
+        group
+        for group in coordinator._last_import_bonus_group_ids
+        if group is not None
+    }
+    assert active_groups == {"2026-08-01", "2026-08-02"}
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08-01": pytest.approx(50.0),
+        "2026-08-02": pytest.approx(50.0),
+    }
+
+
 @pytest.mark.parametrize(
     ("settings", "expected_change"),
     [

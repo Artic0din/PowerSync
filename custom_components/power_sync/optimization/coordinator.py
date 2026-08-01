@@ -3115,6 +3115,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for ts in self._price_timestamps(n)
         ]
 
+    @staticmethod
+    def _zerocharge_tariff_day(ts: datetime) -> str:
+        """Return the local calendar day owning a ZeroCharge allowance."""
+        return ts.date().isoformat()
+
     def _zerohero_credit_status(self, now: datetime | None = None) -> str:
         """Return current ZeroHero import-threshold status."""
         config = self._zerohero_config()
@@ -3153,22 +3158,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         timestamps = self._price_timestamps(n)
         if config.zerocharge_enabled:
-            remaining_import_cap = max(
+            current_import_cap = max(
                 0.0,
                 config.zerocharge_import_cap_kwh
                 - self._actual_zerocharge_import_kwh_today,
             )
+            current_day = self._zerocharge_tariff_day(timestamps[0])
+            import_groups: list[str | None] = [None] * n
+            import_caps: dict[str, float] = {}
             for idx, ts in enumerate(timestamps):
-                if zerocharge_is_in_window(ts, config):
-                    self._last_zerocharge_bonus_prices[idx] = max(
-                        0.0,
-                        import_prices[idx] if idx < len(import_prices) else 0.0,
-                    )
-            self._last_zerocharge_bonus_cap_kwh = remaining_import_cap
-            if remaining_import_cap > 0 and any(self._last_zerocharge_bonus_prices):
+                if not zerocharge_is_in_window(ts, config):
+                    continue
+                tariff_day = self._zerocharge_tariff_day(ts)
+                remaining_import_cap = (
+                    current_import_cap
+                    if tariff_day == current_day
+                    else config.zerocharge_import_cap_kwh
+                )
+                if remaining_import_cap <= 1e-9:
+                    continue
+                import_groups[idx] = tariff_day
+                import_caps[tariff_day] = remaining_import_cap
+                self._last_zerocharge_bonus_prices[idx] = max(
+                    0.0,
+                    import_prices[idx] if idx < len(import_prices) else 0.0,
+                )
+            self._last_import_bonus_group_ids = import_groups
+            self._last_import_bonus_caps_by_group = import_caps
+            self._last_zerocharge_bonus_cap_kwh = sum(import_caps.values())
+            if import_caps and any(self._last_zerocharge_bonus_prices):
                 _LOGGER.info(
-                    "ZeroCharge optimizer: %.2fkWh free-import cap remaining, %s-%s",
-                    remaining_import_cap,
+                    "ZeroCharge optimizer: %.2fkWh free-import capacity across "
+                    "%d tariff day(s), %s-%s",
+                    self._last_zerocharge_bonus_cap_kwh,
+                    len(import_caps),
                     config.zerocharge_start,
                     config.zerocharge_end,
                 )
@@ -12655,16 +12678,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None and zerohero_config.zerocharge_enabled:
-            remaining_zerocharge_kwh = max(
+            remaining_zerocharge_kwh_today = max(
                 0.0,
                 zerohero_config.zerocharge_import_cap_kwh
                 - self._actual_zerocharge_import_kwh_today,
             )
-            zerocharge_slots = (
-                self._zerocharge_window_slots(len(import_prices))
-                if remaining_zerocharge_kwh > 1e-6
-                else [False] * len(import_prices)
+            timestamps = self._price_timestamps(len(import_prices))
+            current_day = self._zerocharge_tariff_day(
+                timestamps[0],
             )
+            zerocharge_slots = []
+            for timestamp in timestamps:
+                tariff_day = self._zerocharge_tariff_day(
+                    timestamp,
+                )
+                remaining_zerocharge_kwh = (
+                    remaining_zerocharge_kwh_today
+                    if tariff_day == current_day
+                    else zerohero_config.zerocharge_import_cap_kwh
+                )
+                zerocharge_slots.append(
+                    remaining_zerocharge_kwh > 1e-6
+                    and zerocharge_is_in_window(timestamp, zerohero_config)
+                )
             allowed = [
                 bool(is_allowed) and bool(is_zerocharge)
                 for is_allowed, is_zerocharge in zip(

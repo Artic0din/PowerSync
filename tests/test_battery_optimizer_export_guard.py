@@ -2345,6 +2345,85 @@ def test_priority_export_bonus_window_exports_below_acquisition_cost(
     assert min(action.soc for action in export_window) >= 0.25
 
 
+def test_priority_export_pairs_with_next_days_zerocharge_allowance(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=81_100,
+        max_charge_w=15_000,
+        max_discharge_w=15_000,
+        max_battery_export_w=15_000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    n = 24 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    import_prices = [0.33] * n
+    export_prices = [0.0] * n
+    import_bonus_prices = [0.0] * n
+    grid_charge_allowed = [False] * n
+    export_allowed = [False] * n
+    priority_export = [False] * n
+    import_groups: list[str | None] = [None] * n
+    tomorrow_key = (start + timedelta(days=1)).date().isoformat()
+    for idx, timestamp in enumerate(timestamps):
+        if timestamp.date() == start.date() and 18 <= timestamp.hour < 21:
+            export_prices[idx] = 0.15
+            export_allowed[idx] = True
+            priority_export[idx] = True
+        if timestamp.date() == (start + timedelta(days=1)).date() and (
+            11 <= timestamp.hour < 14
+        ):
+            import_bonus_prices[idx] = import_prices[idx]
+            grid_charge_allowed[idx] = True
+            import_groups[idx] = tomorrow_key
+
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=import_groups,
+        import_caps_by_group={tomorrow_key: 50.0},
+        export_group_ids=None,
+        export_caps_by_group=None,
+    )
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=50.0,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.8] * n,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.33,
+        allow_battery_export=export_allowed,
+        block_battery_charge=priority_export,
+        allow_grid_charge=True,
+        grid_charge_allowed=grid_charge_allowed,
+        priority_export_slots=priority_export,
+        priority_export_enabled=True,
+        schedule_timestamps=timestamps,
+    )
+
+    current_export_slots = [
+        idx for idx, enabled in enumerate(priority_export) if enabled
+    ]
+    tomorrow_charge_slots = [
+        idx for idx, enabled in enumerate(grid_charge_allowed) if enabled
+    ]
+    assert any(
+        result.schedule.actions[idx].action == "export"
+        for idx in current_export_slots
+    )
+    assert any(
+        result.schedule.actions[idx].action == "charge"
+        for idx in tomorrow_charge_slots
+    )
+
+
 def test_zerohero_low_value_export_does_not_force_paid_prefill_without_priority(
     battery_optimizer_module,
 ):
