@@ -3187,6 +3187,319 @@ if (!customElements.get('power-sync-optimization-plan')) {
   customElements.define('power-sync-optimization-plan', PowerSyncOptimizationPlan);
 }
 
+class PowerSyncAIPlanExplanation extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = {};
+    this._hass = null;
+    this._state = 'initial';
+    this._summary = null;
+    this._meta = {};
+    this._errorCode = null;
+    this._statusRequested = false;
+    this._requestToken = 0;
+    this._connected = false;
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._connected) this._loadStatusOnce();
+  }
+
+  connectedCallback() {
+    this._connected = true;
+    this._render();
+    this._loadStatusOnce();
+  }
+
+  disconnectedCallback() {
+    this._connected = false;
+  }
+
+  getCardSize() {
+    return 3;
+  }
+
+  _optimizationPath() {
+    return this._config.optimizationPath || 'power_sync/optimization';
+  }
+
+  _summaryPath() {
+    return this._config.summaryPath || 'power_sync/optimization/ai_summary';
+  }
+
+  async _loadStatusOnce() {
+    if (this._statusRequested || !this._hass || typeof this._hass.callApi !== 'function') return;
+    this._statusRequested = true;
+    this._state = 'checking_status';
+    this._render();
+    try {
+      const response = await this._hass.callApi('GET', this._optimizationPath());
+      const status = response?.ai_summary;
+      if (response?.features?.ai_summary === false || !status) {
+        this._state = 'unavailable';
+      } else if (!status.configured || status.state === 'not_configured') {
+        this._state = 'not_configured';
+      } else if (status.summary && (status.state === 'ready' || status.state === 'stale')) {
+        this._summary = status.summary;
+        this._meta = {
+          cacheHit: true,
+          stale: status.state === 'stale',
+        };
+        this._state = 'content';
+      } else if (status.state === 'optimizer_unavailable' || status.state === 'plan_stale') {
+        this._errorCode = status.last_error?.code || status.state;
+        this._state = 'unavailable';
+      } else {
+        this._state = 'ready';
+      }
+    } catch (_) {
+      this._state = 'unavailable';
+    }
+    this._render();
+  }
+
+  _retryStatus() {
+    this._statusRequested = false;
+    this._loadStatusOnce();
+  }
+
+  async _generate(refresh) {
+    if (!this._hass || typeof this._hass.callApi !== 'function' || this._state === 'loading') return;
+    const requestToken = ++this._requestToken;
+    this._state = 'loading';
+    this._errorCode = null;
+    this._render();
+    try {
+      const response = await this._hass.callApi('POST', this._summaryPath(), { refresh: !!refresh });
+      if (requestToken !== this._requestToken) return;
+      if (!response?.success || !response.summary || typeof response.summary !== 'object') {
+        const invalidResponse = new Error('Invalid AI summary response');
+        invalidResponse.code = response?.code || 'invalid_provider_response';
+        throw invalidResponse;
+      }
+      this._summary = response.summary;
+      this._meta = {
+        cacheHit: !!response.cache_hit,
+        stale: !!response.stale,
+      };
+      this._state = 'content';
+    } catch (err) {
+      if (requestToken !== this._requestToken) return;
+      this._errorCode = err?.body?.code || err?.code || 'request_failed';
+      if (this._summary) {
+        this._meta = { ...this._meta, refreshError: this._errorCode };
+        this._state = 'content';
+      } else {
+        this._state = this._errorCode === 'ai_not_configured' ? 'not_configured' : 'error';
+      }
+    }
+    this._render();
+  }
+
+  _errorText(code) {
+    const messages = {
+      ai_not_configured: 'Add a Gemini or Grok API key in Smart Optimization settings first.',
+      optimizer_unavailable: 'Smart Optimization is unavailable, so there is no plan to explain.',
+      plan_stale: 'The optimizer plan is not ready yet. Try again after the next optimization cycle.',
+      plan_changed: 'The plan changed while the explanation was generated. Try again.',
+      provider_auth_failed: 'The selected provider rejected the saved API key.',
+      provider_rate_limited: 'The selected provider rate-limited this request. Try again later.',
+      provider_timeout: 'The selected provider timed out. Try again later.',
+      provider_unavailable: 'The selected provider is currently unavailable.',
+      invalid_provider_response: 'The provider returned an explanation PowerSync could not safely display.',
+      request_failed: 'The explanation request failed. Try again.',
+    };
+    return messages[code] || messages.request_failed;
+  }
+
+  _appendTextBlock(parent, title, value) {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const block = document.createElement('section');
+    const heading = document.createElement('h4');
+    heading.textContent = title;
+    const text = document.createElement('p');
+    text.textContent = value;
+    block.append(heading, text);
+    parent.append(block);
+  }
+
+  _appendList(parent, title, values, mapper) {
+    const items = Array.isArray(values) ? values.map(mapper).filter(Boolean) : [];
+    if (!items.length) return;
+    const block = document.createElement('section');
+    const heading = document.createElement('h4');
+    heading.textContent = title;
+    const list = document.createElement('ul');
+    for (const value of items) {
+      const item = document.createElement('li');
+      item.textContent = value;
+      list.append(item);
+    }
+    block.append(heading, list);
+    parent.append(block);
+  }
+
+  _timelineText(item) {
+    if (!item || typeof item.reason !== 'string') return null;
+    const formatTime = (value) => {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime())
+        ? ''
+        : parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+    const start = formatTime(item.start);
+    const end = formatTime(item.end);
+    const time = start ? (end && end !== start ? `${start} - ${end}` : start) : '';
+    const action = typeof item.action === 'string'
+      ? item.action.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+      : '';
+    return [time, action, item.reason.trim()].filter(Boolean).join(' — ');
+  }
+
+  _renderContent(body) {
+    const summary = this._summary || {};
+    const badges = document.createElement('div');
+    badges.className = 'badges';
+    const provider = typeof summary.provider === 'string' ? summary.provider : '';
+    for (const label of [
+      provider ? provider.toUpperCase() : null,
+      this._meta.cacheHit ? 'Cached' : null,
+      this._meta.stale ? 'Older plan' : null,
+    ].filter(Boolean)) {
+      const badge = document.createElement('span');
+      badge.textContent = label;
+      badges.append(badge);
+    }
+    if (badges.childElementCount) body.append(badges);
+    if (this._meta.stale) {
+      const stale = document.createElement('p');
+      stale.className = 'notice';
+      stale.textContent = 'This explanation describes an older plan. Refresh it to explain the current plan.';
+      body.append(stale);
+    }
+    if (this._meta.refreshError) {
+      const refreshError = document.createElement('p');
+      refreshError.className = 'notice';
+      refreshError.textContent = `${this._errorText(this._meta.refreshError)} Showing the previous explanation.`;
+      body.append(refreshError);
+    }
+    const hasDecisionContract = ['now', 'next', 'why_it_matters', 'expected_outcome']
+      .some((key) => typeof summary[key] === 'string' && summary[key].trim());
+    if (typeof summary.headline === 'string' && summary.headline.trim()) {
+      const headline = document.createElement('p');
+      headline.className = 'headline';
+      headline.textContent = summary.headline;
+      body.append(headline);
+    }
+    if (hasDecisionContract) {
+      this._appendTextBlock(body, 'Right now', summary.now);
+      this._appendTextBlock(body, 'Next', summary.next);
+      this._appendTextBlock(body, 'Why this plan', summary.why_it_matters);
+      this._appendTextBlock(body, 'Expected outcome', summary.expected_outcome);
+    } else {
+      this._appendTextBlock(body, 'Overview', summary.overview);
+      this._appendTextBlock(body, 'Strategy', summary.strategy);
+    }
+    const timeline = Array.isArray(summary.important_actions)
+      ? summary.important_actions
+      : summary.action_explanations;
+    this._appendList(body, 'Optional timeline', timeline, (item) => this._timelineText(item));
+    this._appendList(body, 'What may change', summary.caveats, (item) => typeof item === 'string' ? item : null);
+    if (typeof summary.generated_at === 'string') {
+      const generated = document.createElement('p');
+      generated.className = 'generated';
+      const parsed = new Date(summary.generated_at);
+      generated.textContent = Number.isNaN(parsed.getTime())
+        ? 'Explanation generated previously'
+        : `Generated ${parsed.toLocaleString()}`;
+      body.append(generated);
+    }
+  }
+
+  _render() {
+    if (!this.shadowRoot) return;
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card { padding: 18px; }
+        .header { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+        .header ha-icon { color:var(--cyan-color, #00bcd4); }
+        h3 { margin:0; font-size:18px; }
+        h4 { margin:14px 0 5px; font-size:14px; }
+        p { margin:0; line-height:1.45; }
+        ul { margin:6px 0 0; padding-left:20px; }
+        li { margin:5px 0; line-height:1.4; }
+        .badges { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:10px; }
+        .badges span { padding:3px 8px; border-radius:999px; background:rgba(var(--rgb-cyan-color, 0,188,212),0.13); font-size:11px; font-weight:700; }
+        .notice { padding:9px 10px; border-radius:9px; background:rgba(var(--rgb-orange-color,255,152,0),0.13); }
+        .headline { font-size:16px; font-weight:700; line-height:1.4; }
+        .status { color:var(--secondary-text-color); }
+        .generated { margin-top:13px; color:var(--secondary-text-color); font-size:12px; }
+        .actions { display:flex; gap:9px; margin-top:14px; }
+        button { border:0; border-radius:9px; padding:9px 13px; cursor:pointer; background:var(--primary-color); color:var(--text-primary-color, white); font-weight:600; }
+        button.secondary { background:var(--secondary-background-color); color:var(--primary-text-color); }
+        button:disabled { opacity:.55; cursor:default; }
+        .boundary { margin-top:12px; color:var(--secondary-text-color); font-size:12px; }
+      </style>
+      <ha-card>
+        <div class="header"><ha-icon icon="mdi:creation-outline"></ha-icon><h3>AI Plan Explanation</h3></div>
+        <div id="body" aria-live="polite"></div>
+        <div class="actions" id="actions"></div>
+        <p class="boundary">Descriptive only. AI cannot change or execute the optimizer plan.</p>
+      </ha-card>`;
+    const body = this.shadowRoot.getElementById('body');
+    const actions = this.shadowRoot.getElementById('actions');
+    if (this._state === 'content') {
+      this._renderContent(body);
+    } else {
+      const status = document.createElement('p');
+      status.className = 'status';
+      const textByState = {
+        initial: 'Checking AI explanation availability…',
+        checking_status: 'Checking AI explanation availability…',
+        ready: 'Generate a plain-language explanation of the current deterministic plan.',
+        not_configured: 'Add a Gemini or Grok API key under Smart Optimization settings to enable explanations.',
+        loading: 'Generating the explanation…',
+        unavailable: this._errorText(this._errorCode || 'optimizer_unavailable'),
+        error: this._errorText(this._errorCode),
+      };
+      status.textContent = textByState[this._state] || textByState.error;
+      body.append(status);
+    }
+    if (this._state === 'ready' || this._state === 'error' || this._state === 'loading') {
+      const generate = document.createElement('button');
+      generate.textContent = this._state === 'loading' ? 'Generating…' : 'Generate explanation';
+      generate.disabled = this._state === 'loading';
+      generate.addEventListener('click', () => this._generate(false));
+      actions.append(generate);
+    }
+    if (this._state === 'content') {
+      const refresh = document.createElement('button');
+      refresh.className = 'secondary';
+      refresh.textContent = 'Refresh explanation';
+      refresh.addEventListener('click', () => this._generate(true));
+      actions.append(refresh);
+    }
+    if (this._state === 'not_configured' || this._state === 'unavailable') {
+      const checkAgain = document.createElement('button');
+      checkAgain.className = 'secondary';
+      checkAgain.textContent = 'Check settings again';
+      checkAgain.addEventListener('click', () => this._retryStatus());
+      actions.append(checkAgain);
+    }
+  }
+}
+
+if (!customElements.get('power-sync-ai-plan-explanation')) {
+  customElements.define('power-sync-ai-plan-explanation', PowerSyncAIPlanExplanation);
+}
+
 const EV_PANEL_FETCH_INTERVAL_MS = 30000;
 const EV_PANEL_CACHE = window.__powerSyncEVPanelCache || new Map();
 window.__powerSyncEVPanelCache = EV_PANEL_CACHE;
@@ -5670,6 +5983,7 @@ class PowerSyncStrategy {
     if (hasButton && hasE('optimization_status')) {
       left.push(_optimizerStatus(e));
       center.push(_optimizationPlan(e));
+      center.push(_aiPlanExplanation());
     }
 
     // --- Center Column: Power Flow ---
@@ -5945,6 +6259,14 @@ function _optimizationPlan(e) {
     forceDischargeEntity: e('optimization_force_discharge_windows'),
     importPriceEntity: e('lp_import_price_forecast'),
     exportPriceEntity: e('lp_export_price_forecast'),
+  };
+}
+
+function _aiPlanExplanation() {
+  return {
+    type: 'custom:power-sync-ai-plan-explanation',
+    optimizationPath: 'power_sync/optimization',
+    summaryPath: 'power_sync/optimization/ai_summary',
   };
 }
 
@@ -6662,6 +6984,17 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
           ? 'holding SOC at ' + Math.round(holdPct) + '%'
           : 'temporary hold';
         line1 += ' - ' + holdText;
+      }
+      if (current.attributes?.charge_by_time_enabled) {
+        const targetSocValue = current.attributes?.charge_by_time_target_soc;
+        const targetSoc = targetSocValue === null || targetSocValue === undefined || targetSocValue === ''
+          ? NaN
+          : Number(targetSocValue);
+        const targetTime = String(current.attributes?.charge_by_time_target_time || '').trim();
+        const targetParts = [];
+        if (Number.isFinite(targetSoc)) targetParts.push(Math.round(targetSoc) + '%');
+        if (targetTime) targetParts.push('by ' + targetTime);
+        line1 += ' | Charge By Time' + (targetParts.length ? ': ' + targetParts.join(' ') : '');
       }
       if (next && next.state && next.state !== 'unknown' && next.state !== 'unavailable') {
         const nextAction = (next.state || '').replace('_', ' ');

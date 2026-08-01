@@ -87,6 +87,23 @@ def test_unload_entry_shuts_down_sungrow_coordinator():
     assert "async_shutdown" in unload_source
 
 
+def test_setup_retains_sungrow_coordinator_after_transient_first_refresh_failure():
+    """A failed first poll must still leave a retryable, unloadable coordinator."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    setup_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "async_setup_entry"),
+    )
+    start = setup_source.index("if sungrow_coordinator:")
+    end = setup_source.index("if foxess_coordinator:", start)
+    sungrow_startup_source = setup_source[start:end]
+
+    assert "sungrow_coordinator = None" not in sungrow_startup_source
+    assert "keeping " in sungrow_startup_source
+    assert "coordinator active so it can retry" in sungrow_startup_source
+
+
 def test_unload_entry_shuts_down_every_non_sungrow_brand_coordinator():
     """OB-28: every brand coordinator with async_shutdown() must be stopped
     on unload, not just Sungrow.

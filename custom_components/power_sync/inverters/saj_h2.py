@@ -186,6 +186,11 @@ class SajH2BatteryController:
     # leg specifically, not the grid leg.
     _MIN_ENGAGED_INV_VOLTAGE = 50.0
     _SWITCH_VERIFY_DELAY_SEC = 0.5
+    # SAJ Modbus v3 queues the two passive power writes before the switch
+    # transition. Each queued register write can use three attempts with
+    # exponential backoff, so allow the serialized queue up to 30 seconds
+    # without reissuing the switch command.
+    _SWITCH_VERIFY_ATTEMPTS = 61
     _APP_MODE_VERIFY_DELAY_SEC = 0.5
     _APP_MODE_VERIFY_ATTEMPTS = 10
     _TELEMETRY_KEYS = (
@@ -1090,13 +1095,13 @@ class SajH2BatteryController:
         )
         if not verify:
             return True
-        if self._switch_is_on(key):
-            return True
-        await asyncio.sleep(self._SWITCH_VERIFY_DELAY_SEC)
-        if self._switch_is_on(key):
-            return True
+        for attempt in range(self._SWITCH_VERIFY_ATTEMPTS):
+            if self._switch_is_on(key):
+                return True
+            if attempt < self._SWITCH_VERIFY_ATTEMPTS - 1:
+                await asyncio.sleep(self._SWITCH_VERIFY_DELAY_SEC)
         _LOGGER.error(
-            "SAJ H2: switch.turn_on for %s completed but state is not on",
+            "SAJ H2: switch.turn_on for %s did not confirm state on",
             entity_id,
         )
         return False

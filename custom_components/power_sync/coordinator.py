@@ -4091,7 +4091,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             session: aiohttp client session for API requests
             surcharge: Fixed surcharge in ct/kWh (network fees, levies)
             tax_percent: Tax percentage (e.g. 21 for Belgian VAT)
-            export_rate: Fixed feed-in rate in ct/kWh (0 = use wholesale price)
+            export_rate: Fixed feed-in rate in ct/kWh (0 = unconfigured)
         """
         from .epex_api import EPEXAPIClient
 
@@ -4131,9 +4131,11 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             current_prices = []
             forecast_prices = []
 
+            parsed_prices: list[
+                tuple[dict[str, Any], datetime, datetime | None]
+            ] = []
             for entry in prices:
                 starts_at_str = entry.get("startsAt", "")
-                total_ct = entry.get("total", 0)
 
                 if not starts_at_str:
                     continue
@@ -4142,9 +4144,39 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                     starts_at = datetime.fromisoformat(starts_at_str)
                     if starts_at.tzinfo is None:
                         starts_at = starts_at.replace(tzinfo=dt_util.UTC)
-                    ends_at = starts_at + timedelta(hours=1)
                 except (ValueError, TypeError):
                     continue
+
+                explicit_end = None
+                ends_at_str = entry.get("endsAt") or entry.get("endTime")
+                if ends_at_str:
+                    try:
+                        explicit_end = datetime.fromisoformat(ends_at_str)
+                        if explicit_end.tzinfo is None:
+                            explicit_end = explicit_end.replace(tzinfo=dt_util.UTC)
+                    except (ValueError, TypeError):
+                        explicit_end = None
+                parsed_prices.append((entry, starts_at, explicit_end))
+
+            parsed_prices.sort(key=lambda item: item[1])
+            default_duration = 15 if self.region.upper() == "BE" else 60
+
+            for index, (entry, starts_at, explicit_end) in enumerate(parsed_prices):
+                total_ct = entry.get("total", 0)
+                next_start = (
+                    parsed_prices[index + 1][1]
+                    if index + 1 < len(parsed_prices)
+                    else None
+                )
+                ends_at = explicit_end
+                if ends_at is None and next_start is not None and next_start > starts_at:
+                    ends_at = next_start
+                if ends_at is None or ends_at <= starts_at:
+                    ends_at = starts_at + timedelta(minutes=default_duration)
+                duration_minutes = max(
+                    1,
+                    int(round((ends_at - starts_at).total_seconds() / 60)),
+                )
 
                 # Determine interval type
                 if starts_at <= now < ends_at:
@@ -4156,11 +4188,13 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
 
                 # Import price entry (ct/kWh = Amber's perKwh format)
                 import_entry = {
+                    "startTime": starts_at.isoformat(),
+                    "endTime": ends_at.isoformat(),
                     "nemTime": ends_at.isoformat(),
                     "perKwh": total_ct,
                     "channelType": "general",
                     "type": interval_type,
-                    "duration": 60,
+                    "duration": duration_minutes,
                 }
 
                 # Export price: use fixed rate if configured. The EPEX
@@ -4192,11 +4226,13 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                         self._warned_export_rate_unset = True
 
                 export_entry = {
+                    "startTime": starts_at.isoformat(),
+                    "endTime": ends_at.isoformat(),
                     "nemTime": ends_at.isoformat(),
                     "perKwh": export_ct,
                     "channelType": "feedIn",
                     "type": interval_type,
-                    "duration": 60,
+                    "duration": duration_minutes,
                 }
 
                 if interval_type == "CurrentInterval":
@@ -4864,6 +4900,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
     _EXPORT_CONTROL_STORAGE_VERSION = 1
     _AC_INVERTER_ENERGY_STORAGE_VERSION = 1
+    _DAILY_ENERGY_BASELINE_STORAGE_VERSION = 1
+    _INVALID_U32_ENERGY_KWH = 0xFFFFFFFF * 0.1
 
     def __init__(
         self,
@@ -4873,6 +4911,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         slave_id: int = 1,
         entry_id: str = "",
         ac_inverter_source_id: str | None = None,
+        telemetry_only: bool = False,
     ) -> None:
         """Initialize the coordinator.
 
@@ -4890,8 +4929,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self.slave_id = slave_id
         self._entry_id = entry_id
         self._ac_inverter_source_id = ac_inverter_source_id
+        self._telemetry_only = bool(telemetry_only)
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
+        self._daily_energy_baseline_store = (
+            Store(
+                hass,
+                self._DAILY_ENERGY_BASELINE_STORAGE_VERSION,
+                f"{DOMAIN}.sungrow_daily_energy_baseline.{entry_id}",
+            )
+            if entry_id
+            else None
+        )
+        self._daily_energy_baselines_restored = False
+        self._daily_energy_baselines_dirty = False
         self._export_control_store = (
             Store(
                 hass,
@@ -4928,6 +4979,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
+        self._persisted_export_control_recovery_pending = not self._telemetry_only
 
         super().__init__(
             hass,
@@ -4936,25 +4988,147 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
 
+    def _native_control_allowed(self, operation: str) -> bool:
+        """Return whether this connection may write Sungrow registers."""
+        if not getattr(self, "_telemetry_only", False):
+            return True
+        _LOGGER.warning(
+            "%s blocked: Sungrow iHomeManager forwarding is telemetry-only",
+            operation,
+        )
+        return False
+
+    def startup_control_ready(self) -> bool:
+        """Return True only after a complete, current Modbus snapshot."""
+        data = getattr(self, "data", None)
+        if (
+            getattr(self, "last_update_success", False) is not True
+            or not isinstance(data, dict)
+            or data.get("telemetry_ready") is not True
+        ):
+            return False
+        for key in (
+            "solar_power",
+            "grid_power",
+            "battery_power",
+            "load_power",
+            "battery_level",
+        ):
+            value = data.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                return False
+        return 0 <= float(data["battery_level"]) <= 100
+
+    @staticmethod
+    def _valid_daily_total(value: Any) -> float | None:
+        """Return a finite non-negative lifetime energy total."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(parsed)
+            or parsed < 0
+            or parsed == SungrowEnergyCoordinator._INVALID_U32_ENERGY_KWH
+        ):
+            return None
+        return parsed
+
+    async def _async_restore_daily_energy_baselines(self) -> None:
+        """Restore today's lifetime-counter baselines before the first poll."""
+        if getattr(self, "_daily_energy_baselines_restored", False):
+            return
+        store = getattr(self, "_daily_energy_baseline_store", None)
+        if store is None:
+            self._daily_energy_baselines_restored = True
+            return
+        try:
+            stored = await store.async_load()
+        except Exception as exc:
+            _LOGGER.debug(
+                "Could not restore Sungrow daily energy baselines: %s",
+                exc,
+            )
+            return
+        self._daily_energy_baselines_restored = True
+        today = dt_util.now().date().isoformat()
+        if not isinstance(stored, dict) or stored.get("date") != today:
+            return
+        self._baseline_date = today
+        self._total_import_baseline = self._valid_daily_total(
+            stored.get("import_baseline_kwh")
+        )
+        self._total_export_baseline = self._valid_daily_total(
+            stored.get("export_baseline_kwh")
+        )
+
+    async def _async_save_daily_energy_baselines(self) -> None:
+        """Persist lifetime-counter baselines after initialization or rollover."""
+        if not getattr(self, "_daily_energy_baselines_dirty", False):
+            return
+        store = getattr(self, "_daily_energy_baseline_store", None)
+        if store is None:
+            self._daily_energy_baselines_dirty = False
+            return
+        try:
+            await store.async_save(
+                {
+                    "date": self._baseline_date,
+                    "import_baseline_kwh": self._total_import_baseline,
+                    "export_baseline_kwh": self._total_export_baseline,
+                }
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Could not save Sungrow daily energy baselines: %s",
+                exc,
+            )
+            return
+        self._daily_energy_baselines_dirty = False
+
     def _update_total_baselines(self, data: dict) -> None:
         """Track midnight baselines for total import/export registers.
 
         Some Sungrow systems (e.g. SH10RS + SBH) have no working daily
         import/export registers — they permanently read 0.  We derive
-        daily values from the total (lifetime) registers by subtracting
-        a baseline captured at midnight (or on first read of the day).
+        daily values from the total (lifetime) registers by subtracting a
+        persisted baseline captured at midnight (or on the first read of the
+        day). Persisting that baseline prevents a mid-day reload from treating
+        the current lifetime counter as midnight and resetting daily energy.
         """
+        if (
+            getattr(self, "_daily_energy_baseline_store", None) is not None
+            and not getattr(self, "_daily_energy_baselines_restored", False)
+        ):
+            # A transient Store load failure must not let this poll replace a
+            # valid same-day baseline with the current lifetime counter.
+            return
         today = dt_util.now().date().isoformat()
-        total_import = data.get("total_import")
-        total_export = data.get("total_export")
+        total_import = self._valid_daily_total(data.get("total_import"))
+        total_export = self._valid_daily_total(data.get("total_export"))
+        changed = False
 
         if self._baseline_date != today:
-            # New day — capture baselines from current total values
-            if total_import is not None:
-                self._total_import_baseline = total_import
-            if total_export is not None:
-                self._total_export_baseline = total_export
+            # New day — discard yesterday's baselines before initializing each
+            # available lifetime counter independently.
+            self._total_import_baseline = None
+            self._total_export_baseline = None
             self._baseline_date = today
+            changed = True
+
+        if self._total_import_baseline is None and total_import is not None:
+            self._total_import_baseline = total_import
+            changed = True
+        if self._total_export_baseline is None and total_export is not None:
+            self._total_export_baseline = total_export
+            changed = True
+
+        if changed:
+            self._daily_energy_baselines_dirty = True
             _LOGGER.info(
                 "Sungrow daily baseline reset: import=%.1f export=%.1f kWh (total)",
                 self._total_import_baseline or 0, self._total_export_baseline or 0,
@@ -5005,7 +5179,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             summary["grid_import_today_kwh"] = daily_import
         else:
             # Daily register missing or 0 — derive from total register delta
-            total_import = data.get("total_import")
+            total_import = self._valid_daily_total(data.get("total_import"))
             if total_import is not None and self._total_import_baseline is not None:
                 derived = round(total_import - self._total_import_baseline, 2)
                 if derived >= 0:
@@ -5016,7 +5190,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             summary["grid_export_today_kwh"] = daily_export
         else:
             # Daily register missing or 0 — derive from total register delta
-            total_export = data.get("total_export")
+            total_export = self._valid_daily_total(data.get("total_export"))
             if total_export is not None and self._total_export_baseline is not None:
                 derived = round(total_export - self._total_export_baseline, 2)
                 if derived >= 0:
@@ -5126,6 +5300,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """Fetch data from Sungrow system via Modbus."""
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
+        await self._async_restore_daily_energy_baselines()
         await self._async_restore_ac_inverter_daily_energy()
         try:
             async with self._modbus_lock:
@@ -5139,7 +5314,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning(
                         "Sungrow Modbus returned no battery data — keeping previous readings"
                     )
-                    return self.data
+                    stale_data = dict(self.data)
+                    stale_data["telemetry_ready"] = False
+                    return stale_data
                 raise UpdateFailed("Sungrow Modbus connection failed — no data available")
 
             # Map Sungrow data to standard format
@@ -5270,6 +5447,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 raw_soc = 0
 
             energy_data = {
+                "telemetry_ready": True,
                 "solar_power": max(0, site_solar_kw),  # kW, total configured site solar
                 "battery_inverter_solar_power": max(
                     0, battery_inverter_solar_kw
@@ -5279,6 +5457,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "load_power": load_kw,  # kW
                 "battery_level": raw_soc,  # %
                 "last_update": dt_util.utcnow(),
+                "control_available": not getattr(self, "_telemetry_only", False),
+                "telemetry_source": (
+                    "sungrow_ihomemanager"
+                    if getattr(self, "_telemetry_only", False)
+                    else "sungrow_direct"
+                ),
                 # Sungrow-specific data
                 "battery_soh": data.get("battery_soh"),  # % State of Health
                 "battery_voltage": data.get("battery_voltage"),
@@ -5318,6 +5502,25 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 ),
                 "energy_summary": self._build_energy_summary(data),
             }
+            await self._async_save_daily_energy_baselines()
+
+            if getattr(
+                self,
+                "_persisted_export_control_recovery_pending",
+                False,
+            ):
+                export_control_restored = (
+                    await self.async_restore_persisted_export_control()
+                )
+                self._persisted_export_control_recovery_pending = (
+                    not export_control_restored
+                )
+                if not export_control_restored:
+                    energy_data["telemetry_ready"] = False
+                    _LOGGER.warning(
+                        "Sungrow interrupted export control could not be fully "
+                        "restored; telemetry will remain control-blocked for retry"
+                    )
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
@@ -5352,6 +5555,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow force charge"):
+            return False
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
             return await self._controller.force_charge(power_w=target_power_w)
@@ -5366,6 +5571,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow force discharge"):
+            return False
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
             return await self._controller.force_discharge(power_w=target_power_w)
@@ -5382,6 +5589,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         limit so home load spikes can still be served by the battery, and use
         Sungrow's export-limit register to constrain export to grid.
         """
+        if not self._native_control_allowed("Sungrow force grid export"):
+            return False
         async with self._modbus_lock, self._controller:
             target_export_w = max(0, int(round(export_limit_w or 0)))
 
@@ -5464,6 +5673,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow restore normal"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             export_limit_ok = await self._restore_captured_export_limit()
@@ -5480,6 +5691,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set maximum SOC"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_max_soc(percent)
 
@@ -5492,11 +5705,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set backup reserve"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_backup_reserve(percent)
 
     async def set_backup_mode(self) -> bool:
         """Block Sungrow discharge for IDLE while still allowing battery charge."""
+        if not self._native_control_allowed("Sungrow set backup mode"):
+            return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
             limit_ok = await self._controller.set_discharge_rate_limit(0)
@@ -5508,6 +5725,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_no_discharge_mode(self) -> bool:
         """Block Sungrow battery discharge while still allowing battery charge."""
+        if not self._native_control_allowed("Sungrow set no-discharge mode"):
+            return False
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
             limit_ok = await self._controller.set_discharge_rate_limit(0)
@@ -5517,6 +5736,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sungrow from scheduled EV no-discharge preserve mode."""
+        if not self._native_control_allowed("Sungrow restore no-discharge mode"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             limit_ok = await self._restore_captured_discharge_limit()
@@ -5617,6 +5838,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def async_restore_persisted_export_control(self) -> bool:
         """Recover an optimizer-owned Sungrow export limit after a reload."""
+        if not self._native_control_allowed(
+            "Sungrow restore persisted export control"
+        ):
+            return False
         store = getattr(self, "_export_control_store", None)
         if store is None:
             return True
@@ -5996,6 +6221,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode and discharge limit after IDLE."""
+        if not self._native_control_allowed("Sungrow restore from idle"):
+            return False
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
             charge_limit_ok = await self._restore_captured_charge_limit()
@@ -6011,6 +6238,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set charge rate limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_charge_rate_limit(kw)
 
@@ -6023,6 +6252,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set discharge rate limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_discharge_rate_limit(kw)
 
@@ -6035,12 +6266,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             True if successful
         """
+        if not self._native_control_allowed("Sungrow set export limit"):
+            return False
         async with self._modbus_lock, self._controller:
             return await self._controller.set_export_limit(watts)
 
     async def async_shutdown(self) -> None:
         """Stop polling and disconnect from Sungrow after active Modbus work."""
         self.update_interval = None
+        await self._async_save_daily_energy_baselines()
         async with self._modbus_lock:
             await self._controller.disconnect()
 
@@ -6073,6 +6307,22 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             _LOGGER,
             name=f"{DOMAIN}_sungrow_dual",
             update_interval=timedelta(seconds=30),
+        )
+
+    def _children_control_ready(self) -> bool:
+        """Return whether both child snapshots can form a fresh aggregate."""
+        return (
+            self._coord1.startup_control_ready()
+            and self._coord2.startup_control_ready()
+        )
+
+    def startup_control_ready(self) -> bool:
+        """Require a successful current aggregate built from both inverters."""
+        data = getattr(self, "data", None)
+        return (
+            getattr(self, "last_update_success", False) is True
+            and isinstance(data, dict)
+            and data.get("telemetry_ready") is True
         )
 
     # ------------------------------------------------------------------
@@ -6207,6 +6457,7 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         discharge_limit_w = self._combined_power_limit_w("discharge")
 
         return {
+            "telemetry_ready": self._children_control_ready(),
             "solar_power": max(0, solar),
             "grid_power": grid,
             "battery_power": battery,

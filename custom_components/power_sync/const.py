@@ -17,7 +17,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "45"
+DASHBOARD_JS_VERSION = "46"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -223,7 +223,17 @@ CONF_CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 CONF_SUNGROW_HOST = "sungrow_host"
 CONF_SUNGROW_PORT = "sungrow_port"
 CONF_SUNGROW_SLAVE_ID = "sungrow_slave_id"
+CONF_SUNGROW_CONNECTION_TYPE = "sungrow_connection_type"
+SUNGROW_CONNECTION_DIRECT = "direct"
+SUNGROW_CONNECTION_IHOMEMANAGER = "ihomemanager"
+SUNGROW_CONNECTION_TYPES = {
+    SUNGROW_CONNECTION_DIRECT: "Direct inverter / WiNet-S",
+    SUNGROW_CONNECTION_IHOMEMANAGER: (
+        "iHomeManager forwarding channel — telemetry only"
+    ),
+}
 DEFAULT_SUNGROW_PORT = 502
+DEFAULT_SUNGROW_IHOMEMANAGER_PORT = 503
 DEFAULT_SUNGROW_SLAVE_ID = 1
 
 # Dual Sungrow (secondary inverter, optional)
@@ -775,7 +785,7 @@ LOCALVOLTS_API_BASE_URL = "https://api.localvolts.com/v1"
 CONF_EPEX_REGION = "epex_region"
 CONF_EPEX_SURCHARGE = "epex_surcharge"  # Fixed surcharge in ct/kWh (network fees, levies)
 CONF_EPEX_TAX_PERCENT = "epex_tax_percent"  # Tax percentage (e.g. 21% VAT in Belgium)
-CONF_EPEX_EXPORT_RATE = "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = wholesale)
+CONF_EPEX_EXPORT_RATE = "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = unconfigured)
 CONF_EPEX_IMPORT_PRICE_ENTITY = "epex_import_price_entity"  # Optional HA sensor for import valuation
 CONF_EPEX_EXPORT_PRICE_ENTITY = "epex_export_price_entity"  # Optional HA sensor for export valuation
 EPEX_API_BASE_URL = "https://epexpredictor.batzill.com"
@@ -1371,6 +1381,7 @@ SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 SWITCH_TYPE_AWAY_MODE = "away_mode"
 SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
+SWITCH_TYPE_COST_NEUTRAL = "cost_neutral"
 SWITCH_TYPE_CHARGE_BY_TIME = "charge_by_time"
 SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
@@ -1964,9 +1975,14 @@ CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
+CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER = "optimization_ai_summary_provider"
+CONF_OPTIMIZATION_AI_SUMMARY_API_KEY = "optimization_ai_summary_api_key"
+CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY = "optimization_ai_summary_clear_api_key"
+DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER = "gemini"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
 CONF_PROFIT_MAX_ENABLED = "profit_max_enabled"  # Whether profit maximisation mode is on
+CONF_COST_NEUTRAL_ENABLED = "cost_neutral_enabled"  # Cap daily battery-export earnings at projected costs
 CONF_CHARGE_BY_TIME_ENABLED = "charge_by_time_enabled"  # Whether charge-by-time prefill is on
 CONF_CHARGE_BY_TIME_TARGET_TIME = "charge_by_time_target_time"  # HH:MM time to reach target SOC
 CONF_CHARGE_BY_TIME_TARGET_SOC = "charge_by_time_target_soc"  # Target SOC before the configured time

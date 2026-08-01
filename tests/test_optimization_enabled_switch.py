@@ -139,7 +139,8 @@ def test_optimizer_mode_switches_reoptimize_after_change():
     assert "changed = self._coordinator.set_spread_import_enabled(True)" in switch_source
     assert "changed = self._coordinator.set_spread_import_enabled(False)" in switch_source
     assert "def set_profit_max_mode(self, enabled: bool) -> bool:" in coordinator_source
-    assert "def set_charge_by_time_enabled(self, enabled: bool) -> bool:" in coordinator_source
+    assert "def set_charge_by_time_enabled(" in coordinator_source
+    assert "publish: bool = True" in coordinator_source
 
 
 def test_charge_by_time_switch_is_registered_as_config_entity():

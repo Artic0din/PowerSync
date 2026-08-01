@@ -42,6 +42,7 @@ from .settings_metadata import (
     merge_optimization_section_input,
     submitted_live_settings,
 )
+from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -199,11 +200,16 @@ from .const import (
     ALPHAESS_CONNECTION_MODBUS_CLOUD,
     ALPHAESS_CONNECTION_CLOUD_ONLY,
     # Sungrow battery system configuration
+    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
+    DEFAULT_SUNGROW_IHOMEMANAGER_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    SUNGROW_CONNECTION_DIRECT,
+    SUNGROW_CONNECTION_IHOMEMANAGER,
+    SUNGROW_CONNECTION_TYPES,
     CONF_SUNGROW_HOST_2,
     CONF_SUNGROW_PORT_2,
     CONF_SUNGROW_SLAVE_ID_2,
@@ -497,12 +503,17 @@ from .const import (
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_PROFIT_MAX_ENABLED,
+    CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
     CONF_CHARGE_BY_TIME_TARGET_TIME,
     CONF_CHARGE_BY_TIME_TARGET_SOC,
     CONF_PROFIT_MAX_TARGET_TIME,
     CONF_PROFIT_MAX_TARGET_SOC,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
+    CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+    CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+    CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+    DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
     DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
@@ -605,6 +616,7 @@ BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
         CONF_SIGENERGY_MODBUS_SLAVE_ID,
     ),
     BATTERY_SYSTEM_SUNGROW: (
+        CONF_SUNGROW_CONNECTION_TYPE,
         CONF_SUNGROW_HOST,
         CONF_SUNGROW_PORT,
         CONF_SUNGROW_SLAVE_ID,
@@ -2564,6 +2576,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
         if self._ml_options:
             data.update(self._ml_options)
+        if data.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            # iHomeManager is an explicitly telemetry-only forwarding path.
+            # Never allow later optimizer defaults to turn control back on.
+            data[CONF_MONITORING_MODE] = True
 
         # Tesla EV API provider (chosen during async_step_tesla_provider).
         # Defaults to "none" so non-Tesla setups stay clean.
@@ -3329,6 +3348,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OPTIMIZATION_DISABLE_IDLE: disable_idle,
                     CONF_PROFIT_MAX_ENABLED: bool(
                         user_input.get(CONF_PROFIT_MAX_ENABLED, False)
+                        and not user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
+                    ),
+                    CONF_COST_NEUTRAL_ENABLED: bool(
+                        user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
                     ),
                     CONF_CHARGE_BY_TIME_ENABLED: bool(
                         user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
@@ -3526,6 +3549,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields.update({
             vol.Required(
                 CONF_PROFIT_MAX_ENABLED,
+                default=False,
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_COST_NEUTRAL_ENABLED,
                 default=False,
             ): BooleanSelector(),
             vol.Required(
@@ -5000,12 +5027,26 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             host = user_input.get(CONF_SUNGROW_HOST, "").strip()
-            port = user_input.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            port = user_input.get(CONF_SUNGROW_PORT, default_port)
             slave_id = user_input.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
 
             if not host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
             else:
                 # Test Modbus connection
                 test_result = await test_sungrow_connection(
@@ -5015,12 +5056,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if test_result["success"]:
                     # Store Sungrow configuration
                     self._sungrow_data = {
+                        CONF_SUNGROW_CONNECTION_TYPE: connection_type,
                         CONF_SUNGROW_HOST: host,
                         CONF_SUNGROW_PORT: port,
                         CONF_SUNGROW_SLAVE_ID: slave_id,
                     }
+                    if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                        self._sungrow_data[CONF_MONITORING_MODE] = True
                     _LOGGER.info(
-                        "Sungrow Modbus connection successful: host=%s, SOC=%.1f%%, SOH=%.1f%%",
+                        "Sungrow %s Modbus connection successful: host=%s, SOC=%.1f%%, SOH=%.1f%%",
+                        connection_type,
                         host,
                         test_result.get("battery_soc", 0),
                         test_result.get("battery_soh", 0),
@@ -5034,6 +5079,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sungrow",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=SUNGROW_CONNECTION_DIRECT,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(CONF_SUNGROW_HOST): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
@@ -7331,6 +7388,36 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
             options.pop(key, None)
 
+    def _sungrow_ac_inverter_conflicts(
+        self,
+        sungrow_host: str,
+        sungrow_port: int,
+        sungrow_slave_id: int,
+    ) -> bool:
+        """Return whether an enabled Sungrow AC path reuses this endpoint."""
+        if not self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False):
+            return False
+        if self._get_option(CONF_INVERTER_BRAND, "") != "sungrow":
+            return False
+
+        inverter_host = str(self._get_option(CONF_INVERTER_HOST, "")).strip()
+        inverter_port = self._get_option(
+            CONF_INVERTER_PORT,
+            DEFAULT_INVERTER_PORT,
+        )
+        inverter_slave_id = self._get_option(
+            CONF_INVERTER_SLAVE_ID,
+            DEFAULT_INVERTER_SLAVE_ID,
+        )
+        try:
+            return (
+                inverter_host == str(sungrow_host).strip()
+                and int(inverter_port) == int(sungrow_port)
+                and int(inverter_slave_id) == int(sungrow_slave_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
     def _has_weather_entities(self) -> bool:
         """Return whether HA currently exposes any weather entities."""
         try:
@@ -9143,34 +9230,106 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
+            sungrow_slave_id = user_input.get(
+                CONF_SUNGROW_SLAVE_ID,
+                DEFAULT_SUNGROW_SLAVE_ID,
+            )
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(sungrow_port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
+            elif self._sungrow_ac_inverter_conflicts(
+                modbus_host,
+                sungrow_port,
+                sungrow_slave_id,
+            ):
+                errors["base"] = "sungrow_modbus_conflict"
             else:
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_port = user_input.get(
-                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
-                )
-                sungrow_slave_id = user_input.get(
-                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
-                )
+                new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
                 new_data[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                new_options[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_options[CONF_SUNGROW_HOST] = modbus_host
                 new_options[CONF_SUNGROW_PORT] = sungrow_port
                 new_options[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
+                monitoring_handoff = (
+                    connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                    and not bool(
+                        self._get_option(
+                            CONF_MONITORING_MODE,
+                            self.config_entry.data.get(
+                                CONF_MONITORING_MODE,
+                                False,
+                            ),
+                        )
+                    )
                 )
+                if monitoring_handoff:
+                    try:
+                        await async_prepare_monitoring_handoff(
+                            self.hass,
+                            self.config_entry,
+                        )
+                    except Exception as err:
+                        finish_monitoring_handoff(self.hass, self.config_entry)
+                        _LOGGER.warning(
+                            "Sungrow iHomeManager telemetry-only mode was not "
+                            "enabled because control cleanup failed: %s",
+                            err,
+                        )
+                        return self.async_abort(
+                            reason="monitoring_cleanup_failed"
+                        )
+                try:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data=new_data,
+                        options=new_options,
+                    )
+                finally:
+                    if monitoring_handoff:
+                        finish_monitoring_handoff(
+                            self.hass,
+                            self.config_entry,
+                        )
                 self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=new_options)
 
+        current_connection_type = self._get_option(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        )
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
-        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_port = self._get_option(
+            CONF_SUNGROW_PORT,
+            (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if current_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            ),
+        )
         current_slave_id = self._get_option(
             CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
         )
@@ -9179,6 +9338,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="sungrow_connection",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=current_connection_type,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,
@@ -10282,6 +10453,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "battery_forecast_inputs",
                 "grid_site_constraints",
                 "dispatch_behaviour",
+                "ai_explanations",
             } and isinstance(value, dict):
                 submitted.update(value)
             else:
@@ -10309,11 +10481,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         user_input: dict[str, Any] | None = None,
         *,
         form_step_id: str = "optimization",
+        errors: dict[str, str] | None = None,
     ) -> FlowResult:
         """Menu handler: optimization provider and backup reserve settings."""
         battery_system = self._effective_battery_system()
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
         is_custom = battery_system == BATTERY_SYSTEM_CUSTOM
+        is_sungrow_ihomemanager = (
+            battery_system == BATTERY_SYSTEM_SUNGROW
+            and self._get_option(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
+            == SUNGROW_CONNECTION_IHOMEMANAGER
+        )
         if user_input is not None:
             optimization_provider = user_input.get(
                 CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
@@ -10350,12 +10531,44 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 optimization_enabled = True
             new_data = dict(self.config_entry.data)
             new_options = dict(self.config_entry.options)
+            for ai_key in (
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+            ):
+                if ai_key not in new_options and ai_key in new_data:
+                    new_options[ai_key] = new_data[ai_key]
+            try:
+                new_options, _ = apply_ai_summary_settings(
+                    new_options,
+                    {
+                        "ai_summary_provider": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                            DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                        ),
+                        "ai_summary_api_key": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                            "",
+                        ),
+                        "clear_ai_summary_api_key": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+                            False,
+                        ),
+                    },
+                )
+                new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER, None)
+                new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_API_KEY, None)
+            except AISummaryError:
+                return await self._async_step_optimization(
+                    None,
+                    form_step_id=form_step_id,
+                    errors={"base": "invalid_ai_summary_settings"},
+                )
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
             new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled
             new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
             new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
             monitoring_mode = bool(user_input.get(CONF_MONITORING_MODE, False))
-            if is_custom:
+            if is_custom or is_sungrow_ihomemanager:
                 monitoring_mode = True
             new_data[CONF_MONITORING_MODE] = monitoring_mode
             new_options[CONF_MONITORING_MODE] = monitoring_mode
@@ -10456,6 +10669,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 profit_max_enabled = bool(
                     user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                 )
+                cost_neutral_enabled = bool(
+                    user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
+                )
+                if cost_neutral_enabled:
+                    profit_max_enabled = False
                 charge_by_time_enabled = bool(
                     user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                 )
@@ -10544,6 +10762,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity
                 new_data[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
+                new_data[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
+                new_options[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
                 new_data[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
@@ -10752,6 +10972,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "grid_charge_soc_cap": CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         "profit_max_enabled": CONF_PROFIT_MAX_ENABLED,
+                        "cost_neutral_enabled": CONF_COST_NEUTRAL_ENABLED,
                         "charge_by_time_enabled": CONF_CHARGE_BY_TIME_ENABLED,
                         "charge_by_time_target_time": (
                             CONF_CHARGE_BY_TIME_TARGET_TIME
@@ -10937,6 +11158,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_PROFIT_MAX_ENABLED,
             self.config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
         )
+        current_cost_neutral_enabled = self._get_option(
+            CONF_COST_NEUTRAL_ENABLED,
+            self.config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
+        )
+        if current_cost_neutral_enabled:
+            current_profit_max_enabled = False
         current_charge_by_time_enabled = self._get_option(
             CONF_CHARGE_BY_TIME_ENABLED,
             self.config_entry.data.get(
@@ -10966,6 +11193,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             ),
             DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
+        )
+        current_ai_provider = str(
+            self._get_option(
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                    DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                ),
+            )
+        ).strip().lower()
+        if current_ai_provider not in {"gemini", "grok"}:
+            current_ai_provider = DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER
+        current_ai_key_configured = bool(
+            str(
+                self._get_option(
+                    CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                    self.config_entry.data.get(
+                        CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                        "",
+                    ),
+                )
+                or ""
+            ).strip()
         )
 
         current_form_values: dict[str, Any] = {
@@ -11000,9 +11250,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
             CONF_PROFIT_MAX_ENABLED: bool(current_profit_max_enabled),
+            CONF_COST_NEUTRAL_ENABLED: bool(current_cost_neutral_enabled),
             CONF_CHARGE_BY_TIME_ENABLED: bool(current_charge_by_time_enabled),
             CONF_CHARGE_BY_TIME_TARGET_TIME: current_charge_by_time_target_time,
             CONF_CHARGE_BY_TIME_TARGET_SOC: current_charge_by_time_target_soc,
+            CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER: current_ai_provider,
+            CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY: False,
         }
         if current_load_entity:
             current_form_values[CONF_OPTIMIZATION_LOAD_ENTITY] = current_load_entity
@@ -11072,6 +11325,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Required(
                 CONF_MONITORING_MODE,
                 default=bool(current_monitoring_mode),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                default=current_ai_provider,
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value="gemini", label="Gemini"),
+                    SelectOptionDict(value="grok", label="Grok"),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
+            vol.Optional(
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            vol.Required(
+                CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+                default=False,
             ): BooleanSelector(),
         }
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
@@ -11192,6 +11462,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=bool(current_profit_max_enabled),
                 ): BooleanSelector(),
                 vol.Required(
+                    CONF_COST_NEUTRAL_ENABLED,
+                    default=bool(current_cost_neutral_enabled),
+                ): BooleanSelector(),
+                vol.Required(
                     CONF_CHARGE_BY_TIME_ENABLED,
                     default=bool(current_charge_by_time_enabled),
                 ): BooleanSelector(),
@@ -11214,6 +11488,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_PROVIDER,
                 CONF_OPTIMIZATION_ENABLED,
                 CONF_PROFIT_MAX_ENABLED,
+                CONF_COST_NEUTRAL_ENABLED,
                 CONF_CHARGE_BY_TIME_ENABLED,
                 CONF_CHARGE_BY_TIME_TARGET_TIME,
                 CONF_CHARGE_BY_TIME_TARGET_SOC,
@@ -11245,6 +11520,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_MONITORING_MODE,
                 CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
             },
+            "ai_explanations": {
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+            },
         }
         grouped_schema: dict[Any, Any] = {}
         for section_name, allowed_fields in section_fields.items():
@@ -11266,6 +11546,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id=form_step_id,
             data_schema=vol.Schema(grouped_schema),
+            errors=errors,
+            description_placeholders={
+                "ai_summary_key_status": (
+                    "Configured" if current_ai_key_configured else "Not configured"
+                ),
+            },
         )
 
     async def async_step_inverter(
@@ -11693,9 +11979,34 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             # Validate Modbus host
+            connection_type = user_input.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            )
             modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            default_port = (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            )
+            sungrow_port = user_input.get(CONF_SUNGROW_PORT, default_port)
+            sungrow_slave_id = user_input.get(
+                CONF_SUNGROW_SLAVE_ID,
+                DEFAULT_SUNGROW_SLAVE_ID,
+            )
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
+            elif (
+                connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                and int(sungrow_port) not in (503, 504)
+            ):
+                errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
+            elif self._sungrow_ac_inverter_conflicts(
+                modbus_host,
+                sungrow_port,
+                sungrow_slave_id,
+            ):
+                errors["base"] = "sungrow_modbus_conflict"
             else:
                 # Store provider and Sungrow settings
                 self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -11703,24 +12014,63 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 # Update config entry data with Sungrow Modbus settings
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
-                sungrow_port = user_input.get(
-                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
-                )
-                sungrow_slave_id = user_input.get(
-                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
-                )
+                new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
                 new_data[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                new_options[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_options[CONF_SUNGROW_HOST] = modbus_host
                 new_options[CONF_SUNGROW_PORT] = sungrow_port
                 new_options[CONF_SUNGROW_SLAVE_ID] = sungrow_slave_id
+                if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
                 if not errors:
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry, data=new_data, options=new_options
+                    monitoring_handoff = (
+                        connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                        and not bool(
+                            self._get_option(
+                                CONF_MONITORING_MODE,
+                                self.config_entry.data.get(
+                                    CONF_MONITORING_MODE,
+                                    False,
+                                ),
+                            )
+                        )
                     )
+                    if monitoring_handoff:
+                        try:
+                            await async_prepare_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
+                        except Exception as err:
+                            finish_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
+                            _LOGGER.warning(
+                                "Sungrow iHomeManager telemetry-only mode was "
+                                "not enabled because control cleanup failed: %s",
+                                err,
+                            )
+                            return self.async_abort(
+                                reason="monitoring_cleanup_failed"
+                            )
+                    try:
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry,
+                            data=new_data,
+                            options=new_options,
+                        )
+                    finally:
+                        if monitoring_handoff:
+                            finish_monitoring_handoff(
+                                self.hass,
+                                self.config_entry,
+                            )
 
                     # Route to provider-specific step
                     if self._provider == "amber":
@@ -11737,8 +12087,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_connection_type = self._get_option(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            SUNGROW_CONNECTION_DIRECT,
+        )
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
-        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_port = self._get_option(
+            CONF_SUNGROW_PORT,
+            (
+                DEFAULT_SUNGROW_IHOMEMANAGER_PORT
+                if current_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                else DEFAULT_SUNGROW_PORT
+            ),
+        )
         current_slave_id = self._get_option(
             CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
         )
@@ -11756,6 +12117,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                     )),
+                    vol.Required(
+                        CONF_SUNGROW_CONNECTION_TYPE,
+                        default=current_connection_type,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in SUNGROW_CONNECTION_TYPES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,

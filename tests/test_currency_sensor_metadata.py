@@ -727,6 +727,33 @@ def test_optimizer_current_action_exposes_reserve_recommendation():
     assert attrs["idle_hold_reserve_percent"] == 100
 
 
+def test_optimizer_current_action_exposes_charge_by_time_settings():
+    sensor = _sensor_module()
+    desc = next(
+        d
+        for d in sensor.OPTIMIZER_ACTION_SENSORS
+        if d.key == "optimization_status"
+    )
+    payload = {
+        "current_action": "charge",
+        "charge_by_time_enabled": True,
+        "config": {
+            "charge_by_time_target_time": "17:15",
+            "charge_by_time_target_soc": 100,
+        },
+    }
+    entity = sensor.OptimizerActionSensor(
+        SimpleNamespace(data=payload),
+        desc,
+        _entry("amber"),
+    )
+
+    attrs = entity.extra_state_attributes
+    assert attrs["charge_by_time_enabled"] is True
+    assert attrs["charge_by_time_target_time"] == "17:15"
+    assert attrs["charge_by_time_target_soc"] == 100
+
+
 def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():
     sensor = _sensor_module()
     desc = next(d for d in sensor.LP_FORECAST_SENSORS if d.key == "lp_import_price_forecast")

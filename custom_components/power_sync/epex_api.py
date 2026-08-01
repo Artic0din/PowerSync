@@ -55,7 +55,11 @@ class EPEXAPIClient:
             "taxPercent": tax_percent,
             "hours": hours,
             "unit": "CT_PER_KWH",
-            "hourly": "true",
+            # Belgian dynamic retail contracts use EPEX's native quarter-hour
+            # products. Keep the established hourly aggregation for every
+            # other bidding zone until its native-resolution scope is
+            # explicitly supported.
+            "hourly": "false" if region.upper() == "BE" else "true",
         }
 
         url = f"{EPEX_API_BASE_URL}/prices"

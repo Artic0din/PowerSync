@@ -56,6 +56,44 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():
+    source = STRATEGY_PATH.read_text()
+    start = source.index("class PowerSyncAIPlanExplanation extends HTMLElement")
+    end = source.index("const EV_PANEL_FETCH_INTERVAL_MS")
+    card_source = source[start:end]
+
+    assert "customElements.define('power-sync-ai-plan-explanation'" in card_source
+    assert "custom:power-sync-ai-plan-explanation" in source
+    assert "center.push(_optimizationPlan(e));" in source
+    assert "center.push(_aiPlanExplanation());" in source
+    assert "this._hass.callApi('GET', this._optimizationPath())" in card_source
+    assert "this._hass.callApi('POST', this._summaryPath(), { refresh: !!refresh })" in card_source
+    assert card_source.count("callApi('POST'") == 1
+    assert "generate.addEventListener('click', () => this._generate(false))" in card_source
+    assert "refresh.addEventListener('click', () => this._generate(true))" in card_source
+    assert "text.textContent = value" in card_source
+    assert "item.textContent = value" in card_source
+    assert "summary.important_actions" in card_source
+    assert ": summary.action_explanations" in card_source
+    assert "item.window_id" not in card_source
+    assert "toLocaleTimeString" in card_source
+    assert "provider_auth_failed" in card_source
+    assert "Showing the previous explanation." in card_source
+    assert "Descriptive only. AI cannot change or execute the optimizer plan." in card_source
+    decision_labels = [
+        "'Right now'",
+        "'Next'",
+        "'Why this plan'",
+        "'Expected outcome'",
+        "'Optional timeline'",
+        "'What may change'",
+    ]
+    positions = [card_source.index(label) for label in decision_labels]
+    assert positions == sorted(positions)
+    assert "setInterval" not in card_source
+    assert "localStorage" not in card_source
+
+
 def test_lp_battery_power_chart_splits_home_consumption_from_export():
     """LP battery forecast should show where discharge is going."""
     source = STRATEGY_PATH.read_text()
@@ -658,6 +696,20 @@ def test_optimizer_plan_shows_temporary_idle_hold_separately():
     assert "IDLE Hold" in source
     assert "idleHoldReservePercent" in source
     assert "holding SOC at" in source
+
+
+def test_optimizer_status_shows_active_charge_by_time_target_read_only():
+    """Active Charge By Time settings should be visible without opening config."""
+    source = STRATEGY_PATH.read_text()
+    optimizer_status = source[
+        source.index("function _optimizerStatus"):
+        source.index("function _loadIncludesGenericEv")
+    ]
+
+    assert "current.attributes?.charge_by_time_enabled" in optimizer_status
+    assert "current.attributes?.charge_by_time_target_soc" in optimizer_status
+    assert "current.attributes?.charge_by_time_target_time" in optimizer_status
+    assert "Charge By Time" in optimizer_status
 
 
 def test_dashboard_battery_controls_include_self_consumption_action():

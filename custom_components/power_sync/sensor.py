@@ -28,6 +28,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from datetime import timedelta
 
@@ -239,6 +240,28 @@ from .network_envelope import HANetworkEnvelopeManager, NetworkExportEnvelope
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
+
+_FLOW_POWER_EXCLUSIVE_SENSOR_KEYS = frozenset(
+    {
+        SENSOR_TYPE_FLOW_POWER_PRICE,
+        SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
+        SENSOR_TYPE_FLOW_POWER_TWAP,
+        SENSOR_TYPE_NETWORK_TARIFF,
+        SENSOR_TYPE_AMBER_COMPARISON,
+        "fp_account_pea",
+        "fp_account_pea_30d",
+        "fp_account_bpea",
+        "fp_account_cpea",
+        "fp_account_pea_import",
+        "fp_account_lwap",
+        "fp_account_lwap_actual",
+        "fp_account_twap",
+        "fp_account_avg_rrp",
+        "fp_account_dlf",
+        "fp_account_avg_usage",
+        "fp_account_max_usage",
+    }
+)
 
 
 def _has_tesla_ev_device(hass: HomeAssistant) -> bool:
@@ -1375,6 +1398,13 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "idle_hold_active": data.get("idle_hold_active", False),
             "idle_hold_reserve": data.get("idle_hold_reserve"),
             "idle_hold_reserve_percent": data.get("idle_hold_reserve_percent"),
+            "charge_by_time_enabled": data.get("charge_by_time_enabled", False),
+            "charge_by_time_target_time": (data.get("config") or {}).get(
+                "charge_by_time_target_time"
+            ),
+            "charge_by_time_target_soc": (data.get("config") or {}).get(
+                "charge_by_time_target_soc"
+            ),
         } if data else {},
     ),
     PowerSyncSensorEntityDescription(
@@ -1650,6 +1680,73 @@ class NetworkExportLimitSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+def _cleanup_inactive_flow_power_registry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    electricity_provider: str,
+) -> int:
+    """Remove Flow-only registry rows after the entry changes provider."""
+    if electricity_provider == "flow_power":
+        return 0
+
+    entity_registry = er.async_get(hass)
+    standard_prefix = f"{entry.entry_id}_"
+    account_prefix = f"power_sync_{entry.entry_id}_"
+    removed = 0
+    for entity in list(entity_registry.entities.values()):
+        if (
+            getattr(entity, "platform", None) != DOMAIN
+            or getattr(entity, "config_entry_id", None) != entry.entry_id
+        ):
+            continue
+        unique_id = str(getattr(entity, "unique_id", "") or "")
+        sensor_key = None
+        for prefix in (standard_prefix, account_prefix):
+            if unique_id.startswith(prefix):
+                sensor_key = unique_id[len(prefix):]
+                break
+        if sensor_key not in _FLOW_POWER_EXCLUSIVE_SENSOR_KEYS:
+            continue
+        entity_registry.async_remove(entity.entity_id)
+        removed += 1
+
+    flow_device_identifier = (
+        DOMAIN,
+        f"{entry.entry_id}_{SENSOR_FAMILY_FLOW_POWER}_pricing",
+    )
+    device_registry = dr.async_get(hass)
+    for device in list(device_registry.devices.values()):
+        if flow_device_identifier not in (
+            getattr(device, "identifiers", set()) or set()
+        ):
+            continue
+        config_entries = getattr(device, "config_entries", None)
+        if (
+            config_entries is not None
+            and entry.entry_id not in config_entries
+        ):
+            break
+        try:
+            device_registry.async_update_device(
+                device_id=device.id,
+                remove_config_entry_id=entry.entry_id,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Unable to remove inactive Flow Power pricing device %s: %s",
+                device.id,
+                err,
+            )
+        break
+
+    if removed:
+        _LOGGER.info(
+            "Removed %d inactive Flow Power provider sensor registries",
+            removed,
+        )
+    return removed
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1694,6 +1791,11 @@ async def async_setup_entry(
     electricity_provider = entry.options.get(
         CONF_ELECTRICITY_PROVIDER,
         entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+    )
+    _cleanup_inactive_flow_power_registry(
+        hass,
+        entry,
+        electricity_provider,
     )
 
     network_envelope_manager = domain_data.get("network_envelope_manager")

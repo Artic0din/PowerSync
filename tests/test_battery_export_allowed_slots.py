@@ -139,6 +139,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
     const_module.CONF_FP_TWAP_OVERRIDE = "fp_twap_override"
+    const_module.AGL_BATTERY_REWARDS_START_HOUR = 17
+    const_module.AGL_BATTERY_REWARDS_END_HOUR = 21
     const_module.CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
     const_module.CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
     const_module.CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
@@ -1920,6 +1922,44 @@ def test_profit_max_setting_change_schedules_background_reoptimization(opt_modul
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
+def test_cost_neutral_setting_atomically_disables_profit_max(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings({"cost_neutral_enabled": True})
+    )
+
+    assert result["success"] is True
+    assert result["changes"] == ["cost_neutral_enabled: True"]
+    assert coordinator._config.cost_neutral_enabled is True
+    assert coordinator._config.profit_max_enabled is False
+    assert updates[-1]["options"]["cost_neutral_enabled"] is True
+    assert updates[-1]["options"]["profit_max_enabled"] is False
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_optimizer_settings_reject_both_exclusive_modes(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=False)
+    _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings({
+        "profit_max_enabled": True,
+        "cost_neutral_enabled": True,
+    }))
+
+    assert result == {
+        "success": False,
+        "error": "Profit Max and Cost Neutral cannot both be enabled",
+        "changes": [],
+    }
+    assert coordinator._config.profit_max_enabled is False
+    assert coordinator._config.cost_neutral_enabled is False
+
+
 @pytest.mark.parametrize(
     ("settings", "expected_change"),
     [
@@ -2032,6 +2072,143 @@ def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
     ) == [False] * 6
 
 
+def test_globird_zerocharge_exhausted_today_keeps_tomorrows_allowance(
+    opt_module,
+):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    n = 24 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+
+    allowed = coordinator._grid_charge_allowed_slots(
+        import_prices=[0.33] * n,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.8] * n,
+        current_soc=1.0,
+    )
+
+    tomorrow = (start + timedelta(days=1)).date()
+    tomorrow_zerocharge = [
+        idx
+        for idx, timestamp in enumerate(timestamps)
+        if timestamp.date() == tomorrow and 11 <= timestamp.hour < 14
+    ]
+    assert len(tomorrow_zerocharge) == 36
+    assert all(allowed[idx] for idx in tomorrow_zerocharge)
+
+
+def test_globird_zerocharge_partitions_bonus_caps_by_local_day(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    n = 24 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+    import_prices = [0.33] * n
+    export_prices = [0.0] * n
+
+    coordinator._apply_zerohero_optimizer_inputs(import_prices, export_prices)
+
+    tomorrow_key = (start + timedelta(days=1)).date().isoformat()
+    assert coordinator._last_zerocharge_bonus_cap_kwh == pytest.approx(50.0)
+    assert coordinator._last_import_bonus_caps_by_group == {
+        tomorrow_key: pytest.approx(50.0),
+    }
+    active_groups = {
+        group
+        for group in coordinator._last_import_bonus_group_ids
+        if group is not None
+    }
+    assert active_groups == {tomorrow_key}
+
+
+def test_globird_zerocharge_keeps_partial_today_and_full_tomorrow_isolated(
+    opt_module,
+):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 10, 55, tzinfo=aest)
+    n = 30 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerocharge_import_kwh_today = 12.5
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08-01": pytest.approx(37.5),
+        "2026-08-02": pytest.approx(50.0),
+    }
+
+
+def test_globird_overnight_zerocharge_resets_at_local_calendar_midnight(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="23:00",
+        globird_zerocharge_end="02:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 1, 22, 55, tzinfo=aest)
+    n = 4 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    active_groups = {
+        group
+        for group in coordinator._last_import_bonus_group_ids
+        if group is not None
+    }
+    assert active_groups == {"2026-08-01", "2026-08-02"}
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08-01": pytest.approx(50.0),
+        "2026-08-02": pytest.approx(50.0),
+    }
+
+
 @pytest.mark.parametrize(
     ("settings", "expected_change"),
     [
@@ -2055,6 +2232,19 @@ def test_charge_by_time_setting_change_schedules_background_reoptimization(
         charge_by_time_target_soc=1.0,
     )
     updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+        "config": {
+            "charge_by_time_target_time": (
+                coordinator._config.charge_by_time_target_time
+            ),
+            "charge_by_time_target_soc": int(
+                round(coordinator._config.charge_by_time_target_soc * 100)
+            ),
+        },
+    }
+    coordinator.async_set_updated_data = published.append
 
     result = asyncio.run(coordinator.set_settings(settings))
 
@@ -2067,6 +2257,76 @@ def test_charge_by_time_setting_change_schedules_background_reoptimization(
         assert coordinator._config.charge_by_time_target_time == "16:00"
     if "target_soc" in next(iter(settings)):
         assert coordinator._config.charge_by_time_target_soc == 0.8
+    assert published == [coordinator.get_api_data()]
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_charge_by_time_switch_setter_publishes_when_optimizer_disabled(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        charge_by_time=False,
+    )
+    _prepare_enabled_settings_coordinator(coordinator)
+    coordinator._enabled = False
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+    }
+    coordinator.async_set_updated_data = published.append
+
+    assert coordinator.set_charge_by_time_enabled(True) is True
+    assert published == [{"charge_by_time_enabled": True}]
+
+    assert coordinator.set_charge_by_time_enabled(True) is False
+    assert published == [{"charge_by_time_enabled": True}]
+
+
+def test_combined_charge_by_time_settings_publish_one_final_snapshot(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        charge_by_time=False,
+        charge_by_time_target_time="17:15",
+        charge_by_time_target_soc=1.0,
+    )
+    _updates, _run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+    published = []
+    coordinator.get_api_data = lambda: {
+        "charge_by_time_enabled": coordinator.charge_by_time_enabled,
+        "config": {
+            "charge_by_time_target_time": (
+                coordinator._config.charge_by_time_target_time
+            ),
+            "charge_by_time_target_soc": int(
+                round(coordinator._config.charge_by_time_target_soc * 100)
+            ),
+        },
+    }
+    coordinator.async_set_updated_data = published.append
+
+    result = asyncio.run(
+        coordinator.set_settings(
+            {
+                "charge_by_time_enabled": True,
+                "charge_by_time_target_time": "16:00",
+                "charge_by_time_target_soc": 80,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert published == [
+        {
+            "charge_by_time_enabled": True,
+            "config": {
+                "charge_by_time_target_time": "16:00",
+                "charge_by_time_target_soc": 80,
+            },
+        }
+    ]
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
@@ -2400,6 +2660,24 @@ def test_flow_power_profit_window_is_priority_export(opt_module):
     slots = coordinator._priority_export_slots_for_run(288, [0.45] * 288)
 
     assert _true_indexes(slots) == list(range(108, 132))
+
+
+def test_agl_reward_window_is_priority_export_only_with_a_usable_rate(opt_module):
+    coordinator = _coordinator(opt_module, "agl")
+    n = 51
+    coordinator._last_price_timestamps = [
+        datetime(2026, 7, 31, 16, 55, tzinfo=timezone.utc)
+        + timedelta(minutes=5 * idx)
+        for idx in range(n)
+    ]
+    export_prices = [0.26] * n
+    export_prices[12] = 0.0
+
+    slots = coordinator._priority_export_slots_for_run(n, export_prices)
+
+    expected = list(range(1, 49))
+    expected.remove(12)
+    assert _true_indexes(slots) == expected
 
 
 def test_flow_power_happy_hour_is_priority_export_without_profit_max(opt_module):
@@ -4661,6 +4939,144 @@ def test_sungrow_idle_uses_discharge_cap_without_backup_reserve_write(opt_module
     assert battery.backup_reserve_calls == []
     assert coordinator._pre_idle_backup_reserve is None
     assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
+def test_fronius_idle_uses_power_limits_without_backup_reserve_write(opt_module):
+    class FroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backup_mode_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return True
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._startup_backup_reserve = 4
+    energy_coordinator = FroniusEnergyCoordinator()
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
+@pytest.mark.parametrize("failure_mode", ["unavailable", "rejected"])
+def test_fronius_idle_never_falls_back_to_backup_reserve_write(
+    opt_module,
+    failure_mode,
+):
+    class RejectingFroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        async def set_backup_mode(self):
+            return False
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = (
+        _FakeEnergyCoordinator()
+        if failure_mode == "unavailable"
+        else RejectingFroniusEnergyCoordinator()
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_fronius_exit_idle_restores_auto_without_reserve_write(opt_module):
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.75)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator._last_executed_action = "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert coordinator.energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+@pytest.mark.parametrize("result", [False, True])
+def test_saj_idle_propagates_result_without_backup_reserve_write(
+    opt_module,
+    result,
+):
+    class SajEnergyCoordinator(_FakeEnergyCoordinator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backup_mode_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return result
+
+    battery = _FakeBattery(backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.216)
+    coordinator.battery_system = "saj_h2"
+    coordinator._config.backup_reserve = 0.56
+    energy_coordinator = SajEnergyCoordinator()
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == (
+        "idle" if result else "self_consumption"
+    )
+
+
+def test_fronius_rejected_auto_restore_keeps_idle_for_retry(opt_module):
+    class RejectingFroniusEnergyCoordinator(_FakeEnergyCoordinator):
+        async def restore_work_mode_from_idle(self):
+            self.restore_work_mode_from_idle_calls += 1
+            return False
+
+    battery = _FakeBattery(backup_reserve=4)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.75)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator.energy_coordinator = RejectingFroniusEnergyCoordinator()
+    coordinator._last_executed_action = "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert coordinator.energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == []
     assert coordinator._last_executed_action == "idle"
 
 
@@ -7423,6 +7839,84 @@ def test_spread_import_schedule_flattens_planned_energy_across_same_price_window
     original_wh = sum(action.battery_charge_w for action in actions) * (5 / 60)
     spread_wh = sum(action.battery_charge_w for action in spread.actions) * (5 / 60)
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_import_preserves_solar_charge_needed_for_deadline(opt_module):
+    """Spread Import must not discard LP-counted natural solar charging.
+
+    Charge By Time applies its SOC floor inside the LP.  Solar-surplus slots are
+    emitted as self_consumption with battery_charge_w, while deliberate grid
+    charging is emitted as charge.  Rewriting the whole equal-price window from
+    only the explicit charge energy makes the displayed and executable schedule
+    miss that already-solved SOC floor.
+    """
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "sungrow"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.interval_minutes = 5
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start,
+            action="charge",
+            power_w=5000,
+            battery_charge_w=5000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=5),
+            action="self_consumption",
+            power_w=2000,
+            battery_charge_w=2000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=10),
+            action="self_consumption",
+            power_w=2000,
+            battery_charge_w=2000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=15),
+            action="self_consumption",
+            power_w=0,
+            battery_charge_w=0,
+        ),
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_import_schedule(
+        schedule,
+        [0.066] * 4,
+        [False] * 4,
+        initial_soc=0.40,
+        solar_forecast=[0.0, 3.0, 3.0, 0.0],
+        load_forecast=[0.0, 1.0, 1.0, 0.0],
+    )
+
+    assert [action.action for action in spread.actions] == [
+        "charge",
+        "self_consumption",
+        "self_consumption",
+        "charge",
+    ]
+    assert [action.battery_charge_w for action in spread.actions] == [
+        2500.0,
+        2000,
+        2000,
+        2500.0,
+    ]
+    original_wh = sum(action.battery_charge_w for action in actions) * (5 / 60)
+    spread_wh = sum(action.battery_charge_w for action in spread.actions) * (5 / 60)
+    assert spread_wh == pytest.approx(original_wh, abs=0.1)
+    assert spread.actions[-1].soc == pytest.approx(0.475, abs=0.0001)
+    assert [action.soc for action in schedule.actions] == [None] * 4
 
 
 def test_spread_import_free_window_caps_to_available_battery_room(opt_module):

@@ -157,6 +157,12 @@ def _load_sungrow_energy_coordinator():
     return coordinator_module.SungrowEnergyCoordinator, restore
 
 
+def _load_dual_sungrow_coordinator():
+    """Load the aggregate coordinator alongside the existing HA stubs."""
+    _sungrow, restore = _load_sungrow_energy_coordinator()
+    return sys.modules["power_sync.coordinator"].DualSungrowCoordinator, restore
+
+
 def _controller_with_recorded_writes():
     controller = SungrowSHController("192.0.2.10")
     writes: list[tuple[int, int]] = []
@@ -689,6 +695,7 @@ class _FakeEnergyAccumulator:
 def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator = SungrowEnergyCoordinator.__new__(SungrowEnergyCoordinator)
     coordinator._controller = fake_controller
+    coordinator._telemetry_only = False
     coordinator._modbus_lock = asyncio.Lock()
     coordinator._total_import_baseline = None
     coordinator._total_export_baseline = None
@@ -698,7 +705,460 @@ def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator._ac_inverter_daily_energy_restored = False
     coordinator._ac_inverter_daily_energy_kwh = None
     coordinator._ac_inverter_daily_energy_date = None
+    coordinator.last_update_success = True
     return coordinator
+
+
+def test_sungrow_ihomemanager_telemetry_only_blocks_all_native_writes():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class WriteTrap:
+        def __getattr__(self, name):
+            raise AssertionError(f"telemetry-only path attempted controller access: {name}")
+
+    async def run_checks():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            WriteTrap(),
+        )
+        coordinator._telemetry_only = True
+
+        results = [
+            await coordinator.force_charge(),
+            await coordinator.force_discharge(),
+            await coordinator.force_grid_export(export_limit_w=5000),
+            await coordinator.restore_normal(),
+            await coordinator.set_max_soc(90),
+            await coordinator.set_backup_reserve(20),
+            await coordinator.set_backup_mode(),
+            await coordinator.set_no_discharge_mode(),
+            await coordinator.restore_no_discharge_mode(),
+            await coordinator.async_restore_persisted_export_control(),
+            await coordinator.restore_work_mode_from_idle(),
+            await coordinator.set_charge_rate_limit(2.5),
+            await coordinator.set_discharge_rate_limit(2.5),
+            await coordinator.set_export_limit(5000),
+        ]
+
+        return results
+
+    try:
+        results = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert results == [False] * 14
+
+
+def test_sungrow_direct_connection_keeps_native_control_enabled():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        assert coordinator._native_control_allowed("test write") is True
+    finally:
+        restore()
+
+
+def test_sungrow_startup_control_requires_a_valid_telemetry_snapshot():
+    """A retained coordinator must not authorize planning from empty defaults."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator.data = None
+        assert coordinator.startup_control_ready() is False
+
+        coordinator.data = {
+            "telemetry_ready": True,
+            "solar_power": 0.0,
+            "grid_power": 0.0,
+            "battery_power": 0.0,
+            "load_power": 0.0,
+            "battery_level": 0.0,
+        }
+        assert coordinator.startup_control_ready() is True
+
+        coordinator.last_update_success = False
+        assert coordinator.startup_control_ready() is False
+
+        coordinator.last_update_success = True
+        coordinator.data["battery_level"] = float("nan")
+        assert coordinator.startup_control_ready() is False
+    finally:
+        restore()
+
+
+def test_dual_sungrow_requires_both_coordinators_to_be_ready():
+    """Child and aggregate failures must both block optimizer control."""
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        def __init__(self, ready):
+            self.ready = ready
+            self.data = {
+                "telemetry_ready": ready,
+                "solar_power": 0.0,
+                "grid_power": 0.0,
+                "battery_power": 0.0,
+                "load_power": 0.0,
+                "battery_level": 50.0,
+            }
+
+        def startup_control_ready(self):
+            return self.ready
+
+    async def run_checks():
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        coordinator._coord1 = Child(True)
+        coordinator._coord2 = Child(False)
+        coordinator._soc_cap = 100
+        coordinator._cap1 = 10.0
+        coordinator._cap2 = 10.0
+        coordinator.last_update_success = False
+
+        assert coordinator.startup_control_ready() is False
+
+        coordinator._coord2.ready = True
+        first_snapshot = await coordinator._async_update_data()
+        assert first_snapshot["telemetry_ready"] is True
+
+        coordinator.data = first_snapshot
+        coordinator.last_update_success = True
+        assert coordinator.startup_control_ready() is True
+
+        coordinator.last_update_success = False
+        assert coordinator.startup_control_ready() is False
+
+    try:
+        asyncio.run(run_checks())
+    finally:
+        restore()
+
+
+def test_sungrow_failed_poll_marks_cached_telemetry_not_ready():
+    """A disconnected poll may preserve values, but never control readiness."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FailedController:
+        async def get_battery_data(self):
+            return {}
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            FailedController(),
+        )
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator.data = {
+            "telemetry_ready": True,
+            "solar_power": 1.0,
+            "grid_power": 0.0,
+            "battery_power": -0.5,
+            "load_power": 0.5,
+            "battery_level": 42.0,
+        }
+        stale = await coordinator._async_update_data()
+        coordinator.data = stale
+        return stale, coordinator.startup_control_ready()
+
+    try:
+        stale, ready = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert stale["battery_level"] == 42.0
+    assert stale["telemetry_ready"] is False
+    assert ready is False
+
+
+def test_sungrow_daily_grid_totals_survive_same_day_reload():
+    """Persisted lifetime baselines must outrank a polluted accumulator."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class PollutedAccumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.20
+            data["grid_export_today_kwh"] = 25.14
+            return data
+
+    async def run_checks():
+        store = _FakeStore(
+            {
+                "date": "2026-05-20",
+                "import_baseline_kwh": 2073.9,
+                "export_baseline_kwh": 17315.5,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = PollutedAccumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        first = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 2074.0,
+                "total_export": 17315.8,
+            }
+        )
+        second = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 2074.1,
+                "total_export": 17316.0,
+            }
+        )
+        return first, second
+
+    try:
+        first, second = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert first["grid_import_today_kwh"] == pytest.approx(0.1)
+    assert first["grid_export_today_kwh"] == pytest.approx(0.3)
+    assert second["grid_import_today_kwh"] == pytest.approx(0.2)
+    assert second["grid_export_today_kwh"] == pytest.approx(0.5)
+
+
+def test_sungrow_daily_grid_baselines_initialize_and_persist_independently():
+    """A late lifetime register must not reset the baseline already available."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_checks():
+        store = _FakeStore()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        first = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_export": 500.0,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+        second = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.0,
+                "total_export": 500.2,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+        return first, second, store.data
+
+    try:
+        first, second, stored = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert first["grid_export_today_kwh"] == 0.0
+    assert second["grid_import_today_kwh"] == 0.0
+    assert second["grid_export_today_kwh"] == pytest.approx(0.2)
+    assert stored == {
+        "date": "2026-05-20",
+        "import_baseline_kwh": 100.0,
+        "export_baseline_kwh": 500.0,
+    }
+
+
+def test_sungrow_lifetime_counter_rollback_keeps_accumulator_fallback():
+    """A reset lifetime counter must not publish a negative daily total."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class Accumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.4
+            data["grid_export_today_kwh"] = 0.7
+            return data
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = Accumulator()
+        coordinator._baseline_date = "2026-05-20"
+        coordinator._total_import_baseline = 100.0
+        coordinator._total_export_baseline = 500.0
+        rollback = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 99.0,
+                "total_export": 499.0,
+            }
+        )
+        invalid = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 0xFFFFFFFF * 0.1,
+                "total_export": 0xFFFFFFFF * 0.1,
+            }
+        )
+        assert coordinator._valid_daily_total("unavailable") is None
+        assert coordinator._valid_daily_total(float("nan")) is None
+    finally:
+        restore()
+
+    assert rollback["grid_import_today_kwh"] == 0.4
+    assert rollback["grid_export_today_kwh"] == 0.7
+    assert invalid["grid_import_today_kwh"] == 0.4
+    assert invalid["grid_export_today_kwh"] == 0.7
+
+
+def test_sungrow_daily_grid_baseline_load_failure_retries_without_overwrite():
+    """A transient Store load failure must not replace a valid baseline."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class Accumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data["grid_import_today_kwh"] = 0.4
+            data["grid_export_today_kwh"] = 0.7
+            return data
+
+    class FlakyStore(_FakeStore):
+        def __init__(self):
+            super().__init__(
+                {
+                    "date": "2026-05-20",
+                    "import_baseline_kwh": 100.0,
+                    "export_baseline_kwh": 500.0,
+                }
+            )
+            self.load_calls = 0
+            self.save_calls = 0
+
+        async def async_load(self):
+            self.load_calls += 1
+            if self.load_calls == 1:
+                raise OSError("temporary Store read failure")
+            return self.data
+
+        async def async_save(self, data):
+            self.save_calls += 1
+            await super().async_save(data)
+
+    async def run_checks():
+        store = FlakyStore()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = Accumulator()
+        coordinator._daily_energy_baseline_store = store
+        coordinator._daily_energy_baselines_restored = False
+        coordinator._daily_energy_baselines_dirty = False
+
+        await coordinator._async_restore_daily_energy_baselines()
+        fallback = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.4,
+                "total_export": 500.7,
+            }
+        )
+        await coordinator._async_save_daily_energy_baselines()
+
+        await coordinator._async_restore_daily_energy_baselines()
+        restored = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.0,
+                "daily_export": 0.0,
+                "total_import": 100.5,
+                "total_export": 500.8,
+            }
+        )
+        return fallback, restored, store
+
+    try:
+        fallback, restored, store = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert fallback["grid_import_today_kwh"] == 0.4
+    assert fallback["grid_export_today_kwh"] == 0.7
+    assert restored["grid_import_today_kwh"] == 0.5
+    assert restored["grid_export_today_kwh"] == 0.8
+    assert store.load_calls == 2
+    assert store.save_calls == 0
+
+
+def test_sungrow_successful_retry_rechecks_persisted_export_recovery_once():
+    """The first recovered snapshot must finish interrupted export cleanup."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class RecoveredController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 42.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+            }
+
+    async def run_updates():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            RecoveredController(),
+        )
+        coordinator.hass = types.SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._persisted_export_control_recovery_pending = True
+        recovery_results = iter((False, True))
+        recovery_calls = 0
+
+        async def recover():
+            nonlocal recovery_calls
+            recovery_calls += 1
+            return next(recovery_results)
+
+        coordinator.async_restore_persisted_export_control = recover
+        first = await coordinator._async_update_data()
+        second = await coordinator._async_update_data()
+        third = await coordinator._async_update_data()
+        return first, second, third, recovery_calls
+
+    try:
+        first, second, third, recovery_calls = asyncio.run(run_updates())
+    finally:
+        restore()
+
+    assert first["telemetry_ready"] is False
+    assert second["telemetry_ready"] is True
+    assert third["telemetry_ready"] is True
+    assert recovery_calls == 2
 
 
 def test_sungrow_coordinator_combines_separate_ac_inverter_solar_telemetry():

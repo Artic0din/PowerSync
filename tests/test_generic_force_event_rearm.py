@@ -24,6 +24,7 @@ DOMAIN = "power_sync"
 SERVICE_FORCE_DISCHARGE = "force_discharge"
 SERVICE_RESTORE_NORMAL = "restore_normal"
 CONF_AEMO_REGION = "aemo_region"
+CONF_AEMO_SPIKE_ENABLED = "aemo_spike_enabled"
 CONF_AEMO_SPIKE_THRESHOLD = "aemo_spike_threshold"
 CONF_ELECTRICITY_PROVIDER = "electricity_provider"
 
@@ -260,6 +261,101 @@ def _find_check_aemo_spike_for_vpp() -> ast.AsyncFunctionDef:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "check_aemo_spike_for_vpp":
             return node
     raise AssertionError("check_aemo_spike_for_vpp not found")
+
+
+def _find_vpp_setup_guard() -> ast.If:
+    """Locate the outer setup guard that owns the VPP spike closure."""
+    source = INIT_PATH.read_text()
+    module = ast.parse(source)
+    candidates = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.AsyncFunctionDef)
+            and child.name == "check_aemo_spike_for_vpp"
+            for child in node.body
+        )
+    ]
+    assert len(candidates) == 1, (
+        "expected exactly one setup guard containing "
+        f"check_aemo_spike_for_vpp, found {len(candidates)}"
+    )
+    return candidates[0]
+
+
+def _resolve_aemo_spike_enabled(entry) -> bool:
+    """Execute the runtime options-over-data resolution used by setup."""
+    source = INIT_PATH.read_text()
+    module = ast.parse(source)
+    candidates = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "aemo_spike_enabled"
+            for target in node.targets
+        )
+    ]
+    assert len(candidates) == 1, (
+        "expected exactly one aemo_spike_enabled assignment, "
+        f"found {len(candidates)}"
+    )
+    segment = ast.get_source_segment(source, candidates[0])
+    assert segment is not None
+    namespace = {
+        "CONF_AEMO_SPIKE_ENABLED": CONF_AEMO_SPIKE_ENABLED,
+        "entry": entry,
+    }
+    exec(segment.strip(), namespace)
+    return namespace["aemo_spike_enabled"]
+
+
+def _vpp_setup_enabled(provider: str, aemo_spike_enabled: bool) -> bool:
+    """Evaluate the current source guard with controlled setup state."""
+    expression = ast.Expression(body=_find_vpp_setup_guard().test)
+    ast.fix_missing_locations(expression)
+    return bool(
+        eval(
+            compile(expression, "<vpp-setup-guard>", "eval"),
+            {
+                "aemo_spike_enabled": aemo_spike_enabled,
+                "electricity_provider_for_vpp": provider,
+            },
+        )
+    )
+
+
+def test_vpp_spike_setup_honors_explicit_disabled_option():
+    """A disabled GloBird spike toggle must not schedule force-discharge checks."""
+    entry = SimpleNamespace(
+        options={
+            CONF_ELECTRICITY_PROVIDER: "globird",
+            CONF_AEMO_SPIKE_ENABLED: False,
+        },
+        data={CONF_AEMO_SPIKE_ENABLED: True},
+    )
+
+    enabled = _resolve_aemo_spike_enabled(entry)
+    assert enabled is False, "an explicit false option must override stale entry data"
+    assert _vpp_setup_enabled("globird", enabled) is False
+
+
+def test_vpp_spike_setup_still_runs_when_explicitly_enabled():
+    entry = SimpleNamespace(
+        options={
+            CONF_ELECTRICITY_PROVIDER: "globird",
+            CONF_AEMO_SPIKE_ENABLED: True,
+        },
+        data={},
+    )
+
+    enabled = _resolve_aemo_spike_enabled(entry)
+    assert enabled is True
+    assert _vpp_setup_enabled("globird", enabled) is True
+    assert _vpp_setup_enabled("aemo_vpp", enabled) is True
+    assert _vpp_setup_enabled("amber", enabled) is False
 
 
 def _resolve_vpp_threshold(entry) -> float:

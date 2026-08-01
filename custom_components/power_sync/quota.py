@@ -136,6 +136,14 @@ class QuotaLedger:
         if self.rules:
             self.state.timezone_token = self.rules[0].timezone_token
 
+    def _required_directions(self) -> tuple[Direction, ...]:
+        """Return only meter directions used by this ledger's rules."""
+        return tuple(
+            direction
+            for direction in ("import", "export")
+            if any(rule.direction == direction for rule in self.rules)
+        )
+
     def observe_cumulative(
         self,
         direction: Direction,
@@ -317,11 +325,15 @@ class QuotaLedger:
             or not eligible_usage_could_have_elapsed
         ):
             self.state.reset_seen[direction] = True
-            if all(self.state.reset_seen.values()):
+            required_directions = self._required_directions()
+            if required_directions and all(
+                self.state.reset_seen[required]
+                for required in required_directions
+            ):
                 previously_estimated = self.state.confidence == "estimated"
                 all_authoritative = all(
                     self.state.source_kind.get(item) == "total_increasing"
-                    for item in ("import", "export")
+                    for item in required_directions
                 )
                 self.state.confidence = (
                     "authoritative"
@@ -384,12 +396,15 @@ class QuotaLedger:
             self.state.confidence != "unknown"
             or self.state.reason
             != f"{direction} cumulative energy meter unavailable"
-            or not all(self.state.reset_seen.values())
+            or not all(
+                self.state.reset_seen[required]
+                for required in self._required_directions()
+            )
         ):
             return
         all_authoritative = all(
             self.state.source_kind.get(item) == "total_increasing"
-            for item in ("import", "export")
+            for item in self._required_directions()
         )
         self.state.confidence = "authoritative" if all_authoritative else "estimated"
         self.state.reason = (

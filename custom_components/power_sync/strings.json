@@ -273,10 +273,10 @@
           "epex_export_price_entity": "Export price sensor"
         },
         "data_description": {
-          "epex_region": "Your EPEX electricity market bidding zone. Most users need just their country code (DE, AT, BE, NL, FR, etc.).",
+          "epex_region": "Choose a supported EPEX bidding zone: DE, AT, BE, NL, DK1, DK2, or SE1-SE4.",
           "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
           "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
-          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation.",
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Leave at 0 if unconfigured; exports are valued at 0 ct/kWh unless an export price entity supplies values.",
           "epex_import_price_entity": "Optional Home Assistant sensor for actual import costs. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "epex_export_price_entity": "Optional Home Assistant sensor for actual export earnings. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast."
         },
@@ -476,6 +476,7 @@
           "optimization_spread_import_enabled": "Spread import across window",
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
+          "cost_neutral_enabled": "Enable Cost Neutral",
           "charge_by_time_enabled": "Enable Charge By Time",
           "charge_by_time_target_time": "Charge By Time target time",
           "charge_by_time_target_soc": "Charge By Time target SOC"
@@ -501,7 +502,8 @@
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
           "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
-          "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default.",
+          "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
+          "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -510,15 +512,17 @@
       },
       "sungrow": {
         "title": "Sungrow Modbus connection",
-        "description": "Connect to your Sungrow SH-series hybrid inverter via Modbus TCP.",
+        "description": "Connect directly to a Sungrow SH-series inverter, or read it through an iHomeManager plaintext forwarding channel. iHomeManager connections are telemetry-only.",
         "data": {
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Connect"
@@ -1076,6 +1080,7 @@
       "no_station_selected": "Select a Sigenergy station from the list to continue.",
       "modbus_host_required": "IP address is required -- enter the local IP of your Sigenergy inverter or gateway.",
       "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
+      "sungrow_ihomemanager_plaintext_port_required": "iHomeManager support requires a non-SSL forwarding channel on port 503 or 504. Enable that channel in iHomeManager settings and enter the matching port.",
       "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
       "sungrow_modbus_conflict": "The AC inverter curtailment path cannot use the same Sungrow Modbus IP, port, and slave ID as the battery system. Disable this option for a hybrid-only setup, or configure a separate AC-coupled/string inverter endpoint.",
       "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
@@ -1148,6 +1153,7 @@
   "options": {
     "error": {
       "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "invalid_ai_summary_settings": "Choose either Clear saved provider key or enter a replacement key, not both.",
       "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
       "goodwe_entity_prefix_required": "Enter the GoodWe Experimental entity prefix, for example goodwe.",
       "goodwe_entity_unavailable": "PowerSync could not validate the GoodWe PV power, grid export limit, and grid export limit switch entities for that prefix.",
@@ -1412,15 +1418,17 @@
       },
       "sungrow_connection": {
         "title": "Sungrow Modbus connection",
-        "description": "Update your Sungrow inverter Modbus settings. Changes take effect immediately.",
+        "description": "Update the direct Sungrow or telemetry-only iHomeManager forwarding connection. Changes take effect immediately.",
         "data": {
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Save"
@@ -1545,23 +1553,109 @@
         "sections": {
           "core_goals": {
             "name": "Core goals",
-            "description": "Choose the optimisation engine and the outcomes it should target."
+            "description": "Choose the optimisation engine and the outcomes it should target.",
+            "data": {
+              "optimization_provider": "Optimization mode",
+              "optimization_enabled": "Enable Smart Optimization",
+              "profit_max_enabled": "Enable Profit Max",
+              "cost_neutral_enabled": "Enable Cost Neutral",
+              "charge_by_time_enabled": "Enable Charge By Time",
+              "charge_by_time_target_time": "Charge By Time target time",
+              "charge_by_time_target_soc": "Charge By Time target SOC"
+            },
+            "data_description": {
+              "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
+              "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
+              "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
+              "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
+              "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
+              "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
+              "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
+            }
           },
           "reserve_controls": {
             "name": "Reserve controls",
-            "description": "Manage the optimiser floor, forecast reserve and hardware backup reserve together."
+            "description": "Manage the optimiser floor, forecast reserve and hardware backup reserve together.",
+            "data": {
+              "optimization_backup_reserve": "Minimum discharge level",
+              "optimization_auto_apply_reserve": "Auto-apply optimizer reserve",
+              "hardware_backup_reserve": "Hardware backup reserve"
+            },
+            "data_description": {
+              "optimization_backup_reserve": "The optimizer will not intentionally export battery energy below this percentage. Natural self-consumption may continue to the separate hardware backup reserve. Default 20% is a good starting point.",
+              "optimization_auto_apply_reserve": "Preserves the selected minimum as a forecast buffer by adding expected home load between an export window and the next charge. Natural self-consumption may continue toward that buffer; Auto-Apply never lowers below your selected minimum or changes the hardware backup reserve.",
+              "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes."
+            }
           },
           "battery_forecast_inputs": {
             "name": "Battery & forecast inputs",
-            "description": "Describe the battery and the load inputs used to build the plan."
+            "description": "Describe the battery and the load inputs used to build the plan.",
+            "data": {
+              "optimization_battery_capacity_wh": "Battery capacity",
+              "optimization_max_charge_w": "Maximum charge power",
+              "optimization_max_discharge_w": "Maximum discharge power",
+              "optimization_load_entity": "Historical load sensor",
+              "optimization_ev_integration": "PowerSync EV charger plans",
+              "optimization_planned_ev_load_entity": "Planned EV load forecast sensor"
+            },
+            "data_description": {
+              "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
+              "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
+              "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
+              "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
+              "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
+              "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger."
+            }
           },
           "grid_site_constraints": {
             "name": "Grid & site constraints",
-            "description": "Set grid-charging guardrails and whole-site import and export limits."
+            "description": "Set grid-charging guardrails and whole-site import and export limits.",
+            "data": {
+              "optimization_allow_grid_charge": "Allow grid charging",
+              "optimization_max_grid_charge_price": "Maximum grid charge price",
+              "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
+              "optimization_max_grid_export_w": "Maximum grid export",
+              "optimization_max_grid_import_w": "Maximum grid import"
+            },
+            "data_description": {
+              "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
+              "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+              "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
+              "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+              "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit."
+            }
           },
           "dispatch_behaviour": {
             "name": "Dispatch behaviour",
-            "description": "Control plan execution, including Monitoring Mode and idle behaviour."
+            "description": "Control plan execution, including Monitoring Mode and idle behaviour.",
+            "data": {
+              "optimization_spread_export_enabled": "Spread export across window",
+              "optimization_spread_import_enabled": "Spread import across window",
+              "optimization_disable_idle": "Disable idle mode",
+              "monitoring_mode": "Monitoring mode",
+              "neovolt_surplus_balancer_mode": "Independent stack surplus balancing"
+            },
+            "data_description": {
+              "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
+              "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
+              "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
+              "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
+              "neovolt_surplus_balancer_mode": "Controls independent NeoVolt stack balancing. Auto balances multiple selected Neovolt integrations whenever PowerSync is running; the Smart Optimization switch does not control it."
+            }
+          },
+          "ai_explanations": {
+            "name": "AI Plan Explanation",
+            "description": "Configure optional descriptive explanations of the existing plan. Saved key status: {ai_summary_key_status}. AI cannot change or execute the optimizer plan.",
+            "data": {
+              "optimization_ai_summary_provider": "AI provider",
+              "optimization_ai_summary_api_key": "Provider API key",
+              "optimization_ai_summary_clear_api_key": "Clear saved provider key"
+            },
+            "data_description": {
+              "optimization_ai_summary_provider": "Choose Gemini or Grok. Changing providers without entering a replacement key clears the previous provider's key.",
+              "optimization_ai_summary_api_key": "Write-only provider key. This field always opens blank; leave it blank to keep the current key, or enter a value to replace it.",
+              "optimization_ai_summary_clear_api_key": "Remove the saved provider key when you select Save. Do not enter a replacement key at the same time."
+            }
           }
         },
         "data": {
@@ -1586,6 +1680,7 @@
           "optimization_spread_import_enabled": "Spread import across window",
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
+          "cost_neutral_enabled": "Enable Cost Neutral",
           "charge_by_time_enabled": "Enable Charge By Time",
           "charge_by_time_target_time": "Charge By Time target time",
           "charge_by_time_target_soc": "Charge By Time target SOC"
@@ -1611,7 +1706,8 @@
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
           "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
-          "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default.",
+          "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
+          "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -1704,16 +1800,18 @@
       },
       "init_sungrow": {
         "title": "Sungrow settings",
-        "description": "Configure pricing and Sungrow Modbus connection. Modbus is required for energy data and battery control.",
+        "description": "Configure pricing and a direct Sungrow or telemetry-only iHomeManager Modbus forwarding connection.",
         "data": {
           "electricity_provider": "Electricity provider",
+          "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
+          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
+          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
           "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
         },
         "submit": "Save"
@@ -2026,10 +2124,10 @@
           "battery_curtailment_enabled": "Stop export below 1c"
         },
         "data_description": {
-          "epex_region": "Your EPEX electricity market bidding zone. Most users need just their country code (DE, AT, BE, NL, FR, etc.).",
+          "epex_region": "Choose a supported EPEX bidding zone: DE, AT, BE, NL, DK1, DK2, or SE1-SE4.",
           "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
           "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
-          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation.",
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Leave at 0 if unconfigured; exports are valued at 0 ct/kWh unless an export price entity supplies values.",
           "epex_import_price_entity": "Optional Home Assistant sensor for actual import costs. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "epex_export_price_entity": "Optional Home Assistant sensor for actual export earnings. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery.",

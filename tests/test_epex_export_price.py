@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+STRINGS_PATHS = (
+    ROOT / "custom_components" / "power_sync" / "strings.json",
+    ROOT / "custom_components" / "power_sync" / "translations" / "en.json",
+)
 
 
 def _method_source(class_name: str, method_name: str) -> str:
@@ -43,6 +48,19 @@ def _method_source(class_name: str, method_name: str) -> str:
                     assert segment is not None
                     return segment
     raise AssertionError(f"{class_name}.{method_name} not found")
+
+
+def _values_for_key(value: Any, key: str) -> list[str]:
+    matches: list[str] = []
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            if item_key == key and isinstance(item_value, str):
+                matches.append(item_value)
+            matches.extend(_values_for_key(item_value, key))
+    elif isinstance(value, list):
+        for item in value:
+            matches.extend(_values_for_key(item, key))
+    return matches
 
 
 class UpdateFailed(Exception):
@@ -171,3 +189,104 @@ def test_epex_configured_export_rate_branch_is_unchanged():
     assert export_entries[0]["perKwh"] == -8.5
     # Configured-rate branch never needs the "not configured" warning.
     assert len(warnings) == 0
+
+
+def test_epex_export_rate_copy_matches_safe_unconfigured_default():
+    for path in STRINGS_PATHS:
+        descriptions = [
+            value
+            for value in _values_for_key(
+                json.loads(path.read_text()),
+                "epex_export_rate",
+            )
+            if "ct/kWh" in value
+        ]
+        assert descriptions
+        for description in descriptions:
+            assert "unconfigured" in description
+            assert "0 ct/kWh" in description
+            assert "export price entity" in description
+            assert "use the wholesale price" not in description
+
+
+def test_epex_region_copy_lists_only_supported_zone_examples():
+    for path in STRINGS_PATHS:
+        descriptions = [
+            value
+            for value in _values_for_key(
+                json.loads(path.read_text()),
+                "epex_region",
+            )
+            if "supported EPEX bidding zone" in value
+        ]
+        assert descriptions
+        for description in descriptions:
+            assert "FR" not in description
+            assert "DK1" in description
+            assert "SE1-SE4" in description
+
+
+def test_epex_belgium_preserves_native_quarter_hour_boundaries():
+    warnings: list = []
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[
+            {
+                "startsAt": "2026-07-08T10:30:00+00:00",
+                "total": 21.0,
+            },
+            {
+                "startsAt": "2026-07-08T10:45:00+00:00",
+                "total": 18.0,
+            },
+            {
+                "startsAt": "2026-07-08T11:00:00+00:00",
+                "total": 15.0,
+            },
+        ],
+        warnings=warnings,
+    )
+    self_obj.region = "BE"
+
+    data = _run_update_data(self_obj, warnings)
+    imports = [
+        entry
+        for entry in data["current"] + data["forecast"]
+        if entry["channelType"] == "general"
+    ]
+
+    assert [entry["duration"] for entry in imports] == [15, 15, 15]
+    assert imports[0]["startTime"] == "2026-07-08T10:30:00+00:00"
+    assert imports[0]["endTime"] == "2026-07-08T10:45:00+00:00"
+    assert imports[0]["nemTime"] == imports[0]["endTime"]
+    assert imports[1]["startTime"] == imports[0]["endTime"]
+
+
+def test_epex_explicit_interval_end_takes_precedence_over_inference():
+    warnings: list = []
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[
+            {
+                "startsAt": "2026-07-08T10:30:00+00:00",
+                "endsAt": "2026-07-08T10:50:00+00:00",
+                "total": 21.0,
+            },
+            {
+                "startsAt": "2026-07-08T11:00:00+00:00",
+                "total": 15.0,
+            },
+        ],
+        warnings=warnings,
+    )
+    self_obj.region = "BE"
+
+    data = _run_update_data(self_obj, warnings)
+    current_import = next(
+        entry
+        for entry in data["current"]
+        if entry["channelType"] == "general"
+    )
+
+    assert current_import["duration"] == 20
+    assert current_import["endTime"] == "2026-07-08T10:50:00+00:00"

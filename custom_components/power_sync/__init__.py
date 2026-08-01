@@ -672,11 +672,14 @@ from .const import (
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
     # Sungrow battery system configuration
+    CONF_SUNGROW_CONNECTION_TYPE,
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    SUNGROW_CONNECTION_DIRECT,
+    SUNGROW_CONNECTION_IHOMEMANAGER,
     # FoxESS battery system configuration
     BATTERY_SYSTEM_FOXESS,
     CONF_FOXESS_HOST,
@@ -803,6 +806,7 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
     CONF_PROFIT_MAX_ENABLED,
+    CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
     CONF_CHARGE_BY_TIME_TARGET_TIME,
     CONF_CHARGE_BY_TIME_TARGET_SOC,
@@ -1813,6 +1817,20 @@ class SensitiveDataFilter(logging.Filter):
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE
+        )
+
+        # Handle user-supplied xAI and Gemini keys used for plan explanations.
+        # The normal path never logs these values; this is defense in depth for
+        # unexpected exception or third-party client output.
+        text = re.sub(
+            r'\b(xai-[a-zA-Z0-9_-]{20,})\b',
+            lambda m: self.obfuscate(m.group(1)),
+            text,
+        )
+        text = re.sub(
+            r'\b(AIza[a-zA-Z0-9_-]{20,})\b',
+            lambda m: self.obfuscate(m.group(1)),
+            text,
         )
 
         # Handle authorization headers in websocket/API logs
@@ -5334,11 +5352,11 @@ async def _calendar_time_series_from_statistics(
     end_date: str | None,
     coordinator: Any,
     preferred_entry_id: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Build calendar history from HA recorder statistics for daily sensors."""
     range_result = _calendar_period_range(period, end_date)
     if not range_result:
-        return []
+        return [], "invalid_range"
 
     start_dt, end_dt = range_result
     now = dt_util.now()
@@ -5352,9 +5370,20 @@ async def _calendar_time_series_from_statistics(
 
     entity_ids = _find_calendar_statistic_entity_ids(hass, preferred_entry_id)
     if not entity_ids:
-        return _calendar_time_series_from_energy_summary(coordinator) if includes_today else []
+        rows = (
+            _calendar_time_series_from_energy_summary(coordinator)
+            if includes_today
+            else []
+        )
+        source = (
+            "daily_energy_sensors_unavailable"
+            if period in ("month", "year")
+            else "live"
+        )
+        return rows, source
 
     time_series: dict[str, dict[str, Any]] = {}
+    statistics_failed = False
 
     if statistic_end_dt > start_dt:
         try:
@@ -5406,19 +5435,38 @@ async def _calendar_time_series_from_statistics(
                     )
                     row[field] += max(0, float(change)) * 1000
         except Exception as exc:
+            statistics_failed = True
             _LOGGER.debug("Failed to build calendar history from statistics: %s", exc)
 
     rows = [
         _calendar_entry_with_detail_aliases(time_series[key])
         for key in sorted(time_series)
     ]
-    if not rows and statistic_end_dt > start_dt:
+    history_source = "long_term_statistics" if rows else "live"
+    if (
+        not rows
+        and statistic_end_dt > start_dt
+        and period in ("day", "week")
+    ):
         rows = await _calendar_time_series_from_state_history(
             hass,
             period,
             start_dt,
             statistic_end_dt,
             entity_ids,
+        )
+        if rows:
+            history_source = "state_history"
+    elif not rows and statistic_end_dt > start_dt:
+        history_source = (
+            "long_term_statistics_error"
+            if statistics_failed
+            else "long_term_statistics_unavailable"
+        )
+        _LOGGER.warning(
+            "Calendar history has no usable long-term statistics for "
+            "period=%s; skipping the potentially expensive raw-history fallback",
+            period,
         )
     if includes_today:
         current_entry = _calendar_current_entry(
@@ -5433,7 +5481,7 @@ async def _calendar_time_series_from_statistics(
             else:
                 rows.append(current_entry)
 
-    return rows
+    return rows, history_source
 
 
 def _calendar_current_optimizer_cost_summary(
@@ -5491,7 +5539,7 @@ async def _calendar_result_from_energy_summary(
     source_system: str | None = None,
 ) -> dict[str, Any]:
     """Return calendar-history response data for energy-summary based systems."""
-    time_series = await _calendar_time_series_from_statistics(
+    time_series, history_source = await _calendar_time_series_from_statistics(
         hass,
         period,
         end_date,
@@ -5517,7 +5565,20 @@ async def _calendar_result_from_energy_summary(
         "time_series": time_series,
         "serial_number": None,
         "installation_date": None,
+        "history_source": history_source,
     }
+    limited_sources = {
+        "daily_energy_sensors_unavailable",
+        "long_term_statistics_error",
+        "long_term_statistics_unavailable",
+    }
+    if history_source in limited_sources:
+        result["history_limited"] = True
+        result["history_message"] = (
+            "No Home Assistant long-term statistics are available for this "
+            "period. Month and Year history requires Home Assistant to record "
+            "long-term statistics for PowerSync's daily energy sensors."
+        )
 
     if period == "day":
         cost_summary = await _calculate_cost_from_statistics(hass, period, end_date)
@@ -5626,13 +5687,12 @@ class CalendarHistoryView(HomeAssistantView):
 
     def _calendar_cache_key(
         self,
-        tesla_coordinator: Any,
+        source_key: str,
         period: str,
         end_date: str | None,
     ) -> tuple[str, str, str]:
         """Return a stable cache key for one calendar-history request."""
-        site_id = str(getattr(tesla_coordinator, "site_id", "") or "unknown")
-        return (site_id, period, end_date or "")
+        return (source_key, period, end_date or "")
 
     def _cached_calendar_result(
         self,
@@ -5659,7 +5719,7 @@ class CalendarHistoryView(HomeAssistantView):
         if status == 200 and result.get("success"):
             self._cache[key] = (time.monotonic(), dict(result), status)
 
-    async def _build_calendar_history_response(
+    async def _build_tesla_calendar_history_response(
         self,
         *,
         tesla_coordinator: Any,
@@ -5729,42 +5789,18 @@ class CalendarHistoryView(HomeAssistantView):
         _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
         return result, 200
 
-    async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request for calendar history."""
-        # Get period from query params (default: day)
-        period = request.query.get("period", "day")
-        # Get end_date from query params (format: YYYY-MM-DD)
-        end_date = request.query.get("end_date")
-
-        # Validate period
-        valid_periods = ["day", "week", "month", "year"]
-        if period not in valid_periods:
-            return web.json_response(
-                {"success": False, "error": f"Invalid period. Must be one of: {valid_periods}"},
-                status=400
-            )
-
-        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
-
-        # Find the power_sync entry and coordinator
-        # Check ALL entries, not just the first one (important during reload)
-        tesla_coordinator = None
-        for _entry_id, data in self._hass.data.get(DOMAIN, {}).items():
-            if isinstance(data, dict):
-                # Look for Tesla coordinator (this is the main data source for calendar history)
-                if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
-                    tesla_coordinator = data["tesla_coordinator"]
-                    break  # Found it, no need to continue
-
-        # Look up tariff schedule for cost calculation (shared across all battery types)
-        tariff_schedule = _find_calendar_tariff_schedule(self._hass)
-
-        summary_system, summary_coordinator, summary_entry_id = _find_calendar_energy_summary_source(self._hass)
-        if summary_coordinator and not tesla_coordinator:
-            _LOGGER.info(
-                "Calendar history using %s daily energy summary",
-                summary_system,
-            )
+    async def _build_energy_summary_calendar_response(
+        self,
+        *,
+        period: str,
+        end_date: str | None,
+        summary_coordinator: Any,
+        summary_entry_id: str | None,
+        tariff_schedule: dict | None,
+        summary_system: str | None,
+    ) -> tuple[dict[str, Any], int]:
+        """Build recorder-backed calendar history in a shielded background task."""
+        try:
             result = await _calendar_result_from_energy_summary(
                 self._hass,
                 period,
@@ -5774,33 +5810,40 @@ class CalendarHistoryView(HomeAssistantView):
                 tariff_schedule,
                 summary_system,
             )
-            return web.json_response(result)
+        except Exception as exc:
+            _LOGGER.exception(
+                "Error building %s calendar history",
+                summary_system or "energy-summary",
+            )
+            return {"success": False, "error": str(exc)}, 500
+        return result, 200
 
-        if not tesla_coordinator:
-            # Check if we have ANY power_sync entries - if yes, system might still be loading
-            has_entries = bool(self._hass.data.get(DOMAIN, {}))
-            if has_entries:
-                _LOGGER.debug("Calendar history requested but Tesla coordinator not ready yet (system loading)")
-                return web.json_response(
-                    {
-                        "success": False,
-                        "error": "System is still loading, please retry",
-                        "reason": "loading"
-                    },
-                    status=200  # Return 200 with error in body so mobile app handles gracefully
-                )
-            else:
-                _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
-                return web.json_response(
-                    {
-                        "success": False,
-                        "error": "Calendar history requires Tesla Powerwall",
-                        "reason": "tesla_not_configured"
-                    },
-                    status=200  # Return 200 with error in body so mobile app handles gracefully
-                )
+    def _calendar_task_done(
+        self,
+        cache_key: tuple[str, str, str],
+        task: asyncio.Task[tuple[dict[str, Any], int]],
+    ) -> None:
+        """Harvest a shielded history build even when the caller never retries."""
+        if self._inflight.get(cache_key) is not task:
+            return
+        self._inflight.pop(cache_key, None)
+        try:
+            result, status = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _LOGGER.warning("Calendar history background task failed: %s", exc)
+            return
+        self._store_calendar_result(cache_key, result, status)
 
-        cache_key = self._calendar_cache_key(tesla_coordinator, period, end_date)
+    async def _calendar_task_response(
+        self,
+        *,
+        cache_key: tuple[str, str, str],
+        task_name: str,
+        builder: Callable[[], Any],
+    ) -> web.Response:
+        """Return, cache, or continue one potentially slow history build."""
         cached = self._cached_calendar_result(cache_key)
         if cached:
             result, status = cached
@@ -5817,15 +5860,16 @@ class CalendarHistoryView(HomeAssistantView):
 
         if not task:
             task = self._hass.async_create_task(
-                self._build_calendar_history_response(
-                    tesla_coordinator=tesla_coordinator,
-                    tariff_schedule=tariff_schedule,
-                    period=period,
-                    end_date=end_date,
-                ),
-                name=f"powersync_calendar_history_{period}",
+                builder(),
+                name=task_name,
             )
             self._inflight[cache_key] = task
+            task.add_done_callback(
+                lambda completed, key=cache_key: self._calendar_task_done(
+                    key,
+                    completed,
+                )
+            )
 
         try:
             result, status = await asyncio.wait_for(
@@ -5864,6 +5908,106 @@ class CalendarHistoryView(HomeAssistantView):
             self._inflight.pop(cache_key, None)
         self._store_calendar_result(cache_key, result, status)
         return web.json_response(result, status=status)
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for calendar history."""
+        # Get period from query params (default: day)
+        period = request.query.get("period", "day")
+        # Get end_date from query params (format: YYYY-MM-DD)
+        end_date = request.query.get("end_date")
+
+        # Validate period
+        valid_periods = ["day", "week", "month", "year"]
+        if period not in valid_periods:
+            return web.json_response(
+                {"success": False, "error": f"Invalid period. Must be one of: {valid_periods}"},
+                status=400
+            )
+
+        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
+
+        # Find the power_sync entry and coordinator
+        # Check ALL entries, not just the first one (important during reload)
+        tesla_coordinator = None
+        for _entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict):
+                # Look for Tesla coordinator (this is the main data source for calendar history)
+                if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
+                    tesla_coordinator = data["tesla_coordinator"]
+                    break  # Found it, no need to continue
+
+        # Look up tariff schedule for cost calculation (shared across all battery types)
+        tariff_schedule = _find_calendar_tariff_schedule(self._hass)
+
+        summary_system, summary_coordinator, summary_entry_id = _find_calendar_energy_summary_source(self._hass)
+        if summary_coordinator and not tesla_coordinator:
+            _LOGGER.info(
+                "Calendar history using %s daily energy summary",
+                summary_system,
+            )
+            source_key = (
+                f"summary:{summary_entry_id}"
+                if summary_entry_id
+                else f"summary:{summary_system or 'unknown'}"
+            )
+            cache_key = self._calendar_cache_key(
+                source_key,
+                period,
+                end_date,
+            )
+            return await self._calendar_task_response(
+                cache_key=cache_key,
+                task_name=f"powersync_calendar_history_summary_{period}",
+                builder=lambda: self._build_energy_summary_calendar_response(
+                    period=period,
+                    end_date=end_date,
+                    summary_coordinator=summary_coordinator,
+                    summary_entry_id=summary_entry_id,
+                    tariff_schedule=tariff_schedule,
+                    summary_system=summary_system,
+                ),
+            )
+
+        if not tesla_coordinator:
+            # Check if we have ANY power_sync entries - if yes, system might still be loading
+            has_entries = bool(self._hass.data.get(DOMAIN, {}))
+            if has_entries:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not ready yet (system loading)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "System is still loading, please retry",
+                        "reason": "loading"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
+            else:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "Calendar history requires Tesla Powerwall",
+                        "reason": "tesla_not_configured"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
+
+        site_id = str(getattr(tesla_coordinator, "site_id", "") or "unknown")
+        cache_key = self._calendar_cache_key(
+            f"tesla:{site_id}",
+            period,
+            end_date,
+        )
+        return await self._calendar_task_response(
+            cache_key=cache_key,
+            task_name=f"powersync_calendar_history_tesla_{period}",
+            builder=lambda: self._build_tesla_calendar_history_response(
+                tesla_coordinator=tesla_coordinator,
+                tariff_schedule=tariff_schedule,
+                period=period,
+                end_date=end_date,
+            ),
+        )
 
 
 def _is_history_relink_entry(entry: ConfigEntry) -> bool:
@@ -10044,10 +10188,19 @@ class ProviderConfigView(HomeAssistantView):
                 CONF_AUTO_SYNC_ENABLED,
                 entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
             )
-            config["monitoring_mode"] = entry.options.get(
-                CONF_MONITORING_MODE,
-                entry.data.get(CONF_MONITORING_MODE, False)
-            )
+            if entry.options.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                entry.data.get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
+            ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+                config["monitoring_mode"] = True
+            else:
+                config["monitoring_mode"] = entry.options.get(
+                    CONF_MONITORING_MODE,
+                    entry.data.get(CONF_MONITORING_MODE, False),
+                )
 
             result = {
                 "success": True,
@@ -10208,6 +10361,15 @@ class ProviderConfigView(HomeAssistantView):
             for key, value in data.items():
                 if key in key_mapping:
                     new_options[key_mapping[key]] = value
+
+            if entry.options.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                entry.data.get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
+            ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+                new_options[CONF_MONITORING_MODE] = True
 
             active_provider = new_options.get(
                 CONF_ELECTRICITY_PROVIDER,
@@ -11767,6 +11929,33 @@ class CustomTariffView(HomeAssistantView):
                     {"success": False, "error": "Energy charges are required"},
                     status=400
                 )
+
+            raw_import_quota = data.get("import_quota")
+            if (
+                isinstance(raw_import_quota, dict)
+                and raw_import_quota.get("enabled", True) is not False
+            ):
+                from .tariff_quota import custom_tariff_import_quota_rule
+
+                quota_rule = custom_tariff_import_quota_rule(
+                    data,
+                    default_timezone=getattr(
+                        getattr(self._hass, "config", None),
+                        "time_zone",
+                        "LOCAL",
+                    ),
+                )
+                if quota_rule is None:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Import allowance requires a valid HH:MM window, "
+                                "positive daily kWh cap, and non-negative prices"
+                            ),
+                        },
+                        status=400,
+                    )
 
             entry_data = self._get_entry_data()
             entry = entry_data.get("entry") if entry_data else None
@@ -19105,6 +19294,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and not alphaess_coordinator.supports_dispatch
         ):
             return True
+        if entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        ) == SUNGROW_CONNECTION_IHOMEMANAGER:
+            return True
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if isinstance(entry_data, dict) and entry_data.get(
             "_monitoring_handoff_active", False
@@ -19443,6 +19640,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     is_solaredge = active_battery_system == BATTERY_SYSTEM_SOLAREDGE
     is_anker_solix = active_battery_system == BATTERY_SYSTEM_ANKER_SOLIX
     is_custom_battery = active_battery_system == BATTERY_SYSTEM_CUSTOM
+
+    def ac_inverter_is_same_hybrid() -> bool:
+        """Return whether the AC path targets the active Sungrow connection."""
+        if not is_sungrow:
+            return False
+
+        inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND,
+            entry.data.get(CONF_INVERTER_BRAND, ""),
+        )
+        if inverter_brand != "sungrow":
+            return False
+
+        inverter_host = entry.options.get(
+            CONF_INVERTER_HOST,
+            entry.data.get(CONF_INVERTER_HOST, ""),
+        )
+        inverter_port = entry.options.get(
+            CONF_INVERTER_PORT,
+            entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+        )
+        inverter_slave_id = entry.options.get(
+            CONF_INVERTER_SLAVE_ID,
+            entry.data.get(
+                CONF_INVERTER_SLAVE_ID,
+                DEFAULT_INVERTER_SLAVE_ID,
+            ),
+        )
+        sungrow_host = entry.options.get(
+            CONF_SUNGROW_HOST,
+            entry.data.get(CONF_SUNGROW_HOST, ""),
+        )
+        sungrow_port = entry.options.get(
+            CONF_SUNGROW_PORT,
+            entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT),
+        )
+        sungrow_slave_id = entry.options.get(
+            CONF_SUNGROW_SLAVE_ID,
+            entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID),
+        )
+        try:
+            return (
+                str(inverter_host).strip() == str(sungrow_host).strip()
+                and int(inverter_port) == int(sungrow_port)
+                and int(inverter_slave_id) == int(sungrow_slave_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -19501,6 +19747,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Running in Sungrow mode - Tesla credentials not required")
 
         # Initialize Sungrow Modbus coordinator
+        sungrow_connection_type = entry.options.get(
+            CONF_SUNGROW_CONNECTION_TYPE,
+            entry.data.get(
+                CONF_SUNGROW_CONNECTION_TYPE,
+                SUNGROW_CONNECTION_DIRECT,
+            ),
+        )
+        sungrow_telemetry_only = (
+            sungrow_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+        )
         sungrow_host = entry.options.get(
             CONF_SUNGROW_HOST,
             entry.data.get(CONF_SUNGROW_HOST)
@@ -19514,8 +19770,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
         )
         _LOGGER.info(
-            "Initializing Sungrow Modbus coordinator: %s:%s (slave %s)",
-            sungrow_host, sungrow_port, sungrow_slave_id
+            "Initializing Sungrow %s Modbus coordinator: %s:%s (slave %s%s)",
+            sungrow_connection_type,
+            sungrow_host,
+            sungrow_port,
+            sungrow_slave_id,
+            ", telemetry only" if sungrow_telemetry_only else "",
         )
         ac_inverter_enabled = entry.options.get(
             CONF_AC_INVERTER_CURTAILMENT_ENABLED,
@@ -19562,6 +19822,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             slave_id=sungrow_slave_id,
             entry_id=entry.entry_id,
             ac_inverter_source_id=ac_inverter_source_id,
+            telemetry_only=sungrow_telemetry_only,
         )
 
     elif is_foxess:
@@ -20093,19 +20354,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if sungrow_coordinator:
         try:
             await sungrow_coordinator.async_config_entry_first_refresh()
-            export_control_restored = (
-                await sungrow_coordinator.async_restore_persisted_export_control()
-            )
-            if not export_control_restored:
-                _LOGGER.warning(
-                    "Sungrow interrupted export control could not be fully restored; "
-                    "the persisted recovery state was retained"
-                )
             _LOGGER.info("Sungrow Modbus coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Sungrow Modbus coordinator failed to initialize: %s", e)
-            # Don't fail the entire setup - allow other features to work
-            sungrow_coordinator = None
+            _LOGGER.warning(
+                "Sungrow Modbus coordinator failed its first refresh; keeping "
+                "coordinator active so it can retry: %s",
+                e,
+            )
 
     if foxess_coordinator:
         try:
@@ -25212,34 +25467,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("sungrow_curtailment_state", "normal")
-
-        def ac_inverter_is_same_hybrid() -> bool:
-            inverter_brand = entry.options.get(
-                CONF_INVERTER_BRAND,
-                entry.data.get(CONF_INVERTER_BRAND, ""),
-            )
-            if inverter_brand != "sungrow":
-                return False
-
-            inverter_host = entry.options.get(
-                CONF_INVERTER_HOST,
-                entry.data.get(CONF_INVERTER_HOST, ""),
-            )
-            inverter_port = entry.options.get(
-                CONF_INVERTER_PORT,
-                entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
-            )
-            inverter_slave_id = entry.options.get(
-                CONF_INVERTER_SLAVE_ID,
-                entry.data.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID),
-            )
-            return (
-                inverter_host == entry.data.get(CONF_SUNGROW_HOST, "")
-                and inverter_port
-                == entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
-                and inverter_slave_id
-                == entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
-            )
 
         if feedin_price is None:
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
@@ -35956,6 +36183,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Inverter curtailment not enabled in config")
             return
 
+        if ac_inverter_is_same_hybrid():
+            _LOGGER.warning(
+                "Manual inverter curtailment blocked: the configured Sungrow AC "
+                "endpoint matches the active battery/telemetry connection"
+            )
+            return
+
         inverter_brand = entry.options.get(
             CONF_INVERTER_BRAND,
             entry.data.get(CONF_INVERTER_BRAND, "sungrow")
@@ -36104,6 +36338,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if not inverter_enabled:
             _LOGGER.warning("Inverter curtailment not enabled in config")
+            return
+
+        if ac_inverter_is_same_hybrid():
+            _LOGGER.warning(
+                "Manual inverter restore blocked: the configured Sungrow AC "
+                "endpoint matches the active battery/telemetry connection"
+            )
             return
 
         inverter_brand = entry.options.get(
@@ -38847,6 +39088,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             add_profit_max = hass.data[DOMAIN][entry.entry_id].pop("switch_add_profit_max", None)
             if add_profit_max:
                 add_profit_max(optimization_coordinator)
+            add_cost_neutral = hass.data[DOMAIN][entry.entry_id].pop(
+                "switch_add_cost_neutral", None
+            )
+            if add_cost_neutral:
+                add_cost_neutral(optimization_coordinator)
             add_charge_by_time = hass.data[DOMAIN][entry.entry_id].pop("switch_add_charge_by_time", None)
             if add_charge_by_time:
                 add_charge_by_time(optimization_coordinator)
@@ -38899,7 +39145,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_ELECTRICITY_PROVIDER,
                 entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
             )
-            if electricity_provider_for_vpp in ("globird", "aemo_vpp"):
+            if (
+                aemo_spike_enabled
+                and electricity_provider_for_vpp in ("globird", "aemo_vpp")
+            ):
                 aemo_region = entry.options.get(
                     CONF_AEMO_REGION,
                     entry.data.get(CONF_AEMO_REGION, "QLD1")
@@ -39119,6 +39368,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoints for Smart Optimization
     hass.http.register_view(OptimizationView(hass))
     hass.http.register_view(OptimizationSettingsView(hass))
+    hass.http.register_view(OptimizationAISummaryView(hass))
     _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
     # Reload integration when options change (e.g. optimizer toggled in config flow)
@@ -39153,6 +39403,27 @@ async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+def _optimization_ai_service(
+    hass: HomeAssistant,
+    entry_id: str,
+    opt_coordinator: Any,
+):
+    """Return the per-entry descriptive AI-summary service."""
+    from .optimization.ai_summary import AISummaryService
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id)
+    if not isinstance(entry_data, dict):
+        return None
+    service = entry_data.get("_optimization_ai_summary_service")
+    if service is None and opt_coordinator is not None:
+        service = AISummaryService(
+            async_get_clientsession(hass),
+            opt_coordinator.get_api_data,
+        )
+        entry_data["_optimization_ai_summary_service"] = service
+    return service
+
+
 class OptimizationView(HomeAssistantView):
     """HTTP view to get optimization schedule and status."""
 
@@ -39170,10 +39441,23 @@ class OptimizationView(HomeAssistantView):
 
         # Find the optimization coordinator
         opt_coordinator = None
+        optimization_entry_id = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict) and "optimization_coordinator" in data:
                 opt_coordinator = data["optimization_coordinator"]
+                optimization_entry_id = entry_id
                 break
+
+        config_entry = next(
+            (
+                entry
+                for entry in self._hass.config_entries.async_entries(DOMAIN)
+                if optimization_entry_id is None or entry.entry_id == optimization_entry_id
+            ),
+            None,
+        )
+        from .optimization.ai_summary import ai_summary_settings, configured_api_key
+        ai_settings = ai_summary_settings(config_entry)
 
         if not opt_coordinator:
             # Optimization not enabled - return disabled status
@@ -39183,10 +39467,31 @@ class OptimizationView(HomeAssistantView):
                 "enabled": False,
                 "optimizer_available": False,
                 "status": "not_configured",
-                "message": "Smart Optimization is not enabled. Enable it in settings."
+                "message": "Smart Optimization is not enabled. Enable it in settings.",
+                "features": {"ai_summary": True},
+                "ai_summary": {
+                    "configured": ai_settings["ai_summary_key_configured"],
+                    "state": "optimizer_unavailable"
+                    if ai_settings["ai_summary_key_configured"]
+                    else "not_configured",
+                    "summary": None,
+                    "last_error": None,
+                },
             })
 
         api_data = opt_coordinator.get_api_data()
+        api_data.setdefault("features", {})["ai_summary"] = True
+        service = _optimization_ai_service(
+            self._hass,
+            optimization_entry_id or opt_coordinator.entry_id,
+            opt_coordinator,
+        )
+        if service is not None:
+            api_data["ai_summary"] = service.status(
+                snapshot=api_data,
+                provider=ai_settings["ai_summary_provider"],
+                api_key=configured_api_key(config_entry),
+            )
         _LOGGER.debug(f"Optimization GET response: enabled={api_data.get('enabled')}, "
                       f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
                       f"savings=${api_data.get('predicted_savings', 0):.2f}, "
@@ -39430,8 +39735,10 @@ class OptimizationSettingsView(HomeAssistantView):
                 configured_reserve=backup_reserve,
                 manual_reserve=manual_reserve,
             )
+            from .optimization.ai_summary import ai_summary_settings
             return web.json_response({
                 "success": True,
+                **ai_summary_settings(config_entry),
                 "enabled": bool(
                     config_entry
                     and config_entry.options.get(CONF_OPTIMIZATION_ENABLED, False)
@@ -39463,6 +39770,17 @@ class OptimizationSettingsView(HomeAssistantView):
                     and config_entry.options.get(
                         CONF_PROFIT_MAX_ENABLED,
                         config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
+                    )
+                    and not config_entry.options.get(
+                        CONF_COST_NEUTRAL_ENABLED,
+                        config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
+                    )
+                ),
+                "cost_neutral_enabled": bool(
+                    config_entry
+                    and config_entry.options.get(
+                        CONF_COST_NEUTRAL_ENABLED,
+                        config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
                     )
                 ),
                 "charge_by_time_enabled": charge_by_time_enabled,
@@ -39591,14 +39909,17 @@ class OptimizationSettingsView(HomeAssistantView):
             else None
         )
 
+        from .optimization.ai_summary import ai_summary_settings
         return web.json_response({
             "success": True,
+            **ai_summary_settings(config_entry),
             "enabled": opt_coordinator.enabled,
             "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
             "ev_integration": opt_coordinator._ev_integration_enabled,
             "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
             "profit_max_enabled": opt_coordinator.profit_max_mode,
+            "cost_neutral_enabled": opt_coordinator.cost_neutral_enabled,
             "charge_by_time_enabled": opt_coordinator.charge_by_time_enabled,
             "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
@@ -39687,6 +40008,81 @@ class OptimizationSettingsView(HomeAssistantView):
                 entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
                 if isinstance(entry_data, dict):
                     opt_coordinator = entry_data.get("optimization_coordinator")
+
+            ai_setting_keys = {
+                "ai_summary_provider",
+                "ai_summary_api_key",
+                "clear_ai_summary_api_key",
+            }
+            if ai_setting_keys.intersection(settings):
+                if config_entry is None:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "code": "integration_not_configured",
+                            "message": "PowerSync is not configured.",
+                        },
+                        status=400,
+                    )
+                from .optimization.ai_summary import (
+                    AISummaryError,
+                    ai_summary_settings,
+                    apply_ai_summary_settings,
+                )
+                try:
+                    new_options, ai_changes = apply_ai_summary_settings(
+                        config_entry.options,
+                        settings,
+                    )
+                except AISummaryError as err:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "code": err.code,
+                            "message": err.message,
+                        },
+                        status=err.http_status,
+                    )
+                if new_options != dict(config_entry.options):
+                    if isinstance(entry_data, dict):
+                        entry_data["_skip_reload"] = True
+                    self._hass.config_entries.async_update_entry(
+                        config_entry,
+                        options=new_options,
+                    )
+                    service = (
+                        entry_data.get("_optimization_ai_summary_service")
+                        if isinstance(entry_data, dict)
+                        else None
+                    )
+                    if service is not None:
+                        service.invalidate()
+                settings = {
+                    key: value
+                    for key, value in settings.items()
+                    if key not in ai_setting_keys
+                }
+                changes.extend(ai_changes)
+                if not settings:
+                    return web.json_response(
+                        {
+                            "success": True,
+                            "changes": changes,
+                            **ai_summary_settings(config_entry),
+                        }
+                    )
+
+            if (
+                settings.get("profit_max_enabled") is True
+                and settings.get("cost_neutral_enabled") is True
+            ):
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "Profit Max and Cost Neutral cannot both be enabled",
+                    },
+                    status=400,
+                )
 
             # If coordinator exists, use it
             if opt_coordinator:
@@ -39870,9 +40266,20 @@ class OptimizationSettingsView(HomeAssistantView):
                 changes.append(f"Set planned EV load entity to {entity_id or 'cleared'}")
 
             if "profit_max_enabled" in settings:
-                from .const import CONF_PROFIT_MAX_ENABLED
                 new_options[CONF_PROFIT_MAX_ENABLED] = bool(settings["profit_max_enabled"])
+                if settings["profit_max_enabled"]:
+                    new_options[CONF_COST_NEUTRAL_ENABLED] = False
                 changes.append(f"Set profit maximisation mode to {settings['profit_max_enabled']}")
+
+            if "cost_neutral_enabled" in settings:
+                new_options[CONF_COST_NEUTRAL_ENABLED] = bool(
+                    settings["cost_neutral_enabled"]
+                )
+                if settings["cost_neutral_enabled"]:
+                    new_options[CONF_PROFIT_MAX_ENABLED] = False
+                changes.append(
+                    f"Set Cost Neutral mode to {settings['cost_neutral_enabled']}"
+                )
 
             if "charge_by_time_enabled" in settings:
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = bool(settings["charge_by_time_enabled"])
@@ -40130,6 +40537,108 @@ class OptimizationSettingsView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+
+class OptimizationAISummaryView(HomeAssistantView):
+    """Explicitly generate a descriptive explanation of the current plan."""
+
+    url = "/api/power_sync/optimization/ai_summary"
+    name = "api:power_sync:optimization:ai_summary"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Generate only after a deliberate authenticated request."""
+        from .optimization.ai_summary import (
+            AISummaryError,
+            ai_summary_settings,
+            configured_api_key,
+        )
+
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ValueError, TypeError):
+            payload = None
+        if not isinstance(payload, dict) or set(payload) - {"refresh"}:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "invalid_ai_summary_request",
+                    "message": "The request may contain only refresh: true or false.",
+                },
+                status=400,
+            )
+        refresh = payload.get("refresh", False)
+        if not isinstance(refresh, bool):
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "invalid_ai_summary_request",
+                    "message": "refresh must be true or false.",
+                },
+                status=400,
+            )
+
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        config_entry = entries[0] if entries else None
+        entry_data = (
+            self._hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+            if config_entry
+            else None
+        )
+        opt_coordinator = (
+            entry_data.get("optimization_coordinator")
+            if isinstance(entry_data, dict)
+            else None
+        )
+        if config_entry is None or opt_coordinator is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "optimizer_unavailable",
+                    "message": "Smart Optimization is unavailable, so there is no plan to explain.",
+                },
+                status=409,
+            )
+
+        public_settings = ai_summary_settings(config_entry)
+        service = _optimization_ai_service(
+            self._hass,
+            config_entry.entry_id,
+            opt_coordinator,
+        )
+        if service is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "code": "optimizer_unavailable",
+                    "message": "The AI plan explanation service is unavailable.",
+                },
+                status=409,
+            )
+
+        try:
+            result = await service.generate(
+                provider=public_settings["ai_summary_provider"],
+                api_key=configured_api_key(config_entry),
+                refresh=refresh,
+            )
+        except AISummaryError as err:
+            _LOGGER.warning("AI plan explanation failed: %s", err.code)
+            return web.json_response(
+                {
+                    "success": False,
+                    "state": "error",
+                    "code": err.code,
+                    "message": err.message,
+                    "summary": None,
+                },
+                status=err.http_status,
+            )
+        return web.json_response({"success": True, **result})
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
