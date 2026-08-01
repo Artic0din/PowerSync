@@ -19,6 +19,8 @@ _LOGGER = logging.getLogger(__name__)
 
 _UNAVAILABLE = {"", "unknown", "unavailable", "none", "None"}
 
+# Canonical suffixes come from solaredge-modbus-multi's select.py and number.py;
+# the remaining values support other SolarEdge entity naming conventions.
 _CONTROL_ENTITIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "storage_control_mode": (
         "select",
@@ -305,7 +307,9 @@ class SolarEdgeController(InverterController):
     ) -> None:
         super().__init__(host, port, slave_id, model)
         self.rated_power_w = float(rated_power_w or self.DEFAULT_RATED_POWER_W)
-        self.entity_prefix = (entity_prefix or "").strip()
+        self.entity_prefix = (
+            (entity_prefix or "").strip().removesuffix("*").rstrip("_")
+        )
         self._hass = hass
         self._client = None
         self._lock = asyncio.Lock()
@@ -615,6 +619,9 @@ class SolarEdgeController(InverterController):
 class SolarEdgeEnergyController:
     """Bridge SolarEdge Home battery telemetry and control through HA entities."""
 
+    WRITE_CONFIRM_TIMEOUT_SECONDS = 15.0
+    WRITE_CONFIRM_INTERVAL_SECONDS = 0.25
+
     def __init__(
         self,
         hass: Any,
@@ -622,7 +629,7 @@ class SolarEdgeEnergyController:
         solaredge_entry_id: str | None = None,
     ) -> None:
         self.hass = hass
-        self._prefix = entity_prefix.strip()
+        self._prefix = entity_prefix.strip().removesuffix("*").rstrip("_")
         self._solaredge_entry_id = (solaredge_entry_id or "").strip()
         self._entity_map: dict[str, str] = {}
         self._control_entity_map: dict[str, str] = {}
@@ -880,6 +887,19 @@ class SolarEdgeEnergyController:
             )
             return False
 
+        command_aliases = (
+            _CHARGE_OPTIONS if command == "charge" else _DISCHARGE_OPTIONS
+        )
+        command_entity_id = self._control_entity_map["storage_command_mode"]
+        command_option = self._match_select_option(command_entity_id, command_aliases)
+        if command_option is None:
+            _LOGGER.error(
+                "SolarEdge force %s failed: %s has no matching command option",
+                command,
+                command_entity_id,
+            )
+            return False
+
         self._save_current_control_state()
         duration_seconds = max(60, int(duration_minutes) * 60)
         target_power = self._coerce_target_power("charge_power_limit" if command == "charge" else "discharge_power_limit", power_w)
@@ -889,14 +909,21 @@ class SolarEdgeEnergyController:
             ok &= await self._set_select_by_alias("storage_control_mode", _REMOTE_CONTROL_OPTIONS)
             ok &= await self._set_number_if_mapped("command_timeout", duration_seconds)
             if command == "charge":
-                ok &= await self._set_optional_grid_charge(True)
+                if not await self._set_optional_grid_charge(True):
+                    if self._is_explicit_grid_charge_option(command_option):
+                        _LOGGER.warning(
+                            "SolarEdge AC charge policy write failed; continuing with "
+                            "the explicit storage grid-charge command"
+                        )
+                    else:
+                        ok = False
                 ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
                 ok &= await self._set_number_if_mapped("charge_power_limit", target_power)
-                ok &= await self._set_select_by_alias("storage_command_mode", _CHARGE_OPTIONS)
+                ok &= await self._select_option(command_entity_id, command_option)
             else:
                 ok &= await self._set_number_if_mapped("charge_power_limit", 0)
                 ok &= await self._set_number_if_mapped("discharge_power_limit", target_power)
-                ok &= await self._set_select_by_alias("storage_command_mode", _DISCHARGE_OPTIONS)
+                ok &= await self._select_option(command_entity_id, command_option)
             if not ok:
                 await self.restore_normal()
             return bool(ok)
@@ -941,11 +968,46 @@ class SolarEdgeEnergyController:
             if entity_id:
                 self._entity_map[key] = entity_id
         for key, (domain, suffixes) in _CONTROL_ENTITIES.items():
-            entity_id = self._resolve_entity_id(entity_ids, domain, suffixes, legacy_prefix, key)
+            entity_id = self._resolve_control_entity_id(
+                entity_ids, domain, suffixes, legacy_prefix, key
+            )
             if not entity_id and key == "allow_grid_charge":
-                entity_id = self._resolve_entity_id(entity_ids, "select", suffixes, legacy_prefix, key)
+                entity_id = self._resolve_control_entity_id(
+                    entity_ids, "select", suffixes, legacy_prefix, key
+                )
             if entity_id:
                 self._control_entity_map[key] = entity_id
+
+    def _resolve_control_entity_id(
+        self,
+        entity_ids: list[str],
+        domain: str,
+        suffixes: tuple[str, ...],
+        prefix: str | None,
+        key: str,
+    ) -> str | None:
+        """Return the first usable control candidate in suffix order."""
+        for suffix in suffixes:
+            entity_id = self._resolve_entity_id(
+                entity_ids,
+                domain,
+                (suffix,),
+                prefix,
+                key,
+            )
+            if not entity_id:
+                continue
+            rejection = self._control_candidate_rejection(entity_id, key)
+            if rejection:
+                _LOGGER.debug(
+                    "SolarEdge rejected %s candidate %s: %s",
+                    key,
+                    entity_id,
+                    rejection,
+                )
+                continue
+            return entity_id
+        return None
 
     def _resolve_entity_id(
         self,
@@ -989,6 +1051,65 @@ class SolarEdgeEnergyController:
         if not valid_matches:
             return None
         return sorted(valid_matches, key=lambda entity_id: self._match_score(entity_id, key))[0]
+
+    def _control_candidate_rejection(self, entity_id: str, key: str) -> str | None:
+        """Return why a writable entity cannot safely fulfil a control role."""
+        if key not in _CONTROL_ENTITIES:
+            return None
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return "entity has no state"
+
+        domain = entity_id.split(".", 1)[0]
+        body = entity_id.split(".", 1)[-1].lower()
+        if key == "storage_control_mode":
+            if "_limit_control_mode" in body:
+                return "Limit Control Mode controls export or production, not storage"
+            options = (getattr(state, "attributes", {}) or {}).get("options") or []
+            recognised = {
+                _normalize_option(alias)
+                for alias in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
+            }
+            if options and not any(
+                _normalize_option(str(option)) in recognised for option in options
+            ):
+                return "selector has no recognised storage-control options"
+
+        if domain == "number" and key in {
+            "charge_power_limit",
+            "discharge_power_limit",
+        }:
+            attrs = getattr(state, "attributes", {}) or {}
+            unit = str(attrs.get("unit_of_measurement", "")).lower()
+            if (
+                "ac_charge_limit" in body or "accharge_limit" in body
+            ) and unit and unit not in {"w", "kw"}:
+                return (
+                    "AC Charge Limit controls an energy or production-policy limit"
+                )
+            try:
+                minimum = float(attrs.get("min", attrs.get("native_min_value", 0)))
+                maximum_value = attrs.get("max", attrs.get("native_max_value"))
+                maximum = (
+                    float(maximum_value) if maximum_value is not None else None
+                )
+            except (TypeError, ValueError):
+                return "numeric range is invalid"
+            if not math.isfinite(minimum) or (
+                maximum is not None and not math.isfinite(maximum)
+            ):
+                return "numeric range is not finite"
+            if maximum is not None and (maximum == 0 or maximum <= minimum):
+                return f"numeric range is unusable ({minimum} to {maximum})"
+
+        return None
+
+    @staticmethod
+    def _is_explicit_grid_charge_option(option: str) -> bool:
+        """Return whether a storage command explicitly permits grid charging."""
+        normalized = _normalize_option(option)
+        return "grid" in normalized or re.search(r"\bac\b", normalized) is not None
 
     @staticmethod
     def _is_non_solar_power_entity(entity_id: str) -> bool:
@@ -1093,6 +1214,14 @@ class SolarEdgeEnergyController:
             )
             return True
         except Exception as err:
+            if await self._wait_for_reflected_state(entity_id, numeric):
+                _LOGGER.warning(
+                    "SolarEdge number write for %s raised %s, but the requested "
+                    "state was subsequently reflected",
+                    entity_id,
+                    err,
+                )
+                return True
             _LOGGER.error("SolarEdge number write failed for %s: %s", entity_id, err)
             return False
 
@@ -1146,6 +1275,15 @@ class SolarEdgeEnergyController:
             )
             return True
         except Exception as err:
+            if await self._wait_for_reflected_state(entity_id, option):
+                _LOGGER.warning(
+                    "SolarEdge select write for %s=%s raised %s, but the requested "
+                    "state was subsequently reflected",
+                    entity_id,
+                    option,
+                    err,
+                )
+                return True
             _LOGGER.error("SolarEdge select write failed for %s=%s: %s", entity_id, option, err)
             return False
 
@@ -1183,6 +1321,39 @@ class SolarEdgeEnergyController:
         except Exception as err:
             _LOGGER.error("SolarEdge switch write failed for %s: %s", entity_id, err)
             return False
+
+    async def _wait_for_reflected_state(
+        self,
+        entity_id: str,
+        expected: Any,
+    ) -> bool:
+        """Confirm an ambiguous service-call outcome from the HA state machine."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.WRITE_CONFIRM_TIMEOUT_SECONDS
+        while True:
+            state = self.hass.states.get(entity_id)
+            current = getattr(state, "state", None)
+            if self._control_values_match(entity_id, current, expected):
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(self.WRITE_CONFIRM_INTERVAL_SECONDS, remaining))
+
+    @staticmethod
+    def _control_values_match(
+        entity_id: str,
+        current: Any,
+        expected: Any,
+    ) -> bool:
+        if current is None or str(current) in _UNAVAILABLE:
+            return False
+        if entity_id.startswith("number."):
+            try:
+                return math.isclose(float(current), float(expected))
+            except (TypeError, ValueError):
+                return False
+        return _normalize_option(str(current)) == _normalize_option(str(expected))
 
     def _expected_entity_hint(self, key: str) -> str:
         suffixes = _ENERGY_READ_ENTITIES.get(key) or ()
