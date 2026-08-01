@@ -463,6 +463,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # stored grid energy used by the export-profitability gate.
         self._actual_grid_charge_kwh_today = 0.0
         self._actual_grid_charge_cost_today = 0.0
+        self._grid_charge_tracking_known = True
         self._actual_zerohero_import_kwh_today = 0.0
         self._actual_zerohero_export_kwh_today = 0.0
         self._actual_zerohero_bonus_export_kwh_today = 0.0
@@ -4527,6 +4528,63 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("%s: released IDLE no-discharge mode", context)
         return True
 
+    def _acquisition_cost_for_run(
+        self,
+        *,
+        import_prices: list[float],
+        current_soc: float,
+        capacity_wh: float,
+    ) -> float:
+        """Return the best supported acquisition cost for stored energy."""
+        tracking_known = bool(
+            getattr(self, "_grid_charge_tracking_known", False)
+        )
+        grid_charge_kwh = max(
+            0.0,
+            float(getattr(self, "_actual_grid_charge_kwh_today", 0.0) or 0.0),
+        )
+        grid_charge_cost = float(
+            getattr(self, "_actual_grid_charge_cost_today", 0.0) or 0.0
+        )
+        if tracking_known and grid_charge_kwh > 1e-6:
+            return grid_charge_cost / grid_charge_kwh
+
+        if tracking_known:
+            total_charge_kwh = max(
+                0.0,
+                float(getattr(self, "_actual_charge_kwh_today", 0.0) or 0.0),
+            )
+            total_discharge_kwh = max(
+                0.0,
+                float(getattr(self, "_actual_discharge_kwh_today", 0.0) or 0.0),
+            )
+            remaining_solar_charge_kwh = max(
+                0.0,
+                total_charge_kwh - grid_charge_kwh - total_discharge_kwh,
+            )
+            current_stored_energy_kwh = (
+                max(0.0, min(1.0, float(current_soc)))
+                * max(0.0, float(capacity_wh))
+                / 1000.0
+            )
+            # Only call the inventory solar-sourced when today's measured net
+            # solar charging can account for all energy currently in the
+            # battery. This keeps unknown overnight carry-over conservative.
+            if (
+                current_stored_energy_kwh > 0.1
+                and remaining_solar_charge_kwh + 1e-9
+                >= current_stored_energy_kwh
+            ):
+                return 0.0
+
+        # With no measured charge provenance for the current day, retain the
+        # conservative proxy for energy that may have carried over overnight.
+        return (
+            sorted(import_prices)[len(import_prices) // 2]
+            if import_prices
+            else 0.0
+        )
+
     async def _run_optimization(
         self,
         force: bool = False,
@@ -4718,25 +4776,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc * 100,
                 )
 
-            # Compute acquisition cost: actual cost per kWh of GRID-charged
-            # energy. Use the grid-charge-specific accumulators (cost of grid
-            # energy that went into the battery / kWh of grid charging), not
-            # total household import cost over total charge (which includes
-            # house-load import in the numerator and solar charging in the
-            # denominator, inflating the value and wrongly blocking exports).
-            if self._actual_grid_charge_kwh_today > 0.1:
-                acq_cost = (
-                    self._actual_grid_charge_cost_today
-                    / self._actual_grid_charge_kwh_today
-                )
-            else:
-                # No meaningful grid-charge data yet — use median import price
-                # as proxy.
-                acq_cost = (
-                    sorted(import_prices)[len(import_prices) // 2]
-                    if import_prices
-                    else 0.0
-                )
+            # Use measured grid cost for grid-charged energy, zero purchase
+            # cost for measured solar-only charging, and a conservative median
+            # import proxy only when today's charge provenance is unknown.
+            acq_cost = self._acquisition_cost_for_run(
+                import_prices=import_prices,
+                current_soc=soc,
+                capacity_wh=capacity,
+            )
 
             # Suppress the below-reserve WARNING when a user-triggered force
             # discharge is active — draining past the LP reserve is intentional
@@ -11836,6 +11883,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_export_earnings_today = float(data.get("export_earnings", 0.0))
             self._actual_grid_charge_kwh_today = float(data.get("grid_charge_kwh", 0.0))
             self._actual_grid_charge_cost_today = float(data.get("grid_charge_cost", 0.0))
+            has_grid_charge_provenance = (
+                "grid_charge_kwh" in data and "grid_charge_cost" in data
+            )
+            self._grid_charge_tracking_known = bool(
+                data.get(
+                    "grid_charge_tracking_known",
+                    has_grid_charge_provenance,
+                )
+            )
             zerohero = data.get("zerohero", {}) or {}
             self._actual_zerohero_import_kwh_today = float(zerohero.get("import_window_kwh", 0.0))
             self._actual_zerohero_export_kwh_today = float(zerohero.get("export_window_kwh", 0.0))
@@ -11904,6 +11960,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "export_earnings": round(self._actual_export_earnings_today, 4),
             "grid_charge_kwh": round(self._actual_grid_charge_kwh_today, 4),
             "grid_charge_cost": round(self._actual_grid_charge_cost_today, 4),
+            "grid_charge_tracking_known": bool(
+                self._grid_charge_tracking_known
+            ),
             "zerohero": {
                 "import_window_kwh": round(self._actual_zerohero_import_kwh_today, 4),
                 "export_window_kwh": round(self._actual_zerohero_export_kwh_today, 4),
@@ -12180,6 +12239,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_export_earnings_today = 0.0
             self._actual_grid_charge_kwh_today = 0.0
             self._actual_grid_charge_cost_today = 0.0
+            self._grid_charge_tracking_known = True
             self._actual_zerohero_import_kwh_today = 0.0
             self._actual_zerohero_export_kwh_today = 0.0
             self._actual_zerohero_bonus_export_kwh_today = 0.0

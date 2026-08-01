@@ -2077,6 +2077,58 @@ def test_fit_export_above_acquisition_not_blocked_by_peak_import(
     assert max(result.grid_export_w[today_start:today_start + 24]) > 1000
 
 
+@pytest.mark.parametrize(
+    ("future_load_kw", "terminal_weight", "expects_export"),
+    [(0.0, 0.0, True), (0.4, 1.0, False)],
+)
+def test_solar_only_acquisition_removes_only_flow_happy_hour_export_veto(
+    battery_optimizer_module,
+    future_load_kw,
+    terminal_weight,
+    expects_export,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=48,
+        terminal_weight=terminal_weight,
+    )
+    n = 48 * 12
+    happy_hour_slots = 7
+    import_prices = [0.43] * n
+    import_prices[0] = 0.532
+    export_prices = [0.0] * n
+    export_prices[:happy_hour_slots] = [0.35] * happy_hour_slots
+    export_allowed = [idx < happy_hour_slots for idx in range(n)]
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * happy_hour_slots
+        + [future_load_kw] * (n - happy_hour_slots),
+        current_soc=0.94,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=export_allowed,
+        block_battery_charge=export_allowed,
+        priority_export_slots=export_allowed,
+        priority_export_enabled=True,
+    )
+
+    exported = any(
+        action.action == "export"
+        for action in result.schedule.actions[:happy_hour_slots]
+    )
+    assert exported is expects_export
+    if expects_export:
+        assert max(result.grid_export_w[:happy_hour_slots]) > 1_000
+    else:
+        assert max(result.grid_export_w[:happy_hour_slots]) == pytest.approx(0.0)
+
+
 def test_priority_export_uses_surplus_above_optimizer_floor(
     battery_optimizer_module,
 ):

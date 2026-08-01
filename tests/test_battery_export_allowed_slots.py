@@ -2693,6 +2693,107 @@ def test_flow_power_happy_hour_is_priority_export_without_profit_max(opt_module)
     assert _true_indexes(slots) == list(range(108, 132))
 
 
+def test_solar_only_charge_does_not_use_median_import_as_acquisition_cost(
+    opt_module,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 31.0
+    coordinator._actual_discharge_kwh_today = 0.5
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.43],
+        current_soc=0.94,
+        capacity_wh=32_000,
+    )
+
+    assert acquisition_cost == 0.0
+
+
+def test_small_solar_top_up_keeps_unknown_carry_over_conservative(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 9.4
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.41],
+        current_soc=0.94,
+        capacity_wh=32_000,
+    )
+
+    assert acquisition_cost == pytest.approx(0.43)
+
+
+def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
+    opt_module,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = False
+    coordinator._actual_charge_kwh_today = 31.0
+    coordinator._actual_discharge_kwh_today = 0.5
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.41],
+        current_soc=0.94,
+        capacity_wh=32_000,
+    )
+
+    assert acquisition_cost == pytest.approx(0.43)
+
+
+def test_grid_charge_keeps_measured_acquisition_cost(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 9.4
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator._actual_grid_charge_kwh_today = 0.05
+    coordinator._actual_grid_charge_cost_today = 0.02
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.41],
+        current_soc=0.94,
+        capacity_wh=32_000,
+    )
+
+    assert acquisition_cost == pytest.approx(0.40)
+
+
+@pytest.mark.parametrize(
+    ("grid_fields", "expected_known"),
+    [({}, False), ({"grid_charge_kwh": 0.0, "grid_charge_cost": 0.0}, True)],
+)
+def test_cost_restore_distinguishes_legacy_missing_grid_charge_provenance(
+    opt_module,
+    grid_fields,
+    expected_known,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    payload = {
+        "date": "2026-05-03",
+        "charge_kwh": 31.0,
+        "discharge_kwh": 0.5,
+        **grid_fields,
+    }
+
+    async def _load():
+        return payload
+
+    coordinator._cost_store = SimpleNamespace(async_load=_load)
+    coordinator._ensure_custom_tariff_quota_ledger = lambda *args, **kwargs: None
+    coordinator._covau_snapshot = lambda: None
+
+    asyncio.run(coordinator._restore_cost_data())
+
+    assert coordinator._grid_charge_tracking_known is expected_known
+
+
 def test_zerohero_blocks_battery_charge_during_no_import_window(opt_module):
     coordinator = _coordinator(
         opt_module,
