@@ -619,7 +619,7 @@ class SolarEdgeController(InverterController):
 class SolarEdgeEnergyController:
     """Bridge SolarEdge Home battery telemetry and control through HA entities."""
 
-    WRITE_CONFIRM_TIMEOUT_SECONDS = 3.0
+    WRITE_CONFIRM_TIMEOUT_SECONDS = 15.0
     WRITE_CONFIRM_INTERVAL_SECONDS = 0.25
 
     def __init__(
@@ -887,8 +887,19 @@ class SolarEdgeEnergyController:
             )
             return False
 
-        # TODO: Preflight required select options here if partial dispatch
-        # becomes a problem on integrations that expose incomplete option lists.
+        command_aliases = (
+            _CHARGE_OPTIONS if command == "charge" else _DISCHARGE_OPTIONS
+        )
+        command_entity_id = self._control_entity_map["storage_command_mode"]
+        command_option = self._match_select_option(command_entity_id, command_aliases)
+        if command_option is None:
+            _LOGGER.error(
+                "SolarEdge force %s failed: %s has no matching command option",
+                command,
+                command_entity_id,
+            )
+            return False
+
         self._save_current_control_state()
         duration_seconds = max(60, int(duration_minutes) * 60)
         target_power = self._coerce_target_power("charge_power_limit" if command == "charge" else "discharge_power_limit", power_w)
@@ -899,17 +910,20 @@ class SolarEdgeEnergyController:
             ok &= await self._set_number_if_mapped("command_timeout", duration_seconds)
             if command == "charge":
                 if not await self._set_optional_grid_charge(True):
-                    _LOGGER.warning(
-                        "SolarEdge AC charge policy write failed; continuing with "
-                        "the explicit storage grid-charge command"
-                    )
+                    if self._is_explicit_grid_charge_option(command_option):
+                        _LOGGER.warning(
+                            "SolarEdge AC charge policy write failed; continuing with "
+                            "the explicit storage grid-charge command"
+                        )
+                    else:
+                        ok = False
                 ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
                 ok &= await self._set_number_if_mapped("charge_power_limit", target_power)
-                ok &= await self._set_select_by_alias("storage_command_mode", _CHARGE_OPTIONS)
+                ok &= await self._select_option(command_entity_id, command_option)
             else:
                 ok &= await self._set_number_if_mapped("charge_power_limit", 0)
                 ok &= await self._set_number_if_mapped("discharge_power_limit", target_power)
-                ok &= await self._set_select_by_alias("storage_command_mode", _DISCHARGE_OPTIONS)
+                ok &= await self._select_option(command_entity_id, command_option)
             if not ok:
                 await self.restore_normal()
             return bool(ok)
@@ -953,8 +967,6 @@ class SolarEdgeEnergyController:
             entity_id = self._resolve_entity_id(entity_ids, "sensor", suffixes, legacy_prefix, key)
             if entity_id:
                 self._entity_map[key] = entity_id
-        # TODO: Add explicit inverter scoping here if generic prefixes need
-        # first-class support for installations with multiple inverters.
         for key, (domain, suffixes) in _CONTROL_ENTITIES.items():
             entity_id = self._resolve_control_entity_id(
                 entity_ids, domain, suffixes, legacy_prefix, key
@@ -1048,8 +1060,6 @@ class SolarEdgeEnergyController:
         state = self.hass.states.get(entity_id)
         if state is None:
             return "entity has no state"
-        if str(state.state) in _UNAVAILABLE:
-            return f"state is {state.state!r}"
 
         domain = entity_id.split(".", 1)[0]
         body = entity_id.split(".", 1)[-1].lower()
@@ -1061,7 +1071,7 @@ class SolarEdgeEnergyController:
                 _normalize_option(alias)
                 for alias in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
             }
-            if not any(
+            if options and not any(
                 _normalize_option(str(option)) in recognised for option in options
             ):
                 return "selector has no recognised storage-control options"
@@ -1071,6 +1081,13 @@ class SolarEdgeEnergyController:
             "discharge_power_limit",
         }:
             attrs = getattr(state, "attributes", {}) or {}
+            unit = str(attrs.get("unit_of_measurement", "")).lower()
+            if (
+                "ac_charge_limit" in body or "accharge_limit" in body
+            ) and unit and unit not in {"w", "kw"}:
+                return (
+                    "AC Charge Limit controls an energy or production-policy limit"
+                )
             try:
                 minimum = float(attrs.get("min", attrs.get("native_min_value", 0)))
                 maximum_value = attrs.get("max", attrs.get("native_max_value"))
@@ -1087,6 +1104,12 @@ class SolarEdgeEnergyController:
                 return f"numeric range is unusable ({minimum} to {maximum})"
 
         return None
+
+    @staticmethod
+    def _is_explicit_grid_charge_option(option: str) -> bool:
+        """Return whether a storage command explicitly permits grid charging."""
+        normalized = _normalize_option(option)
+        return "grid" in normalized or re.search(r"\bac\b", normalized) is not None
 
     @staticmethod
     def _is_non_solar_power_entity(entity_id: str) -> bool:

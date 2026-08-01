@@ -625,9 +625,9 @@ def test_solaredge_control_discovery_rejects_limit_control_mode():
     assert "storage_control_mode" in controller.missing_control_entities()
 
 
-def test_solaredge_control_discovery_continues_after_unavailable_candidate():
+def test_solaredge_control_discovery_continues_after_unusable_candidate():
     hass = _SEHass()
-    hass.states.get("number.solaredge_storage_charge_limit").state = "unavailable"
+    hass.states.get("number.solaredge_storage_charge_limit").attributes["max"] = 0
     hass.states._states["number.solaredge_battery_charge_power_limit"] = _SEState(
         "number.solaredge_battery_charge_power_limit",
         "0",
@@ -639,6 +639,37 @@ def test_solaredge_control_discovery_continues_after_unavailable_candidate():
     assert controller._control_entity_map["charge_power_limit"] == (
         "number.solaredge_battery_charge_power_limit"
     )
+
+
+def test_solaredge_control_discovery_keeps_unavailable_remote_controls():
+    hass = _SEHass()
+    for entity_id in (
+        "select.solaredge_storage_control_mode",
+        "select.solaredge_storage_command_mode",
+        "number.solaredge_storage_charge_limit",
+        "number.solaredge_storage_discharge_limit",
+        "number.solaredge_storage_command_timeout",
+    ):
+        hass.states.get(entity_id).state = "unavailable"
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert controller.control_available()
+    assert controller.missing_control_entities() == []
+
+
+def test_solaredge_control_discovery_rejects_ac_charge_energy_limit():
+    hass = _SEHass()
+    hass.states._states.pop("number.solaredge_storage_charge_limit")
+    hass.states._states["number.solaredge_i1_storage_ac_charge_limit"] = _SEState(
+        "number.solaredge_i1_storage_ac_charge_limit",
+        "1000",
+        {"unit_of_measurement": "kWh", "min": 0, "max": 100000000},
+    )
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert "charge_power_limit" not in controller._control_entity_map
 
 
 def test_solaredge_control_discovery_keeps_usable_ac_charge_limit_fallback():
@@ -802,13 +833,34 @@ def test_solaredge_force_charge_does_not_rollback_when_ac_policy_fails():
     )
 
 
+def test_solaredge_force_charge_rolls_back_when_required_ac_policy_fails():
+    hass = _SEHass()
+    hass.states._states.pop("switch.solaredge_allow_grid_charge")
+    policy_entity_id = "select.solaredge_i1_ac_charge_policy"
+    hass.states._states[policy_entity_id] = _SEState(
+        policy_entity_id,
+        "Disabled",
+        {"options": ["Disabled", "Always Allowed"]},
+    )
+    hass.services = _SEFailingServices(hass.states, policy_entity_id)
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    controller.WRITE_CONFIRM_TIMEOUT_SECONDS = 0
+
+    assert asyncio.run(controller.connect())
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.states.get("select.solaredge_storage_control_mode").state == (
+        "Maximize Self Consumption"
+    )
+    assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
+
+
 def test_solaredge_force_charge_accepts_timeout_when_state_is_reflected():
     hass = _SEHass()
     command_entity_id = "select.solaredge_storage_command_mode"
     hass.services = _SEFailingServices(
         hass.states,
         command_entity_id,
-        reflect_delay=0.01,
+        reflect_delay=3.1,
     )
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
 
