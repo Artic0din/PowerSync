@@ -999,8 +999,9 @@ def test_disable_idle_deadline_reachability_respects_grid_charge_soc_cap(
 def test_disable_idle_self_consumes_after_last_charge_despite_deadline(
     battery_optimizer_module,
     monkeypatch,
+    caplog,
 ):
-    """No Idle takes precedence over preserving an explicit SOC target."""
+    """A retained feasible plan must not log its discarded hold as final."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -1035,6 +1036,56 @@ def test_disable_idle_self_consumes_after_last_charge_despite_deadline(
     assert result.schedule.actions[2].action == "self_consumption"
     assert result.schedule.actions[2].battery_discharge_w == pytest.approx(1000.0)
     assert result.schedule.actions[2].soc < 0.595
+    assert any(
+        "using the previous physically projected HiGHS plan" in message
+        for message in caplog.messages
+    )
+    assert not any(
+        message.startswith("LP solver status: Infeasible")
+        or message.startswith("LP infeasible — holding in self-consumption")
+        for message in caplog.messages
+    )
+
+
+def test_primary_infeasible_solve_still_logs_selected_safe_hold(
+    battery_optimizer_module,
+    monkeypatch,
+    caplog,
+):
+    """A primary infeasible solve must retain its user-visible safety warning."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    monkeypatch.setattr(
+        module,
+        "_solve_lp_highs",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            success=False,
+            message="Infeasible",
+            status=8,
+        ),
+    )
+    optimizer = _optimizer(module, horizon_hours=1)
+
+    result = optimizer.optimize(
+        import_prices=[0.50],
+        export_prices=[0.0],
+        solar_forecast=[0.0],
+        load_forecast=[1.0],
+        current_soc=0.40,
+        allow_battery_export=[False],
+    )
+
+    assert result.feasible is False
+    assert result.lp_stats["fallback_reason"] == "infeasible_self_consumption_hold"
+    assert "LP solver status: Infeasible" in caplog.messages
+    assert any(
+        message.startswith("LP infeasible — holding in self-consumption")
+        for message in caplog.messages
+    )
+    assert not any(
+        "using the previous physically projected HiGHS plan" in message
+        for message in caplog.messages
+    )
 
 
 def test_disable_idle_does_not_hold_for_export_capped_at_reserve(

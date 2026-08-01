@@ -3108,7 +3108,20 @@ class BatteryOptimizer:
         }
 
         if not result.success:
-            _LOGGER.warning(f"LP solver status: {result.message}")
+            # A later command-mode projection is provisional.  Its fallback
+            # result is discarded by _solve_lp when an earlier physically
+            # projected HiGHS plan exists, so do not log that temporary hold as
+            # the selected optimizer behaviour.  The wrapper emits the single
+            # accurate retained-plan warning instead.  A primary-pass failure
+            # still needs the full safety warning because its hold is returned.
+            projection_pass = mode_slots is not None
+            if projection_pass:
+                _LOGGER.debug(
+                    "LP command-mode projection solver status: %s",
+                    result.message,
+                )
+            else:
+                _LOGGER.warning("LP solver status: %s", result.message)
             if "infeasible" in result.message.lower():
                 # The LP could not be satisfied with the real backup-reserve
                 # floor. Rather than relaxing that floor to 5% and re-solving
@@ -3117,6 +3130,13 @@ class BatteryOptimizer:
                 # batteries to 5%) — fall back to a self-consumption hold that
                 # never exports the battery, never grid-charges, and never
                 # drops below the genuine reserve.
+                if not projection_pass:
+                    _LOGGER.warning(
+                        "LP infeasible — holding in self-consumption: battery "
+                        "serves home load and charges from solar only (no grid "
+                        "export/charge), drawing down to the hardware reserve "
+                        "floor as the inverter would natively",
+                    )
                 hold = self._solve_self_consumption_hold(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function,
                     acquisition_cost_kwh,
@@ -3518,12 +3538,6 @@ class BatteryOptimizer:
         so Auto-Apply Optimizer Reserve never ratchets the reserve down off the
         back of an infeasible solve.
         """
-        _LOGGER.warning(
-            "LP infeasible — holding in self-consumption: battery serves home "
-            "load and charges from solar only (no grid export/charge), drawing "
-            "down to the hardware reserve floor as the inverter would natively",
-        )
-
         eff = self.efficiency
         cap = self.capacity_kwh
         dt = self.dt_hours
