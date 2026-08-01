@@ -1976,6 +1976,7 @@ CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER = "optimization_ai_summary_provider"
 CONF_OPTIMIZATION_AI_SUMMARY_API_KEY = "optimization_ai_summary_api_key"
+CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY = "optimization_ai_summary_clear_api_key"
 DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER = "gemini"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off

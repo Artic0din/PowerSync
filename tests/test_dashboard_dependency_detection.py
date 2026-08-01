@@ -56,6 +56,28 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():
+    source = STRATEGY_PATH.read_text()
+    start = source.index("class PowerSyncAIPlanExplanation extends HTMLElement")
+    end = source.index("const EV_PANEL_FETCH_INTERVAL_MS")
+    card_source = source[start:end]
+
+    assert "customElements.define('power-sync-ai-plan-explanation'" in card_source
+    assert "custom:power-sync-ai-plan-explanation" in source
+    assert "center.push(_optimizationPlan(e));" in source
+    assert "center.push(_aiPlanExplanation());" in source
+    assert "this._hass.callApi('GET', this._optimizationPath())" in card_source
+    assert "this._hass.callApi('POST', this._summaryPath(), { refresh: !!refresh })" in card_source
+    assert card_source.count("callApi('POST'") == 1
+    assert "generate.addEventListener('click', () => this._generate(false))" in card_source
+    assert "refresh.addEventListener('click', () => this._generate(true))" in card_source
+    assert "text.textContent = value" in card_source
+    assert "item.textContent = value" in card_source
+    assert "setInterval" not in card_source
+    assert "localStorage" not in card_source
+    assert "Descriptive only. AI cannot change or execute the optimizer plan." in card_source
+
+
 def test_lp_battery_power_chart_splits_home_consumption_from_export():
     """LP battery forecast should show where discharge is going."""
     source = STRATEGY_PATH.read_text()

@@ -210,16 +210,39 @@ def test_context_distinguishes_soft_missing_inputs_from_unusable_plan():
     context = module.build_compact_context(snapshot)
     assert context["missing_inputs"] == [
         "cost_and_energy_summary",
-        "ev_plan",
         "export_prices",
         "forecast_summary",
         "import_prices",
     ]
+    assert context["ev"] == {
+        "configured": False,
+        "plan_available": False,
+    }
 
     snapshot["next_actions"] = []
     with pytest.raises(module.AISummaryError, match="usable action plan") as caught:
         module.build_compact_context(snapshot)
     assert caught.value.code == "optimizer_unavailable"
+
+
+def test_context_treats_configured_ev_without_active_plan_as_valid_empty_state():
+    module = _load_module()
+    snapshot = _snapshot()
+    snapshot.pop("ev")
+    snapshot.pop("planned_ev_load_kwh")
+    snapshot.pop("planned_ev_load_peak_kw")
+    snapshot["features"] = {
+        "ev_integration": True,
+        "planned_ev_load": False,
+    }
+
+    context = module.build_compact_context(snapshot)
+
+    assert context["ev"] == {
+        "configured": True,
+        "plan_available": False,
+    }
+    assert "ev_plan" not in context["missing_inputs"]
 
 
 def test_model_output_is_strict_and_server_owns_action_metadata():
@@ -253,7 +276,7 @@ def test_model_output_is_strict_and_server_owns_action_metadata():
         module.validate_model_output(excessive, context["action_windows"])
 
 
-def test_write_only_settings_replace_preserve_clear_and_require_provider_key():
+def test_write_only_settings_replace_preserve_clear_and_isolate_provider_key():
     module = _load_module()
     key_name = module.CONF_OPTIMIZATION_AI_SUMMARY_API_KEY
     provider_name = module.CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER
@@ -270,10 +293,15 @@ def test_write_only_settings_replace_preserve_clear_and_require_provider_key():
     assert preserved[key_name] == "secret-key"
     assert changes == []
 
-    with pytest.raises(module.AISummaryError) as caught:
-        module.apply_ai_summary_settings(options, {"ai_summary_provider": "grok"})
-    assert caught.value.code == "ai_provider_key_required"
-    assert options[provider_name] == "gemini"
+    switched, changes = module.apply_ai_summary_settings(
+        options, {"ai_summary_provider": "grok"}
+    )
+    assert switched == {provider_name: "grok"}
+    assert changes == [
+        "updated AI summary provider",
+        "cleared AI summary API key",
+    ]
+    assert options == {provider_name: "gemini", key_name: "secret-key"}
 
     changed, _ = module.apply_ai_summary_settings(
         options,
@@ -294,6 +322,17 @@ def test_write_only_settings_replace_preserve_clear_and_require_provider_key():
         "ai_summary_model": "grok-4.5",
     }
     assert "grok-secret" not in json.dumps(public)
+
+    with pytest.raises(module.AISummaryError) as caught:
+        module.apply_ai_summary_settings(
+            changed,
+            {
+                "ai_summary_api_key": "replacement",
+                "clear_ai_summary_api_key": True,
+            },
+        )
+    assert caught.value.code == "invalid_ai_settings"
+    assert changed == {provider_name: "grok", key_name: "grok-secret"}
 
 
 class _FakeResponse:

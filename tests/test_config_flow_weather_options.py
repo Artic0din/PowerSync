@@ -1670,6 +1670,7 @@ def test_optimization_options_use_one_grouped_form_without_stale_replay():
         "battery_forecast_inputs",
         "grid_site_constraints",
         "dispatch_behaviour",
+        "ai_explanations",
     ):
         assert f'"{section}": {{' in implementation_source
     assert "if marker.schema in allowed_fields" in implementation_source
@@ -1720,6 +1721,7 @@ def test_optimization_options_use_one_grouped_form_without_stale_replay():
             "battery_forecast_inputs",
             "grid_site_constraints",
             "dispatch_behaviour",
+            "ai_explanations",
         }
 
 
@@ -2524,9 +2526,48 @@ def test_smart_optimization_setup_and_sectioned_options_labels_match():
             "battery_forecast_inputs",
             "grid_site_constraints",
             "dispatch_behaviour",
+            "ai_explanations",
         }
         assert config_step["data"] == options_step["data"]
         assert config_step["data_description"] == options_step["data_description"]
+
+
+def test_smart_optimization_sections_have_local_labels_and_descriptions():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        step = data["options"]["step"]["optimization"]
+
+        for section_name, section in step["sections"].items():
+            fields = section.get("data", {})
+            descriptions = section.get("data_description", {})
+            assert fields, f"{path.name}: {section_name} has no local labels"
+            assert set(fields) <= set(descriptions), (
+                f"{path.name}: {section_name} is missing local descriptions"
+            )
+
+        ai_section = step["sections"]["ai_explanations"]
+        assert set(ai_section["data"]) == {
+            "optimization_ai_summary_provider",
+            "optimization_ai_summary_api_key",
+            "optimization_ai_summary_clear_api_key",
+        }
+        assert "write-only" in ai_section["data_description"][
+            "optimization_ai_summary_api_key"
+        ].lower()
+        assert "cannot change or execute" in ai_section["description"]
+
+
+def test_smart_optimization_ai_key_uses_shared_write_only_settings_helper():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("_async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "apply_ai_summary_settings(" in method_source
+    assert "CONF_OPTIMIZATION_AI_SUMMARY_API_KEY" in method_source
+    assert "TextSelectorType.PASSWORD" in method_source
+    assert "default=current_ai_key" not in method_source
+    assert 'errors={"base": "invalid_ai_summary_settings"}' in method_source
 
 
 def test_config_and_options_flow_shared_text_matches():

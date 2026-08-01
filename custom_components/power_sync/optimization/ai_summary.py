@@ -202,13 +202,6 @@ def apply_ai_summary_settings(
             "Replace or clear the provider key in one request, not both.",
             http_status=400,
         )
-    if requested_provider != current_provider and not replacement_key:
-        raise AISummaryError(
-            "ai_provider_key_required",
-            "Enter a new API key when changing AI providers.",
-            http_status=400,
-        )
-
     changes: list[str] = []
     if requested_provider != current_provider:
         options[CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER] = requested_provider
@@ -222,6 +215,11 @@ def apply_ai_summary_settings(
     elif replacement_key:
         options[CONF_OPTIMIZATION_AI_SUMMARY_API_KEY] = replacement_key
         changes.append("updated AI summary API key")
+    elif requested_provider != current_provider:
+        # Provider credentials are never portable. Switching without entering
+        # a replacement leaves the newly selected provider unconfigured.
+        if options.pop(CONF_OPTIMIZATION_AI_SUMMARY_API_KEY, None) is not None:
+            changes.append("cleared AI summary API key")
 
     return options, changes
 
@@ -446,7 +444,21 @@ def build_compact_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     if not ev_summary:
-        missing_inputs.append("ev_plan")
+        features = snapshot.get("features")
+        ev_configured = bool(
+            isinstance(features, Mapping)
+            and (
+                features.get("ev_integration")
+                or features.get("planned_ev_load")
+            )
+        )
+        # No active EV plan is a valid optimizer state, not a missing required
+        # input. Make that state explicit so providers do not present the
+        # optional EV overlay as a generation failure.
+        ev_summary = {
+            "configured": ev_configured,
+            "plan_available": False,
+        }
 
     context = {
         "schema_version": SCHEMA_VERSION,

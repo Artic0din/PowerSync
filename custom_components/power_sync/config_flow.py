@@ -42,6 +42,7 @@ from .settings_metadata import (
     merge_optimization_section_input,
     submitted_live_settings,
 )
+from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -508,6 +509,10 @@ from .const import (
     CONF_PROFIT_MAX_TARGET_TIME,
     CONF_PROFIT_MAX_TARGET_SOC,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
+    CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+    CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+    CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+    DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
     DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
@@ -10439,6 +10444,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "battery_forecast_inputs",
                 "grid_site_constraints",
                 "dispatch_behaviour",
+                "ai_explanations",
             } and isinstance(value, dict):
                 submitted.update(value)
             else:
@@ -10466,6 +10472,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         user_input: dict[str, Any] | None = None,
         *,
         form_step_id: str = "optimization",
+        errors: dict[str, str] | None = None,
     ) -> FlowResult:
         """Menu handler: optimization provider and backup reserve settings."""
         battery_system = self._effective_battery_system()
@@ -10515,6 +10522,38 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 optimization_enabled = True
             new_data = dict(self.config_entry.data)
             new_options = dict(self.config_entry.options)
+            for ai_key in (
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+            ):
+                if ai_key not in new_options and ai_key in new_data:
+                    new_options[ai_key] = new_data[ai_key]
+            try:
+                new_options, _ = apply_ai_summary_settings(
+                    new_options,
+                    {
+                        "ai_summary_provider": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                            DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                        ),
+                        "ai_summary_api_key": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                            "",
+                        ),
+                        "clear_ai_summary_api_key": user_input.get(
+                            CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+                            False,
+                        ),
+                    },
+                )
+                new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER, None)
+                new_data.pop(CONF_OPTIMIZATION_AI_SUMMARY_API_KEY, None)
+            except AISummaryError:
+                return await self._async_step_optimization(
+                    None,
+                    form_step_id=form_step_id,
+                    errors={"base": "invalid_ai_summary_settings"},
+                )
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
             new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled
             new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = auto_apply_reserve_enabled
@@ -11132,6 +11171,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
         )
+        current_ai_provider = str(
+            self._get_option(
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                    DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                ),
+            )
+        ).strip().lower()
+        if current_ai_provider not in {"gemini", "grok"}:
+            current_ai_provider = DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER
+        current_ai_key_configured = bool(
+            str(
+                self._get_option(
+                    CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                    self.config_entry.data.get(
+                        CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                        "",
+                    ),
+                )
+                or ""
+            ).strip()
+        )
 
         current_form_values: dict[str, Any] = {
             CONF_OPTIMIZATION_PROVIDER: current_opt_provider,
@@ -11168,6 +11230,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_CHARGE_BY_TIME_ENABLED: bool(current_charge_by_time_enabled),
             CONF_CHARGE_BY_TIME_TARGET_TIME: current_charge_by_time_target_time,
             CONF_CHARGE_BY_TIME_TARGET_SOC: current_charge_by_time_target_soc,
+            CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER: current_ai_provider,
+            CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY: False,
         }
         if current_load_entity:
             current_form_values[CONF_OPTIMIZATION_LOAD_ENTITY] = current_load_entity
@@ -11237,6 +11301,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Required(
                 CONF_MONITORING_MODE,
                 default=bool(current_monitoring_mode),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                default=current_ai_provider,
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value="gemini", label="Gemini"),
+                    SelectOptionDict(value="grok", label="Grok"),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
+            vol.Optional(
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            vol.Required(
+                CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+                default=False,
             ): BooleanSelector(),
         }
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
@@ -11410,6 +11491,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_MONITORING_MODE,
                 CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
             },
+            "ai_explanations": {
+                CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+                CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
+                CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+            },
         }
         grouped_schema: dict[Any, Any] = {}
         for section_name, allowed_fields in section_fields.items():
@@ -11431,6 +11517,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id=form_step_id,
             data_schema=vol.Schema(grouped_schema),
+            errors=errors,
+            description_placeholders={
+                "ai_summary_key_status": (
+                    "Configured" if current_ai_key_configured else "Not configured"
+                ),
+            },
         )
 
     async def async_step_inverter(
