@@ -2776,6 +2776,130 @@ def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
     assert acquisition_cost == pytest.approx(0.43)
 
 
+def test_unknown_charge_provenance_blends_main_energy_summary(opt_module):
+    """Use full-day counters when the private tracking state was lost."""
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = False
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "energy_summary": {
+                "pv_today_kwh": 37.07,
+                "grid_import_today_kwh": 0.03,
+                "charge_today_kwh": 17.86,
+                "discharge_today_kwh": 2.18,
+            }
+        }
+    )
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.43],
+        current_soc=1.0,
+        capacity_wh=24_200,
+    )
+
+    stored_energy_kwh = 24.2
+    proven_solar_kwh = 17.86 - 2.18 - 0.03
+    expected_unknown_fraction = (
+        stored_energy_kwh - proven_solar_kwh
+    ) / stored_energy_kwh
+    assert acquisition_cost == pytest.approx(0.43 * expected_unknown_fraction)
+    assert acquisition_cost < 0.35
+
+
+def test_incomplete_private_tracking_uses_main_energy_summary(opt_module):
+    """A newly enabled optimizer can have known-but-partial private totals."""
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 0.0
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "energy_summary": {
+                "pv_today_kwh": 37.07,
+                "grid_import_today_kwh": 0.03,
+                "charge_today_kwh": 17.86,
+                "discharge_today_kwh": 2.18,
+            }
+        }
+    )
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.43],
+        current_soc=1.0,
+        capacity_wh=24_200,
+    )
+
+    assert acquisition_cost < 0.35
+
+
+@pytest.mark.parametrize(
+    "energy_summary",
+    [
+        {"charge_today_kwh": 10.0, "discharge_today_kwh": 2.0},
+        {
+            "charge_today_kwh": 10.0,
+            "discharge_today_kwh": 2.0,
+            "grid_import_today_kwh": -0.1,
+        },
+        {
+            "charge_today_kwh": 10.0,
+            "discharge_today_kwh": 2.0,
+            "grid_import_today_kwh": "unknown",
+        },
+        {
+            "charge_today_kwh": True,
+            "discharge_today_kwh": False,
+            "grid_import_today_kwh": False,
+        },
+    ],
+)
+def test_unknown_charge_provenance_keeps_conservative_fallback_for_bad_summary(
+    opt_module,
+    energy_summary,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = False
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={"energy_summary": energy_summary}
+    )
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.43],
+        current_soc=1.0,
+        capacity_wh=24_200,
+    )
+
+    assert acquisition_cost == pytest.approx(0.43)
+
+
+def test_unknown_charge_provenance_caps_proven_solar_at_current_inventory(
+    opt_module,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = False
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "energy_summary": {
+                "charge_today_kwh": 100.0,
+                "discharge_today_kwh": 0.0,
+                "grid_import_today_kwh": 0.0,
+            }
+        }
+    )
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.43],
+        current_soc=0.5,
+        capacity_wh=10_000,
+    )
+
+    assert acquisition_cost == pytest.approx(0.0)
+
+
 def test_grid_charge_keeps_measured_acquisition_cost(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._grid_charge_tracking_known = True

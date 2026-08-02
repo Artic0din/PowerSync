@@ -2777,6 +2777,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
+    def _full_day_battery_energy_summary(
+        self,
+    ) -> tuple[float, float, float] | None:
+        """Return validated full-day battery totals from the main coordinator.
+
+        The optimizer's private cost counters can be absent after a reload or
+        when optimization is enabled part-way through a day.  The main energy
+        coordinator keeps independent cumulative totals that let us prove a
+        conservative lower bound on solar-origin inventory in that case.
+        """
+        data = getattr(getattr(self, "energy_coordinator", None), "data", None)
+        if not isinstance(data, dict):
+            return None
+        summary = data.get("energy_summary")
+        if not isinstance(summary, dict):
+            return None
+
+        values: list[float] = []
+        for key in (
+            "charge_today_kwh",
+            "discharge_today_kwh",
+            "grid_import_today_kwh",
+        ):
+            raw_value = summary.get(key)
+            if isinstance(raw_value, bool):
+                return None
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or value < 0:
+                return None
+            values.append(value)
+        return values[0], values[1], values[2]
+
     def _settle_custom_tariff_quota_measurements(
         self,
         now: datetime,
@@ -4554,7 +4589,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if tracking_known and grid_charge_kwh > 1e-6:
             return grid_charge_cost / grid_charge_kwh
 
+        current_stored_energy_kwh = (
+            max(0.0, min(1.0, float(current_soc)))
+            * max(0.0, float(capacity_wh))
+            / 1000.0
+        )
+        proven_solar_candidates: list[float] = []
         if tracking_known:
+            # Known private counters are an independently authoritative lower
+            # bound for the intervals they recorded.  Keep that candidate
+            # separate from the main summary: either source may cover only a
+            # partial day, and taking the maximum of lower bounds remains safe.
             total_charge_kwh = max(
                 0.0,
                 float(getattr(self, "_actual_charge_kwh_today", 0.0) or 0.0),
@@ -4563,29 +4608,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 0.0,
                 float(getattr(self, "_actual_discharge_kwh_today", 0.0) or 0.0),
             )
-            remaining_solar_charge_kwh = max(
-                0.0,
-                total_charge_kwh - grid_charge_kwh - total_discharge_kwh,
-            )
-            current_stored_energy_kwh = (
-                max(0.0, min(1.0, float(current_soc)))
-                * max(0.0, float(capacity_wh))
-                / 1000.0
-            )
-            if current_stored_energy_kwh > 0.1:
-                # Value only the portion that today's measured solar charging
-                # cannot account for at the conservative import proxy. A
-                # battery that started above 0% and then filled from solar must
-                # not have its entire inventory priced as unknown carry-over.
-                unknown_carry_over_kwh = max(
+            proven_solar_candidates.append(
+                max(
                     0.0,
-                    current_stored_energy_kwh - remaining_solar_charge_kwh,
+                    total_charge_kwh - grid_charge_kwh - total_discharge_kwh,
                 )
-                unknown_fraction = min(
-                    1.0,
-                    unknown_carry_over_kwh / current_stored_energy_kwh,
+            )
+
+        # If private same-day provenance is unavailable or incomplete (for
+        # example after a reload or part-way through a day), use the main
+        # coordinator's full-day totals. Site grid import is an upper bound on
+        # possible grid charging, so subtracting it yields a conservative
+        # lower bound on remaining solar-origin inventory. Keep the larger of
+        # the independent lower bounds, then blend once below.
+        summary_totals = self._full_day_battery_energy_summary()
+        if summary_totals is not None:
+            (
+                total_charge_kwh,
+                total_discharge_kwh,
+                grid_import_kwh,
+            ) = summary_totals
+            proven_solar_candidates.append(
+                max(
+                    0.0,
+                    total_charge_kwh - total_discharge_kwh - grid_import_kwh,
                 )
-                return median_import_cost * unknown_fraction
+            )
+
+        if current_stored_energy_kwh > 0.1 and proven_solar_candidates:
+            proven_solar_kwh = max(proven_solar_candidates)
+            # Value only the portion that today's measured solar charging
+            # cannot account for at the conservative import proxy. A battery
+            # that started above 0% and then filled from solar must not have
+            # its entire inventory priced as unknown carry-over.
+            unknown_carry_over_kwh = max(
+                0.0,
+                current_stored_energy_kwh - proven_solar_kwh,
+            )
+            unknown_fraction = min(
+                1.0,
+                unknown_carry_over_kwh / current_stored_energy_kwh,
+            )
+            return median_import_cost * unknown_fraction
 
         # With no measured charge provenance for the current day, retain the
         # conservative proxy for energy that may have carried over overnight.
