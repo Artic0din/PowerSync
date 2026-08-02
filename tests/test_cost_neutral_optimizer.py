@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -138,6 +139,213 @@ def test_cost_neutral_prices_export_induced_later_import_in_same_constraint(
     assert exported_kwh - 0.20 * induced_import_kwh == pytest.approx(0.8)
     assert result.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(1.2)
     assert result.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(1.0)
+
+
+def test_zero_baseline_cap_is_reopened_by_final_plan_import_cost(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+
+    effective_cap = optimizer._cost_neutral_effective_earnings_cap(
+        grid_import_kw=[2.0, 0.0],
+        import_prices=[0.20, 0.20],
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        earnings_cap=0.0,
+        forecast_import_cost=0.0,
+        cost_neutral_slots=[True, True],
+    )
+
+    assert effective_cap == pytest.approx(0.40)
+
+
+def test_prior_export_credit_is_consumed_before_final_plan_import_reopens_cap(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+
+    effective_cap = optimizer._cost_neutral_effective_earnings_cap(
+        grid_import_kw=[2.0, 0.0],
+        import_prices=[0.20, 0.20],
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        earnings_cap=0.0,
+        forecast_import_cost=0.0,
+        cost_neutral_slots=[True, True],
+        fixed_cost_allowance=-0.20,
+    )
+
+    assert effective_cap == pytest.approx(0.20)
+
+
+def test_zero_cap_does_not_bootstrap_grid_import_to_fund_export(
+    optimizer_module,
+):
+    result = _optimizer(optimizer_module).optimize(
+        import_prices=[0.20] * 2,
+        export_prices=[1.00] * 2,
+        solar_forecast=[0.0] * 2,
+        load_forecast=[0.0] * 2,
+        current_soc=1.0,
+        allow_battery_export=[True] * 2,
+        priority_export_slots=[True] * 2,
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_earnings_cap=0.0,
+        cost_neutral_slots=[True] * 2,
+        cost_neutral_forecast_import_cost=0.0,
+        cost_neutral_fixed_cost_allowance=-0.20,
+    )
+
+    assert result.grid_import_w == pytest.approx([0.0, 0.0])
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 0.0])
+    assert result.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(0.0)
+
+
+def test_positive_clipped_cap_with_prior_credit_stays_feasible_without_imports(
+    optimizer_module,
+):
+    result = _optimizer(optimizer_module).optimize(
+        import_prices=[0.20] * 2,
+        export_prices=[1.00] * 2,
+        solar_forecast=[0.0] * 2,
+        load_forecast=[0.0] * 2,
+        current_soc=1.0,
+        allow_battery_export=[True] * 2,
+        priority_export_slots=[True] * 2,
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_earnings_cap=0.80,
+        cost_neutral_slots=[True] * 2,
+        cost_neutral_forecast_import_cost=1.00,
+        cost_neutral_fixed_cost_allowance=-0.20,
+    )
+
+    assert result.feasible is True
+    assert result.grid_import_w == pytest.approx([0.0, 0.0])
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 0.0])
+    assert result.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(0.0)
+
+
+def test_zero_cap_reoptimizes_from_required_plan_import_with_static_cap(
+    optimizer_module,
+    monkeypatch,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(2)[0]
+    solve_signature = inspect.signature(optimizer._solve_lp)
+    calls: list[tuple[float | None, bool]] = []
+
+    def _result(*, export_w: float, effective_cap: float):
+        schedule = module.OptimizationSchedule(
+            actions=[
+                module.ScheduleAction(
+                    timestamp=start,
+                    action="charge",
+                    power_w=2_000,
+                    battery_charge_w=2_000,
+                ),
+                module.ScheduleAction(
+                    timestamp=start + timedelta(hours=1),
+                    action="export" if export_w else "self_consumption",
+                    power_w=export_w,
+                    battery_discharge_w=export_w,
+                ),
+            ],
+            predicted_cost=0.0,
+            predicted_savings=0.0,
+            last_updated=start,
+        )
+        return module.OptimizerResult(
+            schedule=schedule,
+            solver_used="highs",
+            grid_import_w=[2_000.0, 0.0],
+            grid_export_w=[0.0, export_w],
+            battery_to_grid_w=[0.0, export_w],
+            lp_stats={
+                "cost_neutral_earnings_cap": effective_cap,
+                "cost_neutral_planned_earnings": export_w / 1000.0,
+            },
+        )
+
+    def fake_solve(*args, **kwargs):
+        bound = solve_signature.bind(*args, **kwargs)
+        cap = bound.arguments["cost_neutral_earnings_cap"]
+        static = not bound.arguments[
+            "cost_neutral_account_for_planned_imports"
+        ]
+        calls.append((cap, static))
+        return _result(
+            export_w=0.0 if len(calls) == 1 else 200.0,
+            effective_cap=0.20,
+        )
+
+    monkeypatch.setattr(optimizer, "_solve_lp", fake_solve)
+    result = optimizer.optimize(
+        import_prices=[0.20] * 2,
+        export_prices=[0.0, 1.0],
+        solar_forecast=[0.0] * 2,
+        load_forecast=[0.0] * 2,
+        current_soc=0.0,
+        allow_battery_export=[False, True],
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_earnings_cap=0.0,
+        cost_neutral_slots=[True] * 2,
+        cost_neutral_fixed_cost_allowance=-0.20,
+    )
+
+    assert calls == [(0.0, True), (0.20, True)]
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 200.0])
+    assert result.lp_stats["cost_neutral_baseline_earnings_cap"] == 0.0
+    assert result.lp_stats["cost_neutral_reconciliation_iterations"] == 1
+
+
+def test_final_plan_import_reopens_only_uncovered_prior_credit_balance(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(2)[0]
+    schedule = module.OptimizationSchedule(
+        actions=[
+            module.ScheduleAction(
+                timestamp=start,
+                action="charge",
+                power_w=2_000,
+                battery_charge_w=2_000,
+            ),
+            module.ScheduleAction(
+                timestamp=start + timedelta(hours=1),
+                action="export",
+                power_w=1_000,
+                battery_discharge_w=1_000,
+            ),
+        ],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+        last_updated=start,
+    )
+
+    reconciled = optimizer.reconcile_result_with_schedule(
+        module.OptimizerResult(schedule=schedule),
+        schedule,
+        import_prices=[0.20, 0.20],
+        export_prices=[0.0, 1.0],
+        solar=[0.0, 0.0],
+        load=[0.0, 0.0],
+        cost_neutral_earnings_cap=0.0,
+        cost_neutral_slots=[True, True],
+        cost_neutral_forecast_import_cost=0.0,
+        cost_neutral_fixed_cost_allowance=-0.20,
+    )
+
+    assert reconciled.grid_import_w == pytest.approx([2_000.0, 0.0])
+    assert reconciled.schedule.battery_export_w == pytest.approx([0.0, 200.0])
+    assert reconciled.lp_stats["cost_neutral_earnings_cap"] == pytest.approx(0.20)
+    assert reconciled.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(
+        0.20
+    )
 
 
 def test_zero_cap_preserves_natural_solar_export(optimizer_module):

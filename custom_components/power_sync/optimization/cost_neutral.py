@@ -16,14 +16,18 @@ class CostNeutralBudget:
     forecast_natural_export_earnings: float
 
     @property
-    def base_projected_cost(self) -> float:
+    def fixed_cost_allowance(self) -> float:
+        """Return the local-day balance before replaceable forecast imports."""
         return (
             self.supply_charge
             + self.measured_import_cost
             - self.measured_export_earnings
-            + self.forecast_import_cost
             - self.forecast_natural_export_earnings
         )
+
+    @property
+    def base_projected_cost(self) -> float:
+        return self.fixed_cost_allowance + self.forecast_import_cost
 
     @property
     def battery_export_earnings_cap(self) -> float:

@@ -4920,7 +4920,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     export_caps_by_group=self._last_export_bonus_caps_by_group,
                 )
 
-            cost_neutral_cap, cost_neutral_slots, cost_neutral_status = (
+            (
+                cost_neutral_cap,
+                cost_neutral_slots,
+                cost_neutral_status,
+                cost_neutral_fixed_cost_allowance,
+            ) = (
                 self._cost_neutral_solve_inputs(
                     now=dt_util.now(),
                     timestamps=schedule_timestamps,
@@ -4999,6 +5004,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_cap,
                         cost_neutral_slots,
                         cost_neutral_forecast_import_cost,
+                        cost_neutral_fixed_cost_allowance,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5064,6 +5070,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cost_neutral_slots=cost_neutral_slots,
                 cost_neutral_forecast_import_cost=(
                     cost_neutral_forecast_import_cost
+                ),
+                cost_neutral_fixed_cost_allowance=(
+                    cost_neutral_fixed_cost_allowance
                 ),
             )
             self._set_forecast_bridge_reserve_recommendation(
@@ -5143,6 +5152,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     cost_neutral_slots=cost_neutral_slots,
                     cost_neutral_forecast_import_cost=(
                         cost_neutral_forecast_import_cost
+                    ),
+                    cost_neutral_fixed_cost_allowance=(
+                        cost_neutral_fixed_cost_allowance
                     ),
                 )
                 final_recommendation = dict(
@@ -12880,20 +12892,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar: list[float],
         load: list[float],
         current_soc: float,
-    ) -> tuple[float | None, list[bool], dict[str, Any]]:
+    ) -> tuple[float | None, list[bool], dict[str, Any], float | None]:
         """Build a non-self-referential current-local-day earnings budget."""
         local_midnight = now.replace(
             hour=0, minute=0, second=0, microsecond=0
         ) + timedelta(days=1)
         slots = [timestamp < local_midnight for timestamp in timestamps]
         if not self.cost_neutral_enabled:
-            return None, slots, {
-                "enabled": False,
-                "effective_mode": (
-                    "profit_max" if self.profit_max_mode else "standard"
-                ),
-                "reason": "disabled",
-            }
+            return (
+                None,
+                slots,
+                {
+                    "enabled": False,
+                    "effective_mode": (
+                        "profit_max" if self.profit_max_mode else "standard"
+                    ),
+                    "reason": "disabled",
+                },
+                None,
+            )
 
         n = min(
             len(timestamps),
@@ -12995,6 +13012,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             forecast_natural_export_earnings=forecast_natural_export_earnings,
         )
         base_projected_cost = budget.base_projected_cost
+        fixed_cost_allowance = budget.fixed_cost_allowance
         cap = budget.battery_export_earnings_cap
         status = {
             "enabled": True,
@@ -13025,7 +13043,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "blocking_reasons": [],
         }
-        return cap, slots, status
+        return cap, slots, status, fixed_cost_allowance
 
     def _get_daily_cost(self) -> float:
         """Get today's total cost: actual (midnight→now) + predicted (now→midnight)."""

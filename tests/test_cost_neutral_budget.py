@@ -31,6 +31,7 @@ def test_exact_daily_cost_example_produces_two_dollar_export_cap():
 
     assert budget.base_projected_cost == 2.0
     assert budget.battery_export_earnings_cap == 2.0
+    assert budget.fixed_cost_allowance == 1.5
 
 
 def test_natural_export_covering_daily_cost_sets_zero_battery_export_cap():
