@@ -12926,7 +12926,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value = max(0.0, float(raw or 0.0))
             except (TypeError, ValueError):
                 value = 0.0
-            return value, "configured_daily" if value > 0 else "configured_zero"
+            if value > 0:
+                return value, "configured_daily"
         if CONF_MONTHLY_SUPPLY_CHARGE in options or CONF_MONTHLY_SUPPLY_CHARGE in data:
             raw = options.get(
                 CONF_MONTHLY_SUPPLY_CHARGE,
@@ -12940,6 +12941,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return 0.0, "configured_zero"
             days = calendar.monthrange(now.year, now.month)[1]
             return monthly / days, "configured_monthly"
+        if CONF_DAILY_SUPPLY_CHARGE in options or CONF_DAILY_SUPPLY_CHARGE in data:
+            return 0.0, "configured_zero"
         return 0.0, "missing"
 
     def _cost_neutral_solve_inputs(
@@ -14114,6 +14117,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         rerun_after_settings = False
         charge_by_time_display_changed = False
 
+        if "daily_supply_charge" in settings:
+            try:
+                daily_supply_charge = float(
+                    settings["daily_supply_charge"] or 0.0
+                )
+            except (TypeError, ValueError):
+                daily_supply_charge = -1.0
+            if not math.isfinite(daily_supply_charge) or daily_supply_charge < 0:
+                return {
+                    "success": False,
+                    "error": "Daily supply charge must be a non-negative number",
+                    "changes": [],
+                }
+            settings["daily_supply_charge"] = daily_supply_charge
+
         # A non-positive battery specification means "clear the manual
         # override", matching the mobile Reset to Auto action. Never push a
         # zero capacity/power into the live LP model while waiting for
@@ -14481,6 +14499,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     f"cost_neutral_enabled: {settings['cost_neutral_enabled']}"
                 )
                 rerun_after_settings = True
+
+        if "daily_supply_charge" in settings:
+            daily_supply_charge = settings["daily_supply_charge"]
+            if self._entry:
+                from ..const import CONF_DAILY_SUPPLY_CHARGE, DOMAIN as _SKIP_DOM
+
+                new_data = dict(self._entry.data)
+                new_options = dict(self._entry.options)
+                persisted_changed = (
+                    new_data.get(CONF_DAILY_SUPPLY_CHARGE) != daily_supply_charge
+                    or new_options.get(CONF_DAILY_SUPPLY_CHARGE)
+                    != daily_supply_charge
+                )
+                new_data[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                new_options[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                if persisted_changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(
+                        self.entry_id, {}
+                    )["_skip_reload"] = True
+                    self.hass.config_entries.async_update_entry(
+                        self._entry,
+                        data=new_data,
+                        options=new_options,
+                    )
+            # The HA options flow persists before applying live settings, so
+            # the entry may already contain this value when we get here.
+            # Rebuild the plan whenever the field was submitted regardless.
+            rerun_after_settings = True
+            response["changes"].append(
+                f"daily_supply_charge: {daily_supply_charge:.2f}"
+            )
 
         if "charge_by_time_enabled" in settings:
             new_val = bool(settings["charge_by_time_enabled"])

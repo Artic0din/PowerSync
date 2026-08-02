@@ -3353,6 +3353,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_COST_NEUTRAL_ENABLED: bool(
                         user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
                     ),
+                    CONF_DAILY_SUPPLY_CHARGE: max(
+                        0.0,
+                        float(
+                            user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+                            or 0.0
+                        ),
+                    ),
                     CONF_CHARGE_BY_TIME_ENABLED: bool(
                         user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                     ),
@@ -3555,6 +3562,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_COST_NEUTRAL_ENABLED,
                 default=False,
             ): BooleanSelector(),
+            vol.Required(
+                CONF_DAILY_SUPPLY_CHARGE,
+                default=0.0,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=500.0,
+                    step=0.01,
+                    unit_of_measurement=self._selector_unit("daily"),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
             vol.Required(
                 CONF_CHARGE_BY_TIME_ENABLED,
                 default=False,
@@ -10674,6 +10693,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
                 if cost_neutral_enabled:
                     profit_max_enabled = False
+                daily_supply_charge = max(
+                    0.0,
+                    float(user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0) or 0.0),
+                )
                 charge_by_time_enabled = bool(
                     user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                 )
@@ -10764,6 +10787,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_data[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
                 new_options[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
+                new_data[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                new_options[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
                 new_data[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
@@ -10938,6 +10963,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "allow_grid_charge": allow_grid_charge,
                     "cost_function": COST_FUNCTION_COST,
                     "profit_max_enabled": profit_max_enabled,
+                    "cost_neutral_enabled": cost_neutral_enabled,
+                    "daily_supply_charge": daily_supply_charge,
                     "charge_by_time_enabled": charge_by_time_enabled,
                     "charge_by_time_target_time": charge_by_time_target_time,
                     "charge_by_time_target_soc": charge_by_time_target_soc,
@@ -10973,6 +11000,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         "profit_max_enabled": CONF_PROFIT_MAX_ENABLED,
                         "cost_neutral_enabled": CONF_COST_NEUTRAL_ENABLED,
+                        "daily_supply_charge": CONF_DAILY_SUPPLY_CHARGE,
                         "charge_by_time_enabled": CONF_CHARGE_BY_TIME_ENABLED,
                         "charge_by_time_target_time": (
                             CONF_CHARGE_BY_TIME_TARGET_TIME
@@ -11162,6 +11190,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_COST_NEUTRAL_ENABLED,
             self.config_entry.data.get(CONF_COST_NEUTRAL_ENABLED, False),
         )
+        current_daily_supply_charge = max(
+            0.0,
+            float(
+                self._get_option(
+                    CONF_DAILY_SUPPLY_CHARGE,
+                    self.config_entry.data.get(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                )
+                or 0.0
+            ),
+        )
         if current_cost_neutral_enabled:
             current_profit_max_enabled = False
         current_charge_by_time_enabled = self._get_option(
@@ -11251,6 +11289,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
             CONF_PROFIT_MAX_ENABLED: bool(current_profit_max_enabled),
             CONF_COST_NEUTRAL_ENABLED: bool(current_cost_neutral_enabled),
+            CONF_DAILY_SUPPLY_CHARGE: current_daily_supply_charge,
             CONF_CHARGE_BY_TIME_ENABLED: bool(current_charge_by_time_enabled),
             CONF_CHARGE_BY_TIME_TARGET_TIME: current_charge_by_time_target_time,
             CONF_CHARGE_BY_TIME_TARGET_SOC: current_charge_by_time_target_soc,
@@ -11466,6 +11505,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=bool(current_cost_neutral_enabled),
                 ): BooleanSelector(),
                 vol.Required(
+                    CONF_DAILY_SUPPLY_CHARGE,
+                    default=current_daily_supply_charge,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0,
+                    max=500.0,
+                    step=0.01,
+                    unit_of_measurement=self._selector_unit("daily"),
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
                     CONF_CHARGE_BY_TIME_ENABLED,
                     default=bool(current_charge_by_time_enabled),
                 ): BooleanSelector(),
@@ -11489,6 +11538,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_ENABLED,
                 CONF_PROFIT_MAX_ENABLED,
                 CONF_COST_NEUTRAL_ENABLED,
+                CONF_DAILY_SUPPLY_CHARGE,
                 CONF_CHARGE_BY_TIME_ENABLED,
                 CONF_CHARGE_BY_TIME_TARGET_TIME,
                 CONF_CHARGE_BY_TIME_TARGET_SOC,
@@ -13077,20 +13127,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_DEMAND_ALLOW_GRID_CHARGING,
                     default=self._get_option(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
                 ): BooleanSelector(),
-                vol.Optional(
-                    CONF_DAILY_SUPPLY_CHARGE,
-                    default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-                ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=500.0, step=0.01, unit_of_measurement=self._selector_unit("daily"),
-                    mode=NumberSelectorMode.BOX,
-                )),
-                vol.Optional(
-                    CONF_MONTHLY_SUPPLY_CHARGE,
-                    default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-                ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=500.0, step=0.01, unit_of_measurement=self._selector_unit("monthly"),
-                    mode=NumberSelectorMode.BOX,
-                )),
             }
         )
 

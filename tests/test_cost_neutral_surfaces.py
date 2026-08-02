@@ -43,3 +43,36 @@ def test_cost_neutral_english_strings_exist_on_all_optimizer_forms():
         assert options["sections"]["core_goals"]["data"][
             "cost_neutral_enabled"
         ] == "Enable Cost Neutral"
+        assert options["sections"]["core_goals"]["data"][
+            "daily_supply_charge"
+        ] == "Daily supply charge"
+        assert "cost neutral target" in options["sections"]["core_goals"][
+            "data_description"
+        ]["daily_supply_charge"].lower()
+
+
+def test_supply_charge_is_owned_by_optimizer_not_demand_charge_form():
+    config_flow_source = (COMPONENT / "config_flow.py").read_text()
+    optimizer_start = config_flow_source.index("async def _async_step_optimization")
+    optimizer_end = config_flow_source.index(
+        "async def async_step_inverter", optimizer_start
+    )
+    optimizer_source = config_flow_source[optimizer_start:optimizer_end]
+    demand_start = config_flow_source.index(
+        "async def async_step_demand_charge_options"
+    )
+    demand_end = config_flow_source.index(
+        "async def async_step_curtailment_options", demand_start
+    )
+    demand_source = config_flow_source[demand_start:demand_end]
+
+    assert "CONF_DAILY_SUPPLY_CHARGE" in optimizer_source
+    assert '"daily_supply_charge": daily_supply_charge' in optimizer_source
+    schema_source = optimizer_source[
+        optimizer_source.index("schema_fields.update("):
+    ]
+    assert schema_source.index("CONF_COST_NEUTRAL_ENABLED") < schema_source.index(
+        "CONF_DAILY_SUPPLY_CHARGE"
+    ) < schema_source.index("CONF_CHARGE_BY_TIME_ENABLED")
+    assert "CONF_DAILY_SUPPLY_CHARGE" not in demand_source
+    assert "CONF_MONTHLY_SUPPLY_CHARGE" not in demand_source

@@ -39566,6 +39566,19 @@ class OptimizationSettingsView(HomeAssistantView):
                 opt_coordinator = data["optimization_coordinator"]
                 break
 
+        def _entry_nonnegative_float_setting(key: str) -> float:
+            if not config_entry:
+                return 0.0
+            value = config_entry.options.get(
+                key,
+                config_entry.data.get(key, 0.0),
+            )
+            try:
+                parsed = float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+            return parsed if math.isfinite(parsed) and parsed >= 0 else 0.0
+
         if not opt_coordinator:
             battery_system = (
                 config_entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
@@ -39875,6 +39888,9 @@ class OptimizationSettingsView(HomeAssistantView):
                     ),
                     "auto_applied_optimizer_reserve": None,
                     "charge_by_time_enabled": charge_by_time_enabled,
+                    "daily_supply_charge": _entry_nonnegative_float_setting(
+                        CONF_DAILY_SUPPLY_CHARGE
+                    ),
                     "charge_by_time_target_time": charge_by_time_target_time,
                     "charge_by_time_target_soc": charge_by_time_target_soc,
                     "profit_max_target_time": charge_by_time_target_time,
@@ -39959,6 +39975,9 @@ class OptimizationSettingsView(HomeAssistantView):
                 "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
                 "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
                 "charge_by_time_enabled": opt_coordinator.charge_by_time_enabled,
+                "daily_supply_charge": _entry_nonnegative_float_setting(
+                    CONF_DAILY_SUPPLY_CHARGE
+                ),
                 "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
                 "manual_backup_reserve": (
                     round(manual_backup_reserve * 100)
@@ -40281,6 +40300,32 @@ class OptimizationSettingsView(HomeAssistantView):
                     new_options[CONF_PROFIT_MAX_ENABLED] = False
                 changes.append(
                     f"Set Cost Neutral mode to {settings['cost_neutral_enabled']}"
+                )
+
+            if "daily_supply_charge" in settings:
+                try:
+                    daily_supply_charge = float(
+                        settings["daily_supply_charge"] or 0.0
+                    )
+                except (TypeError, ValueError):
+                    daily_supply_charge = -1.0
+                if (
+                    not math.isfinite(daily_supply_charge)
+                    or daily_supply_charge < 0
+                ):
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Daily supply charge must be a non-negative number"
+                            ),
+                        },
+                        status=400,
+                    )
+                new_data[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                new_options[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                changes.append(
+                    f"Set daily supply charge to {daily_supply_charge:.2f}"
                 )
 
             if "charge_by_time_enabled" in settings:

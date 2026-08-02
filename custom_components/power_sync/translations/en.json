@@ -447,6 +447,7 @@
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
           "cost_neutral_enabled": "Enable Cost Neutral",
+          "daily_supply_charge": "Daily supply charge",
           "charge_by_time_enabled": "Enable Charge By Time",
           "charge_by_time_target_time": "Charge By Time target time",
           "charge_by_time_target_soc": "Charge By Time target SOC"
@@ -474,6 +475,7 @@
           "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
           "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
+          "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target. Enter 0 when your plan has no fixed daily charge.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -1529,6 +1531,7 @@
               "optimization_enabled": "Enable Smart Optimization",
               "profit_max_enabled": "Enable Profit Max",
               "cost_neutral_enabled": "Enable Cost Neutral",
+              "daily_supply_charge": "Daily supply charge",
               "charge_by_time_enabled": "Enable Charge By Time",
               "charge_by_time_target_time": "Charge By Time target time",
               "charge_by_time_target_soc": "Charge By Time target SOC"
@@ -1538,6 +1541,7 @@
               "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
               "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
               "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
+              "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target. Enter 0 when your plan has no fixed daily charge.",
               "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
               "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
               "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -1651,6 +1655,7 @@
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
           "cost_neutral_enabled": "Enable Cost Neutral",
+          "daily_supply_charge": "Daily supply charge",
           "charge_by_time_enabled": "Enable Charge By Time",
           "charge_by_time_target_time": "Charge By Time target time",
           "charge_by_time_target_soc": "Charge By Time target SOC"
@@ -1678,6 +1683,7 @@
           "optimization_disable_idle": "Replace every Smart Optimization idle hold action with self-consumption for any electricity provider. This takes precedence over Charge By Time.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default. Mutually exclusive with Cost Neutral.",
           "cost_neutral_enabled": "Allow discretionary battery export only until today's projected supply and import costs are offset, then preserve the battery for self-consumption. Natural solar export is not capped. Mutually exclusive with Profit Max.",
+          "daily_supply_charge": "Fixed daily electricity supply charge included in the Cost Neutral target. Enter 0 when your plan has no fixed daily charge.",
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
@@ -2238,9 +2244,7 @@
           "demand_charge_billing_day": "Billing cycle reset day",
           "demand_charge_apply_to": "Apply demand charge to",
           "demand_artificial_price_enabled": "Apply artificial price during peak",
-          "demand_allow_grid_charging": "Allow grid charging during demand windows",
-          "daily_supply_charge": "Daily supply charge ($)",
-          "monthly_supply_charge": "Monthly supply charge ($)"
+          "demand_allow_grid_charging": "Allow grid charging during demand windows"
         },
         "data_description": {
           "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees.",
@@ -2251,9 +2255,7 @@
           "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28).",
           "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both.",
           "demand_artificial_price_enabled": "Add an artificial price component during demand peak periods to discourage grid draw.",
-          "demand_allow_grid_charging": "Allow battery grid charging during demand peak periods. Disable to protect against demand charge spikes.",
-          "daily_supply_charge": "Your daily electricity supply charge for cost tracking.",
-          "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking."
+          "demand_allow_grid_charging": "Allow battery grid charging during demand peak periods. Disable to protect against demand charge spikes."
         },
         "submit": "Save"
       },

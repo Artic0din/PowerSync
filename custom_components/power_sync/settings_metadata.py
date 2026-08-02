@@ -83,6 +83,12 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "order": 11,
                 "exclusive_with": ["profit_max_enabled"],
             },
+            "daily_supply_charge": {
+                "category": "core",
+                "owner": "optimizer",
+                "section": "core_goals",
+                "order": 12,
+            },
             "charge_by_time_enabled": {
                 "category": "core",
                 "owner": "optimizer",
@@ -214,6 +220,7 @@ def optimizer_settings_groups() -> dict[str, Any]:
                 "hardware_backup_reserve",
                 "profit_max_enabled",
                 "cost_neutral_enabled",
+                "daily_supply_charge",
                 "charge_by_time_enabled",
                 "charge_by_time_target_time",
                 "charge_by_time_target_soc",

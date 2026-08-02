@@ -184,6 +184,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"
     const_module.CONF_PROFIT_MAX_TARGET_SOC = "profit_max_target_soc"
     const_module.CONF_PROFIT_MAX_ENABLED = "profit_max_enabled"
+    const_module.CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
+    const_module.CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
     const_module.DEFAULT_CHARGE_BY_TIME_TARGET_TIME = "17:15"
     const_module.DEFAULT_CHARGE_BY_TIME_TARGET_SOC = 1.0
     const_module.DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"
@@ -1940,6 +1942,63 @@ def test_cost_neutral_setting_atomically_disables_profit_max(opt_module):
     assert updates[-1]["options"]["profit_max_enabled"] is False
     assert run_calls == []
     assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_daily_supply_charge_setting_persists_and_reoptimizes(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings({"daily_supply_charge": 1.23})
+    )
+
+    assert result["success"] is True
+    assert result["changes"] == ["daily_supply_charge: 1.23"]
+    assert updates[-1]["data"]["daily_supply_charge"] == pytest.approx(1.23)
+    assert updates[-1]["options"]["daily_supply_charge"] == pytest.approx(1.23)
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_daily_supply_charge_setting_rejects_invalid_value_before_writes(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    updates, _, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings({
+            "daily_supply_charge": -1,
+            "profit_max_enabled": True,
+        })
+    )
+
+    assert result == {
+        "success": False,
+        "error": "Daily supply charge must be a non-negative number",
+        "changes": [],
+    }
+    assert updates == []
+    assert coordinator._config.profit_max_enabled is False
+    assert background_tasks == []
+
+
+def test_zero_daily_supply_charge_keeps_legacy_monthly_fallback(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        daily_supply_charge=0.0,
+        monthly_supply_charge=31.0,
+    )
+
+    value, source = coordinator._daily_supply_charge_for_cost_neutral(
+        datetime(2026, 8, 2, tzinfo=timezone.utc)
+    )
+
+    assert value == pytest.approx(1.0)
+    assert source == "configured_monthly"
 
 
 def test_optimizer_settings_reject_both_exclusive_modes(opt_module):
