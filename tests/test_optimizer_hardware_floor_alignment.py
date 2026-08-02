@@ -1628,7 +1628,7 @@ def test_capped_bonus_free_import_keeps_full_slot_charge_command(
         efficiency=1.0,
         backup_reserve=0.10,
         hardware_reserve=0.10,
-        grid_charge_soc_cap=0.98,
+        grid_charge_soc_cap=1.0,
         interval_minutes=60,
         horizon_hours=3,
         terminal_weight=0.0,
@@ -1640,7 +1640,7 @@ def test_capped_bonus_free_import_keeps_full_slot_charge_command(
         export_prices=[0.05, 0.05, 0.05],
         solar_forecast=[0.0, 0.0, 0.0],
         load_forecast=[0.7, 0.7, 0.7],
-        current_soc=0.98,
+        current_soc=0.25,
         allow_battery_export=[False, False, False],
         allow_grid_charge=True,
         import_bonus_prices=[0.3517, 0.3517, 0.3517],
@@ -1657,7 +1657,7 @@ def test_capped_bonus_free_import_keeps_full_slot_charge_command(
         abs=0.1,
     )
     assert all(
-        action.battery_charge_w == pytest.approx(0.0, abs=0.1)
+        action.battery_charge_w == pytest.approx(5_000.0, abs=0.1)
         for action in result.schedule.actions
     )
 
@@ -1670,7 +1670,7 @@ def test_capped_bonus_free_import_keeps_full_slot_charge_command(
         load=[0.7, 0.7, 0.7],
         import_bonus_prices=[0.3517, 0.3517, 0.3517],
         import_bonus_cap_kwh=50.0,
-        initial_soc=0.98,
+        initial_soc=0.25,
     )
     assert [action.action for action in reconciled.schedule.actions] == [
         "charge",
@@ -1678,11 +1678,11 @@ def test_capped_bonus_free_import_keeps_full_slot_charge_command(
         "charge",
     ]
     assert all(
-        action.battery_charge_w == pytest.approx(0.0, abs=0.1)
+        action.battery_charge_w == pytest.approx(5_000.0, abs=0.1)
         for action in reconciled.schedule.actions
     )
     assert reconciled.grid_import_w == pytest.approx(
-        [700.0, 700.0, 700.0],
+        [5_700.0, 5_700.0, 5_700.0],
         abs=0.1,
     )
 
@@ -2022,7 +2022,7 @@ def test_capped_bonus_free_import_resets_for_next_tariff_day(
         efficiency=1.0,
         backup_reserve=0.10,
         hardware_reserve=0.10,
-        grid_charge_soc_cap=0.98,
+        grid_charge_soc_cap=1.0,
         interval_minutes=60,
         horizon_hours=2,
         terminal_weight=0.0,
@@ -2042,7 +2042,7 @@ def test_capped_bonus_free_import_resets_for_next_tariff_day(
         export_prices=[0.05, 0.05],
         solar_forecast=[0.0, 0.0],
         load_forecast=[0.7, 0.7],
-        current_soc=0.98,
+        current_soc=1.0,
         allow_battery_export=[False, False],
         allow_grid_charge=True,
         import_bonus_prices=[0.3517, 0.3517],
@@ -2110,7 +2110,7 @@ def test_raw_zero_price_remains_free_with_exhausted_optional_bonus(
         efficiency=1.0,
         backup_reserve=0.10,
         hardware_reserve=0.10,
-        grid_charge_soc_cap=0.98,
+        grid_charge_soc_cap=1.0,
         interval_minutes=60,
         horizon_hours=1,
         terminal_weight=0.0,
@@ -2122,7 +2122,7 @@ def test_raw_zero_price_remains_free_with_exhausted_optional_bonus(
         export_prices=[0.05],
         solar_forecast=[0.0],
         load_forecast=[0.7],
-        current_soc=0.98,
+        current_soc=1.0,
         allow_battery_export=[False],
         allow_grid_charge=True,
         import_bonus_prices=[0.10],
@@ -2182,7 +2182,7 @@ def test_infeasible_hold_propagates_quota_backed_free_command_mask(
         efficiency=1.0,
         backup_reserve=0.10,
         hardware_reserve=0.10,
-        grid_charge_soc_cap=0.98,
+        grid_charge_soc_cap=1.0,
         interval_minutes=60,
         horizon_hours=1,
         terminal_weight=0.0,
@@ -2194,7 +2194,7 @@ def test_infeasible_hold_propagates_quota_backed_free_command_mask(
         export_prices=[0.05],
         solar=[0.0],
         load=[0.7],
-        soc_0=0.98,
+        soc_0=1.0,
         cost_function="cost",
         allow_battery_export=[False],
         block_battery_charge=[False],
@@ -2246,7 +2246,7 @@ def test_free_import_emission_obeys_grid_charge_soc_cap(
 
     action = result.schedule.actions[0]
     assert action.action == "charge"
-    assert action.power_w == pytest.approx(5000.0, abs=0.1)
+    assert action.power_w == pytest.approx(3000.0, abs=0.1)
     assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
     assert action.soc == pytest.approx(0.40, abs=1e-6)
     assert result.grid_import_w == pytest.approx([3000.0], abs=0.1)
@@ -2262,7 +2262,7 @@ def test_free_import_emission_obeys_grid_charge_soc_cap(
     )
     action = reconciled.schedule.actions[0]
     assert action.action == "charge"
-    assert action.power_w == pytest.approx(5000.0, abs=0.1)
+    assert action.power_w == pytest.approx(3000.0, abs=0.1)
     assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
     assert action.soc == pytest.approx(0.40, abs=1e-6)
     assert reconciled.grid_import_w == pytest.approx([3000.0], abs=0.1)
@@ -2270,13 +2270,13 @@ def test_free_import_emission_obeys_grid_charge_soc_cap(
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
 @pytest.mark.parametrize("load_kw", [0.0, 1.0])
-def test_free_import_at_grid_soc_cap_keeps_charge_command(
+def test_free_import_at_grid_soc_cap_stops_charge_command(
     battery_optimizer_module,
     monkeypatch,
     backend,
     load_kw,
 ):
-    """The SOC cap clips accepted energy, not the free-slot command mode."""
+    """A free-price slot must not command grid charge at the configured cap."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, backend)
     optimizer = module.BatteryOptimizer(
@@ -2304,8 +2304,8 @@ def test_free_import_at_grid_soc_cap_keeps_charge_command(
     )
 
     emitted = result.schedule.actions[0]
-    assert emitted.action == "charge"
-    assert emitted.power_w == pytest.approx(5000.0, abs=0.1)
+    assert emitted.action == "self_consumption"
+    assert emitted.power_w == pytest.approx(0.0, abs=0.1)
     assert emitted.battery_charge_w == pytest.approx(0.0, abs=0.1)
     assert emitted.battery_discharge_w == pytest.approx(0.0, abs=0.1)
     assert emitted.soc == pytest.approx(0.40, abs=1e-6)
@@ -2320,8 +2320,8 @@ def test_free_import_at_grid_soc_cap_keeps_charge_command(
         initial_soc=0.40,
     )
     final = reconciled.schedule.actions[0]
-    assert final.action == "charge"
-    assert final.power_w == pytest.approx(5000.0, abs=0.1)
+    assert final.action == "self_consumption"
+    assert final.power_w == pytest.approx(0.0, abs=0.1)
     assert final.battery_charge_w == pytest.approx(0.0, abs=0.1)
     assert final.battery_discharge_w == pytest.approx(0.0, abs=0.1)
     assert final.soc == pytest.approx(0.40, abs=1e-6)
@@ -2329,12 +2329,51 @@ def test_free_import_at_grid_soc_cap_keeps_charge_command(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
-def test_free_import_command_persists_after_cap_headroom_is_exhausted(
+def test_bonus_backed_free_import_stops_at_grid_soc_cap(
     battery_optimizer_module,
     monkeypatch,
     backend,
 ):
-    """Later free intervals keep charging mode without inventing energy or value."""
+    """A positive raw price made free by a tariff credit still obeys the cap."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.40,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.3517],
+        export_prices=[0.05],
+        solar_forecast=[0.0],
+        load_forecast=[0.7],
+        current_soc=0.40,
+        allow_battery_export=[False],
+        allow_grid_charge=True,
+        import_bonus_prices=[0.3517],
+        import_bonus_cap_kwh=50.0,
+    )
+
+    assert result.free_import_command_slots == [True]
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].power_w == pytest.approx(0.0, abs=0.1)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_free_import_command_stops_after_cap_headroom_is_exhausted(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """Later free intervals stop charging mode once cap headroom is exhausted."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, backend)
     optimizer = module.BatteryOptimizer(
@@ -2372,11 +2411,11 @@ def test_free_import_command_persists_after_cap_headroom_is_exhausted(
 
     assert [action.action for action in reconciled.schedule.actions] == [
         "charge",
-        "charge",
-        "charge",
+        "self_consumption",
+        "self_consumption",
     ]
     assert [action.power_w for action in reconciled.schedule.actions] == pytest.approx(
-        [5000.0, 5000.0, 5000.0], abs=0.1
+        [1000.0, 0.0, 0.0], abs=0.1
     )
     assert [
         action.battery_charge_w for action in reconciled.schedule.actions
@@ -2393,12 +2432,12 @@ def test_free_import_command_persists_after_cap_headroom_is_exhausted(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
-def test_solar_only_charge_above_grid_soc_cap_keeps_free_slot_command(
+def test_solar_only_charge_above_grid_soc_cap_uses_self_consumption(
     battery_optimizer_module,
     monkeypatch,
     backend,
 ):
-    """Solar remains physical flow while free-slot charge intent persists."""
+    """Solar remains physical flow without forced grid charge above the cap."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, backend)
     optimizer = module.BatteryOptimizer(
@@ -2435,8 +2474,8 @@ def test_solar_only_charge_above_grid_soc_cap_keeps_free_slot_command(
     )
 
     action = reconciled.schedule.actions[0]
-    assert action.action == "charge"
-    assert action.power_w == pytest.approx(5000.0, abs=0.1)
+    assert action.action == "self_consumption"
+    assert action.power_w == pytest.approx(3000.0, abs=0.1)
     assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
     assert action.soc == pytest.approx(0.80, abs=1e-6)
     assert reconciled.grid_import_w == pytest.approx([0.0], abs=0.1)

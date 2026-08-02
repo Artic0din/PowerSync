@@ -3125,11 +3125,13 @@ class _FakeBattery:
         backup_reserve: int | None = None,
         force_charge_result: bool | None = None,
         force_discharge_result: bool | None = None,
+        restore_normal_result: bool | None = None,
     ) -> None:
         self.hardware_mode = hardware_mode
         self.backup_reserve = backup_reserve
         self.self_consumption_calls = 0
         self.restore_normal_calls = 0
+        self.restore_normal_result = restore_normal_result
         self.backup_reserve_calls = []
         self.force_charge_calls = []
         self.force_charge_result = force_charge_result
@@ -3147,6 +3149,7 @@ class _FakeBattery:
 
     async def restore_normal(self):
         self.restore_normal_calls += 1
+        return self.restore_normal_result
 
     async def set_backup_reserve(self, percent):
         self.backup_reserve_calls.append(percent)
@@ -3200,6 +3203,7 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
     coordinator._force_state_getter = None
     coordinator._force_state_clearer = None
     coordinator._last_executed_action = "self_consumption"
+    coordinator._last_executed_planned_action = None
     coordinator._startup_backup_reserve = 20
     coordinator._pre_idle_backup_reserve = None
     coordinator._idle_hold_reserve = None
@@ -5390,6 +5394,195 @@ def test_charge_executes_immediately_above_reserve(opt_module):
     assert coordinator._optimizer_force_state["active"] is True
     assert coordinator._optimizer_force_state["type"] == "charge"
     assert coordinator._last_executed_action == "charge"
+
+
+def test_charge_at_grid_soc_cap_restores_without_force_command(opt_module):
+    """A stale/free-slot charge action cannot bypass the live SOC cap."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {"battery_level": 90}
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_unknown_soc_with_lower_grid_cap_blocks_force_charge(opt_module):
+    """A lower cap fails safe when live SOC telemetry is unavailable."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {}
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_grid_cap_state_read_error_blocks_force_charge(opt_module):
+    """Unexpected live-state errors cannot make a configured cap fail open."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator._config.grid_charge_soc_cap = 0.89
+
+    def _raise_state_error():
+        raise RuntimeError("state unavailable")
+
+    coordinator._get_energy_data = _raise_state_error
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_stale_charge_retries_failed_soc_cap_restore(opt_module):
+    """A failed stale-action restore retries before recording cap enforcement."""
+    battery = _FakeBattery(restore_normal_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {"battery_level": 90}
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert coordinator._last_executed_planned_action is None
+
+    battery.restore_normal_result = True
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 2
+    assert coordinator._last_executed_planned_action == "charge"
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_repeated_charge_at_grid_soc_cap_restores_once_then_can_resume(opt_module):
+    """An at-cap stale slot is idempotent but can charge again below the cap."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {"battery_level": 90}
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_charge_calls == []
+
+    coordinator._get_energy_data = lambda: {"battery_level": 88}
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == [(10, 5000, False)]
+
+
+def test_user_force_charge_at_grid_soc_cap_is_untouched(opt_module):
+    """The optimizer cap cannot override a user-owned force command."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "charge",
+        "source": "user",
+    }
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 0
+    assert battery.force_charge_calls == []
+
+
+def test_full_grid_soc_cap_keeps_charge_execution(opt_module):
+    """The default 100% cap preserves free-slot force charging."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator._config.grid_charge_soc_cap = 1.0
+    action = SimpleNamespace(action="charge", power_w=5000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 0
+    assert battery.force_charge_calls == [(10, 5000, False)]
+
+
+@pytest.mark.parametrize("cap", [None, "invalid"])
+def test_invalid_grid_soc_cap_defaults_to_full(opt_module, cap):
+    """Missing or malformed persisted caps cannot block optimizer charging."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator._config.grid_charge_soc_cap = cap
+
+    reached, soc, normalized_cap = asyncio.run(
+        coordinator._grid_charge_soc_cap_reached()
+    )
+
+    assert reached is False
+    assert soc is None
+    assert normalized_cap == 1.0
+
+
+def test_active_optimizer_charge_stops_when_live_soc_reaches_cap(opt_module):
+    """The SOC cap overrides the optimizer's anti-thrash charge commitment."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.88)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {"battery_level": 88}
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="charge", power_w=5000, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    coordinator._get_energy_data = lambda: {"battery_level": 90}
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == [(5, 5000, False)]
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_active_optimizer_charge_retries_failed_soc_cap_restore(opt_module):
+    """A failed cap restore retains force state until a retry succeeds."""
+    battery = _FakeBattery(restore_normal_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.88)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {"battery_level": 88}
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="charge", power_w=5000, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    coordinator._get_energy_data = lambda: {"battery_level": 90}
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is True
+
+    battery.restore_normal_result = True
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 2
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_optimizer_owned_force_charge_holds_when_current_slot_stops_charging(opt_module):

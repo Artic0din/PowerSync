@@ -6835,6 +6835,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc /= 100.0
         return max(0.0, min(1.0, soc))
 
+    async def _grid_charge_soc_cap_reached(
+        self,
+    ) -> tuple[bool, float | None, float]:
+        """Return whether live SOC has reached the configured grid-charge cap."""
+        cap = self._soc_ratio(
+            getattr(self._config, "grid_charge_soc_cap", 1.0),
+            1.0,
+        )
+        if cap >= 0.999:
+            return False, None, cap
+
+        try:
+            data = self._get_energy_data()
+            raw_soc = data.get("battery_level") if data else None
+            if raw_soc is None:
+                return True, None, cap
+            soc = float(raw_soc) / 100.0
+            if not math.isfinite(soc):
+                return True, None, cap
+            soc = max(0.0, min(1.0, soc))
+        except (TypeError, ValueError):
+            return True, None, cap
+        return soc >= cap - 0.0001, soc, cap
+
     async def _execute_optimizer_action(
         self,
         action: Any,
@@ -6905,6 +6929,59 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 force_window_action = action
                 force_discharge_soc_now: float | None = None
                 force_discharge_reserve: float | None = None
+
+                if force_type == "charge":
+                    try:
+                        cap_reached, charge_soc_now, charge_soc_cap = (
+                            await self._grid_charge_soc_cap_reached()
+                        )
+                    except Exception as cap_err:
+                        cap_reached = True
+                        charge_soc_now = None
+                        charge_soc_cap = self._soc_ratio(
+                            getattr(self._config, "grid_charge_soc_cap", 1.0),
+                            1.0,
+                        )
+                        _LOGGER.warning(
+                            "Optimizer: grid-charge SOC-cap check before extending "
+                            "force charge failed; restoring conservatively: %s",
+                            cap_err,
+                        )
+                    if cap_reached:
+                        if charge_soc_now is None:
+                            _LOGGER.warning(
+                                "Optimizer: Canceling active force charge — live "
+                                "SOC could not be verified against grid-charge cap "
+                                "%.0f%%; restoring self_consumption instead of "
+                                "extending",
+                                charge_soc_cap * 100,
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Optimizer: Canceling active force charge — live SOC "
+                                "%.1f%% reached grid-charge cap %.0f%%; restoring "
+                                "self_consumption instead of extending",
+                                charge_soc_now * 100,
+                                charge_soc_cap * 100,
+                            )
+                        restore_success = True
+                        if hasattr(battery, "restore_normal"):
+                            restore_success = await battery.restore_normal()
+                        elif hasattr(battery, "set_self_consumption_mode"):
+                            restore_success = await battery.set_self_consumption_mode()
+                        if restore_success is False:
+                            _LOGGER.warning(
+                                "Optimizer: Grid-charge SOC-cap restore failed; "
+                                "retaining force state for retry"
+                            )
+                            return
+                        if force_state.get("scope") == "optimizer":
+                            self._clear_optimizer_force_state()
+                        elif self._force_state_clearer:
+                            self._force_state_clearer()
+                        self._last_executed_planned_action = action.action
+                        self._last_executed_action = "self_consumption"
+                        return
 
                 if lp_matches_force:
                     if force_type == "discharge":
@@ -7567,6 +7644,57 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
 
             if effective_action == "charge":
+                try:
+                    cap_reached, charge_soc_now, charge_soc_cap = (
+                        await self._grid_charge_soc_cap_reached()
+                    )
+                except Exception as cap_err:
+                    cap_reached = True
+                    charge_soc_now = None
+                    charge_soc_cap = self._soc_ratio(
+                        getattr(self._config, "grid_charge_soc_cap", 1.0),
+                        1.0,
+                    )
+                    _LOGGER.warning(
+                        "Optimizer: grid-charge SOC-cap check before force charge "
+                        "failed; blocking conservatively: %s",
+                        cap_err,
+                    )
+                if cap_reached:
+                    if (
+                        getattr(self, "_last_executed_planned_action", None)
+                        == action.action
+                        and self._last_executed_action == "self_consumption"
+                    ):
+                        return
+                    if charge_soc_now is None:
+                        _LOGGER.warning(
+                            "Optimizer: Blocking charge — live SOC could not be "
+                            "verified against grid-charge cap %.0f%%; restoring "
+                            "self_consumption",
+                            charge_soc_cap * 100,
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "Optimizer: Blocking charge — live SOC %.1f%% reached "
+                            "grid-charge cap %.0f%%; restoring self_consumption",
+                            charge_soc_now * 100,
+                            charge_soc_cap * 100,
+                        )
+                    restore_success = True
+                    if hasattr(battery, "restore_normal"):
+                        restore_success = await battery.restore_normal()
+                    elif hasattr(battery, "set_self_consumption_mode"):
+                        restore_success = await battery.set_self_consumption_mode()
+                    if restore_success is False:
+                        _LOGGER.warning(
+                            "Optimizer: Grid-charge SOC-cap restore failed; "
+                            "keeping previous action marker so the next cycle retries"
+                        )
+                        return
+                    self._last_executed_planned_action = action.action
+                    self._last_executed_action = "self_consumption"
+                    return
                 if hasattr(battery, "force_charge"):
                     if self._tesla_force_charge_should_yield_to_live_solar(action):
                         effective_action = "self_consumption"
