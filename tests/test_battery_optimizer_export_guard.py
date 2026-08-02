@@ -2129,6 +2129,61 @@ def test_solar_only_acquisition_removes_only_flow_happy_hour_export_veto(
         assert max(result.grid_export_w[:happy_hour_slots]) == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("acquisition_cost", "expects_export"),
+    [(0.43, False), (0.43 * 0.20, True)],
+)
+def test_solar_filled_battery_can_export_before_next_high_solar_day(
+    battery_optimizer_module,
+    acquisition_cost,
+    expects_export,
+):
+    """Discord #338: value only the unknown overnight inventory portion."""
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=48,
+    )
+    n = 48 * 12
+    happy_hour_start = 18
+    happy_hour_end = happy_hour_start + 24
+    next_day_solar_start = 16 * 12
+    next_day_solar_end = next_day_solar_start + 8 * 12
+    export_prices = [0.0] * n
+    export_prices[happy_hour_start:happy_hour_end] = [0.35] * (
+        happy_hour_end - happy_hour_start
+    )
+    export_allowed = [
+        happy_hour_start <= idx < happy_hour_end for idx in range(n)
+    ]
+    solar_forecast = [0.0] * n
+    solar_forecast[next_day_solar_start:next_day_solar_end] = [5.0] * (
+        next_day_solar_end - next_day_solar_start
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.43] * n,
+        export_prices=export_prices,
+        solar_forecast=solar_forecast,
+        load_forecast=[0.4] * n,
+        current_soc=1.0,
+        acquisition_cost_kwh=acquisition_cost,
+        allow_battery_export=export_allowed,
+        block_battery_charge=export_allowed,
+        priority_export_slots=export_allowed,
+        priority_export_enabled=True,
+    )
+
+    exported = any(
+        action.action == "export"
+        for action in result.schedule.actions[happy_hour_start:happy_hour_end]
+    )
+    assert exported is expects_export
+
+
 def test_priority_export_uses_surplus_above_optimizer_floor(
     battery_optimizer_module,
 ):

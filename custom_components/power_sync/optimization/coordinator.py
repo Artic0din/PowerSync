@@ -4536,6 +4536,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         capacity_wh: float,
     ) -> float:
         """Return the best supported acquisition cost for stored energy."""
+        median_import_cost = (
+            sorted(import_prices)[len(import_prices) // 2]
+            if import_prices
+            else 0.0
+        )
         tracking_known = bool(
             getattr(self, "_grid_charge_tracking_known", False)
         )
@@ -4567,23 +4572,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 * max(0.0, float(capacity_wh))
                 / 1000.0
             )
-            # Only call the inventory solar-sourced when today's measured net
-            # solar charging can account for all energy currently in the
-            # battery. This keeps unknown overnight carry-over conservative.
-            if (
-                current_stored_energy_kwh > 0.1
-                and remaining_solar_charge_kwh + 1e-9
-                >= current_stored_energy_kwh
-            ):
-                return 0.0
+            if current_stored_energy_kwh > 0.1:
+                # Value only the portion that today's measured solar charging
+                # cannot account for at the conservative import proxy. A
+                # battery that started above 0% and then filled from solar must
+                # not have its entire inventory priced as unknown carry-over.
+                unknown_carry_over_kwh = max(
+                    0.0,
+                    current_stored_energy_kwh - remaining_solar_charge_kwh,
+                )
+                unknown_fraction = min(
+                    1.0,
+                    unknown_carry_over_kwh / current_stored_energy_kwh,
+                )
+                return median_import_cost * unknown_fraction
 
         # With no measured charge provenance for the current day, retain the
         # conservative proxy for energy that may have carried over overnight.
-        return (
-            sorted(import_prices)[len(import_prices) // 2]
-            if import_prices
-            else 0.0
-        )
+        return median_import_cost
 
     async def _run_optimization(
         self,
@@ -4776,9 +4782,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc * 100,
                 )
 
-            # Use measured grid cost for grid-charged energy, zero purchase
-            # cost for measured solar-only charging, and a conservative median
-            # import proxy only when today's charge provenance is unknown.
+            # Use measured grid cost for grid-charged energy, blend measured
+            # solar charging with conservative unknown carry-over, and use the
+            # median import proxy when today's provenance is unavailable.
             acq_cost = self._acquisition_cost_for_run(
                 import_prices=import_prices,
                 current_soc=soc,

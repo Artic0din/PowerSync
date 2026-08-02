@@ -2712,7 +2712,7 @@ def test_solar_only_charge_does_not_use_median_import_as_acquisition_cost(
     assert acquisition_cost == 0.0
 
 
-def test_small_solar_top_up_keeps_unknown_carry_over_conservative(opt_module):
+def test_solar_top_up_blends_unknown_carry_over_with_free_solar(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._grid_charge_tracking_known = True
     coordinator._actual_charge_kwh_today = 9.4
@@ -2726,7 +2726,35 @@ def test_small_solar_top_up_keeps_unknown_carry_over_conservative(opt_module):
         capacity_wh=32_000,
     )
 
-    assert acquisition_cost == pytest.approx(0.43)
+    current_stored_energy_kwh = 0.94 * 32.0
+    expected_unknown_fraction = (
+        current_stored_energy_kwh - 9.4
+    ) / current_stored_energy_kwh
+    assert acquisition_cost == pytest.approx(0.43 * expected_unknown_fraction)
+
+
+def test_solar_filled_battery_does_not_price_entire_overnight_reserve(
+    opt_module,
+):
+    """Regression for Discord #338 after the v2.12.999 provenance fix."""
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 25.6
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.532, 0.41],
+        current_soc=1.0,
+        capacity_wh=32_000,
+    )
+
+    # The 20% overnight remainder stays conservatively valued, while the 80%
+    # measured solar charge is free. Happy Hour's 35c rate is therefore not
+    # vetoed by applying the 43c proxy to the full battery.
+    assert acquisition_cost == pytest.approx(0.43 * 0.20)
+    assert acquisition_cost < 0.35
 
 
 def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
