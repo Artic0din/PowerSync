@@ -2382,13 +2382,17 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     # Prepare messages for Expo Push API
     messages = []
     skipped_tokens = 0
-    for device_id, token_data in push_tokens.items():
+    for _device_id, token_data in push_tokens.items():
         token = token_data.get("token")
         platform = token_data.get("platform", "unknown")
         device = token_data.get("device_name", "unknown")
         registered_at = token_data.get("registered_at", "unknown")
-        _LOGGER.info(f"📱 PUSH DEBUG: Token entry - device_id={device_id}, platform={platform}, device={device}, registered_at={registered_at}")
-        _LOGGER.info(f"📱 PUSH DEBUG: Token value = {token[:50] if token else 'None'}...")
+        _LOGGER.info(
+            "📱 PUSH DEBUG: Token entry - platform=%s, device=%s, registered_at=%s",
+            platform,
+            device,
+            registered_at,
+        )
 
         if token and token.startswith("ExponentPushToken"):
             messages.append({
@@ -2402,7 +2406,11 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
             _LOGGER.info(f"📱 PUSH DEBUG: Including token for {device} ({platform})")
         else:
             skipped_tokens += 1
-            _LOGGER.warning(f"📱 PUSH DEBUG: Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
+            _LOGGER.warning(
+                "📱 PUSH DEBUG: Skipping invalid push token for %s (%s)",
+                device,
+                platform,
+            )
 
     if not messages:
         _LOGGER.warning(f"📱 PUSH DEBUG: No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
