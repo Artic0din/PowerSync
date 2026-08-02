@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added a disposable regression fixture for PowerBot support workflow testing.
+
 ### Changed
 
 - Graphite CI Optimizations now gate pull-request HACS and Hassfest validation
