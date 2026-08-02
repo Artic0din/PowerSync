@@ -6,9 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+### Removed
 
-- Added a disposable regression fixture for PowerBot support workflow testing.
+- Removed the disposable support-workflow regression fixture after release
+  testing.
 
 ### Changed
 
