@@ -278,7 +278,8 @@ class EnergyAccumulator:
         if not data:
             return
         stored_date = data.get("date")
-        today = dt_util.now().strftime("%Y-%m-%d")
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
         if stored_date == today:
             self.solar_kwh = float(data.get("solar_kwh", 0.0))
             self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
@@ -296,13 +297,18 @@ class EnergyAccumulator:
                 self.import_cost_today, self.export_earnings_today,
                 stored_date,
             )
+            # A restored same-day snapshot is already associated with the
+            # current local day.  Keep that ownership marker so the first
+            # update after a reload does not treat the restored totals as
+            # stale and reset them.
+            self._last_date = now.date()
         else:
             _LOGGER.debug(
                 "Energy accumulator data from %s (today=%s), starting fresh",
                 stored_date, today,
             )
         stored_month = data.get("month")
-        current_month = dt_util.now().strftime("%Y-%m")
+        current_month = now.strftime("%Y-%m")
         if stored_month == current_month:
             self.mtd_solar_kwh = float(data.get("mtd_solar_kwh", 0.0))
             self.mtd_grid_import_kwh = float(data.get("mtd_grid_import_kwh", 0.0))
@@ -312,6 +318,9 @@ class EnergyAccumulator:
             self.mtd_load_kwh = float(data.get("mtd_load_kwh", 0.0))
             self.mtd_import_cost = float(data.get("mtd_import_cost", 0.0))
             self.mtd_export_earnings = float(data.get("mtd_export_earnings", 0.0))
+            # Persist the full year-month rather than only the numeric month;
+            # January of a new year must not inherit December/January totals.
+            self._last_month = current_month
 
     async def async_flush(self) -> None:
         """Immediately write current energy data to persistent storage.
@@ -334,8 +343,14 @@ class EnergyAccumulator:
 
     def _data_to_save(self) -> dict:
         """Return energy data dict for Store serialization."""
+        now = dt_util.now()
+        # Delayed Store callbacks can run after local midnight.  Daily and
+        # MTD totals belong to the period of the last update, not necessarily
+        # the wall-clock time at which serialization happens.
+        stored_date = self._last_date or now.date()
+        stored_month = self._last_month or stored_date.strftime("%Y-%m")
         return {
-            "date": dt_util.now().strftime("%Y-%m-%d"),
+            "date": stored_date.strftime("%Y-%m-%d"),
             "solar_kwh": round(self.solar_kwh, 4),
             "grid_import_kwh": round(self.grid_import_kwh, 4),
             "grid_export_kwh": round(self.grid_export_kwh, 4),
@@ -344,7 +359,7 @@ class EnergyAccumulator:
             "load_kwh": round(self.load_kwh, 4),
             "import_cost_today": round(self.import_cost_today, 4),
             "export_earnings_today": round(self.export_earnings_today, 4),
-            "month": dt_util.now().strftime("%Y-%m"),
+            "month": stored_month,
             "mtd_solar_kwh": round(self.mtd_solar_kwh, 4),
             "mtd_grid_import_kwh": round(self.mtd_grid_import_kwh, 4),
             "mtd_grid_export_kwh": round(self.mtd_grid_export_kwh, 4),
@@ -379,7 +394,8 @@ class EnergyAccumulator:
         now = dt_util.now()  # Local time for midnight reset
 
         # Reset MTD at month rollover
-        if self._last_month is not None and now.month != self._last_month:
+        current_month = now.strftime("%Y-%m")
+        if self._last_month is not None and current_month != self._last_month:
             self.mtd_solar_kwh = 0.0
             self.mtd_grid_import_kwh = 0.0
             self.mtd_grid_export_kwh = 0.0
@@ -437,7 +453,7 @@ class EnergyAccumulator:
 
         self._last_update = now
         self._last_date = now.date()
-        self._last_month = now.month
+        self._last_month = current_month
 
     def as_dict(self) -> dict:
         """Return accumulated totals as a dict for energy_summary."""
