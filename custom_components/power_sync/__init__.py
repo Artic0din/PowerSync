@@ -9641,6 +9641,7 @@ class ConfigView(HomeAssistantView):
                 "success": True,
                 "battery_system": battery_system,
                 "electricity_provider": electricity_provider,
+                **currency_metadata(currency_for_entry(entry, self._hass)),
                 "ev_provider": ev_provider,  # Tesla (fleet_api/tesla_ble/both) or None for OCPP-only
                 "features": features,
                 "battery_health": battery_health,
@@ -10206,6 +10207,7 @@ class ProviderConfigView(HomeAssistantView):
                 "success": True,
                 "electricity_provider": electricity_provider,
                 "battery_system": battery_system,
+                **currency_metadata(currency_for_entry(entry, self._hass)),
                 "config": config,
             }
 

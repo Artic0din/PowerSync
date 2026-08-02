@@ -177,4 +177,4 @@ Copyright (c) 2024–2026 Ben Boller. All rights reserved.
 
 Licensed under [PolyForm Noncommercial 1.0.0](LICENSE) — free for personal, hobby, and noncommercial use.
 
-**Commercial use is prohibited without prior written permission from the copyright holder.** This includes use within a commercial organisation, integration into a paid product or service, and redistribution as part of a commercial system. To enquire about a commercial licence, contact via [Discord](https://discord.gg/eaWDWxEWE3).
+**Commercial use is prohibited without prior written permission from the copyright holder.** This includes use within a commercial organisation, integration into a paid product or service, and redistribution as part of a commercial system. To enquire about a commercial licence, contact [dev@powersync.cc](mailto:dev@powersync.cc).
