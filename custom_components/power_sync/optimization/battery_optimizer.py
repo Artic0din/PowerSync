@@ -5557,23 +5557,53 @@ class BatteryOptimizer:
                 solar_surplus_w = max(0.0, solar[t] - load[t]) * 1000.0
                 solar_charge_w = min(reported_charge_w, solar_surplus_w)
                 grid_charge_w = max(0.0, reported_charge_w - solar_charge_w)
+                total_cap_headroom_w: float | None = None
                 if grid_charge_cap_active:
-                    allowed_grid_charge_w = (
+                    total_cap_headroom_w = (
                         max(0.0, grid_charge_soc_cap - soc)
                         * cap
                         * 1000.0
                         / max(eff * dt, 1e-9)
                     )
+                    allowed_grid_charge_w = total_cap_headroom_w
                     grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
                 reported_charge_w = solar_charge_w + grid_charge_w
+
+                # Fixed-rate charge controls (notably SAJ H2 TOU) cannot honor
+                # a reduced power target.  Never turn a bounded LP top-up into
+                # a full-rate hardware command: keep any natural solar charge,
+                # but emit self-consumption unless a complete fixed-rate slot
+                # fits both the modeled request and the configured SOC cap.
+                if (
+                    grid_charge_cap_active
+                    and not self.target_charge_power_supported
+                ):
+                    fixed_charge_w = self.max_charge_kw * 1000.0
+                    full_rate_requested = (
+                        fixed_charge_w > ACTION_THRESHOLD_W
+                        and reported_charge_w
+                        >= fixed_charge_w - ACTION_THRESHOLD_W
+                    )
+                    full_rate_fits_cap = (
+                        total_cap_headroom_w is None
+                        or fixed_charge_w
+                        <= total_cap_headroom_w + ACTION_THRESHOLD_W
+                    )
+                    if not (full_rate_requested and full_rate_fits_cap):
+                        action = "self_consumption"
+                        grid_charge_w = 0.0
+                        reported_charge_w = solar_charge_w
+                        power_w = reported_charge_w
+
                 # A genuinely free import slot owns the inverter's charge mode
                 # for the complete slot only when the user has not configured
                 # a lower grid-charge SOC cap. With an active cap, command power
                 # follows the remaining modeled headroom and stops at the cap.
-                if not preserve_free_charge_command:
+                if action == "charge" and not preserve_free_charge_command:
                     power_w = min(power_w, reported_charge_w)
                 if (
-                    grid_charge_w <= ACTION_THRESHOLD_W
+                    action == "charge"
+                    and grid_charge_w <= ACTION_THRESHOLD_W
                     and not preserve_free_charge_command
                 ):
                     action = "self_consumption"

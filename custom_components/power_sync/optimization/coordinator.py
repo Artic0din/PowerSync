@@ -2015,6 +2015,72 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return min(requested, safe_minutes), hardware_projected_soc
 
+    def _targetless_charge_safe_duration(
+        self,
+        action: Any,
+        soc_now: float | None,
+        charge_cap: float,
+        requested_minutes: int,
+    ) -> tuple[int, float | None]:
+        """Return a cap-safe full-power duration for targetless charging."""
+        if self._supports_target_charge_power():
+            return max(0, int(requested_minutes)), None
+        try:
+            capacity_wh = float(
+                getattr(self._config, "battery_capacity_wh", 0.0) or 0.0
+            )
+            command_w = float(
+                getattr(self._config, "max_charge_w", 0.0) or 0.0
+            )
+            requested_w = max(
+                0.0,
+                float(getattr(action, "power_w", 0.0) or 0.0),
+            )
+            efficiency = float(
+                getattr(
+                    getattr(self, "_optimizer", None),
+                    "efficiency",
+                    0.92,
+                )
+                or 0.92
+            )
+            requested = max(0, int(requested_minutes))
+        except (TypeError, ValueError, OverflowError):
+            return 0, None
+        if command_w <= 0 or requested_w <= 0 or not 0 < efficiency <= 1:
+            return 0, None
+
+        # The default 100% cap intentionally preserves the historical command
+        # contract. Hardware/BMS tapering owns the physical full-SOC limit.
+        if charge_cap >= 0.999:
+            return requested, None
+
+        # Preserve the scheduled energy by translating a stale fractional
+        # target into whole minutes at the hardware's fixed command rate.
+        energy_safe_minutes = max(
+            0,
+            math.floor(requested_w * requested / command_w + 1e-6),
+        )
+        hardware_projected_soc: float | None = None
+        cap_safe_minutes = requested
+        if charge_cap < 0.999:
+            if soc_now is None or capacity_wh <= 0:
+                return 0, None
+            headroom_wh = max(0.0, (charge_cap - soc_now) * capacity_wh)
+            cap_safe_minutes = max(
+                0,
+                math.floor(
+                    headroom_wh / (command_w * efficiency) * 60.0 + 1e-6
+                ),
+            )
+            hardware_projected_soc = soc_now + (
+                command_w * requested / 60.0 * efficiency / capacity_wh
+            )
+
+        return min(requested, energy_safe_minutes, cap_safe_minutes), (
+            hardware_projected_soc
+        )
+
     def _force_discharge_reaches_reserve(
         self,
         action: Any,
@@ -7925,6 +7991,69 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
+                    if not self._supports_target_charge_power():
+                        safe_duration, projected_soc = (
+                            self._targetless_charge_safe_duration(
+                                action,
+                                charge_soc_now,
+                                charge_soc_cap,
+                                charge_duration,
+                            )
+                        )
+                        if safe_duration <= 0:
+                            if (
+                                getattr(
+                                    self,
+                                    "_last_executed_planned_action",
+                                    None,
+                                )
+                                == action.action
+                                and self._last_executed_action
+                                == "self_consumption"
+                            ):
+                                return
+                            projected_text = (
+                                f" (full-rate projection "
+                                f"{projected_soc * 100:.1f}%)"
+                                if projected_soc is not None
+                                else ""
+                            )
+                            _LOGGER.warning(
+                                "Optimizer: Blocking targetless charge at %.0fW%s "
+                                "because it cannot fit one whole fixed-power minute "
+                                "below the %.0f%% grid-charge cap; restoring "
+                                "self_consumption",
+                                charge_power_w,
+                                projected_text,
+                                charge_soc_cap * 100,
+                            )
+                            restore_success = True
+                            if hasattr(battery, "restore_normal"):
+                                restore_success = await battery.restore_normal()
+                            elif hasattr(battery, "set_self_consumption_mode"):
+                                restore_success = (
+                                    await battery.set_self_consumption_mode()
+                                )
+                            if restore_success is False:
+                                _LOGGER.warning(
+                                    "Optimizer: Targetless charge block restore "
+                                    "failed; keeping previous action marker so the "
+                                    "next cycle retries"
+                                )
+                                return
+                            self._last_executed_planned_action = action.action
+                            self._last_executed_action = "self_consumption"
+                            return
+                        if safe_duration < charge_duration:
+                            _LOGGER.info(
+                                "Optimizer: Shortening targetless charge from "
+                                "%dmin to %dmin so the fixed-power command stays "
+                                "below the %.0f%% grid-charge cap",
+                                charge_duration,
+                                safe_duration,
+                                charge_soc_cap * 100,
+                            )
+                            charge_duration = safe_duration
                     # Near the demand window, shorten charge duration so the
                     # auto-restore fires 1 minute before demand starts.  The
                     # optimizer recalculates every 5 minutes and will upload a

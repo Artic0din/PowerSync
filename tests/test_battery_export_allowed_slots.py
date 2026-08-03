@@ -5850,6 +5850,54 @@ def test_charge_at_grid_soc_cap_restores_without_force_command(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+@pytest.mark.parametrize("requested_w", [384.3, 645.1, 1158.8])
+def test_saj_partial_charge_below_grid_cap_does_not_send_full_tou_command(
+    opt_module,
+    requested_w,
+):
+    """Ticket #319: a fractional top-up cannot become SAJ's fixed 5 kW mode."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.979)
+    coordinator.battery_system = "saj_h2"
+    coordinator._config.battery_capacity_wh = 20_000
+    coordinator._config.max_charge_w = 5_000
+    coordinator._config.grid_charge_soc_cap = 0.98
+    coordinator._get_energy_data = lambda: {"battery_level": 97.9}
+    start = datetime(2026, 8, 3, 3, 45, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="charge", power_w=requested_w, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_saj_full_fixed_rate_charge_executes_when_slot_fits_below_cap(
+    opt_module,
+):
+    """A complete SAJ fixed-rate slot remains valid when it fits the SOC cap."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.95)
+    coordinator.battery_system = "saj_h2"
+    coordinator._config.battery_capacity_wh = 20_000
+    coordinator._config.max_charge_w = 5_000
+    coordinator._config.grid_charge_soc_cap = 0.98
+    coordinator._get_energy_data = lambda: {"battery_level": 95.0}
+    start = datetime(2026, 8, 3, 3, 30, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="charge", power_w=5_000, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == [(5, 5_000, False)]
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._last_executed_action == "charge"
+
+
 def test_unknown_soc_with_lower_grid_cap_blocks_force_charge(opt_module):
     """A lower cap fails safe when live SOC telemetry is unavailable."""
     battery = _FakeBattery()

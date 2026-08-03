@@ -2269,6 +2269,96 @@ def test_free_import_emission_obeys_grid_charge_soc_cap(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
+@pytest.mark.parametrize(
+    ("target_charge_power_supported", "expected_action"),
+    ((False, "self_consumption"), (True, "charge")),
+)
+def test_near_cap_partial_charge_requires_target_power_control(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+    target_charge_power_supported,
+    expected_action,
+):
+    """Ticket #319: fixed-rate hardware must not receive a partial cap top-up."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.20,
+        grid_charge_soc_cap=0.98,
+        interval_minutes=5,
+        horizon_hours=1,
+        terminal_weight=1.0,
+        target_charge_power_supported=target_charge_power_supported,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.0] * 12,
+        export_prices=[0.05] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.7] * 12,
+        current_soc=0.979,
+        allow_battery_export=[False] * 12,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 12,
+        disable_idle=True,
+    )
+
+    action = result.schedule.actions[0]
+    assert action.action == expected_action
+    if target_charge_power_supported:
+        assert 0.0 < action.power_w < 5_000.0
+    else:
+        assert action.power_w == pytest.approx(0.0, abs=0.1)
+        assert action.battery_charge_w == pytest.approx(0.0, abs=0.1)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_default_grid_soc_cap_preserves_targetless_charge_command(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """The fixed-rate guard must not change historical default-cap charging."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=1,
+        terminal_weight=1.0,
+        target_charge_power_supported=False,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.0] * 12,
+        export_prices=[0.05] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.7] * 12,
+        current_soc=0.979,
+        allow_battery_export=[False] * 12,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 12,
+        disable_idle=True,
+    )
+
+    action = result.schedule.actions[0]
+    assert action.action == "charge"
+    assert action.power_w > 0.0
+    assert action.battery_charge_w > 0.0
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
 @pytest.mark.parametrize("load_kw", [0.0, 1.0])
 def test_free_import_at_grid_soc_cap_stops_charge_command(
     battery_optimizer_module,
