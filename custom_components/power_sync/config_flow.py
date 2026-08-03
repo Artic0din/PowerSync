@@ -7525,6 +7525,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Show optional and specialist settings outside the main path."""
         menu_options = [
+            "back",
             "network_export",
             "inverter",
             "curtailment",
@@ -7540,6 +7541,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="advanced",
             menu_options=menu_options,
         )
+
+    async def async_step_back(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Return from a nested options menu to the main settings menu."""
+        return await self.async_step_init()
 
     @staticmethod
     def _network_export_power_state_valid(

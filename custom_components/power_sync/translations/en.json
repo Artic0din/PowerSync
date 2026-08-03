@@ -1181,6 +1181,7 @@
         "title": "Advanced settings",
         "description": "Optional features for specialist tariffs, export controls, extra inverters, forecasting, and maintenance. You can safely leave these alone unless they apply to your setup.",
         "menu_options": {
+          "back": "Back to PowerSync settings",
           "network_export": "Network export limits / Flexible Exports",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",

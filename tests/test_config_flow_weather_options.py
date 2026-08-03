@@ -1607,9 +1607,13 @@ def test_options_menu_keeps_optimizer_grouped_and_specialists_under_advanced():
     advanced_source = ast.get_source_segment(
         source, _options_flow_method("async_step_advanced")
     )
+    back_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_back")
+    )
 
     assert init_source is not None
     assert advanced_source is not None
+    assert back_source is not None
     for owner_section in (
         '"optimization"',
         '"ev_charging"',
@@ -1636,10 +1640,16 @@ def test_options_menu_keeps_optimizer_grouped_and_specialists_under_advanced():
 
     assert "BATTERY_SYSTEM_SUNGROW" in advanced_source
     assert 'menu_options.append("history_relink")' in advanced_source
+    assert '"back"' in advanced_source
+    assert "return await self.async_step_init()" in back_source
 
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         steps = json.loads(path.read_text())["options"]["step"]
         assert steps["init"]["menu_options"]["advanced"] == "Advanced settings"
+        assert (
+            steps["advanced"]["menu_options"]["back"]
+            == "Back to PowerSync settings"
+        )
         assert "network_export" not in steps["init"]["menu_options"]
         assert "network_export" in steps["advanced"]["menu_options"]
         assert "safely leave these alone" in steps["advanced"]["description"]
