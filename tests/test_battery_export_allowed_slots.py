@@ -2915,6 +2915,37 @@ def test_solar_filled_battery_does_not_price_entire_overnight_reserve(
     assert acquisition_cost < 0.35
 
 
+def test_mixed_solar_and_grid_charge_blends_current_inventory_provenance(
+    opt_module,
+):
+    """Ticket #338: a small measured grid top-up must not price all storage."""
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._grid_charge_tracking_known = True
+    coordinator._actual_charge_kwh_today = 19.17
+    coordinator._actual_discharge_kwh_today = 2.61
+    coordinator._actual_grid_charge_kwh_today = 0.0284
+    coordinator._actual_grid_charge_cost_today = 0.0119
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "energy_summary": {
+                "charge_today_kwh": 19.17,
+                "discharge_today_kwh": 2.61,
+                "grid_import_today_kwh": 0.03,
+            }
+        }
+    )
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=[0.434, 0.532, 0.434],
+        current_soc=1.0,
+        capacity_wh=24_200,
+    )
+
+    expected = (0.0119 + (24.2 - 16.5316 - 0.0284) * 0.434) / 24.2
+    assert acquisition_cost == pytest.approx(expected)
+    assert acquisition_cost < 0.35
+
+
 def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
     opt_module,
 ):
@@ -3058,13 +3089,14 @@ def test_unknown_charge_provenance_caps_proven_solar_at_current_inventory(
     assert acquisition_cost == pytest.approx(0.0)
 
 
-def test_grid_charge_keeps_measured_acquisition_cost(opt_module):
+def test_all_grid_charge_keeps_measured_acquisition_cost(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._grid_charge_tracking_known = True
-    coordinator._actual_charge_kwh_today = 9.4
+    # All of the currently stored inventory is known to be grid-origin.
+    coordinator._actual_charge_kwh_today = 30.08
     coordinator._actual_discharge_kwh_today = 0.0
-    coordinator._actual_grid_charge_kwh_today = 0.05
-    coordinator._actual_grid_charge_cost_today = 0.02
+    coordinator._actual_grid_charge_kwh_today = 30.08
+    coordinator._actual_grid_charge_cost_today = 12.032
 
     acquisition_cost = coordinator._acquisition_cost_for_run(
         import_prices=[0.43, 0.532, 0.41],

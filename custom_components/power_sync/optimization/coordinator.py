@@ -4693,8 +4693,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid_charge_cost = float(
             getattr(self, "_actual_grid_charge_cost_today", 0.0) or 0.0
         )
-        if tracking_known and grid_charge_kwh > 1e-6:
-            return grid_charge_cost / grid_charge_kwh
+        measured_grid_unit_cost = (
+            grid_charge_cost / grid_charge_kwh
+            if tracking_known and grid_charge_kwh > 1e-6
+            else None
+        )
 
         current_stored_energy_kwh = (
             max(0.0, min(1.0, float(current_soc)))
@@ -4743,20 +4746,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         if current_stored_energy_kwh > 0.1 and proven_solar_candidates:
-            proven_solar_kwh = max(proven_solar_candidates)
-            # Value only the portion that today's measured solar charging
-            # cannot account for at the conservative import proxy. A battery
-            # that started above 0% and then filled from solar must not have
-            # its entire inventory priced as unknown carry-over.
-            unknown_carry_over_kwh = max(
+            # Decompose the current inventory into the strongest proven solar
+            # lower bound, measured grid-origin energy that can still fit in
+            # the remainder, and unknown carry-over.  The counters are daily
+            # totals, so a measured grid charge may already have been used or
+            # discharged; cap that priced portion to the inventory still left
+            # after the proven solar portion instead of pricing all storage at
+            # the measured grid rate.
+            proven_solar_kwh = min(
+                current_stored_energy_kwh,
+                max(proven_solar_candidates),
+            )
+            remaining_inventory_kwh = max(
                 0.0,
                 current_stored_energy_kwh - proven_solar_kwh,
             )
-            unknown_fraction = min(
-                1.0,
-                unknown_carry_over_kwh / current_stored_energy_kwh,
+            measured_grid_kwh = min(
+                remaining_inventory_kwh,
+                grid_charge_kwh if measured_grid_unit_cost is not None else 0.0,
             )
-            return median_import_cost * unknown_fraction
+            unknown_carry_over_kwh = max(
+                0.0,
+                remaining_inventory_kwh - measured_grid_kwh,
+            )
+            blended_cost = (
+                measured_grid_kwh * (measured_grid_unit_cost or 0.0)
+                + unknown_carry_over_kwh * median_import_cost
+            ) / current_stored_energy_kwh
+            return blended_cost
+
+        # Keep the measured rate for a genuinely all-grid/no-solar inventory
+        # (or when the live SOC is too small for a meaningful decomposition).
+        if measured_grid_unit_cost is not None:
+            return measured_grid_unit_cost
 
         # With no measured charge provenance for the current day, retain the
         # conservative proxy for energy that may have carried over overnight.
