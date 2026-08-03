@@ -270,19 +270,28 @@ def _coerce_positive_float(value: Any) -> Optional[float]:
 
 def _kw_from_power_state(state: Any) -> float:
     """Return a power state as kW, accepting W or kW entities."""
-    if not state or state.state in ("unknown", "unavailable", ""):
-        return 0.0
+    power_kw, _available = _power_state_kw_reading(state)
+    return power_kw
+
+
+def _power_state_kw_reading(state: Any) -> tuple[float, bool]:
+    """Return ``(kW, available)`` without conflating numeric zero and missing."""
+    raw_state = getattr(state, "state", None) if state else None
+    if raw_state is None or raw_state in ("unknown", "unavailable", ""):
+        return 0.0, False
     try:
-        power = float(state.state or 0)
+        power = float(raw_state)
     except (TypeError, ValueError):
-        return 0.0
+        return 0.0, False
+    if not math.isfinite(power):
+        return 0.0, False
 
     unit = str((getattr(state, "attributes", {}) or {}).get("unit_of_measurement", "")).strip().lower()
     if unit in ("w", "watt", "watts"):
-        return max(0.0, power / 1000.0)
+        return max(0.0, power / 1000.0), True
     if unit in ("kw", "kilowatt", "kilowatts"):
-        return max(0.0, power)
-    return max(0.0, power / 1000.0 if abs(power) > 100 else power)
+        return max(0.0, power), True
+    return max(0.0, power / 1000.0 if abs(power) > 100 else power), True
 
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
@@ -551,32 +560,52 @@ def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
     return ""
 
 
-def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
-    """
-    Check if a Tesla vehicle has reached its charge target (charging state is 'complete').
+_TESLA_NON_CHARGING_STATES = frozenset(
+    {
+        "complete",
+        "disconnected",
+        "not_plugged_in",
+        "stopped",
+        "unplugged",
+    }
+)
+_TESLA_RESTART_TELEMETRY_GRACE_SECONDS = 90
 
-    Args:
-        hass: Home Assistant instance
-        vehicle_vin: The vehicle's VIN
 
-    Returns:
-        True if the vehicle's charging state is 'complete'
-    """
+def _get_tesla_charging_state(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str],
+) -> Optional[str]:
+    """Return a usable Tesla charging state for one VIN, when exposed by HA."""
     import re
 
     if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
-        return False
+        return None
 
-    # Check Teslemetry/Fleet sensor.*_charging_state
     for state in hass.states.async_all():
         match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
-        if match:
-            candidate = match.group(1)
-            # Match by VIN (case-insensitive)
-            if candidate.upper() == vehicle_vin.upper():
-                if state.state and state.state.lower() in ("complete", "stopped"):
-                    return True
-    return False
+        if not match or match.group(1).upper() != str(vehicle_vin).upper():
+            continue
+        value = str(state.state or "").strip().lower()
+        if value and value not in {"unknown", "unavailable", "none"}:
+            return value
+    return None
+
+
+def _tesla_restart_telemetry_pending(state: Dict[str, Any]) -> bool:
+    """Keep commanded load during the short lag after a physical restart."""
+    started_at = state.get("last_start_command_at")
+    if not isinstance(started_at, datetime):
+        return False
+    now = datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
+    return (
+        now - started_at
+    ).total_seconds() < _TESLA_RESTART_TELEMETRY_GRACE_SECONDS
+
+
+def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
+    """Return whether Tesla telemetry says this vehicle reached its target."""
+    return _get_tesla_charging_state(hass, vehicle_vin) == "complete"
 
 
 def _dynamic_ev_soc_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional[str]:
@@ -638,14 +667,14 @@ async def _dynamic_ev_full_soc_reason(
     return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
 
 
-async def _get_observed_ev_power_kw(
+async def _get_observed_ev_power_reading_kw(
     hass: HomeAssistant,
     vehicle_id: str,
     params: dict,
     *,
     allow_wall_connector_fallback: bool = False,
-) -> float:
-    """Return measured EV charging power for dynamic surplus control."""
+) -> tuple[float, bool]:
+    """Return measured EV power and whether a numeric source was available."""
     power_entity_keys = (
         "charger_power_entity",
         "charger_power_sensor",
@@ -657,23 +686,29 @@ async def _get_observed_ev_power_kw(
     for key in power_entity_keys:
         entity_id = params.get(key)
         if entity_id:
-            power_kw = _kw_from_power_state(hass.states.get(str(entity_id)))
-            if power_kw > 0.05:
-                return power_kw
+            power_kw, available = _power_state_kw_reading(
+                hass.states.get(str(entity_id))
+            )
+            if available:
+                return power_kw, True
 
     charger_type = params.get("charger_type", "tesla")
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
+        wall_power_kw = 0.0
+        wall_power_available = False
         if allow_wall_connector_fallback:
-            wall_power_kw = 0.0
             for state in hass.states.async_all("sensor"):
                 entity_id = state.entity_id.lower()
                 if "wall_connector" not in entity_id or "power" not in entity_id:
                     continue
                 if any(token in entity_id for token in ("voltage", "current", "energy", "frequency")):
                     continue
-                wall_power_kw = max(wall_power_kw, _kw_from_power_state(state))
-            if wall_power_kw > 0.05:
-                return wall_power_kw
+                power_kw, available = _power_state_kw_reading(state)
+                if available:
+                    wall_power_available = True
+                    wall_power_kw = max(wall_power_kw, power_kw)
+            if wall_power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+                return wall_power_kw, True
 
         try:
             entity = await _get_tesla_ev_entity(
@@ -683,13 +718,32 @@ async def _get_observed_ev_power_kw(
                 warn_on_missing=False,
             )
             if entity:
-                power_kw = _kw_from_power_state(hass.states.get(entity))
-                if power_kw > 0.05:
-                    return power_kw
+                power_kw, available = _power_state_kw_reading(hass.states.get(entity))
+                if available:
+                    return power_kw, True
         except Exception as err:
             _LOGGER.debug("Solar surplus EV: could not read Tesla EV power entity: %s", err)
 
-    return 0.0
+    if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID and wall_power_available:
+        return wall_power_kw, True
+    return 0.0, False
+
+
+async def _get_observed_ev_power_kw(
+    hass: HomeAssistant,
+    vehicle_id: str,
+    params: dict,
+    *,
+    allow_wall_connector_fallback: bool = False,
+) -> float:
+    """Return measured EV charging power for dynamic surplus control."""
+    power_kw, _available = await _get_observed_ev_power_reading_kw(
+        hass,
+        vehicle_id,
+        params,
+        allow_wall_connector_fallback=allow_wall_connector_fallback,
+    )
+    return power_kw
 
 
 async def _wake_tesla_ev(
@@ -6268,6 +6322,8 @@ async def _dynamic_ev_update_surplus(
         if v_state.get("active") and not v_state.get("paused")
     ]
     observed_current_power_kw = 0.0
+    current_vehicle_power_available = False
+    current_vehicle_charging_state = None
     for vid, v_state in all_vehicles.items():
         if not v_state.get("active") or v_state.get("paused"):
             continue
@@ -6276,7 +6332,7 @@ async def _dynamic_ev_update_surplus(
         v_voltage = v_params.get("voltage", 240)
         v_phases = v_params.get("phases", 1)
         commanded_power_kw = (v_amps * v_voltage * v_phases) / 1000
-        observed_power_kw = await _get_observed_ev_power_kw(
+        observed_power_kw, observed_power_available = await _get_observed_ev_power_reading_kw(
             hass,
             vid,
             v_params,
@@ -6284,9 +6340,29 @@ async def _dynamic_ev_update_surplus(
         )
         if _session_was_replaced("charger-power lookup"):
             return
+        charging_state = None
+        if v_params.get("charger_type", "tesla") == "tesla":
+            charging_state = _get_tesla_charging_state(
+                hass,
+                _dynamic_ev_vehicle_vin(vid, v_params),
+            )
         if vid == vehicle_id:
             observed_current_power_kw = observed_power_kw
-        total_ev_power_kw += max(commanded_power_kw, observed_power_kw)
+            current_vehicle_power_available = observed_power_available
+            current_vehicle_charging_state = charging_state
+        if (
+            observed_power_available
+            and observed_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+            and charging_state in _TESLA_NON_CHARGING_STATES
+            and not _tesla_restart_telemetry_pending(v_state)
+        ):
+            # A known stopped/complete Tesla is not consuming its previous
+            # dynamic target. Keep the command as a fallback only while the
+            # vehicle state or power observation is unavailable.
+            actual_power_kw = 0.0
+        else:
+            actual_power_kw = max(commanded_power_kw, observed_power_kw)
+        total_ev_power_kw += actual_power_kw
 
     # Calculate available surplus after the household buffer and any configured
     # parallel battery reserve.
@@ -6465,7 +6541,17 @@ async def _dynamic_ev_update_surplus(
         observed_current_power_kw,
     )
     effective_current_amps = current_amps
-    if current_amps <= 0 and observed_current_power_kw > 0.05:
+    stopped_without_restart_lag = (
+        params.get("charger_type", "tesla") == "tesla"
+        and current_vehicle_power_available
+        and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+        and current_vehicle_charging_state in _TESLA_NON_CHARGING_STATES
+        and not _tesla_restart_telemetry_pending(state)
+    )
+    if stopped_without_restart_lag:
+        current_ev_kw = 0.0
+        effective_current_amps = 0
+    elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
 
     # Determine available surplus for EV. _calculate_solar_surplus already
@@ -6562,7 +6648,13 @@ async def _dynamic_ev_update_surplus(
                         _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
                     return
 
+                state["last_start_command_at"] = datetime.now()
                 state["charging_started"] = True
+                # The physical restart satisfied this sustained-surplus
+                # window. If Tesla telemetry remains stopped, require a new
+                # window after the post-command grace period instead of
+                # replaying the start command on every update.
+                state["high_surplus_start"] = None
 
                 # Send notification when solar charging actually begins
                 notify_on_start = params.get("notify_on_start", True)
@@ -6637,6 +6729,11 @@ async def _dynamic_ev_update_surplus(
                 applied_amps = min(applied_amps, max_after_set)
             state["current_amps"] = applied_amps
             state["target_amps"] = applied_amps
+            if applied_amps != new_amps:
+                state["reason"] = state["reason"].replace(
+                    f"Target: {new_amps}A",
+                    f"Target: {applied_amps}A",
+                )
 
             # End session when transitioning to 0 amps (stopping charging)
             if new_amps == 0 and effective_current_amps > 0:

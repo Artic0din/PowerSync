@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -4358,6 +4358,167 @@ def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):
 
     assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 0
     assert set_amps_calls == [0]
+
+
+def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commanded_load(
+    monkeypatch,
+):
+    """A stopped Tesla must not reserve its stale Solar Surplus amp target."""
+    hass = _Hass([
+        _State("sensor.VIN123_charging_state", "stopped"),
+        _State("sensor.VIN123_charger_power", "0", {"unit_of_measurement": "W"}),
+    ])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=24)
+    state["params"]["vehicle_vin"] = vehicle_id
+    state["params"]["charger_power_entity"] = "sensor.VIN123_charger_power"
+    state["params"]["household_buffer_kw"] = 0.3
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+
+    start_calls: list[dict] = []
+
+    async def fake_start_ev(hass, config_entry, params, context=None):
+        start_calls.append(params)
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_ev)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", lambda *args: False)
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": -2100,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert start_calls and start_calls[0]["vehicle_vin"] == vehicle_id
+    assert set_amps_calls == [8]
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 8
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["target_amps"] == 8
+    assert "Target: 8A" in actions._dynamic_ev_state["entry-1"][vehicle_id]["reason"]
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["high_surplus_start"] is None
+
+    # Stale stopped telemetry after the restart must not replay the start
+    # command forever once the short post-command grace period expires.
+    state["last_start_command_at"] = datetime.now() - timedelta(seconds=91)
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+    assert len(start_calls) == 1
+    assert set_amps_calls == [8]
+    assert state["high_surplus_start"] is not None
+
+
+def test_tesla_stopped_state_is_not_charge_complete_at_partial_soc():
+    hass = _Hass([
+        _State("sensor.VIN123_charging_state", "stopped"),
+        _State("sensor.VIN123_battery_level", "69"),
+    ])
+
+    assert actions._is_vehicle_charge_complete(hass, "VIN123") is False
+
+
+def test_stopped_tesla_requires_available_numeric_zero_power_for_stale_load_override():
+    missing_hass = _Hass([])
+    unavailable_hass = _Hass([
+        _State("sensor.VIN123_charger_power", "unavailable"),
+    ])
+    nonnumeric_hass = _Hass([
+        _State("sensor.VIN123_charger_power", "not-a-number"),
+    ])
+    params = {
+        "charger_type": "tesla",
+        "charger_power_entity": "sensor.VIN123_charger_power",
+    }
+
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            missing_hass,
+            "VIN123",
+            params,
+        )
+    ) == (0.0, False)
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            unavailable_hass,
+            "VIN123",
+            params,
+        )
+    ) == (0.0, False)
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            nonnumeric_hass,
+            "VIN123",
+            params,
+        )
+    ) == (0.0, False)
+
+
+def test_solar_surplus_stopped_tesla_keeps_commanded_fallback_without_power_source(
+    monkeypatch,
+):
+    for power_state in (None, "unavailable"):
+        states = [_State("sensor.VIN123_charging_state", "stopped")]
+        if power_state is not None:
+            states.append(_State("sensor.VIN123_charger_power", power_state))
+        hass = _Hass(states)
+        vehicle_id = "VIN123"
+        actions._dynamic_ev_state.clear()
+        state = _solar_surplus_state(current_amps=24)
+        state["params"].update(
+            {
+                "vehicle_vin": vehicle_id,
+                "charger_power_entity": "sensor.VIN123_charger_power",
+                "household_buffer_kw": 0.3,
+            }
+        )
+        state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+        actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+        start_calls: list[dict] = []
+
+        async def fake_start_ev(hass, config_entry, params, context=None):
+            start_calls.append(params)
+            return True
+
+        monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_ev)
+        set_amps_calls = _install_solar_surplus_runtime_stubs(
+            monkeypatch,
+            {
+                "battery_soc": 100,
+                "grid_power": -2100,
+                "battery_power": 0,
+                "solar_power": 0,
+                "load_power": 0,
+            },
+        )
+
+        asyncio.run(
+            actions._dynamic_ev_update_surplus(
+                hass,
+                _Entry(),
+                "entry-1",
+                vehicle_id,
+            )
+        )
+
+        assert start_calls == []
+        assert set_amps_calls == [32]
+        assert state["current_amps"] == 32
+
+
+def test_tesla_restart_telemetry_pending_accepts_timezone_aware_timestamp():
+    state = {"last_start_command_at": datetime.now(timezone.utc)}
+
+    assert actions._tesla_restart_telemetry_pending(state) is True
 
 
 def test_clear_tracked_session_does_not_send_physical_stop():
