@@ -800,11 +800,12 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
             assert step["data"]["globird_zerohero_import_limit_kw"] == "No-import threshold"
             assert step["data"]["globird_zerocharge_start"] == "Custom ZeroCharge start"
             assert step["data"]["globird_zerocharge_end"] == "Custom ZeroCharge end"
-            assert step["data"]["globird_zerocharge_import_cap_kwh"] == "ZeroCharge import cap"
+            assert step["data"]["globird_zerocharge_import_cap_kwh"] == "ZeroCharge daily-average allowance"
             assert "Jul 2026" in step["data_description"]["globird_plan"]
             assert "15 kWh" in step["data_description"]["globird_plan"]
             assert "12:00" in step["data_description"]["globird_zerocharge_start"]
             assert "15:00" in step["data_description"]["globird_zerocharge_end"]
+            assert "local calendar month" in step["data_description"]["globird_zerocharge_import_cap_kwh"]
             assert "0.09 kWh total import allowance" in step["data_description"]["globird_zerohero_import_limit_kw"]
 
 

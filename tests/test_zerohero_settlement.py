@@ -63,6 +63,9 @@ def test_jul_2026_plan_uses_10c_super_export_and_zerocharge_window():
     assert config.zerocharge_start == "12:00"
     assert config.zerocharge_end == "15:00"
     assert config.zerocharge_import_cap_kwh == pytest.approx(50.0)
+    assert zerohero.zerocharge_monthly_cap_kwh(config, _ts(12, 0)) == pytest.approx(
+        1550.0
+    )
     assert zerohero.zerocharge_is_in_window(_ts(12, 0), config)
     assert not zerohero.zerocharge_is_in_window(_ts(15, 0), config)
 
@@ -137,10 +140,76 @@ def test_zerocharge_import_credit_applies_only_to_capped_window_imports():
         [_ts(11, 55), _ts(12, 0), _ts(13, 0), _ts(15, 0)],
         [10.0, 30.0, 30.0, 10.0],
         [0.40, 0.50, 0.60, 0.70],
+        initial_import_kwh=1540.0,
+        initial_period_key="2026-05",
     )
 
-    assert used == pytest.approx(60.0)
-    assert credit == pytest.approx(15.0 + 12.0)
+    assert used == pytest.approx(1600.0)
+    assert credit == pytest.approx(5.0)
+
+
+def test_zerocharge_monthly_pool_allows_50kwh_early_in_month():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+    timestamp = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+
+    used, credit = zerohero.settle_zerocharge_imports(
+        config,
+        [timestamp],
+        [5.0],
+        [0.50],
+        initial_import_kwh=50.0,
+        initial_period_key="2026-08",
+    )
+
+    assert used == pytest.approx(55.0)
+    assert credit == pytest.approx(2.5)
+
+
+def test_zerocharge_empty_series_preserves_initial_month_usage():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+
+    used, credit = zerohero.settle_zerocharge_imports(
+        config,
+        [],
+        [],
+        [],
+        initial_import_kwh=5.0,
+    )
+
+    assert used == pytest.approx(5.0)
+    assert credit == 0.0
+
+
+def test_zerocharge_invalid_period_returns_no_pool():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+
+    assert zerohero.zerocharge_monthly_cap_kwh(config, "2026-13") == 0.0
+
+
+def test_zerocharge_month_caps_are_separate_at_august_september_boundary():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+    timestamps = [
+        datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+    ]
+
+    used, credit = zerohero.settle_zerocharge_imports(
+        config,
+        timestamps,
+        [1550.0, 5.0],
+        [0.10, 0.50],
+    )
+
+    assert used == pytest.approx(1555.0)
+    assert credit == pytest.approx(155.0 + 2.5)
 
 
 def test_existing_custom_zerohero_does_not_enable_zerocharge_by_default():

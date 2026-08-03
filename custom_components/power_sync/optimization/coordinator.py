@@ -73,6 +73,8 @@ from ..zerohero import (
     zerohero_is_in_window,
     zerohero_window_end_for,
     zerocharge_is_in_window,
+    zerocharge_monthly_cap_kwh,
+    zerocharge_period_key,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -472,11 +474,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_zerohero_credit_value_today = 0.0
         self._actual_zerocharge_import_kwh_today = 0.0
         self._actual_zerocharge_credit_value_today = 0.0
+        # ZeroCharge uses a local calendar-month pool.  The legacy ``*_today``
+        # fields above remain as public/serialized aliases for compatibility,
+        # while these explicit fields carry the month-to-date state.
+        self._actual_zerocharge_period_key: str | None = None
+        self._actual_zerocharge_import_kwh_month = 0.0
+        self._actual_zerocharge_credit_value_month = 0.0
         self._baseline_zerohero_import_kwh_today = 0.0
         self._baseline_zerohero_bonus_export_kwh_today = 0.0
         self._baseline_zerohero_credit_value_today = 0.0
         self._baseline_zerocharge_import_kwh_today = 0.0
         self._baseline_zerocharge_credit_value_today = 0.0
+        self._baseline_zerocharge_period_key: str | None = None
+        self._baseline_zerocharge_import_kwh_month = 0.0
+        self._baseline_zerocharge_credit_value_month = 0.0
         self._cost_store = Store(
             hass,
             COST_STORE_VERSION,
@@ -3223,8 +3234,89 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _zerocharge_tariff_day(ts: datetime) -> str:
-        """Return the local calendar day owning a ZeroCharge allowance."""
-        return ts.date().isoformat()
+        """Return the local calendar month owning a ZeroCharge allowance.
+
+        The method name is retained for compatibility with older callers, but
+        ZeroCharge allowances are now grouped by ``YYYY-MM`` rather than day.
+        """
+        return zerocharge_period_key(ts)
+
+    @staticmethod
+    def _zerocharge_period_key(ts: datetime) -> str:
+        """Return the local calendar month owning a ZeroCharge allowance."""
+        return zerocharge_period_key(ts)
+
+    def _ensure_zerocharge_period_state(
+        self,
+        now: datetime,
+        *,
+        baseline: bool = False,
+    ) -> tuple[str, float, float]:
+        """Return and normalize actual/baseline ZeroCharge month state.
+
+        Legacy lightweight coordinators and pre-monthly persisted state only
+        expose the ``*_today`` counters.  Adopt those once when no explicit
+        period exists, then keep the explicit month fields authoritative.
+        """
+        prefix = "_baseline_zerocharge" if baseline else "_actual_zerocharge"
+        period_attr = f"{prefix}_period_key"
+        import_attr = f"{prefix}_import_kwh_month"
+        credit_attr = f"{prefix}_credit_value_month"
+        legacy_import_attr = f"{prefix}_import_kwh_today"
+        legacy_credit_attr = f"{prefix}_credit_value_today"
+        period = getattr(self, period_attr, None)
+        key = self._zerocharge_period_key(now)
+        if period != key:
+            # A missing period is a conservative migration point for old
+            # in-memory/test coordinators.  Persisted legacy data is migrated
+            # in _restore_cost_data only when its stored day is today.
+            legacy_import = max(0.0, float(getattr(self, legacy_import_attr, 0.0)))
+            legacy_credit = max(0.0, float(getattr(self, legacy_credit_attr, 0.0)))
+            if period is None and (legacy_import or legacy_credit):
+                imported = legacy_import
+                credit = legacy_credit
+            else:
+                imported = 0.0
+                credit = 0.0
+            setattr(self, period_attr, key)
+            setattr(self, import_attr, imported)
+            setattr(self, credit_attr, credit)
+        else:
+            imported = max(0.0, float(getattr(self, import_attr, 0.0)))
+            credit = max(0.0, float(getattr(self, credit_attr, 0.0)))
+            # Older callers may still update the legacy alias directly (the
+            # lightweight coordinators in the regression suite do this).  A
+            # larger legacy value is safe to adopt without ever reducing the
+            # explicit month-to-date state.
+            imported = max(
+                imported,
+                max(0.0, float(getattr(self, legacy_import_attr, 0.0))),
+            )
+            credit = max(
+                credit,
+                max(0.0, float(getattr(self, legacy_credit_attr, 0.0))),
+            )
+            setattr(self, import_attr, imported)
+            setattr(self, credit_attr, credit)
+        # Keep the historical public/serialized keys compatible.
+        setattr(self, legacy_import_attr, imported)
+        setattr(self, legacy_credit_attr, credit)
+        return key, imported, credit
+
+    def _set_zerocharge_period_state(
+        self,
+        *,
+        period_key: str,
+        import_kwh: float,
+        credit_value: float,
+        baseline: bool = False,
+    ) -> None:
+        prefix = "_baseline_zerocharge" if baseline else "_actual_zerocharge"
+        setattr(self, f"{prefix}_period_key", period_key)
+        setattr(self, f"{prefix}_import_kwh_month", max(0.0, import_kwh))
+        setattr(self, f"{prefix}_credit_value_month", max(0.0, credit_value))
+        setattr(self, f"{prefix}_import_kwh_today", max(0.0, import_kwh))
+        setattr(self, f"{prefix}_credit_value_today", max(0.0, credit_value))
 
     def _zerohero_credit_status(self, now: datetime | None = None) -> str:
         """Return current ZeroHero import-threshold status."""
@@ -3264,22 +3356,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         timestamps = self._price_timestamps(n)
         if config.zerocharge_enabled:
+            current_period, current_import_used, _current_credit = (
+                self._ensure_zerocharge_period_state(dt_util.now())
+            )
             current_import_cap = max(
                 0.0,
-                config.zerocharge_import_cap_kwh
-                - self._actual_zerocharge_import_kwh_today,
+                zerocharge_monthly_cap_kwh(config, current_period)
+                - current_import_used,
             )
-            current_day = self._zerocharge_tariff_day(timestamps[0])
             import_groups: list[str | None] = [None] * n
             import_caps: dict[str, float] = {}
             for idx, ts in enumerate(timestamps):
                 if not zerocharge_is_in_window(ts, config):
                     continue
-                tariff_day = self._zerocharge_tariff_day(ts)
+                tariff_day = self._zerocharge_period_key(ts)
                 remaining_import_cap = (
                     current_import_cap
-                    if tariff_day == current_day
-                    else config.zerocharge_import_cap_kwh
+                    if tariff_day == current_period
+                    else zerocharge_monthly_cap_kwh(config, ts)
                 )
                 if remaining_import_cap <= 1e-9:
                     continue
@@ -3295,7 +3389,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if import_caps and any(self._last_zerocharge_bonus_prices):
                 _LOGGER.info(
                     "ZeroCharge optimizer: %.2fkWh free-import capacity across "
-                    "%d tariff day(s), %s-%s",
+                    "%d calendar month(s), %s-%s",
                     self._last_zerocharge_bonus_cap_kwh,
                     len(import_caps),
                     config.zerocharge_start,
@@ -3334,7 +3428,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
     def _zerohero_cost_breakdown(self) -> dict[str, Any]:
-        """Return API-visible ZeroHero daily settlement status."""
+        """Return API-visible ZeroHero settlement status."""
         config = self._zerohero_config()
         if config is None:
             return {"status": "disabled", "credit_status": "disabled"}
@@ -3348,15 +3442,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             0.0,
             config.import_allowance_kwh - self._actual_zerohero_import_kwh_today,
         )
-        remaining_zerocharge = (
-            max(
-                0.0,
-                config.zerocharge_import_cap_kwh
-                - self._actual_zerocharge_import_kwh_today,
+        zerocharge_period = None
+        if config.zerocharge_enabled:
+            zerocharge_period, zerocharge_used, zerocharge_credit = (
+                self._ensure_zerocharge_period_state(dt_util.now())
             )
-            if config.zerocharge_enabled
-            else 0.0
-        )
+            remaining_zerocharge = max(
+                0.0,
+                zerocharge_monthly_cap_kwh(config, zerocharge_period)
+                - zerocharge_used,
+            )
+        else:
+            zerocharge_used = 0.0
+            zerocharge_credit = 0.0
+            remaining_zerocharge = 0.0
         return {
             "status": "enabled",
             "plan": config.plan,
@@ -3368,13 +3467,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "zerocharge_window_start": config.zerocharge_start,
             "zerocharge_window_end": config.zerocharge_end,
             "zerocharge_import_cap_kwh": round(config.zerocharge_import_cap_kwh, 4),
+            "zerocharge_import_cap_mode": "daily_average_monthly_pool",
+            "zerocharge_period_key": zerocharge_period,
+            "zerocharge_monthly_cap_kwh": round(
+                zerocharge_monthly_cap_kwh(config, zerocharge_period)
+                if zerocharge_period
+                else 0.0,
+                4,
+            ),
             "zerocharge_import_kwh_used": round(
-                self._actual_zerocharge_import_kwh_today,
+                zerocharge_used,
                 4,
             ),
             "zerocharge_import_kwh_remaining": round(remaining_zerocharge, 4),
             "zerocharge_credit_value": round(
-                self._actual_zerocharge_credit_value_today,
+                zerocharge_credit,
                 4,
             ),
             "bonus_export_kwh_used": round(
@@ -12080,7 +12187,90 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             restored_globird_quota_state = QuotaLedgerState.from_dict(quota_state)
 
         stored_date = data.get("date")
-        today = dt_util.now().strftime("%Y-%m-%d")
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
+        current_zerocharge_period = self._zerocharge_period_key(now)
+        zerohero = data.get("zerohero", {}) or {}
+        if not isinstance(zerohero, dict):
+            zerohero = {}
+        stored_zerocharge_period = zerohero.get("zerocharge_period_key")
+        stored_baseline_zerocharge_period = zerohero.get(
+            "baseline_zerocharge_period_key"
+        )
+
+        def _restored_zerocharge_value(*keys: str) -> float:
+            """Return the first valid non-negative persisted month value."""
+            for key in keys:
+                if key not in zerohero:
+                    continue
+                try:
+                    value = float(zerohero[key])
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value) and value >= 0.0:
+                    return value
+            return 0.0
+
+        # ZeroCharge month-to-date state is independent from daily cost state.
+        # Restore an explicit period even when the daily cost date is yesterday
+        # (for example, after a restart just after local midnight).  Legacy
+        # daily-only payloads are adopted conservatively only for today's date.
+        if stored_zerocharge_period == current_zerocharge_period:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=_restored_zerocharge_value(
+                    "zerocharge_import_kwh_month",
+                    "zerocharge_import_kwh",
+                ),
+                credit_value=_restored_zerocharge_value(
+                    "zerocharge_credit_value_month",
+                    "zerocharge_credit_value",
+                ),
+            )
+        elif stored_date == today and not stored_zerocharge_period:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=_restored_zerocharge_value("zerocharge_import_kwh"),
+                credit_value=_restored_zerocharge_value("zerocharge_credit_value"),
+            )
+        else:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=0.0,
+                credit_value=0.0,
+            )
+
+        if stored_baseline_zerocharge_period == current_zerocharge_period:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=_restored_zerocharge_value(
+                    "baseline_zerocharge_import_kwh_month",
+                    "baseline_zerocharge_import_kwh",
+                ),
+                credit_value=_restored_zerocharge_value(
+                    "baseline_zerocharge_credit_value_month",
+                    "baseline_zerocharge_credit_value",
+                ),
+                baseline=True,
+            )
+        elif stored_date == today and not stored_baseline_zerocharge_period:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=_restored_zerocharge_value(
+                    "baseline_zerocharge_import_kwh"
+                ),
+                credit_value=_restored_zerocharge_value(
+                    "baseline_zerocharge_credit_value"
+                ),
+                baseline=True,
+            )
+        else:
+            self._set_zerocharge_period_state(
+                period_key=current_zerocharge_period,
+                import_kwh=0.0,
+                credit_value=0.0,
+                baseline=True,
+            )
 
         if stored_date == today:
             self._actual_cost_today = float(data.get("actual_cost", 0.0))
@@ -12102,20 +12292,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     has_grid_charge_provenance,
                 )
             )
-            zerohero = data.get("zerohero", {}) or {}
             self._actual_zerohero_import_kwh_today = float(zerohero.get("import_window_kwh", 0.0))
             self._actual_zerohero_export_kwh_today = float(zerohero.get("export_window_kwh", 0.0))
             self._actual_zerohero_bonus_export_kwh_today = float(zerohero.get("bonus_export_kwh", 0.0))
             self._actual_zerohero_base_export_earnings_today = float(zerohero.get("base_export_earnings", 0.0))
             self._actual_zerohero_bonus_export_earnings_today = float(zerohero.get("bonus_export_earnings", 0.0))
             self._actual_zerohero_credit_value_today = float(zerohero.get("credit_value", 0.0))
-            self._actual_zerocharge_import_kwh_today = float(zerohero.get("zerocharge_import_kwh", 0.0))
-            self._actual_zerocharge_credit_value_today = float(zerohero.get("zerocharge_credit_value", 0.0))
             self._baseline_zerohero_import_kwh_today = float(zerohero.get("baseline_import_window_kwh", 0.0))
             self._baseline_zerohero_bonus_export_kwh_today = float(zerohero.get("baseline_bonus_export_kwh", 0.0))
             self._baseline_zerohero_credit_value_today = float(zerohero.get("baseline_credit_value", 0.0))
-            self._baseline_zerocharge_import_kwh_today = float(zerohero.get("baseline_zerocharge_import_kwh", 0.0))
-            self._baseline_zerocharge_credit_value_today = float(zerohero.get("baseline_zerocharge_credit_value", 0.0))
             if self._provider_key() == "globird":
                 self._globird_quota_state = (
                     restored_globird_quota_state
@@ -12182,11 +12367,49 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "credit_value": round(self._actual_zerohero_credit_value_today, 4),
                 "zerocharge_import_kwh": round(self._actual_zerocharge_import_kwh_today, 4),
                 "zerocharge_credit_value": round(self._actual_zerocharge_credit_value_today, 4),
+                "zerocharge_period_key": getattr(
+                    self, "_actual_zerocharge_period_key", None
+                ),
+                "zerocharge_import_kwh_month": round(
+                    getattr(
+                        self,
+                        "_actual_zerocharge_import_kwh_month",
+                        self._actual_zerocharge_import_kwh_today,
+                    ),
+                    4,
+                ),
+                "zerocharge_credit_value_month": round(
+                    getattr(
+                        self,
+                        "_actual_zerocharge_credit_value_month",
+                        self._actual_zerocharge_credit_value_today,
+                    ),
+                    4,
+                ),
                 "baseline_import_window_kwh": round(self._baseline_zerohero_import_kwh_today, 4),
                 "baseline_bonus_export_kwh": round(self._baseline_zerohero_bonus_export_kwh_today, 4),
                 "baseline_credit_value": round(self._baseline_zerohero_credit_value_today, 4),
                 "baseline_zerocharge_import_kwh": round(self._baseline_zerocharge_import_kwh_today, 4),
                 "baseline_zerocharge_credit_value": round(self._baseline_zerocharge_credit_value_today, 4),
+                "baseline_zerocharge_period_key": getattr(
+                    self, "_baseline_zerocharge_period_key", None
+                ),
+                "baseline_zerocharge_import_kwh_month": round(
+                    getattr(
+                        self,
+                        "_baseline_zerocharge_import_kwh_month",
+                        self._baseline_zerocharge_import_kwh_today,
+                    ),
+                    4,
+                ),
+                "baseline_zerocharge_credit_value_month": round(
+                    getattr(
+                        self,
+                        "_baseline_zerocharge_credit_value_month",
+                        self._baseline_zerocharge_credit_value_today,
+                    ),
+                    4,
+                ),
             },
         }
         quota_state = self._quota_state_v2_to_save()
@@ -12456,15 +12679,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_zerohero_base_export_earnings_today = 0.0
             self._actual_zerohero_bonus_export_earnings_today = 0.0
             self._actual_zerohero_credit_value_today = 0.0
-            self._actual_zerocharge_import_kwh_today = 0.0
-            self._actual_zerocharge_credit_value_today = 0.0
             self._baseline_zerohero_import_kwh_today = 0.0
             self._baseline_zerohero_bonus_export_kwh_today = 0.0
             self._baseline_zerohero_credit_value_today = 0.0
-            self._baseline_zerocharge_import_kwh_today = 0.0
-            self._baseline_zerocharge_credit_value_today = 0.0
             self._last_cost_tracking_time = None
             self._last_cost_date = today
+
+        # ZeroCharge crosses daily cost boundaries unchanged.  Only a local
+        # calendar-month transition resets its month-to-date pool.
+        self._ensure_zerocharge_period_state(now)
+        self._ensure_zerocharge_period_state(now, baseline=True)
 
         # Use actual elapsed time to prevent multi-counting
         if self._last_cost_tracking_time is None:
@@ -12582,6 +12806,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None:
+            actual_zerocharge_period, actual_zerocharge_used, actual_zerocharge_credit = (
+                self._ensure_zerocharge_period_state(now)
+            )
             settlement = settle_zerohero_series(
                 zerohero_config,
                 [now],
@@ -12604,10 +12831,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 [now],
                 [grid_import_kwh],
                 [import_price],
-                initial_import_kwh=self._actual_zerocharge_import_kwh_today,
+                initial_import_kwh=actual_zerocharge_used,
+                initial_period_key=actual_zerocharge_period,
             )
-            self._actual_zerocharge_import_kwh_today = zerocharge_import
-            self._actual_zerocharge_credit_value_today += zerocharge_credit
+            # A live call contains one timestamp, so the aggregate result is
+            # the current month's month-to-date state.
+            self._set_zerocharge_period_state(
+                period_key=actual_zerocharge_period,
+                import_kwh=zerocharge_import,
+                credit_value=actual_zerocharge_credit + zerocharge_credit,
+            )
             actual_import_cost -= zerocharge_credit
 
         actual_cost = actual_import_cost - actual_export_earnings
@@ -12646,6 +12879,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         baseline_import_cost = baseline_import_kwh * import_price
         baseline_export_earnings = baseline_export_kwh * export_price
         if zerohero_config is not None:
+            baseline_zerocharge_period, baseline_zerocharge_used, baseline_zerocharge_credit_used = (
+                self._ensure_zerocharge_period_state(now, baseline=True)
+            )
             baseline_settlement = settle_zerohero_series(
                 zerohero_config,
                 [now],
@@ -12665,11 +12901,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     [now],
                     [baseline_import_kwh],
                     [import_price],
-                    initial_import_kwh=self._baseline_zerocharge_import_kwh_today,
+                    initial_import_kwh=baseline_zerocharge_used,
+                    initial_period_key=baseline_zerocharge_period,
                 )
             )
-            self._baseline_zerocharge_import_kwh_today = baseline_zerocharge_import
-            self._baseline_zerocharge_credit_value_today += baseline_zerocharge_credit
+            self._set_zerocharge_period_state(
+                period_key=baseline_zerocharge_period,
+                import_kwh=baseline_zerocharge_import,
+                credit_value=baseline_zerocharge_credit_used + baseline_zerocharge_credit,
+                baseline=True,
+            )
             baseline_import_cost -= baseline_zerocharge_credit
 
         baseline_cost = baseline_import_cost - baseline_export_earnings
@@ -12799,6 +13040,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 baseline_export_kwh.append(base_export)
                 baseline_export_prices.append(export_p)
 
+            actual_zerocharge_period, actual_zerocharge_used, _actual_zerocharge_credit = (
+                self._ensure_zerocharge_period_state(now)
+            )
+            baseline_zerocharge_period, baseline_zerocharge_used, _baseline_zerocharge_credit = (
+                self._ensure_zerocharge_period_state(now, baseline=True)
+            )
             predicted_settlement = settle_zerohero_series(
                 zerohero_config,
                 future_timestamps,
@@ -12832,7 +13079,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ]
                         for idx in range(len(predicted_import_kwh))
                     ],
-                    initial_import_kwh=self._actual_zerocharge_import_kwh_today,
+                    initial_import_kwh=actual_zerocharge_used,
+                    initial_period_key=actual_zerocharge_period,
                 )
             )
             baseline_zerocharge_import, baseline_zerocharge_credit = (
@@ -12846,7 +13094,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ]
                         for idx in range(len(baseline_import_kwh))
                     ],
-                    initial_import_kwh=self._baseline_zerocharge_import_kwh_today,
+                    initial_import_kwh=baseline_zerocharge_used,
+                    initial_period_key=baseline_zerocharge_period,
                 )
             )
             predicted_cost = (
@@ -13334,24 +13583,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None and zerohero_config.zerocharge_enabled:
-            remaining_zerocharge_kwh_today = max(
+            current_period, current_import_used, _current_credit = (
+                self._ensure_zerocharge_period_state(dt_util.now())
+                if import_prices
+                else (self._zerocharge_period_key(dt_util.now()), 0.0, 0.0)
+            )
+            remaining_zerocharge_kwh = max(
                 0.0,
-                zerohero_config.zerocharge_import_cap_kwh
-                - self._actual_zerocharge_import_kwh_today,
+                zerocharge_monthly_cap_kwh(zerohero_config, current_period)
+                - current_import_used,
             )
             timestamps = self._price_timestamps(len(import_prices))
-            current_day = self._zerocharge_tariff_day(
-                timestamps[0],
-            )
             zerocharge_slots = []
             for timestamp in timestamps:
-                tariff_day = self._zerocharge_tariff_day(
-                    timestamp,
-                )
+                tariff_day = self._zerocharge_period_key(timestamp)
                 remaining_zerocharge_kwh = (
-                    remaining_zerocharge_kwh_today
-                    if tariff_day == current_day
-                    else zerohero_config.zerocharge_import_cap_kwh
+                    remaining_zerocharge_kwh
+                    if tariff_day == current_period
+                    else zerocharge_monthly_cap_kwh(zerohero_config, timestamp)
                 )
                 zerocharge_slots.append(
                     remaining_zerocharge_kwh > 1e-6

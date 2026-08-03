@@ -2098,7 +2098,22 @@ def test_grid_charge_allowed_slots_apply_price_caps_before_lp_soc_cap(opt_module
     assert allowed == [True, True, False, True]
 
 
-def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
+def test_globird_zerocharge_limits_grid_charge_to_configured_window(
+    opt_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda: datetime(
+            2026,
+            7,
+            7,
+            13,
+            50,
+            tzinfo=timezone(timedelta(hours=10)),
+        ),
+    )
     coordinator = _coordinator(
         opt_module,
         "globird",
@@ -2122,7 +2137,7 @@ def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
 
     assert allowed == [True, True, False, False, False, False]
 
-    coordinator._actual_zerocharge_import_kwh_today = 50.0
+    coordinator._actual_zerocharge_import_kwh_today = 1550.0
     assert coordinator._grid_charge_allowed_slots(
         import_prices=[0.0] * 6,
         solar_forecast=[0.0] * 6,
@@ -2131,8 +2146,9 @@ def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
     ) == [False] * 6
 
 
-def test_globird_zerocharge_exhausted_today_keeps_tomorrows_allowance(
+def test_globird_zerocharge_monthly_exhaustion_blocks_tomorrows_allowance(
     opt_module,
+    monkeypatch,
 ):
     coordinator = _coordinator(
         opt_module,
@@ -2148,10 +2164,11 @@ def test_globird_zerocharge_exhausted_today_keeps_tomorrows_allowance(
     )
     aest = timezone(timedelta(hours=10))
     start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
     n = 24 * 12
     timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
     coordinator._last_price_timestamps = timestamps
-    coordinator._actual_zerocharge_import_kwh_today = 50.0
+    coordinator._actual_zerocharge_import_kwh_today = 1550.0
 
     allowed = coordinator._grid_charge_allowed_slots(
         import_prices=[0.33] * n,
@@ -2167,10 +2184,13 @@ def test_globird_zerocharge_exhausted_today_keeps_tomorrows_allowance(
         if timestamp.date() == tomorrow and 11 <= timestamp.hour < 14
     ]
     assert len(tomorrow_zerocharge) == 36
-    assert all(allowed[idx] for idx in tomorrow_zerocharge)
+    assert all(not allowed[idx] for idx in tomorrow_zerocharge)
 
 
-def test_globird_zerocharge_partitions_bonus_caps_by_local_day(opt_module):
+def test_globird_zerocharge_uses_one_month_pool_for_multiple_local_days(
+    opt_module,
+    monkeypatch,
+):
     coordinator = _coordinator(
         opt_module,
         "globird",
@@ -2185,6 +2205,7 @@ def test_globird_zerocharge_partitions_bonus_caps_by_local_day(opt_module):
     )
     aest = timezone(timedelta(hours=10))
     start = datetime(2026, 8, 1, 17, 15, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
     n = 24 * 12
     timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
     coordinator._last_price_timestamps = timestamps
@@ -2194,21 +2215,22 @@ def test_globird_zerocharge_partitions_bonus_caps_by_local_day(opt_module):
 
     coordinator._apply_zerohero_optimizer_inputs(import_prices, export_prices)
 
-    tomorrow_key = (start + timedelta(days=1)).date().isoformat()
-    assert coordinator._last_zerocharge_bonus_cap_kwh == pytest.approx(50.0)
+    month_key = "2026-08"
+    assert coordinator._last_zerocharge_bonus_cap_kwh == pytest.approx(1500.0)
     assert coordinator._last_import_bonus_caps_by_group == {
-        tomorrow_key: pytest.approx(50.0),
+        month_key: pytest.approx(1500.0),
     }
     active_groups = {
         group
         for group in coordinator._last_import_bonus_group_ids
         if group is not None
     }
-    assert active_groups == {tomorrow_key}
+    assert active_groups == {month_key}
 
 
-def test_globird_zerocharge_keeps_partial_today_and_full_tomorrow_isolated(
+def test_globird_zerocharge_keeps_month_to_date_pool_across_local_days(
     opt_module,
+    monkeypatch,
 ):
     coordinator = _coordinator(
         opt_module,
@@ -2220,6 +2242,7 @@ def test_globird_zerocharge_keeps_partial_today_and_full_tomorrow_isolated(
     )
     aest = timezone(timedelta(hours=10))
     start = datetime(2026, 8, 1, 10, 55, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
     n = 30 * 12
     timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
     coordinator._last_price_timestamps = timestamps
@@ -2231,12 +2254,11 @@ def test_globird_zerocharge_keeps_partial_today_and_full_tomorrow_isolated(
     )
 
     assert coordinator._last_import_bonus_caps_by_group == {
-        "2026-08-01": pytest.approx(37.5),
-        "2026-08-02": pytest.approx(50.0),
+        "2026-08": pytest.approx(1537.5),
     }
 
 
-def test_globird_overnight_zerocharge_resets_at_local_calendar_midnight(opt_module):
+def test_globird_overnight_zerocharge_stays_in_same_month_at_midnight(opt_module):
     coordinator = _coordinator(
         opt_module,
         "globird",
@@ -2261,10 +2283,69 @@ def test_globird_overnight_zerocharge_resets_at_local_calendar_midnight(opt_modu
         for group in coordinator._last_import_bonus_group_ids
         if group is not None
     }
-    assert active_groups == {"2026-08-01", "2026-08-02"}
+    assert active_groups == {"2026-08"}
     assert coordinator._last_import_bonus_caps_by_group == {
-        "2026-08-01": pytest.approx(50.0),
-        "2026-08-02": pytest.approx(50.0),
+        "2026-08": pytest.approx(1550.0),
+    }
+
+
+def test_globird_zerocharge_splits_august_and_september_pools(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 31, 10, 55, tzinfo=aest)
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(48 * 12)]
+    coordinator._last_price_timestamps = timestamps
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * len(timestamps),
+        [0.0] * len(timestamps),
+    )
+
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08": pytest.approx(1550.0),
+        "2026-09": pytest.approx(1500.0),
+    }
+
+
+def test_globird_zerocharge_stale_forecast_does_not_reset_current_month_state(
+    opt_module,
+    monkeypatch,
+):
+    aest = timezone(timedelta(hours=10))
+    now = datetime(2026, 9, 1, 0, 5, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_jul_2026",
+    )
+    coordinator._set_zerocharge_period_state(
+        period_key="2026-09",
+        import_kwh=100.0,
+        credit_value=5.0,
+    )
+    stale_start = datetime(2026, 8, 31, 12, 0, tzinfo=aest)
+    coordinator._last_price_timestamps = [
+        stale_start + timedelta(minutes=5 * idx) for idx in range(48 * 12)
+    ]
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * len(coordinator._last_price_timestamps),
+        [0.0] * len(coordinator._last_price_timestamps),
+    )
+
+    assert coordinator._actual_zerocharge_period_key == "2026-09"
+    assert coordinator._actual_zerocharge_import_kwh_month == pytest.approx(100.0)
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-08": pytest.approx(1550.0),
+        "2026-09": pytest.approx(1400.0),
     }
 
 
@@ -2591,6 +2672,24 @@ def test_globird_legacy_status_is_preserved_while_dual_writing_quota_v2(opt_modu
     assert quota_state["settled_kwh"][
         opt_module.GLOBIRD_QUOTA_IMPORT_RULE_ID
     ] == pytest.approx(3.5)
+
+
+def test_globird_status_reports_calendar_month_pool(opt_module, monkeypatch):
+    now = datetime(2026, 8, 3, 13, 0, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_jul_2026",
+    )
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+
+    status = coordinator._zerohero_cost_breakdown()
+
+    assert status["zerocharge_period_key"] == "2026-08"
+    assert status["zerocharge_monthly_cap_kwh"] == pytest.approx(1550.0)
+    assert status["zerocharge_import_kwh_used"] == pytest.approx(50.0)
+    assert status["zerocharge_import_kwh_remaining"] == pytest.approx(1500.0)
 
 
 def _true_indexes(slots: list[bool]) -> list[int]:
@@ -3003,6 +3102,101 @@ def test_cost_restore_distinguishes_legacy_missing_grid_charge_provenance(
     asyncio.run(coordinator._restore_cost_data())
 
     assert coordinator._grid_charge_tracking_known is expected_known
+
+
+def test_zerocharge_month_state_restores_across_midnight_from_explicit_period(
+    opt_module,
+    monkeypatch,
+):
+    now = datetime(2026, 8, 3, 0, 15, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    coordinator = _coordinator(opt_module, "globird", globird_plan="zerohero_jul_2026")
+    payload = {
+        "date": "2026-08-02",
+        "zerohero": {
+            "zerocharge_period_key": "2026-08",
+            "zerocharge_import_kwh_month": 50.0,
+            "zerocharge_credit_value_month": 2.5,
+            "baseline_zerocharge_period_key": "2026-08",
+            "baseline_zerocharge_import_kwh_month": 40.0,
+            "baseline_zerocharge_credit_value_month": 2.0,
+        },
+    }
+
+    async def _load():
+        return payload
+
+    coordinator._cost_store = SimpleNamespace(async_load=_load)
+    coordinator._ensure_custom_tariff_quota_ledger = lambda *args, **kwargs: None
+    coordinator._covau_snapshot = lambda: None
+
+    asyncio.run(coordinator._restore_cost_data())
+
+    assert coordinator._actual_zerocharge_period_key == "2026-08"
+    assert coordinator._actual_zerocharge_import_kwh_month == pytest.approx(50.0)
+    assert coordinator._actual_zerocharge_credit_value_month == pytest.approx(2.5)
+    assert coordinator._baseline_zerocharge_period_key == "2026-08"
+    assert coordinator._baseline_zerocharge_import_kwh_month == pytest.approx(40.0)
+    assert coordinator._baseline_zerocharge_credit_value_month == pytest.approx(2.0)
+    # Legacy/public aliases remain synchronized.
+    assert coordinator._actual_zerocharge_import_kwh_today == pytest.approx(50.0)
+
+
+def test_zerocharge_month_restore_tolerates_malformed_values(
+    opt_module,
+    monkeypatch,
+):
+    now = datetime(2026, 8, 3, 0, 15, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    coordinator = _coordinator(opt_module, "globird", globird_plan="zerohero_jul_2026")
+    payload = {
+        "date": "2026-08-02",
+        "zerohero": {
+            "zerocharge_period_key": "2026-08",
+            "zerocharge_import_kwh_month": "invalid",
+            "zerocharge_import_kwh": 50.0,
+            "zerocharge_credit_value_month": None,
+            "zerocharge_credit_value": 2.5,
+            "baseline_zerocharge_period_key": "2026-08",
+            "baseline_zerocharge_import_kwh_month": float("nan"),
+            "baseline_zerocharge_credit_value_month": -1.0,
+        },
+    }
+
+    async def _load():
+        return payload
+
+    coordinator._cost_store = SimpleNamespace(async_load=_load)
+    coordinator._ensure_custom_tariff_quota_ledger = lambda *args, **kwargs: None
+    coordinator._covau_snapshot = lambda: None
+
+    asyncio.run(coordinator._restore_cost_data())
+
+    assert coordinator._actual_zerocharge_import_kwh_month == pytest.approx(50.0)
+    assert coordinator._actual_zerocharge_credit_value_month == pytest.approx(2.5)
+    assert coordinator._baseline_zerocharge_import_kwh_month == 0.0
+    assert coordinator._baseline_zerocharge_credit_value_month == 0.0
+
+
+def test_zerocharge_month_restore_tolerates_malformed_section_shape(
+    opt_module,
+    monkeypatch,
+):
+    now = datetime(2026, 8, 3, 0, 15, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    coordinator = _coordinator(opt_module, "globird", globird_plan="zerohero_jul_2026")
+
+    async def _load():
+        return {"date": "2026-08-02", "zerohero": "invalid"}
+
+    coordinator._cost_store = SimpleNamespace(async_load=_load)
+    coordinator._ensure_custom_tariff_quota_ledger = lambda *args, **kwargs: None
+    coordinator._covau_snapshot = lambda: None
+
+    asyncio.run(coordinator._restore_cost_data())
+
+    assert coordinator._actual_zerocharge_import_kwh_month == 0.0
+    assert coordinator._baseline_zerocharge_import_kwh_month == 0.0
 
 
 def test_zerohero_blocks_battery_charge_during_no_import_window(opt_module):

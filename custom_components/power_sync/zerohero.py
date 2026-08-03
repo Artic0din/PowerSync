@@ -3,9 +3,14 @@
 ZeroHero is not a simple TOU export rate.  The Super Export rate applies only
 to a capped daily export bucket, and the daily credit depends on keeping import
 under a small allowance during the evening window.
+
+ZeroCharge's configured cap is a daily-average allowance.  It forms a single
+pool for each local calendar month; the helper functions below deliberately use
+the timestamp's local calendar rather than a fixed 24-hour window.
 """
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -203,6 +208,40 @@ def zerocharge_is_in_window(ts: datetime, config: ZeroHeroConfig) -> bool:
     return _is_in_window(ts, config.zerocharge_start, config.zerocharge_end)
 
 
+def zerocharge_period_key(ts: datetime) -> str:
+    """Return the local calendar month owning a ZeroCharge allowance."""
+    return ts.strftime("%Y-%m")
+
+
+def zerocharge_monthly_cap_kwh(
+    config: ZeroHeroConfig,
+    ts: datetime | str,
+) -> float:
+    """Return the ZeroCharge pool for the local calendar month.
+
+    ``zerocharge_import_cap_kwh`` remains the configured daily-average value
+    for compatibility with existing settings and status keys.  The contract is
+    now a calendar-month pool, so February and 31-day months naturally receive
+    different total allowances.
+    """
+    if isinstance(ts, str):
+        try:
+            year, month = (int(value) for value in ts.split("-", 1))
+        except (TypeError, ValueError):
+            return 0.0
+    else:
+        year, month = ts.year, ts.month
+    try:
+        days = calendar.monthrange(year, month)[1]
+    except ValueError:
+        return 0.0
+    return max(0.0, float(config.zerocharge_import_cap_kwh)) * days
+
+
+# Short alias useful to callers that describe the allowance as a month cap.
+zerocharge_month_cap_kwh = zerocharge_monthly_cap_kwh
+
+
 def _is_in_window(ts: datetime, start_value: str, end_value: str) -> bool:
     """Return True when a timestamp is inside a local HH:MM window."""
     minute = ts.hour * 60 + ts.minute
@@ -220,23 +259,45 @@ def settle_zerocharge_imports(
     import_prices: list[float],
     *,
     initial_import_kwh: float = 0.0,
+    initial_period_key: str | None = None,
 ) -> tuple[float, float]:
-    """Return (window import kWh, import credit value) for ZeroCharge imports."""
+    """Return (month import kWh, import credit value) for ZeroCharge imports.
+
+    Imports are counted in every eligible window, including house and battery
+    imports.  A forecast can span a month boundary, so settlement keeps a
+    separate running pool for each local ``YYYY-MM`` period.  The scalar import
+    result remains backwards compatible for the runtime's current-period
+    accumulator and is the aggregate of all periods when a forecast spans a
+    boundary.
+    """
     if config is None or not config.zerocharge_enabled:
         return max(0.0, initial_import_kwh), 0.0
 
-    used = max(0.0, initial_import_kwh)
+    initial_used = max(0.0, initial_import_kwh)
+    if not timestamps:
+        return initial_used, 0.0
+    used_by_period: dict[str, float] = {}
+    if initial_used > 0:
+        seed_period = initial_period_key
+        if seed_period is None and timestamps:
+            seed_period = zerocharge_period_key(timestamps[0])
+        if seed_period is not None:
+            used_by_period[seed_period] = initial_used
+
     credit = 0.0
     for idx, ts in enumerate(timestamps):
         if not zerocharge_is_in_window(ts, config):
             continue
+        period = zerocharge_period_key(ts)
         imported = max(0.0, import_kwh[idx] if idx < len(import_kwh) else 0.0)
         price = max(0.0, import_prices[idx] if idx < len(import_prices) else 0.0)
-        remaining = max(0.0, config.zerocharge_import_cap_kwh - used)
+        used = used_by_period.get(period, 0.0)
+        remaining = max(0.0, zerocharge_monthly_cap_kwh(config, ts) - used)
         eligible = min(imported, remaining)
         used += imported
+        used_by_period[period] = used
         credit += eligible * price
-    return used, credit
+    return sum(used_by_period.values()), credit
 
 
 def zerohero_window_end_for(ts: datetime, config: ZeroHeroConfig) -> datetime:
