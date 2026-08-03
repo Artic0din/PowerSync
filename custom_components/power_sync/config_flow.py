@@ -6180,7 +6180,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         NumberSelectorConfig(
                             min=0,
                             max=200,
-                            step=0.1,
+                            step=0.01,
                             unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
@@ -6192,7 +6192,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         NumberSelectorConfig(
                             min=0,
                             max=200,
-                            step=0.1,
+                            step=0.01,
                             unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
@@ -6231,6 +6231,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure a custom tariff during initial setup."""
         errors: dict[str, str] = {}
         is_agl = self._selected_electricity_provider == "agl"
+        rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
             if user_input.get("skip_tariff", False) and not is_agl:
@@ -6293,7 +6294,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )
@@ -6302,7 +6303,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )
@@ -6402,6 +6403,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Add a custom tariff period during initial setup."""
         errors: dict[str, str] = {}
         is_agl = self._selected_electricity_provider == "agl"
+        rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
             remove_period = user_input.get("remove_period", "none")
@@ -6465,6 +6467,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
+            rate_precision = 2 if is_agl else 1
             day_labels = {
                 "weekdays": "Mon-Fri",
                 "weekends": "Sat-Sun",
@@ -6475,7 +6478,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     f"{idx}. {period['name']} {period['start']:02d}:00-"
                     f"{period['end']:02d}:00 "
                     f"{day_labels.get(period.get('days'), 'Mon-Sun')}, import "
-                    f"{period['import_rate'] * 100:.1f}{minor_unit}"
+                    f"{period['import_rate'] * 100:.{rate_precision}f}{minor_unit}"
                 )
                 if not is_agl:
                     line += (
@@ -6519,7 +6522,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )
@@ -12586,7 +12589,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         NumberSelectorConfig(
                             min=0,
                             max=200,
-                            step=0.1,
+                            step=0.01,
                             unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
@@ -12601,7 +12604,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         NumberSelectorConfig(
                             min=0,
                             max=200,
-                            step=0.1,
+                            step=0.01,
                             unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
@@ -15395,6 +15398,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_ELECTRICITY_PROVIDER, "other"
         )
         is_agl = provider == "agl"
+        rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
             tariff_type = user_input.get("tariff_type", "tou")
@@ -15449,16 +15453,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     store = entry_data["automation_store"]
                     current_tariff = store.get_custom_tariff()
                     break
+        if is_agl and isinstance(current_tariff, dict):
+            current_tariff = current_tariff.get(
+                "agl_base_tariff",
+                current_tariff,
+            )
 
         default_offpeak = 15
         default_fit = 5
         if current_tariff:
             charges = current_tariff.get("energy_charges", {}).get("All Year", {})
-            # Find off-peak rate from any OFF_PEAK* key
-            for k, v in charges.items():
-                if k.startswith("OFF_PEAK") and isinstance(v, (int, float)):
-                    default_offpeak = int(v * 100)
-                    break
+            # OFF_PEAK_AUTO is the generated uncovered-hours rate when the
+            # tariff also contains an explicit OFF_PEAK period.
+            offpeak_rate = charges.get("OFF_PEAK_AUTO")
+            if not isinstance(offpeak_rate, (int, float)):
+                offpeak_rate = charges.get("OFF_PEAK")
+            if isinstance(offpeak_rate, (int, float)):
+                default_offpeak = round(offpeak_rate * 100, 2)
             sell_charges = (
                 current_tariff.get("sell_tariff", {})
                 .get("energy_charges", {})
@@ -15469,8 +15480,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     if isinstance(v, (int, float)):
                         default_fit = round(v * 100, 1)
                         break
-        if is_agl and isinstance(current_tariff, dict):
-            current_tariff = current_tariff.get("agl_base_tariff", current_tariff)
         self._custom_tariff_for_options = current_tariff
 
         tariff_type_options = {
@@ -15499,7 +15508,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )
@@ -15510,7 +15519,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )
@@ -15616,6 +15625,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_ELECTRICITY_PROVIDER, "other"
         )
         is_agl = provider == "agl"
+        rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
             remove_period = user_input.get("remove_period", "none")
@@ -15692,6 +15702,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
+            rate_precision = 2 if is_agl else 0
             day_labels = {
                 "weekdays": "Mon-Fri",
                 "weekends": "Sat-Sun",
@@ -15705,7 +15716,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "SUPER_OFF_PEAK": "Super Off-Peak",
                 }.get(p["name"], p["name"])
                 rate_summary = (
-                    f"{p['import_rate'] * 100:.0f}{minor_unit} import"
+                    f"{p['import_rate'] * 100:.{rate_precision}f}"
+                    f"{minor_unit} import"
                 )
                 if not is_agl:
                     rate_summary += (
@@ -15753,7 +15765,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 NumberSelectorConfig(
                     min=0,
                     max=200,
-                    step=0.1,
+                    step=rate_step,
                     unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )

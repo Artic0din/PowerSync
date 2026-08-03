@@ -301,7 +301,7 @@ def test_config_tariff_builder_applies_agl_overlay(agl_module):
         "Ctx",
         (),
         {
-            "_tariff_offpeak_rate": 0.20,
+            "_tariff_offpeak_rate": 0.0663,
             "_tariff_fit_rate": 0.03,
             "_tariff_plan_name": "AGL Battery Rewards",
             "_selected_electricity_provider": "agl",
@@ -329,6 +329,33 @@ def test_config_tariff_builder_applies_agl_overlay(agl_module):
     rates = tariff["sell_tariff"]["energy_charges"]["All Year"]
     assert rates["PEAK"] == 0.03
     assert rates["PEAK_AGL_REWARD"] == 0.28
+    assert tariff["energy_charges"]["All Year"]["OFF_PEAK"] == 0.0663
+    assert (
+        tariff["agl_base_tariff"]["energy_charges"]["All Year"]["OFF_PEAK"]
+        == 0.0663
+    )
+
+    reopened_offpeak = round(
+        tariff["energy_charges"]["All Year"]["OFF_PEAK"] * 100,
+        2,
+    )
+    ctx._tariff_offpeak_rate = reopened_offpeak / 100
+    reopened = namespace["_build_tariff_from_periods"](
+        ctx,
+        [
+            {
+                "name": "PEAK",
+                "start": 15,
+                "end": 22,
+                "days": "all_days",
+                "import_rate": 0.50,
+                "export_rate": 0.03,
+            }
+        ],
+    )
+
+    assert reopened_offpeak == 6.63
+    assert reopened["energy_charges"]["All Year"]["OFF_PEAK"] == 0.0663
     assert tariff["utility"] == "AGL"
 
 

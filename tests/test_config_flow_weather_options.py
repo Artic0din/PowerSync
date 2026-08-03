@@ -2257,6 +2257,169 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
     ]
 
 
+def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():
+    source = CONFIG_FLOW_PATH.read_text()
+    agl_setup = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_agl"),
+    )
+    agl_options = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_agl_options"),
+    )
+    initial_custom = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_custom_tariff"),
+    )
+    initial_period = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_tariff_period"),
+    )
+    options_custom_method = _options_flow_method(
+        "async_step_custom_tariff_options"
+    )
+    options_custom = ast.get_source_segment(source, options_custom_method)
+    options_period = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_tariff_period_options"),
+    )
+
+    assert agl_setup is not None
+    assert agl_options is not None
+    assert initial_custom is not None
+    assert initial_period is not None
+    assert options_custom is not None
+    assert options_period is not None
+    assert agl_setup.count("step=0.01") == 4
+    assert agl_options.count("step=0.01") == 4
+
+    for method_source in (
+        initial_custom,
+        initial_period,
+        options_custom,
+        options_period,
+    ):
+        assert "rate_step = 0.01 if is_agl else 0.1" in method_source
+
+    class _Field:
+        def __init__(self, name: str, default: object = None) -> None:
+            self.name = name
+            self.default = default
+
+    class _Vol:
+        @staticmethod
+        def Required(name: str, default: object = None) -> _Field:
+            return _Field(name, default)
+
+        Optional = Required
+
+        @staticmethod
+        def Schema(fields: dict) -> dict:
+            return fields
+
+    class _Store:
+        @staticmethod
+        def get_custom_tariff() -> dict:
+            base = {
+                "name": "AGL Battery Rewards",
+                "energy_charges": {
+                    "All Year": {
+                        "OFF_PEAK": 0.40,
+                        "OFF_PEAK_AUTO": 0.0663,
+                    }
+                },
+                "sell_tariff": {
+                    "energy_charges": {
+                        "All Year": {
+                            "OFF_PEAK": 0.03,
+                            "OFF_PEAK_AUTO": 0.03,
+                        }
+                    }
+                },
+            }
+            return {
+                "name": "AGL Battery Rewards",
+                "energy_charges": {
+                    "All Year": {
+                        "OFF_PEAK_AGL_REWARD": 0.40,
+                        "OFF_PEAK_AUTO": 0.0663,
+                    }
+                },
+                "sell_tariff": {
+                    "energy_charges": {
+                        "All Year": {
+                            "OFF_PEAK_AGL_REWARD": 0.28,
+                            "OFF_PEAK_AUTO": 0.03,
+                        }
+                    }
+                },
+                "agl_base_tariff": base,
+            }
+
+    class _OptionsFlow:
+        _provider = "agl"
+        hass = SimpleNamespace(
+            data={"power_sync": {"entry": {"automation_store": _Store()}}}
+        )
+
+        @staticmethod
+        def _get_option(name: str, default: object) -> object:
+            return default
+
+        @staticmethod
+        def _selector_unit() -> str:
+            return "c/kWh"
+
+        @staticmethod
+        def async_show_form(**kwargs: object) -> dict:
+            return kwargs
+
+        async def async_step_tariff_period_options(self) -> dict:
+            return {"type": "next"}
+
+    selector_config = lambda **kwargs: SimpleNamespace(**kwargs)
+    selector = lambda config: config
+    namespace = {
+        "Any": object,
+        "FlowResult": object,
+        "DOMAIN": "power_sync",
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": (
+            "agl_battery_rewards_offpeak_export_rate"
+        ),
+        "DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": 3.0,
+        "NumberSelectorConfig": selector_config,
+        "NumberSelector": selector,
+        "TextSelectorConfig": selector_config,
+        "TextSelector": selector,
+        "SelectSelectorConfig": selector_config,
+        "SelectSelector": selector,
+        "TextSelectorType": SimpleNamespace(TEXT="text"),
+        "SelectSelectorMode": SimpleNamespace(DROPDOWN="dropdown"),
+        "NumberSelectorMode": SimpleNamespace(BOX="box"),
+        "SelectOptionDict": lambda **kwargs: kwargs,
+        "vol": _Vol,
+    }
+    executable_source = textwrap.dedent(options_custom).replace(
+        "from .const import DOMAIN",
+        "DOMAIN = 'power_sync'",
+    )
+    exec(executable_source, namespace)
+
+    result = asyncio.run(
+        namespace["async_step_custom_tariff_options"](_OptionsFlow())
+    )
+    schema = result["data_schema"]
+    offpeak_field = next(
+        field
+        for field in schema
+        if isinstance(field, _Field) and field.name == "offpeak_rate"
+    )
+
+    assert offpeak_field.default == 6.63
+    assert schema[offpeak_field].step == 0.01
+
+
 def test_custom_tariff_periods_can_remove_one_selected_saved_period():
     source = CONFIG_FLOW_PATH.read_text()
     helper_method = _config_flow_method("_pop_tariff_period")
