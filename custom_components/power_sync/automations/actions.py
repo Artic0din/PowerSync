@@ -510,24 +510,131 @@ async def _get_tesla_ev_entity(
                 log_missing(f"  - {device.name}: domain={domain}, id={id_str}")
         return None
 
-    # Use first vehicle if no specific VIN provided
-    target_device = tesla_devices[0]
-    _LOGGER.debug(f"Found Tesla EV device: {target_device.name} (id: {target_device.id})")
-
-    # Find matching entity for this device
+    # A vehicle can be exposed by more than one Tesla integration at once. Do
+    # not blindly use the first registry device: an old/re-authentication-needed
+    # integration can retain the same VIN while all of its command entities are
+    # unavailable, masking a healthy provider registered later.
     pattern = re.compile(entity_pattern, re.IGNORECASE)
-    device_entities = []
+    health_patterns = [
+        (
+            re.compile(r"switch\..*(?<!dis)charge(?:_\d+)?$", re.IGNORECASE),
+            100,
+        ),
+        (
+            re.compile(
+                r"number\..*_(charge_limit|charging_amps|charge_current)(?:_\d+)?$",
+                re.IGNORECASE,
+            ),
+            10,
+        ),
+        (
+            re.compile(
+                r"binary_sensor\..*_(status|asleep|online|charge_cable|charger)(?:_\d+)?$",
+                re.IGNORECASE,
+            ),
+            5,
+        ),
+        (
+            re.compile(
+                r"sensor\..*_(battery_level|charging_state)(?:_\d+)?$",
+                re.IGNORECASE,
+            ),
+            1,
+        ),
+    ]
+
+    def _has_usable_state(entity_id: str) -> bool:
+        state = hass.states.get(entity_id)
+        if state is None:
+            return False
+        return str(state.state or "").strip().lower() not in {
+            "",
+            "none",
+            "unknown",
+            "unavailable",
+        }
+
+    entities_by_device: dict[str, list[str]] = {
+        device.id: [] for device in tesla_devices
+    }
     for entity in entity_registry.entities.values():
-        if entity.device_id == target_device.id:
-            device_entities.append(entity.entity_id)
-            if pattern.match(entity.entity_id):
-                _LOGGER.debug(f"Found matching entity: {entity.entity_id}")
-                return entity.entity_id
+        if entity.device_id in entities_by_device:
+            entities_by_device[entity.device_id].append(entity.entity_id)
+
+    candidates: list[tuple[int, int, int, Any, str]] = []
+    for registry_index, device in enumerate(tesla_devices):
+        device_entities = entities_by_device.get(device.id, [])
+        matching_entities = [
+            entity_id for entity_id in device_entities if pattern.match(entity_id)
+        ]
+        if not matching_entities:
+            continue
+
+        # Score only EV readiness/control signals, not every cached telemetry
+        # entity. This makes an asleep-but-connected provider usable while an
+        # integration whose entities are all unknown/unavailable loses.
+        health_score = sum(
+            weight
+            for entity_id in device_entities
+            if _has_usable_state(entity_id)
+            for marker, weight in health_patterns
+            if marker.match(entity_id)
+        )
+        matching_entity = max(
+            matching_entities,
+            key=lambda entity_id: int(_has_usable_state(entity_id)),
+        )
+        # Button states are timestamps/unknown rather than availability signals,
+        # so choose their provider from sibling control health. For stateful
+        # command/telemetry entities, a usable direct match is decisive.
+        matching_usable = int(
+            not matching_entity.startswith("button.")
+            and _has_usable_state(matching_entity)
+        )
+        candidates.append(
+            (
+                matching_usable,
+                health_score,
+                -registry_index,
+                device,
+                matching_entity,
+            )
+        )
+
+    if candidates:
+        _matching_usable, health_score, _index, target_device, matching_entity = max(
+            candidates, key=lambda candidate: candidate[:3]
+        )
+        if len(candidates) > 1:
+            _LOGGER.info(
+                "Selected Tesla EV provider device %s for %s from %d VIN-matching "
+                "devices (health score %d)",
+                target_device.name,
+                matching_entity,
+                len(candidates),
+                health_score,
+            )
+        else:
+            _LOGGER.debug(
+                "Found Tesla EV device: %s (id: %s)",
+                target_device.name,
+                target_device.id,
+            )
+        _LOGGER.debug("Found matching entity: %s", matching_entity)
+        return matching_entity
 
     log_missing = _LOGGER.warning if warn_on_missing else _LOGGER.debug
     log_missing(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
-    if device_entities:
-        _LOGGER.debug(f"Available entities for device: {device_entities[:20]}")  # Log first 20
+    available_entities = [
+        entity_id
+        for device_entities in entities_by_device.values()
+        for entity_id in device_entities
+    ]
+    if available_entities:
+        _LOGGER.debug(
+            "Available entities for VIN-matching devices: %s",
+            available_entities[:20],
+        )
     return None
 
 
@@ -713,7 +820,7 @@ async def _get_observed_ev_power_reading_kw(
         try:
             entity = await _get_tesla_ev_entity(
                 hass,
-                r"sensor\..*(charger_power|charging_power|charge_power)$",
+                r"sensor\..*(charger_power|charging_power|charge_power)(?:_\d+)?$",
                 vehicle_id,
                 warn_on_missing=False,
             )
@@ -798,7 +905,7 @@ async def _wake_tesla_ev(
         # Find the wake up button entity
         wake_entity = await _get_tesla_ev_entity(
             hass,
-            r"button\..*wake(_up)?$",
+            r"button\..*wake(_up)?(?:_\d+)?$",
             vehicle_vin
         )
 
@@ -811,13 +918,13 @@ async def _wake_tesla_ev(
         # Order matters - more specific patterns first to avoid matching wrong entities
         status_patterns = [
             # Teslemetry uses binary_sensor.*_status (on=online, off=offline)
-            (r"binary_sensor\..*_status$", "binary", "on"),
+            (r"binary_sensor\..*_status(?:_\d+)?$", "binary", "on"),
             # Other integrations use binary_sensor.*_asleep (off=awake)
-            (r"binary_sensor\..*_asleep$", "binary", "off"),
-            (r"binary_sensor\..*asleep$", "binary", "off"),
+            (r"binary_sensor\..*_asleep(?:_\d+)?$", "binary", "off"),
+            (r"binary_sensor\..*asleep(?:_\d+)?$", "binary", "off"),
             # Fallback: sensor.*_vehicle_state (avoid shift_state which is drive gear)
-            (r"sensor\..*_vehicle_state$", "state", "online"),
-            (r"sensor\..*vehicle_state$", "state", "online"),
+            (r"sensor\..*_vehicle_state(?:_\d+)?$", "state", "online"),
+            (r"sensor\..*vehicle_state(?:_\d+)?$", "state", "online"),
         ]
 
         status_entity = None
@@ -3741,7 +3848,9 @@ async def _action_stop_ev_charging(
     vehicle_vin = params.get("vehicle_vin")
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
-    charging_entity = await _get_tesla_ev_entity(hass, r"sensor\..*_charging$", vehicle_vin)
+    charging_entity = await _get_tesla_ev_entity(
+        hass, r"sensor\..*_charging(?:_\d+)?$", vehicle_vin
+    )
     if charging_entity:
         charging_state = hass.states.get(charging_entity)
         if charging_state and charging_state.state not in ("unavailable", "unknown"):
@@ -3855,7 +3964,7 @@ async def _action_set_ev_charge_limit(
 
         charge_limit_entity = await _get_tesla_ev_entity(
             hass,
-            r"number\..*charge_limit$",
+            r"number\..*charge_limit(?:_\d+)?$",
             vehicle_vin
         )
 
@@ -4002,7 +4111,7 @@ async def _action_set_ev_charging_amps(
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _get_tesla_ev_entity(
             hass,
-            r"number\..*(charging_amps|charge_current)$",
+            r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
             vehicle_vin
         )
 
@@ -6242,7 +6351,9 @@ async def _dynamic_ev_update_surplus(
         entity = None
         try:
             entity = await _get_tesla_ev_entity(
-                hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
+                hass,
+                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+                vehicle_id,
             )
         except Exception:
             pass
@@ -8052,7 +8163,9 @@ async def _action_start_ev_charging_dynamic_locked(
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
         try:
             entity = await _get_tesla_ev_entity(
-                hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
+                hass,
+                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+                vehicle_id,
             )
             if entity:
                 entity_state = hass.states.get(entity)

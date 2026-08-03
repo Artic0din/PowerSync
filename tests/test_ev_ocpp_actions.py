@@ -704,6 +704,92 @@ def test_optional_tesla_power_probe_does_not_warn_when_sensor_missing(caplog):
     assert "No entity matching pattern" not in caplog.text
 
 
+def test_tesla_entity_lookup_prefers_healthy_duplicate_vin_provider():
+    """A stale Fleet device must not mask healthy Teslemetry controls."""
+    vin = "LRW3F7FS1NC484342"
+    stale_device = SimpleNamespace(
+        id="fleet-device",
+        name="Tessy Fleet",
+        identifiers={("tesla_fleet", vin)},
+    )
+    healthy_device = SimpleNamespace(
+        id="teslemetry-device",
+        name="Tessy Teslemetry",
+        identifiers={("teslemetry", vin)},
+    )
+
+    def registry_entity(entity_id: str, device_id: str):
+        return SimpleNamespace(entity_id=entity_id, device_id=device_id)
+
+    registry_entities = {
+        "stale-wake": registry_entity("button.tessy_wake", stale_device.id),
+        "stale-status": registry_entity(
+            "binary_sensor.tessy_status", stale_device.id
+        ),
+        "stale-charge": registry_entity("switch.tessy_charge", stale_device.id),
+        "stale-limit": registry_entity(
+            "number.tessy_charge_limit", stale_device.id
+        ),
+        "stale-battery": registry_entity(
+            "sensor.tessy_battery_level", stale_device.id
+        ),
+        "healthy-wake": registry_entity(
+            "button.tessy_wake_2", healthy_device.id
+        ),
+        "healthy-status": registry_entity(
+            "binary_sensor.tessy_status_2", healthy_device.id
+        ),
+        "healthy-cable": registry_entity(
+            "binary_sensor.tessy_charge_cable_2", healthy_device.id
+        ),
+        "healthy-charge": registry_entity(
+            "switch.tessy_charge_2", healthy_device.id
+        ),
+        "healthy-current": registry_entity(
+            "number.tessy_charge_current_2", healthy_device.id
+        ),
+    }
+    hass = _Hass(
+        [
+            _State("button.tessy_wake", "2026-08-03T00:06:05+00:00"),
+            # Cached telemetry can remain usable even when command controls are not.
+            _State("binary_sensor.tessy_status", "off"),
+            _State("switch.tessy_charge", "unknown"),
+            _State("number.tessy_charge_limit", "80"),
+            _State("sensor.tessy_battery_level", "76"),
+            _State("button.tessy_wake_2", "unknown"),
+            _State("binary_sensor.tessy_status_2", "off"),
+            _State("binary_sensor.tessy_charge_cable_2", "on"),
+            _State("switch.tessy_charge_2", "off"),
+            _State("number.tessy_charge_current_2", "16"),
+        ],
+        registry_entities=registry_entities,
+        # Keep the stale integration first to reproduce HA registry ordering.
+        registry_devices={
+            stale_device.id: stale_device,
+            healthy_device.id: healthy_device,
+        },
+    )
+
+    charge_switch = asyncio.run(
+        actions._get_tesla_ev_entity(
+            hass,
+            r"switch\..*(?<!dis)charge(?:_\d+)?$",
+            vin,
+        )
+    )
+    wake_button = asyncio.run(
+        actions._get_tesla_ev_entity(
+            hass,
+            r"button\..*wake(_up)?(?:_\d+)?$",
+            vin,
+        )
+    )
+
+    assert charge_switch == "switch.tessy_charge_2"
+    assert wake_button == "button.tessy_wake_2"
+
+
 def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeypatch):
     async def not_unplugged(*args, **kwargs):
         return False
