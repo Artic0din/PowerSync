@@ -928,6 +928,25 @@ def test_tesla_force_charge_exposes_optional_optimizer_result():
     assert 'return {"success": False, "error":' in handler_source
 
 
+def test_tesla_force_discharge_exposes_optional_optimizer_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_force_discharge")
+    handler_source = ast.get_source_segment(source, handler)
+
+    assert handler_source is not None
+    assert (
+        "SERVICE_FORCE_DISCHARGE,\n        handle_force_discharge,\n"
+        "        supports_response=SupportsResponse.OPTIONAL"
+    ) in source
+    assert 'return {"success": True, "error": None}' in handler_source
+    assert 'return {"success": False, "error":' in handler_source
+    home_assistant_error_handler = handler_source.split(
+        "except HomeAssistantError as e:", 1
+    )[1].split("except Exception as e:", 1)[0]
+    assert "raise" in home_assistant_error_handler
+
+
 def test_tesla_grid_charging_service_requires_confirmed_response_for_automation():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -2641,6 +2660,11 @@ def test_tesla_force_discharge_arms_cleanup_for_unconfirmed_accepted_upload():
     assert 'upload_status.get("accepted")' in function_source
     assert "FORCE DISCHARGE CLEANUP ARMED" in function_source
     assert "if all_success or accepted_sites:" in function_source
+    active_branch = function_source.split("if all_success or accepted_sites:", 1)[1].split(
+        'else:\n                _LOGGER.error("Failed to upload discharge tariff',
+        1,
+    )[0]
+    assert 'return {"success": True, "error": None}' in active_branch
     assert '"_allow_monitoring_restore": True' in function_source
     assert function_source.index("FORCE DISCHARGE CLEANUP ARMED") < function_source.rindex(
         "async def auto_restore"

@@ -127,6 +127,46 @@ def test_non_tesla_force_charge_keeps_fire_and_wait_service_contract():
         restore()
 
 
+def test_tesla_force_discharge_uses_native_service_response():
+    module, restore = _load_controller_module()
+    try:
+        services = _Services({"success": True, "error": None})
+        hass = SimpleNamespace(services=services)
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.force_discharge(30, 5000)) is True
+        assert services.return_response_requests == [True]
+    finally:
+        restore()
+
+
+def test_tesla_force_discharge_rejects_failed_or_missing_service_response():
+    module, restore = _load_controller_module()
+    try:
+        for response in ({"success": False, "error": "tariff upload failed"}, None):
+            services = _Services(response)
+            hass = SimpleNamespace(services=services)
+            controller = module.BatteryControllerWrapper(hass, "tesla")
+
+            assert asyncio.run(controller.force_discharge(30, 5000)) is False
+            assert services.return_response_requests == [True]
+    finally:
+        restore()
+
+
+def test_non_tesla_force_discharge_keeps_fire_and_wait_service_contract():
+    module, restore = _load_controller_module()
+    try:
+        services = _Services()
+        hass = SimpleNamespace(services=services)
+        controller = module.BatteryControllerWrapper(hass, "sungrow")
+
+        assert asyncio.run(controller.force_discharge(30, 5000)) is True
+        assert services.return_response_requests == [False]
+    finally:
+        restore()
+
+
 def test_tesla_mode_reads_current_ha_entity_but_backup_reserve_prefers_cache():
     module, restore = _load_controller_module()
     try:

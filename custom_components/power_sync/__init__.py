@@ -28509,7 +28509,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
         )
 
-    async def handle_force_discharge(call: ServiceCall) -> None:
+    async def handle_force_discharge(call: ServiceCall) -> dict[str, Any] | None:
         """Force discharge mode - switches to autonomous with high export tariff."""
 
         # Warn if calibration suspected (don't block — user manual command)
@@ -29669,7 +29669,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not site_configs:
                 force_discharge_state["active"] = False
                 _LOGGER.error("Missing Tesla site ID or token for force discharge")
-                return
+                return {"success": False, "error": "missing Tesla site configuration"}
 
             # Tesla force discharge is tariff-driven and exposes no numeric
             # discharge-power actuator. Passing a clamped value through the
@@ -29685,7 +29685,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "envelope is %s because it cannot accept a watt-level clamp",
                     network_guard.manager.snapshot.mode,
                 )
-                return
+                return {"success": False, "error": "blocked by network export envelope"}
 
             session = async_get_clientsession(hass)
             saved_states = force_discharge_state.get("saved_states") or {}
@@ -30008,7 +30008,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "Force discharge final reserve pulse superseded; "
                             "skipping stale cleanup"
                         )
-                        return
+                        return {"success": False, "error": "force discharge superseded"}
                     if _tesla_reserve_generation[0] != _reserve_gen:
                         _LOGGER.info(
                             "Force discharge reserve pulse superseded by a "
@@ -30019,7 +30019,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "reserve pulse superseded after tariff upload",
                             preserve_newer_reserve=True,
                         )
-                        return
+                        return {
+                            "success": False,
+                            "error": "reserve command superseded force discharge",
+                        }
                     _LOGGER.error(
                         "Force discharge tariff uploaded but final Tesla "
                         "reserve pulse did not verify"
@@ -30034,7 +30037,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "Tesla reserve transition did not verify",
                         )
                     )
-                    return
+                    return {"success": False, "error": "final reserve pulse did not verify"}
 
                 force_discharge_state["active"] = True
                 force_discharge_state["source"] = source
@@ -30112,12 +30115,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
+                return {"success": True, "error": None}
             else:
                 _LOGGER.error("Failed to upload discharge tariff to one or more gateways")
                 await _cleanup_failed_tesla_force_discharge(
                     "tariff upload failed after prerequisite writes"
                 )
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Could not upload discharge tariff to Tesla"))
+                return {"success": False, "error": "tariff upload did not verify"}
 
         except HomeAssistantError as e:
             _LOGGER.error("Force discharge rejected: %s", e)
@@ -30136,6 +30141,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await _cleanup_failed_tesla_force_discharge(str(e))
             else:
                 force_discharge_state["active"] = False
+            return {"success": False, "error": str(e)}
 
     def _create_discharge_tariff(duration_minutes: int) -> tuple[dict, datetime]:
         """Create a Tesla tariff optimized for exporting (force discharge).
@@ -36096,7 +36102,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     # Register force discharge, force charge, and restore normal services
-    hass.services.async_register(DOMAIN, SERVICE_FORCE_DISCHARGE, handle_force_discharge)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FORCE_DISCHARGE,
+        handle_force_discharge,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_FORCE_CHARGE,
