@@ -175,6 +175,26 @@ def test_fronius_gen24_storage_keeps_legacy_step_ids_and_routes():
     assert ("fronius_reserva_battery", "fronius_reserva_connection") in CONFIG_OPTION_TEXT_STEP_PAIRS
 
 
+def test_flow_power_happy_hour_end_is_selected_in_setup_and_options():
+    """Both config-flow surfaces expose the plan-specific window selector."""
+    setup = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _config_flow_method("async_step_flow_power_setup"),
+    )
+    options = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _options_flow_method("async_step_flow_power_options"),
+    )
+
+    assert setup is not None and options is not None
+    for method_source in (setup, options):
+        assert "CONF_FLOW_POWER_HAPPY_HOUR_END" in method_source
+        assert "FLOW_POWER_HAPPY_HOUR_END_OPTIONS" in method_source
+        assert "SelectSelector" in method_source
+    assert "DEFAULT_FLOW_POWER_HAPPY_HOUR_END" in setup
+    assert "resolve_flow_power_happy_hour_end" in options
+
+
 def test_fronius_gen24_storage_strings_are_generic():
     strings = json.loads(STRINGS_PATH.read_text())
     translations = json.loads(TRANSLATIONS_PATH.read_text())

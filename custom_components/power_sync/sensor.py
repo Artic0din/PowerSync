@@ -188,11 +188,13 @@ from .const import (
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
+    CONF_FLOW_POWER_HAPPY_HOUR_END,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_MARKET_AVG,
     FLOW_POWER_DEFAULT_BASE_RATE,
     FLOW_POWER_EXPORT_RATES,
-    FLOW_POWER_HAPPY_HOUR_PERIODS,
+    flow_power_happy_hour_periods,
+    resolve_flow_power_happy_hour_end,
     ATTR_PRICE_SPIKE,
     ATTR_WHOLESALE_PRICE,
     ATTR_NETWORK_PRICE,
@@ -5202,14 +5204,16 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         return None
 
     def _is_happy_hour(self) -> bool:
-        """Check if current time is within Flow Power Happy Hour (5:30pm-7:30pm)."""
+        """Check if current time is within the configured Flow Power window."""
         now = dt_util.now()
         hour = now.hour
         minute = now.minute
 
-        # Happy Hour: 17:30 to 19:30
         current_period = f"PERIOD_{hour:02d}_{(minute // 30) * 30:02d}"
-        return current_period in FLOW_POWER_HAPPY_HOUR_PERIODS
+        end_time = resolve_flow_power_happy_hour_end(
+            self._get_config_value(CONF_FLOW_POWER_HAPPY_HOUR_END)
+        )
+        return current_period in flow_power_happy_hour_periods(end_time)
 
     def _get_tariff_data(self) -> tuple[float | None, float | None]:
         """Get tariff_rate and avg_daily_tariff from hass.data if available."""
@@ -5527,6 +5531,9 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
                     attributes["final_rate_cents"] = base_rate
         else:
             # Export price attributes
+            attributes["happy_hour_end"] = resolve_flow_power_happy_hour_end(
+                self._get_config_value(CONF_FLOW_POWER_HAPPY_HOUR_END)
+            )
             attributes["is_happy_hour"] = self._is_happy_hour()
             attributes["happy_hour_rate"] = self._get_export_rate()
 

@@ -16,6 +16,108 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
+TARIFF_CONVERTER_PATH = COMPONENT_ROOT / "tariff_converter.py"
+
+
+def test_flow_power_default_happy_hour_excludes_2130():
+    """Regression: the legacy 19:30 default excludes the 21:30 slot."""
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_ticket353_const_legacy", COMPONENT_ROOT / "const.py"
+    )
+    assert spec and spec.loader
+    const = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(const)
+    periods = const.flow_power_happy_hour_periods()
+    assert "PERIOD_19_00" in periods
+    assert "PERIOD_19_30" not in periods
+    assert "PERIOD_21_30" not in periods
+
+
+def test_flow_power_2130_plan_resolves_extended_periods():
+    """A selected 21:30 plan includes 19:30-21:00 slots, not the endpoint."""
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_ticket353_const", COMPONENT_ROOT / "const.py"
+    )
+    assert spec and spec.loader
+    const = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(const)
+
+    assert const.resolve_flow_power_happy_hour_end(None) == "19:30"
+    assert const.resolve_flow_power_happy_hour_end("invalid") == "19:30"
+    assert const.resolve_flow_power_happy_hour_end("21:30") == "21:30"
+    periods = const.flow_power_happy_hour_periods("21:30")
+    assert periods[-1] == "PERIOD_21_00"
+    assert "PERIOD_19_30" in periods
+    assert "PERIOD_21_30" not in periods
+
+
+def test_flow_power_happy_hour_end_is_in_provider_config_contract():
+    """Provider config exposes the selector and reloads when its value changes."""
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    flow_config_start = source.index('elif electricity_provider == "flow_power":')
+    flow_config_end = source.index('            elif ', flow_config_start + 1)
+    flow_config = source[flow_config_start:flow_config_end]
+    assert '"flow_power_happy_hour_end"' in flow_config
+
+    update_start = source.index('"flow_power_export_rate": CONF_FLOW_POWER_EXPORT_RATE')
+    update_end = source.index('"pea_custom_value":', update_start)
+    update_mapping = source[update_start:update_end]
+    assert '"flow_power_happy_hour_end": CONF_FLOW_POWER_HAPPY_HOUR_END' in update_mapping
+
+    post_start = source.index("    async def post(self, request", flow_config_end)
+    post_end = source.index("\n\nclass TariffPriceView", post_start)
+    post_source = source[post_start:post_end]
+    assert '"flow_power_happy_hour_end" in data' in post_source
+    assert "happy_hour_end_changed" in post_source
+    assert "and not happy_hour_end_changed" in post_source
+
+
+def test_flow_power_tariff_conversion_uses_selected_happy_hour_end():
+    """The tariff converter passes the selected end into period resolution."""
+    function = _function_source(TARIFF_CONVERTER_PATH, "apply_flow_power_export")
+    periods_by_end = {
+        "19:30": ["PERIOD_17_30", "PERIOD_19_00"],
+        "21:30": [
+            "PERIOD_17_30",
+            "PERIOD_19_00",
+            "PERIOD_19_30",
+            "PERIOD_20_00",
+            "PERIOD_20_30",
+            "PERIOD_21_00",
+        ],
+    }
+    namespace = {
+        "Any": object,
+        "_LOGGER": SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        ),
+        "FLOW_POWER_EXPORT_RATES": {"NSW1": 0.45},
+        "resolve_flow_power_happy_hour_end": lambda value=None: (
+            value if value in periods_by_end else "19:30"
+        ),
+        "flow_power_happy_hour_periods": lambda value=None: periods_by_end[value],
+    }
+    exec("from __future__ import annotations\n" + function, namespace)
+
+    rates = {period: 0.99 for period in periods_by_end["21:30"]}
+    rates["PERIOD_21_30"] = 0.99
+    tariff = {
+        "sell_tariff": {
+            "energy_charges": {
+                "Summer": {"rates": dict(rates)},
+                "Winter": {"rates": dict(rates)},
+            }
+        }
+    }
+    namespace["apply_flow_power_export"](tariff, "NSW1", happy_hour_end="21:30")
+
+    summer_rates = tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert summer_rates["PERIOD_19_30"] == 0.45
+    assert summer_rates["PERIOD_21_00"] == 0.45
+    assert summer_rates["PERIOD_21_30"] == 0.0
+
+
 
 
 def _method_source(file_path: Path, class_name: str, method_name: str) -> str:
@@ -148,8 +250,10 @@ def test_cost_tracking_uses_flow_power_kwatch_current_price():
         "CONF_FLOW_POWER_BASE_RATE": "flow_power_base_rate",
         "CONF_PEA_CUSTOM_VALUE": "pea_custom_value",
         "CONF_FLOW_POWER_STATE": "flow_power_state",
+        "CONF_FLOW_POWER_HAPPY_HOUR_END": "flow_power_happy_hour_end",
         "FLOW_POWER_DEFAULT_BASE_RATE": 28.0,
-        "FLOW_POWER_HAPPY_HOUR_PERIODS": {"PERIOD_17_30"},
+        "flow_power_happy_hour_periods": lambda _value=None: {"PERIOD_17_30"},
+        "resolve_flow_power_happy_hour_end": lambda value=None: value or "19:30",
     }.items():
         setattr(const_module, name, value)
     pricing_module = types.ModuleType("power_sync.flow_power_pricing")

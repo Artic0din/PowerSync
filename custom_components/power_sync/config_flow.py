@@ -310,9 +310,13 @@ from .const import (
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
+    CONF_FLOW_POWER_HAPPY_HOUR_END,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
     FLOW_POWER_EXPORT_RATES,
+    DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+    FLOW_POWER_HAPPY_HOUR_END_OPTIONS,
+    resolve_flow_power_happy_hour_end,
     # Export price boost configuration
     CONF_EXPORT_BOOST_ENABLED,
     CONF_EXPORT_PRICE_OFFSET,
@@ -2318,6 +2322,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            user_input[CONF_FLOW_POWER_HAPPY_HOUR_END] = (
+                resolve_flow_power_happy_hour_end(
+                    user_input.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
+                )
+            )
             # Apply sensible defaults for fields not shown during initial setup
             api_key = user_input.get(CONF_FLOWPOWER_API_KEY)
             user_input[CONF_FLOW_POWER_PRICE_SOURCE] = "kwatch" if api_key else "aemo"
@@ -2382,6 +2391,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             step=0.01,
                             unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_FLOW_POWER_HAPPY_HOUR_END,
+                        default=DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=value, label=label)
+                                for value, label in FLOW_POWER_HAPPY_HOUR_END_OPTIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
                     vol.Optional(CONF_FLOWPOWER_API_KEY): TextSelector(
@@ -14178,6 +14199,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             update_api_key = bool(
                 user_input.pop("update_flow_power_api_key", False)
             )
+            user_input[CONF_FLOW_POWER_HAPPY_HOUR_END] = (
+                resolve_flow_power_happy_hour_end(
+                    user_input.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
+                )
+            )
 
             # Store main options temporarily
             self._flow_power_main_options = user_input
@@ -14241,6 +14267,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ): NumberSelector(NumberSelectorConfig(
                 min=0.0, max=100.0, step=0.01, unit_of_measurement=self._selector_unit(),
                 mode=NumberSelectorMode.BOX,
+            )),
+            vol.Required(
+                CONF_FLOW_POWER_HAPPY_HOUR_END,
+                default=resolve_flow_power_happy_hour_end(
+                    self._get_option(
+                        CONF_FLOW_POWER_HAPPY_HOUR_END,
+                        DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+                    )
+                ),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=value, label=label)
+                    for value, label in FLOW_POWER_HAPPY_HOUR_END_OPTIONS.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
             )),
             vol.Optional(
                 CONF_PEA_ENABLED,

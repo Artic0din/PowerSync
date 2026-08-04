@@ -554,8 +554,10 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         CONF_FLOW_POWER_BASE_RATE,
                         CONF_PEA_CUSTOM_VALUE,
                         CONF_FLOW_POWER_STATE,
+                        CONF_FLOW_POWER_HAPPY_HOUR_END,
                         FLOW_POWER_DEFAULT_BASE_RATE,
-                        FLOW_POWER_HAPPY_HOUR_PERIODS,
+                        flow_power_happy_hour_periods,
+                        resolve_flow_power_happy_hour_end,
                     )
                     from .flow_power_pricing import (
                         calculate_flow_power_pea,
@@ -615,9 +617,15 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         )
                         now_local = dt_util.now()
                         period_key = f"PERIOD_{now_local.hour:02d}_{(now_local.minute // 30) * 30:02d}"
+                        happy_hour_end = resolve_flow_power_happy_hour_end(
+                            config_entry.options.get(
+                                CONF_FLOW_POWER_HAPPY_HOUR_END,
+                                config_entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+                            )
+                        )
                         sell_dollar_fp = (
                             _flow_power_export_rate_dollars(config_entry, fp_state)
-                            if period_key in FLOW_POWER_HAPPY_HOUR_PERIODS
+                            if period_key in flow_power_happy_hour_periods(happy_hour_end)
                             else 0.0
                         )
                         return (buy_cents_fp / 100.0, sell_dollar_fp)

@@ -472,6 +472,7 @@ from .const import (
     DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
+    CONF_FLOW_POWER_HAPPY_HOUR_END,
     CONF_FLOWPOWER_API_KEY,
     CONF_FLOWPOWER_NMI,
     CONF_AEMO_SENSOR_ENTITY,
@@ -499,6 +500,8 @@ from .const import (
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
+    DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+    resolve_flow_power_happy_hour_end,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
     # Flow Power v2 tariff configuration
@@ -9977,6 +9980,15 @@ class ProviderConfigView(HomeAssistantView):
                         CONF_FLOW_POWER_EXPORT_RATE,
                         entry.data.get(CONF_FLOW_POWER_EXPORT_RATE, None)
                     ),
+                    "flow_power_happy_hour_end": resolve_flow_power_happy_hour_end(
+                        entry.options.get(
+                            CONF_FLOW_POWER_HAPPY_HOUR_END,
+                            entry.data.get(
+                                CONF_FLOW_POWER_HAPPY_HOUR_END,
+                                DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+                            ),
+                        )
+                    ),
                     "pea_custom_value": entry.options.get(
                         CONF_PEA_CUSTOM_VALUE,
                         entry.data.get(CONF_PEA_CUSTOM_VALUE, None)
@@ -10326,6 +10338,7 @@ class ProviderConfigView(HomeAssistantView):
                 "pea_enabled": CONF_PEA_ENABLED,
                 "flow_power_base_rate": CONF_FLOW_POWER_BASE_RATE,
                 "flow_power_export_rate": CONF_FLOW_POWER_EXPORT_RATE,
+                "flow_power_happy_hour_end": CONF_FLOW_POWER_HAPPY_HOUR_END,
                 "pea_custom_value": CONF_PEA_CUSTOM_VALUE,
                 "demand_charge_enabled": CONF_DEMAND_CHARGE_ENABLED,
                 "demand_charge_rate": CONF_DEMAND_CHARGE_RATE,
@@ -10363,6 +10376,26 @@ class ProviderConfigView(HomeAssistantView):
             for key, value in data.items():
                 if key in key_mapping:
                     new_options[key_mapping[key]] = value
+
+            # Preserve the legacy 19:30 behaviour for missing or malformed
+            # Happy Hour plan-end values supplied by older clients.
+            if CONF_FLOW_POWER_HAPPY_HOUR_END in new_options:
+                new_options[CONF_FLOW_POWER_HAPPY_HOUR_END] = (
+                    resolve_flow_power_happy_hour_end(
+                        new_options[CONF_FLOW_POWER_HAPPY_HOUR_END]
+                    )
+                )
+            current_happy_hour_end = resolve_flow_power_happy_hour_end(
+                entry.options.get(
+                    CONF_FLOW_POWER_HAPPY_HOUR_END,
+                    entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+                )
+            )
+            happy_hour_end_changed = (
+                "flow_power_happy_hour_end" in data
+                and new_options.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
+                != current_happy_hour_end
+            )
 
             if entry.options.get(
                 CONF_SUNGROW_CONNECTION_TYPE,
@@ -10427,9 +10460,9 @@ class ProviderConfigView(HomeAssistantView):
                 ):
                     new_options.pop(key, None)
 
-            # Update the config entry without triggering a full reload.
-            # Set a flag so the update listener knows to skip the reload —
-            # API-driven saves don't need a full integration restart.
+            # Most API-driven saves can update in place. A Happy Hour window
+            # change is structural because the cached tariff schedule must be
+            # regenerated, so let that update follow the normal reload path.
             domain_data = self._hass.data.get(DOMAIN, {})
             entry_data = domain_data.get(entry.entry_id, {})
             monitoring_was_enabled = bool(
@@ -10452,7 +10485,10 @@ class ProviderConfigView(HomeAssistantView):
                 except Exception:
                     finish_monitoring_handoff(self._hass, entry)
                     raise
-            if new_options != dict(entry.options):
+            if (
+                new_options != dict(entry.options)
+                and not happy_hour_end_changed
+            ):
                 entry_data["_skip_reload"] = True
             try:
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
@@ -22794,8 +22830,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         flow_power_state = entry.options.get(CONF_FLOW_POWER_STATE, entry.data.get(CONF_FLOW_POWER_STATE, ""))
         if flow_power_state:
             from .tariff_converter import apply_flow_power_export
+            flow_power_happy_hour_end = resolve_flow_power_happy_hour_end(
+                entry.options.get(
+                    CONF_FLOW_POWER_HAPPY_HOUR_END,
+                    entry.data.get(
+                        CONF_FLOW_POWER_HAPPY_HOUR_END,
+                        DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+                    ),
+                )
+            )
             tariff = apply_flow_power_export(
-                tariff, flow_power_state, _configured_flow_power_export_rate()
+                tariff,
+                flow_power_state,
+                _configured_flow_power_export_rate(),
+                happy_hour_end=flow_power_happy_hour_end,
             )
 
         return tariff
@@ -24214,7 +24262,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 flow_power_state,
                 f" (override {export_rate * 100:.2f}c)" if export_rate is not None else "",
             )
-            tariff = apply_flow_power_export(tariff, flow_power_state, export_rate)
+            flow_power_happy_hour_end = resolve_flow_power_happy_hour_end(
+                entry.options.get(
+                    CONF_FLOW_POWER_HAPPY_HOUR_END,
+                    entry.data.get(
+                        CONF_FLOW_POWER_HAPPY_HOUR_END,
+                        DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
+                    ),
+                )
+            )
+            tariff = apply_flow_power_export(
+                tariff,
+                flow_power_state,
+                export_rate,
+                happy_hour_end=flow_power_happy_hour_end,
+            )
 
         # Apply export price boost for Amber users (if enabled)
         if electricity_provider == "amber":

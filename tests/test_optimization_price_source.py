@@ -115,6 +115,10 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
+    const_module.CONF_FLOW_POWER_HAPPY_HOUR_END = "flow_power_happy_hour_end"
+    const_module.resolve_flow_power_happy_hour_end = lambda value=None: (
+        value if value in {"19:30", "21:30"} else "19:30"
+    )
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
     const_module.CONF_FP_NETWORK = "fp_network"
     const_module.CONF_FP_TARIFF_CODE = "fp_tariff_code"

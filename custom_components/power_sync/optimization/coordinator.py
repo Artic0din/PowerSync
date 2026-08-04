@@ -9339,7 +9339,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._flow_power_export_window_slots(n)
 
     def _flow_power_export_window_slots(self, n: int) -> list[bool]:
-        """Return Flow Power's fixed daily export window slots."""
+        """Return Flow Power's configured daily export window slots."""
         if self._provider_key() != "flow_power":
             return [False] * n
         if not self._entry:
@@ -9347,8 +9347,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         from ..const import (
             CONF_FLOW_POWER_EXPORT_RATE,
+            CONF_FLOW_POWER_HAPPY_HOUR_END,
             CONF_FLOW_POWER_STATE,
             FLOW_POWER_EXPORT_RATES,
+            resolve_flow_power_happy_hour_end,
         )
 
         state = self._entry.options.get(
@@ -9371,7 +9373,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if happy_rate <= 0:
             return [False] * n
 
-        return self._time_window_slots(n, "17:30", "19:30")
+        happy_hour_end = resolve_flow_power_happy_hour_end(
+            self._entry.options.get(
+                CONF_FLOW_POWER_HAPPY_HOUR_END,
+                self._entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+            )
+        )
+        return self._time_window_slots(n, "17:30", happy_hour_end)
 
     def _positive_price_export_slots(
         self,
@@ -9856,7 +9864,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> list[float]:
         """Replace export prices with Flow Power Happy Hour schedule.
 
-        Flow Power: 0c export except Happy Hour (17:30-19:30) at 45c/35c.
+        Flow Power: 0c export except Happy Hour (17:30 to the selected plan
+        end) at the configured regional/plan rate.
         """
         if not self._entry:
             return export_prices
@@ -9864,8 +9873,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         from ..const import (
             CONF_ELECTRICITY_PROVIDER,
             CONF_FLOW_POWER_EXPORT_RATE,
+            CONF_FLOW_POWER_HAPPY_HOUR_END,
             CONF_FLOW_POWER_STATE,
             FLOW_POWER_EXPORT_RATES,
+            resolve_flow_power_happy_hour_end,
         )
 
         provider = self._entry.options.get(
@@ -9895,7 +9906,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (ValueError, TypeError):
             happy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
         happy_start = 17 * 60 + 30  # 17:30
-        happy_end = 19 * 60 + 30    # 19:30
+        happy_end_time = resolve_flow_power_happy_hour_end(
+            self._entry.options.get(
+                CONF_FLOW_POWER_HAPPY_HOUR_END,
+                self._entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+            )
+        )
+        happy_end_hour, happy_end_minute = map(int, happy_end_time.split(":"))
+        happy_end = happy_end_hour * 60 + happy_end_minute
         interval = self._config.interval_minutes
         now = dt_util.now()
 

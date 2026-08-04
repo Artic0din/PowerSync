@@ -138,6 +138,11 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_MONITORING_MODE = "monitoring_mode"
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
+    const_module.CONF_FLOW_POWER_HAPPY_HOUR_END = "flow_power_happy_hour_end"
+    const_module.DEFAULT_FLOW_POWER_HAPPY_HOUR_END = "19:30"
+    const_module.resolve_flow_power_happy_hour_end = lambda value=None: (
+        value if value in {"19:30", "21:30"} else "19:30"
+    )
     const_module.CONF_FP_TWAP_OVERRIDE = "fp_twap_override"
     const_module.AGL_BATTERY_REWARDS_START_HOUR = 17
     const_module.AGL_BATTERY_REWARDS_END_HOUR = 21
@@ -2849,6 +2854,21 @@ def test_flow_power_happy_hour_is_priority_export_without_profit_max(opt_module)
     slots = coordinator._priority_export_slots_for_run(288, [0.45] * 288)
 
     assert _true_indexes(slots) == list(range(108, 132))
+
+
+def test_flow_power_extended_happy_hour_uses_selected_end(opt_module):
+    """The four-hour plan extends priority export through the 21:00 slot."""
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+        flow_power_happy_hour_end="21:30",
+    )
+
+    slots = coordinator._flow_power_export_window_slots(288)
+
+    assert _true_indexes(slots) == list(range(108, 156))
 
 
 def test_solar_only_charge_does_not_use_median_import_as_acquisition_cost(

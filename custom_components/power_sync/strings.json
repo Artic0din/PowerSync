@@ -83,12 +83,14 @@
           "flow_power_state": "NEM region",
           "network_tariff_combined": "Network tariff",
           "flow_power_base_rate": "Base rate",
+          "flow_power_happy_hour_end": "Happy Hour plan end time",
           "flowpower_api_key": "Flow Power API key"
         },
         "data_description": {
           "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
           "network_tariff_combined": "Select the network tariff that matches your electricity bill.",
           "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments.",
+          "flow_power_happy_hour_end": "Select the Happy Hour end time stated on your Flow Power plan or fact sheet. This changes the Happy Hour window only; the separate Happy Hour export-rate setting remains unchanged.",
           "flowpower_api_key": "Optional for AEMO Direct; required for Flow Power API prices and account metrics. Get it from the Flow Power app under More > Web Data Access."
         },
         "submit": "Next"
@@ -1955,6 +1957,7 @@
           "network_tariff_combined": "Network tariff",
           "flow_power_base_rate": "Base rate",
           "flow_power_export_rate": "Happy Hour export rate",
+          "flow_power_happy_hour_end": "Happy Hour plan end time",
           "pea_enabled": "Enable PEA pricing (recommended)",
           "auto_sync_enabled": "Enable automatic TOU sync",
           "update_flow_power_api_key": "Enter or replace Flow Power API key",
@@ -1966,6 +1969,7 @@
         "data_description": {
           "flow_power_price_source": "Flow Power API uses your KWatch API key. AEMO Direct fetches wholesale prices from NEMWeb without an API key. Amber API uses your Amber Electric account.",
           "flow_power_export_rate": "Fixed export credit paid during Flow Power Happy Hour. Set this if Flow Power has applied a promo or account-specific feed-in rate.",
+          "flow_power_happy_hour_end": "Select the Happy Hour end time stated on your Flow Power plan or fact sheet. This changes the Happy Hour window only; the separate Happy Hour export-rate setting remains unchanged.",
           "pea_enabled": "PEA reflects how Flow Power actually bills you: final rate moves with wholesale prices. Disable for flat network tariff rates.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
           "update_flow_power_api_key": "Opens a secure API-key entry page. Leave disabled to keep the currently stored key unchanged.",

@@ -1128,13 +1128,49 @@ FLOW_POWER_EXPORT_RATES = {
     "TAS1": 0.00,   # No Happy Hour in Tasmania
 }
 
-# Flow Power Happy Hour periods (5:30pm to 7:30pm)
-FLOW_POWER_HAPPY_HOUR_PERIODS = [
-    "PERIOD_17_30",  # 5:30pm - 6:00pm
-    "PERIOD_18_00",  # 6:00pm - 6:30pm
-    "PERIOD_18_30",  # 6:30pm - 7:00pm
-    "PERIOD_19_00",  # 7:00pm - 7:30pm
-]
+# Flow Power Happy Hour configuration.  Flow Power publishes both a standard
+# 17:30-19:30 offer and an extended 17:30-21:30 offer.  The end time is an
+# account/plan setting, not a regional pricing rule; keep the legacy window as
+# the safe default for existing entries and invalid/missing stored values.
+CONF_FLOW_POWER_HAPPY_HOUR_END = "flow_power_happy_hour_end"
+DEFAULT_FLOW_POWER_HAPPY_HOUR_END = "19:30"
+FLOW_POWER_HAPPY_HOUR_START = "17:30"
+FLOW_POWER_HAPPY_HOUR_END_OPTIONS = {
+    "19:30": "5:30pm to 7:30pm (2 hours)",
+    "21:30": "5:30pm to 9:30pm (4 hours)",
+}
+
+
+def resolve_flow_power_happy_hour_end(value: object | None) -> str:
+    """Return a supported Flow Power Happy Hour end time.
+
+    Config entries created before the selector existed have no value, and
+    hand-edited entries may contain an invalid value.  Both cases must retain
+    the original 19:30 behaviour rather than widening export eligibility.
+    """
+    candidate = value.strip() if isinstance(value, str) else ""
+    if candidate in FLOW_POWER_HAPPY_HOUR_END_OPTIONS:
+        return candidate
+    return DEFAULT_FLOW_POWER_HAPPY_HOUR_END
+
+
+def flow_power_happy_hour_periods(value: object | None = None) -> list[str]:
+    """Return 30-minute tariff periods in the configured Happy Hour window."""
+    end_time = resolve_flow_power_happy_hour_end(value)
+    start_hour, start_minute = (
+        int(part) for part in FLOW_POWER_HAPPY_HOUR_START.split(":")
+    )
+    end_hour, end_minute = (int(part) for part in end_time.split(":"))
+    end_total = end_hour * 60 + end_minute
+    start_total = start_hour * 60 + start_minute
+    return [
+        f"PERIOD_{minute // 60:02d}_{minute % 60:02d}"
+        for minute in range(start_total, end_total, 30)
+    ]
+
+
+# Preserve the historical exported name for callers using the default plan.
+FLOW_POWER_HAPPY_HOUR_PERIODS = flow_power_happy_hour_periods()
 
 # Flow Power PEA (Price Efficiency Adjustment) configuration
 # PEA adjusts pricing based on wholesale market efficiency
