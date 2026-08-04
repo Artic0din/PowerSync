@@ -208,7 +208,7 @@
         "title": "GloBird plan",
         "description": "Select your exact GloBird plan. ZeroHero and ZeroCharge terms vary by account and date, so choose the preset that matches your written GloBird plan.",
         "data": {
-          "globird_plan": "GloBird ZeroHero plan",
+          "globird_plan": "GloBird plan",
           "globird_zerohero_start": "Custom Super Export start",
           "globird_zerohero_end": "Custom Super Export end",
           "globird_zerohero_export_cap_kwh": "Super Export cap",
@@ -220,7 +220,7 @@
           "globird_zerocharge_import_cap_kwh": "ZeroCharge daily-average allowance"
         },
         "data_description": {
-          "globird_plan": "Choose the matching ZeroHero contract (10c, first 15 kWh exported 18:00-21:00), including pre-Jul 2026 customers whose free window remains 11:00-14:00 and Jul 2026 customers on 12:00-15:00, a custom/account-specific setup, or Not on ZeroHero. A definitive Tesla tariff named ZeroHero is detected automatically.",
+          "globird_plan": "Choose FOUR4FREE automatic when PowerSync receives a complete tariff schedule from Tesla or another imported source. Choose FOUR4FREE manual/custom to enter the exact account rates and periods from your GloBird Welcome Pack. Both FOUR4FREE modes stay outside ZeroHero caps and credits. Choose the matching ZeroHero contract, including the pre-Jul 2026 and Jul 2026 variants with 10c on the first 15 kWh, for its separate settlement rules.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
@@ -2011,7 +2011,7 @@
         "title": "Globird / AEMO settings",
         "description": "Configure your GloBird tariff source/model and optional AEMO spike export. Portal account login is available from the Provider portal login page in the main Configure menu.\n\n{tariff_hint}",
         "data": {
-          "globird_plan": "GloBird ZeroHero plan",
+          "globird_plan": "GloBird plan",
           "globird_zerohero_start": "Custom Super Export start",
           "globird_zerohero_end": "Custom Super Export end",
           "globird_zerohero_export_cap_kwh": "Super Export cap",
@@ -2027,7 +2027,7 @@
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
-          "globird_plan": "Choose the matching ZeroHero contract (10c, first 15 kWh exported 18:00-21:00), including pre-Jul 2026 customers whose free window remains 11:00-14:00 and Jul 2026 customers on 12:00-15:00, a custom/account-specific setup, or Not on ZeroHero. A definitive Tesla tariff named ZeroHero is detected automatically.",
+          "globird_plan": "Choose FOUR4FREE automatic when PowerSync receives a complete tariff schedule from Tesla or another imported source. Choose FOUR4FREE manual/custom to enter the exact account rates and periods from your GloBird Welcome Pack. Both FOUR4FREE modes stay outside ZeroHero caps and credits. Choose the matching ZeroHero contract, including the pre-Jul 2026 and Jul 2026 variants with 10c on the first 15 kWh, for its separate settlement rules.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",

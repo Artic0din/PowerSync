@@ -597,12 +597,13 @@ def test_globird_options_flow_warns_tesla_users_about_tariff_baseline():
 
     assert method_source is not None
     assert "Tesla Powerwall detected" in method_source
-    assert "tariff already stored on your Powerwall" in method_source
+    assert "FOUR4FREE automatic reads the tariff" in method_source
+    assert "already stored on your Powerwall" in method_source
     assert "restart Home Assistant or reload" in method_source
     assert "PowerSync so the scheduler" in method_source
-    assert "Non-Tesla systems, including" in method_source
-    assert "Sigenergy and FoxESS cloud" in method_source
-    assert "inside PowerSync" in method_source
+    assert "complete account tariff schedule" in method_source
+    assert "choose manual/custom" in method_source
+    assert "GloBird Welcome Pack" in method_source
     assert "feed-in tariff here" in method_source
     assert "your ZeroHero plan here" in method_source
 
@@ -815,13 +816,14 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
         options_step = data["options"]["step"]["globird_options"]
 
         for step in (config_step, options_step):
-            assert step["data"]["globird_plan"] == "GloBird ZeroHero plan"
+            assert step["data"]["globird_plan"] == "GloBird plan"
             assert step["data"]["globird_zerohero_export_cap_kwh"] == "Super Export cap"
             assert step["data"]["globird_zerohero_import_limit_kw"] == "No-import threshold"
             assert step["data"]["globird_zerocharge_start"] == "Custom ZeroCharge start"
             assert step["data"]["globird_zerocharge_end"] == "Custom ZeroCharge end"
             assert step["data"]["globird_zerocharge_import_cap_kwh"] == "ZeroCharge daily-average allowance"
             assert "Jul 2026" in step["data_description"]["globird_plan"]
+            assert "FOUR4FREE" in step["data_description"]["globird_plan"]
             assert "15 kWh" in step["data_description"]["globird_plan"]
             assert "12:00" in step["data_description"]["globird_zerocharge_start"]
             assert "15:00" in step["data_description"]["globird_zerocharge_end"]
@@ -838,15 +840,31 @@ def test_globird_plan_schema_exposes_pre_and_post_jul_2026_zerocharge_fields():
     options_step = ast.get_source_segment(
         source, _options_flow_method("async_step_globird_options")
     )
+    setup_route = ast.get_source_segment(
+        source, _config_flow_method("_route_after_globird_aemo_setup")
+    )
+    setup_tariff = ast.get_source_segment(
+        source, _config_flow_method("async_step_custom_tariff")
+    )
+    options_route = ast.get_source_segment(
+        source, _options_flow_method("_route_after_globird_portal_options")
+    )
     api_source = INIT_PATH.read_text()
 
     assert helper is not None
     assert setup_step is not None
     assert options_step is not None
+    assert setup_route is not None
+    assert setup_tariff is not None
+    assert options_route is not None
     assert "GLOBIRD_PLAN_ZEROHERO_JUL_2026" in CONST_PATH.read_text()
     assert "ZeroHero Jul 2026" in CONST_PATH.read_text()
     assert "GLOBIRD_PLAN_ZEROHERO_PRE_JUL_2026" in CONST_PATH.read_text()
     assert "ZeroHero pre-Jul 2026" in CONST_PATH.read_text()
+    assert "GLOBIRD_PLAN_FOUR4FREE" in CONST_PATH.read_text()
+    assert "GLOBIRD_PLAN_FOUR4FREE_CUSTOM" in CONST_PATH.read_text()
+    assert "FOUR4FREE — automatic from tariff source" in CONST_PATH.read_text()
+    assert "FOUR4FREE — manual/custom tariff" in CONST_PATH.read_text()
     assert "CONF_GLOBIRD_ZEROCHARGE_START" in helper
     assert "CONF_GLOBIRD_ZEROCHARGE_END" in helper
     assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in helper
@@ -857,6 +875,14 @@ def test_globird_plan_schema_exposes_pre_and_post_jul_2026_zerocharge_fields():
     assert "CONF_GLOBIRD_ZEROCHARGE_END" in options_step
     assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in options_step
     assert "zerohero_plan_from_entry" in options_step
+    assert "GLOBIRD_PLAN_FOUR4FREE_CUSTOM" in options_step
+    assert "GLOBIRD_PLAN_FOUR4FREE_CUSTOM" in setup_route
+    assert "async_step_custom_tariff" in setup_route
+    assert 'else "FOUR4FREE"' in setup_tariff
+    assert "async_step_custom_tariff_options" in options_route
+    assert "GLOBIRD_PLAN_FOUR4FREE_CUSTOM" in api_source
+    assert "prefer_custom_tariff" in api_source
+    assert "selected FOUR4FREE manual override" in api_source
     assert "zerohero_plan_from_entry" in api_source
     assert '"globird_zerocharge_start": CONF_GLOBIRD_ZEROCHARGE_START' in api_source
     assert '"globird_zerocharge_end": CONF_GLOBIRD_ZEROCHARGE_END' in api_source
@@ -2436,8 +2462,11 @@ def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():
         "Any": object,
         "FlowResult": object,
         "DOMAIN": "power_sync",
-        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
-        "CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": (
+            "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+            "CONF_GLOBIRD_PLAN": "globird_plan",
+            "GLOBIRD_PLAN_NOT_ZEROHERO": "not_zerohero",
+            "GLOBIRD_PLAN_FOUR4FREE_CUSTOM": "four4free_custom",
+            "CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": (
             "agl_battery_rewards_offpeak_export_rate"
         ),
         "DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": 3.0,

@@ -441,6 +441,7 @@ from .const import (
     CONF_GLOBIRD_EMAIL,
     CONF_GLOBIRD_PASSWORD,
     GLOBIRD_PLAN_NOT_ZEROHERO,
+    GLOBIRD_PLAN_FOUR4FREE_CUSTOM,
     GLOBIRD_PLAN_ZEROHERO_CUSTOM,
     DEFAULT_GLOBIRD_ZEROHERO_START,
     DEFAULT_GLOBIRD_ZEROHERO_END,
@@ -38242,9 +38243,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
     if electricity_provider in ("agl", "globird", "aemo_vpp", "other", "tou_only", "nz"):
-        # Only apply custom tariff if Tesla tariff wasn't already fetched
+        configured_globird_plan = entry.options.get(
+            CONF_GLOBIRD_PLAN,
+            entry.data.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO),
+        )
+        prefer_custom_tariff = (
+            electricity_provider == "globird"
+            and configured_globird_plan == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+        )
         existing_tariff = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
-        if existing_tariff and existing_tariff.get("tou_periods"):
+        if (
+            existing_tariff
+            and existing_tariff.get("tou_periods")
+            and not prefer_custom_tariff
+        ):
             _LOGGER.info(
                 f"Tesla tariff already loaded for {electricity_provider} - "
                 f"skipping custom tariff override ({existing_tariff.get('plan_name', 'Unknown')})"
@@ -38257,7 +38269,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     currency=currency_for_entry(entry, hass),
                 )
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
-                _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
+                _LOGGER.info(
+                    "Custom tariff loaded for %s%s: %s",
+                    electricity_provider,
+                    " as the selected FOUR4FREE manual override"
+                    if prefer_custom_tariff
+                    else "",
+                    custom_tariff.get("name"),
+                )
+            elif prefer_custom_tariff:
+                _LOGGER.warning(
+                    "FOUR4FREE manual/custom is selected but no custom tariff is "
+                    "saved; retaining the available Tesla tariff"
+                )
 
     automation_engine = AutomationEngine(hass, automation_store, entry)
 

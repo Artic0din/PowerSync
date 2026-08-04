@@ -285,6 +285,7 @@ from .const import (
     CONF_GLOBIRD_PLAN,
     GLOBIRD_PLANS,
     GLOBIRD_PLAN_NOT_ZEROHERO,
+    GLOBIRD_PLAN_FOUR4FREE_CUSTOM,
     GLOBIRD_PLAN_ZEROHERO_CUSTOM,
     CONF_GLOBIRD_ZEROCHARGE_START,
     CONF_GLOBIRD_ZEROCHARGE_END,
@@ -6096,14 +6097,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ),
                     }
 
-                    # Route to battery system selection
-                    return await self.async_step_battery_system()
+                    return await self._route_after_globird_aemo_setup()
             else:
                 # AEMO disabled
                 self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
 
-                # Route to battery system selection
-                return await self.async_step_battery_system()
+                return await self._route_after_globird_aemo_setup()
 
         # Build region choices
         region_options = [
@@ -6157,6 +6156,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "threshold_hint": threshold_hint,
             },
         )
+
+    async def _route_after_globird_aemo_setup(self) -> FlowResult:
+        """Collect an account-specific FOUR4FREE tariff when requested."""
+        if (
+            getattr(self, "_globird_data", {}).get(CONF_GLOBIRD_PLAN)
+            == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+        ):
+            return await self.async_step_custom_tariff()
+        return await self.async_step_battery_system()
 
     async def async_step_agl(
         self, user_input: dict[str, Any] | None = None
@@ -6253,10 +6261,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure a custom tariff during initial setup."""
         errors: dict[str, str] = {}
         is_agl = self._selected_electricity_provider == "agl"
+        is_four4free_custom = (
+            getattr(self, "_globird_data", {}).get(CONF_GLOBIRD_PLAN)
+            == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+        )
         rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
-            if user_input.get("skip_tariff", False) and not is_agl:
+            if (
+                user_input.get("skip_tariff", False)
+                and not is_agl
+                and not is_four4free_custom
+            ):
                 self._custom_tariff_data = {}
                 return await self.async_step_battery_system()
 
@@ -6301,7 +6317,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields: dict[Any, Any] = {
             vol.Optional(
                 "plan_name",
-                default="AGL Battery Rewards" if is_agl else "",
+                default=(
+                    "AGL Battery Rewards"
+                    if is_agl
+                    else "FOUR4FREE"
+                    if is_four4free_custom
+                    else ""
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required("tariff_type", default="tou"): SelectSelector(
                 SelectSelectorConfig(
@@ -6331,7 +6353,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             ),
         }
-        if not is_agl:
+        if not is_agl and not is_four4free_custom:
             schema_fields[
                 vol.Optional("skip_tariff", default=False)
             ] = BooleanSelector()
@@ -14675,9 +14697,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ):
                         user_input.pop(key, None)
 
-                # Check if user wants to configure custom tariff
-                self._globird_configure_custom_tariff = user_input.pop(
+                # Manual FOUR4FREE always continues to the account-specific
+                # tariff editor. Other plans retain the optional editor toggle.
+                configure_custom_tariff = user_input.pop(
                     "configure_custom_tariff", False
+                )
+                self._globird_configure_custom_tariff = (
+                    user_input.get(CONF_GLOBIRD_PLAN)
+                    == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+                    or configure_custom_tariff
                 )
 
                 # Store options and route accordingly
@@ -14705,7 +14733,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self.config_entry,
             runtime_tariff,
         )
-        if resolved_globird_plan != GLOBIRD_PLAN_NOT_ZEROHERO:
+        configured_globird_plan = current_globird_settings.get(CONF_GLOBIRD_PLAN)
+        if (
+            configured_globird_plan != GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+            and resolved_globird_plan != GLOBIRD_PLAN_NOT_ZEROHERO
+        ):
             current_globird_settings[CONF_GLOBIRD_PLAN] = resolved_globird_plan
         schema_fields: dict[Any, Any] = dict(
             self._globird_plan_schema(current_globird_settings).schema
@@ -14734,22 +14766,32 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )),
         })
 
-        # Tesla users get tariff from the Tesla API — no need for manual configuration
+        # Automatic mode can use Tesla or another complete imported schedule.
+        # Manual mode always routes to PowerSync's account-specific tariff editor.
         if not is_tesla:
-            schema_fields[vol.Optional("configure_custom_tariff", default=False)] = BooleanSelector()
+            schema_fields[
+                vol.Optional(
+                    "configure_custom_tariff",
+                    default=(
+                        current_globird_settings.get(CONF_GLOBIRD_PLAN)
+                        == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+                    ),
+                )
+            ] = BooleanSelector()
             tariff_hint = (
-                "**Custom Tariff (recommended):** Non-Tesla systems, including "
-                "Sigenergy and FoxESS cloud, should configure the Globird/TOU rates "
-                "inside PowerSync. These rates are needed for accurate price sensors, "
-                "battery optimisation, and EV charging. For ZeroHero, enter the base "
-                "feed-in tariff here; PowerSync models the capped Super Export bonus "
-                "separately from your TOU tariff."
+                "For FOUR4FREE, choose automatic only when PowerSync already receives "
+                "a complete account tariff schedule. Otherwise choose manual/custom "
+                "and enter the exact rates and periods from your GloBird Welcome Pack. "
+                "These rates drive price sensors, battery optimisation, and EV charging. "
+                "For ZeroHero, enter the base feed-in tariff here; PowerSync models its "
+                "capped Super Export bonus separately."
             )
         else:
             tariff_hint = (
-                "Tesla Powerwall detected: PowerSync reads the TOU schedule from "
-                "the tariff already stored on your Powerwall. Set the correct "
-                "Globird/TOU tariff in the Tesla app before saving these settings. "
+                "Tesla Powerwall detected: FOUR4FREE automatic reads the tariff "
+                "already stored on your Powerwall. Choose manual/custom to override it "
+                "with the exact rates and periods from your GloBird Welcome Pack. "
+                "Set the correct tariff in the Tesla app before using automatic mode. "
                 "After changing the Tesla tariff, restart Home Assistant or reload "
                 "PowerSync so the scheduler refreshes its cached baseline. Select "
                 "your ZeroHero plan here so PowerSync can model the export cap and "
@@ -15451,6 +15493,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_ELECTRICITY_PROVIDER, "other"
         )
         is_agl = provider == "agl"
+        is_four4free_custom = (
+            getattr(self, "_amber_options", {}).get(CONF_GLOBIRD_PLAN)
+            == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+            or self._get_option(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
+            == GLOBIRD_PLAN_FOUR4FREE_CUSTOM
+        )
         rate_step = 0.01 if is_agl else 0.1
 
         if user_input is not None:
@@ -15545,7 +15593,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "plan_name",
                 default=(current_tariff or {}).get(
                     "name",
-                    "AGL Battery Rewards" if is_agl else "",
+                    (
+                        "AGL Battery Rewards"
+                        if is_agl
+                        else "FOUR4FREE"
+                        if is_four4free_custom
+                        else ""
+                    ),
                 ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required("tariff_type", default="tou"): SelectSelector(

@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
+GLOBIRD_PLAN_FOUR4FREE = "four4free"
+GLOBIRD_PLAN_FOUR4FREE_CUSTOM = "four4free_custom"
 GLOBIRD_PLAN_ZEROHERO_JUL_2026 = "zerohero_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_PRE_JUL_2026 = "zerohero_pre_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_CURRENT = "zerohero_current"
@@ -176,14 +178,15 @@ def _tariff_period_bounds(entry: dict[str, Any]) -> tuple[int, int] | None:
     return start, end
 
 
-def infer_zerohero_plan_from_tariff(
+def infer_globird_plan_from_tariff(
     tariff_schedule: dict[str, Any] | None,
 ) -> str | None:
-    """Infer a known ZeroHero contract from a definitive Tesla tariff.
+    """Infer a known GloBird plan identity from an authoritative tariff source.
 
-    The tariff name alone cannot distinguish grandfathered and post-July 2026
-    customers.  Require the ZeroHero name, the 10c/15c export rate, and the
-    matching free/import or export window before activating settlement rules.
+    FOUR4FREE terms vary by account and date, so its name identifies the plan
+    while the account tariff remains authoritative for prices and windows.
+    ZeroHero additionally requires matching rates/windows before PowerSync
+    activates its capped export and no-import-credit settlement rules.
     """
     if not isinstance(tariff_schedule, dict):
         return None
@@ -192,6 +195,8 @@ def infer_zerohero_plan_from_tariff(
         for character in str(tariff_schedule.get("plan_name", "")).casefold()
         if character.isalnum()
     )
+    if "four4free" in plan_name or "fourforfree" in plan_name:
+        return GLOBIRD_PLAN_FOUR4FREE
     if "zerohero" not in plan_name:
         return None
 
@@ -249,11 +254,27 @@ def infer_zerohero_plan_from_tariff(
     return None
 
 
+def infer_zerohero_plan_from_tariff(
+    tariff_schedule: dict[str, Any] | None,
+) -> str | None:
+    """Infer only ZeroHero settlement presets from a Tesla tariff."""
+    plan = infer_globird_plan_from_tariff(tariff_schedule)
+    if plan == GLOBIRD_PLAN_FOUR4FREE:
+        return None
+    return plan
+
+
 def zerohero_config_from_settings(settings: dict[str, Any] | None) -> ZeroHeroConfig | None:
     """Return a resolved ZeroHero config from config entry data/options."""
     settings = settings or {}
     plan = settings.get(_CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
-    if plan in (None, "", GLOBIRD_PLAN_NOT_ZEROHERO):
+    if plan in (
+        None,
+        "",
+        GLOBIRD_PLAN_NOT_ZEROHERO,
+        GLOBIRD_PLAN_FOUR4FREE,
+        GLOBIRD_PLAN_FOUR4FREE_CUSTOM,
+    ):
         return None
 
     preset = ZEROHERO_PRESETS.get(plan, ZEROHERO_PRESETS[GLOBIRD_PLAN_ZEROHERO_CURRENT])
@@ -329,7 +350,7 @@ def zerohero_plan_from_entry(
     configured = data.get(_CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
     if configured not in (None, "", GLOBIRD_PLAN_NOT_ZEROHERO):
         return str(configured)
-    return infer_zerohero_plan_from_tariff(tariff_schedule) or GLOBIRD_PLAN_NOT_ZEROHERO
+    return infer_globird_plan_from_tariff(tariff_schedule) or GLOBIRD_PLAN_NOT_ZEROHERO
 
 
 def zerohero_config_from_entry(

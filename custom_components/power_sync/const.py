@@ -694,6 +694,8 @@ LEGACY_NO_IDLE_MODE_PROVIDERS_V8 = frozenset({
 # GloBird ZeroHero plan configuration
 CONF_GLOBIRD_PLAN = "globird_plan"
 GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
+GLOBIRD_PLAN_FOUR4FREE = "four4free"
+GLOBIRD_PLAN_FOUR4FREE_CUSTOM = "four4free_custom"
 GLOBIRD_PLAN_ZEROHERO_JUL_2026 = "zerohero_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_PRE_JUL_2026 = "zerohero_pre_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_CURRENT = "zerohero_current"
@@ -701,6 +703,8 @@ GLOBIRD_PLAN_ZEROHERO_LEGACY = "zerohero_legacy"
 GLOBIRD_PLAN_ZEROHERO_CUSTOM = "zerohero_custom"
 GLOBIRD_PLANS = {
     GLOBIRD_PLAN_NOT_ZEROHERO: "Not on ZeroHero",
+    GLOBIRD_PLAN_FOUR4FREE: "FOUR4FREE — automatic from tariff source",
+    GLOBIRD_PLAN_FOUR4FREE_CUSTOM: "FOUR4FREE — manual/custom tariff",
     GLOBIRD_PLAN_ZEROHERO_JUL_2026: "ZeroHero Jul 2026 (10c, 15 kWh, 6pm-9pm, free 12pm-3pm)",
     GLOBIRD_PLAN_ZEROHERO_PRE_JUL_2026: "ZeroHero pre-Jul 2026 (10c, 15 kWh, 6pm-9pm, free 11am-2pm)",
     GLOBIRD_PLAN_ZEROHERO_CURRENT: "ZeroHero previous 3-hour (15c, 15 kWh, 6pm-9pm)",

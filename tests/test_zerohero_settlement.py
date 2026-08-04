@@ -156,6 +156,23 @@ def test_non_zerohero_tariff_name_never_overrides_not_zerohero_choice():
     assert zerohero.zerohero_config_from_entry(entry, tariff) is None
 
 
+@pytest.mark.parametrize("plan_name", ["FOUR4FREE", "Four For Free"])
+def test_four4free_tariff_is_identified_without_zerohero_settlement(plan_name):
+    entry = SimpleNamespace(data={}, options={"globird_plan": "not_zerohero"})
+    tariff = _tesla_zerohero_tariff(10, 14)
+    tariff["plan_name"] = plan_name
+
+    assert zerohero.infer_globird_plan_from_tariff(tariff) == "four4free"
+    assert zerohero.infer_zerohero_plan_from_tariff(tariff) is None
+    assert zerohero.zerohero_plan_from_entry(entry, tariff) == "four4free"
+    assert zerohero.zerohero_config_from_entry(entry, tariff) is None
+
+
+def test_explicit_four4free_never_falls_through_to_zerohero_defaults():
+    for plan in ("four4free", "four4free_custom"):
+        assert zerohero.zerohero_config_from_settings({"globird_plan": plan}) is None
+
+
 def test_definitive_tariff_never_overrides_an_explicit_plan():
     entry = SimpleNamespace(
         data={},
