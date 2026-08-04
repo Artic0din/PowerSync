@@ -2749,6 +2749,45 @@ def test_zerohero_positive_base_fit_does_not_allow_export_outside_bonus_window(
     assert _true_indexes(slots) == list(range(6, 42))
 
 
+def test_tesla_tariff_auto_activates_grandfathered_zerohero_priority(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="not_zerohero",
+    )
+    coordinator._tariff_schedule = {
+        "plan_name": "Zerohero",
+        "buy_rates": {"ON_PEAK": 0.53, "SUPER_OFF_PEAK": 0.0},
+        "sell_rates": {"ON_PEAK": 0.10, "SUPER_OFF_PEAK": 0.0},
+        "tou_periods": {
+            "ON_PEAK": [
+                {"fromHour": 18, "fromMinute": 0, "toHour": 21, "toMinute": 0}
+            ],
+            "SUPER_OFF_PEAK": [
+                {"fromHour": 11, "fromMinute": 0, "toHour": 14, "toMinute": 0}
+            ],
+        },
+    }
+    coordinator._last_price_timestamps = [
+        datetime(2026, 8, 4, 17, 30, tzinfo=timezone.utc)
+        + timedelta(minutes=5 * idx)
+        for idx in range(48)
+    ]
+    import_prices = [0.53] * 48
+    export_prices = [0.0] * 48
+    for idx in range(6, 42):
+        export_prices[idx] = 0.10
+
+    config = coordinator._zerohero_config()
+    coordinator._apply_zerohero_optimizer_inputs(import_prices, export_prices)
+    priority_slots = coordinator._priority_export_slots_for_run(48, export_prices)
+
+    assert config is not None
+    assert config.plan == "zerohero_pre_jul_2026"
+    assert config.zerocharge_start == "11:00"
+    assert _true_indexes(priority_slots) == list(range(6, 42))
+
+
 def test_zerohero_bonus_window_is_priority_export_while_cap_remains(opt_module):
     coordinator = _coordinator(
         opt_module,

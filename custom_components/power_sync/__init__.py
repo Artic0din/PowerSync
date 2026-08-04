@@ -877,6 +877,7 @@ from .tesla_grid_control import (
     tesla_site_info_has_structure,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
+from .zerohero import zerohero_plan_from_entry
 import re
 
 
@@ -10057,10 +10058,15 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                 }
                 if electricity_provider == "globird":
+                    runtime_tariff = (
+                        self._hass.data.get(DOMAIN, {})
+                        .get(entry.entry_id, {})
+                        .get("tariff_schedule")
+                    )
                     config.update({
-                        "globird_plan": entry.options.get(
-                            CONF_GLOBIRD_PLAN,
-                            entry.data.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
+                        "globird_plan": zerohero_plan_from_entry(
+                            entry,
+                            runtime_tariff,
                         ),
                         "globird_zerohero_start": entry.options.get(
                             CONF_GLOBIRD_ZEROHERO_START,

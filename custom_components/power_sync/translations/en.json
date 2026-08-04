@@ -220,7 +220,7 @@
           "globird_zerocharge_import_cap_kwh": "ZeroCharge daily-average allowance"
         },
         "data_description": {
-          "globird_plan": "Choose ZeroHero Jul 2026 (10c, 15 kWh, 18:00-21:00, free 12:00-15:00), an older ZeroHero preset, a custom/account-specific setup, or Not on ZeroHero. Existing saved plans are not migrated automatically.",
+          "globird_plan": "Choose the matching ZeroHero contract (10c, first 15 kWh exported 18:00-21:00), including pre-Jul 2026 customers whose free window remains 11:00-14:00 and Jul 2026 customers on 12:00-15:00, a custom/account-specific setup, or Not on ZeroHero. A definitive Tesla tariff named ZeroHero is detected automatically.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
@@ -2027,7 +2027,7 @@
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
-          "globird_plan": "Choose ZeroHero Jul 2026 (10c, 15 kWh, 18:00-21:00, free 12:00-15:00), an older ZeroHero preset, a custom/account-specific setup, or Not on ZeroHero. Existing saved plans are not migrated automatically.",
+          "globird_plan": "Choose the matching ZeroHero contract (10c, first 15 kWh exported 18:00-21:00), including pre-Jul 2026 customers whose free window remains 11:00-14:00 and Jul 2026 customers on 12:00-15:00, a custom/account-specific setup, or Not on ZeroHero. A definitive Tesla tariff named ZeroHero is detected automatically.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",

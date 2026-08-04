@@ -829,7 +829,7 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
             assert "0.09 kWh total import allowance" in step["data_description"]["globird_zerohero_import_limit_kw"]
 
 
-def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
+def test_globird_plan_schema_exposes_pre_and_post_jul_2026_zerocharge_fields():
     source = CONFIG_FLOW_PATH.read_text()
     helper = ast.get_source_segment(source, _top_level_function("_build_globird_plan_schema"))
     setup_step = ast.get_source_segment(
@@ -845,6 +845,8 @@ def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
     assert options_step is not None
     assert "GLOBIRD_PLAN_ZEROHERO_JUL_2026" in CONST_PATH.read_text()
     assert "ZeroHero Jul 2026" in CONST_PATH.read_text()
+    assert "GLOBIRD_PLAN_ZEROHERO_PRE_JUL_2026" in CONST_PATH.read_text()
+    assert "ZeroHero pre-Jul 2026" in CONST_PATH.read_text()
     assert "CONF_GLOBIRD_ZEROCHARGE_START" in helper
     assert "CONF_GLOBIRD_ZEROCHARGE_END" in helper
     assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in helper
@@ -854,6 +856,8 @@ def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
     assert "CONF_GLOBIRD_ZEROCHARGE_START" in options_step
     assert "CONF_GLOBIRD_ZEROCHARGE_END" in options_step
     assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in options_step
+    assert "zerohero_plan_from_entry" in options_step
+    assert "zerohero_plan_from_entry" in api_source
     assert '"globird_zerocharge_start": CONF_GLOBIRD_ZEROCHARGE_START' in api_source
     assert '"globird_zerocharge_end": CONF_GLOBIRD_ZEROCHARGE_END' in api_source
     assert (

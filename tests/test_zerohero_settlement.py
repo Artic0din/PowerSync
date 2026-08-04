@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,6 +69,121 @@ def test_jul_2026_plan_uses_10c_super_export_and_zerocharge_window():
     )
     assert zerohero.zerocharge_is_in_window(_ts(12, 0), config)
     assert not zerohero.zerocharge_is_in_window(_ts(15, 0), config)
+
+
+def test_pre_jul_2026_plan_keeps_grandfathered_free_window():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_pre_jul_2026"}
+    )
+
+    assert config.start == "18:00"
+    assert config.end == "21:00"
+    assert config.export_cap_kwh == pytest.approx(15.0)
+    assert config.super_export_rate == pytest.approx(0.10)
+    assert config.zerocharge_start == "11:00"
+    assert config.zerocharge_end == "14:00"
+    assert config.zerocharge_import_cap_kwh == pytest.approx(50.0)
+
+
+def _tesla_zerohero_tariff(free_start: int, free_end: int) -> dict:
+    return {
+        "plan_name": "Zerohero",
+        "buy_rates": {
+            "ON_PEAK": 0.53,
+            "SUPER_OFF_PEAK": 0.0,
+        },
+        "sell_rates": {
+            "ON_PEAK": 0.10,
+            "SUPER_OFF_PEAK": 0.0,
+        },
+        "tou_periods": {
+            "ON_PEAK": [
+                {
+                    "fromHour": 18,
+                    "fromMinute": 0,
+                    "toHour": 21,
+                    "toMinute": 0,
+                }
+            ],
+            "SUPER_OFF_PEAK": [
+                {
+                    "fromHour": free_start,
+                    "fromMinute": 0,
+                    "toHour": free_end,
+                    "toMinute": 0,
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("free_start", "free_end", "expected_plan"),
+    [
+        (11, 14, "zerohero_pre_jul_2026"),
+        (12, 15, "zerohero_jul_2026"),
+    ],
+)
+def test_tesla_tariff_distinguishes_pre_and_post_july_contracts(
+    free_start,
+    free_end,
+    expected_plan,
+):
+    tariff = _tesla_zerohero_tariff(free_start, free_end)
+
+    assert zerohero.infer_zerohero_plan_from_tariff(tariff) == expected_plan
+
+
+def test_definitive_tesla_zerohero_tariff_repairs_not_zerohero_default():
+    entry = SimpleNamespace(
+        data={"electricity_provider": "globird"},
+        options={"globird_plan": "not_zerohero"},
+    )
+    tariff = _tesla_zerohero_tariff(11, 14)
+
+    config = zerohero.zerohero_config_from_entry(entry, tariff)
+
+    assert config is not None
+    assert config.plan == "zerohero_pre_jul_2026"
+    assert config.zerocharge_start == "11:00"
+
+
+def test_non_zerohero_tariff_name_never_overrides_not_zerohero_choice():
+    entry = SimpleNamespace(data={}, options={"globird_plan": "not_zerohero"})
+    tariff = _tesla_zerohero_tariff(11, 14)
+    tariff["plan_name"] = "Standard TOU"
+
+    assert zerohero.zerohero_config_from_entry(entry, tariff) is None
+
+
+def test_definitive_tariff_never_overrides_an_explicit_plan():
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "globird_plan": "zerohero_custom",
+            "globird_zerohero_start": "17:30",
+            "globird_zerohero_end": "20:30",
+        },
+    )
+
+    config = zerohero.zerohero_config_from_entry(
+        entry,
+        _tesla_zerohero_tariff(11, 14),
+    )
+
+    assert config is not None
+    assert config.plan == "zerohero_custom"
+    assert config.start == "17:30"
+    assert config.end == "20:30"
+
+
+def test_zerohero_name_and_rates_without_export_window_do_not_activate_plan():
+    tariff = _tesla_zerohero_tariff(11, 14)
+    tariff["tou_periods"]["ON_PEAK"][0].update(
+        {"fromHour": 17, "toHour": 20}
+    )
+
+    assert zerohero.infer_zerohero_plan_from_tariff(tariff) is None
 
 
 def test_legacy_plan_topup_applies_only_to_first_10kwh_before_8pm():

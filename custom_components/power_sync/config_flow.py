@@ -42,6 +42,7 @@ from .settings_metadata import (
     merge_optimization_section_input,
     submitted_live_settings,
 )
+from .zerohero import zerohero_plan_from_entry
 from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings
 from .const import (
     DOMAIN,
@@ -14695,6 +14696,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         current_globird_settings = dict(self.config_entry.data or {})
         current_globird_settings.update(self.config_entry.options or {})
+        runtime_tariff = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self.config_entry.entry_id, {})
+            .get("tariff_schedule")
+        )
+        resolved_globird_plan = zerohero_plan_from_entry(
+            self.config_entry,
+            runtime_tariff,
+        )
+        if resolved_globird_plan != GLOBIRD_PLAN_NOT_ZEROHERO:
+            current_globird_settings[CONF_GLOBIRD_PLAN] = resolved_globird_plan
         schema_fields: dict[Any, Any] = dict(
             self._globird_plan_schema(current_globird_settings).schema
         )

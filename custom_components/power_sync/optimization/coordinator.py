@@ -65,6 +65,7 @@ from ..tariff_quota import (
 )
 from ..tariff_time import find_matching_tou_period, period_entries
 from ..zerohero import (
+    GLOBIRD_PLAN_NOT_ZEROHERO,
     ZeroHeroConfig,
     settle_zerocharge_imports,
     settle_zerohero_series,
@@ -3246,7 +3247,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return resolved GloBird ZeroHero settings for this entry."""
         if self._provider_key() != "globird":
             return None
-        return zerohero_config_from_entry(self._entry)
+        tariff_schedule = getattr(self, "_tariff_schedule", None)
+        if getattr(self, "hass", None) is not None:
+            tariff_schedule = self._get_tou_tariff_schedule()
+        config = zerohero_config_from_entry(self._entry, tariff_schedule)
+        if config is not None:
+            raw_plan = None
+            if self._entry is not None:
+                raw_plan = self._entry.options.get(
+                    "globird_plan",
+                    self._entry.data.get("globird_plan"),
+                )
+            if raw_plan in (None, "", GLOBIRD_PLAN_NOT_ZEROHERO):
+                logged_plan = getattr(self, "_logged_inferred_zerohero_plan", None)
+                if logged_plan != config.plan:
+                    _LOGGER.info(
+                        "GloBird ZeroHero plan auto-detected from tariff: %s",
+                        config.plan,
+                    )
+                    self._logged_inferred_zerohero_plan = config.plan
+        return config
 
     def _price_timestamps(self, n: int) -> list[datetime]:
         """Return local timestamps aligned with the current optimizer interval."""
