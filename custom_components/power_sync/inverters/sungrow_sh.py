@@ -898,7 +898,7 @@ class SungrowSHController(InverterController):
                 # On SH-RS models where writes fail, the stop command alone
                 # may be enough — the inverter returns to self-consumption
                 # when forced mode has no active command
-                if not self._ems_registers_supported:
+                if not self._ems_registers_supported and stop_ok:
                     _LOGGER.info(
                         "EMS mode write unsupported — stop command sent, "
                         "inverter should return to self-consumption"

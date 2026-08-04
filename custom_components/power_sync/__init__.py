@@ -30427,7 +30427,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await controller.disconnect()
             sungrow_coord = entry_data.get("sungrow_coordinator")
             if sungrow_coord:
-                await sungrow_coord.force_charge(duration, power_w=power_w)
+                charge_result = await sungrow_coord.force_charge(
+                    duration,
+                    power_w=power_w,
+                )
+                if charge_result is False:
+                    raise HomeAssistantError(
+                        "Sungrow force charge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"Sungrow force charge hardware extended ({duration}min)")
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")
@@ -32942,7 +32949,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "Sungrow Modbus communication error",
                             )
                         )
-                        return
+                        raise HomeAssistantError(
+                            "Sungrow restore_normal failed"
+                        )
                 else:
                     _LOGGER.error("Restore normal: Sungrow coordinator not available")
                     hass.async_create_task(
@@ -32952,7 +32961,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "Sungrow coordinator unavailable",
                         )
                     )
-                    return
+                    raise HomeAssistantError(
+                        "Sungrow restore_normal coordinator unavailable"
+                    )
 
                 if _restore_superseded("Sungrow restore"):
                     return
@@ -32980,9 +32991,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Sungrow restore normal: {e}", exc_info=True)
-                return
+                raise HomeAssistantError(
+                    "Sungrow restore_normal failed"
+                ) from e
 
         # Guard: if no force mode is active and no saved state exists, there's
         # nothing to restore. Skip to avoid false "tariff not restored" warnings,
@@ -34228,7 +34243,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sungrow_coord = entry_data.get("sungrow_coordinator")
                 if not sungrow_coord:
                     _LOGGER.error("Self-consumption: Sungrow coordinator not available")
-                    return
+                    raise HomeAssistantError(
+                        "Sungrow self-consumption coordinator unavailable"
+                    )
 
                 success = await _guarded_self_consumption_write(
                     sungrow_coord.restore_normal
@@ -34237,10 +34254,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info("✅ Sungrow self-consumption mode set")
                 else:
                     _LOGGER.error("Failed to set Sungrow self-consumption mode")
+                    raise HomeAssistantError(
+                        "Sungrow self-consumption restore failed"
+                    )
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error setting Sungrow self-consumption: {e}", exc_info=True)
-                return
+                raise HomeAssistantError(
+                    "Sungrow self-consumption restore failed"
+                ) from e
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))

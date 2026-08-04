@@ -3696,6 +3696,66 @@ def test_sungrow_restore_normal_does_not_clear_state_on_failed_restore():
     assert '"Sungrow Modbus communication error"' in branch
 
 
+def test_sungrow_restore_normal_propagates_failure_to_optimizer_wrapper():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    branch = function_source.split(
+        "# Check if this is a Sungrow system",
+        1,
+    )[1].split(
+        "# Guard: if no force mode is active",
+        1,
+    )[0]
+
+    assert 'raise HomeAssistantError(\n                            "Sungrow restore_normal failed"' in branch
+    assert 'raise HomeAssistantError(\n                        "Sungrow restore_normal coordinator unavailable"' in branch
+    assert "except HomeAssistantError:\n                raise" in branch
+
+
+def test_sungrow_self_consumption_propagates_failure_to_optimizer_wrapper():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_self_consumption")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    branch = function_source.split(
+        "# Check if this is a Sungrow system",
+        1,
+    )[1].split(
+        "# Check if this is a Sigenergy system",
+        1,
+    )[0]
+
+    assert 'raise HomeAssistantError(\n                        "Sungrow self-consumption coordinator unavailable"' in branch
+    assert 'raise HomeAssistantError(\n                        "Sungrow self-consumption restore failed"' in branch
+    assert "except HomeAssistantError:\n                raise" in branch
+
+
+def test_sungrow_optimizer_force_charge_rejects_unconfirmed_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_force_charge")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    branch = function_source.split(
+        'sungrow_coord = entry_data.get("sungrow_coordinator")',
+        1,
+    )[1].split(
+        'goodwe_coord = entry_data.get("goodwe_coordinator")',
+        1,
+    )[0]
+
+    assert "charge_result = await sungrow_coord.force_charge(" in branch
+    assert "if charge_result is False:" in branch
+    assert 'raise HomeAssistantError(' in branch
+
+
 def test_optimizer_retries_sungrow_restore_when_self_consumption_drift_detected():
     source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

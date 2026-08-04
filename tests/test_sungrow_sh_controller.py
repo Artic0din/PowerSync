@@ -209,6 +209,33 @@ def test_force_discharge_writes_requested_power_to_forced_power_register():
     ]
 
 
+def test_restore_normal_rejects_unsupported_ems_fallback_when_stop_fails():
+    async def run_restore():
+        controller = SungrowSHController("192.0.2.10")
+        writes: list[tuple[int, int]] = []
+
+        async def connect() -> bool:
+            return True
+
+        async def write_register(address: int, value: int) -> bool:
+            writes.append((address, value))
+            if address in (controller.REG_CHARGE_CMD, controller.REG_EMS_MODE):
+                return False
+            return True
+
+        controller.connect = connect
+        controller._write_register = write_register
+        controller._ems_registers_supported = False
+
+        result = await controller.restore_normal()
+        return result, writes, controller
+
+    result, writes, controller = asyncio.run(run_restore())
+
+    assert result is False
+    assert (controller.REG_CHARGE_CMD, controller.CMD_STOP) in writes
+
+
 def test_force_discharge_disables_stale_zero_export_limit_first():
     async def run_force_discharge():
         controller = SungrowSHController("192.0.2.10")
