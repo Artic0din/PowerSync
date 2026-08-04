@@ -710,6 +710,48 @@ def _tesla_restart_telemetry_pending(state: Dict[str, Any]) -> bool:
     ).total_seconds() < _TESLA_RESTART_TELEMETRY_GRACE_SECONDS
 
 
+def _effective_ev_power_kw(
+    commanded_power_kw: float,
+    observed_power_kw: float,
+    observed_power_available: bool,
+    *,
+    charging_state: Optional[str] = None,
+    restart_telemetry_pending: bool = False,
+) -> float:
+    """Resolve the EV load used for surplus accounting.
+
+    A usable positive meter reading is the best representation of the load
+    after the short post-restart grace. During that grace, retain the larger
+    of the command and reading while telemetry catches up. A prior command is
+    otherwise only a fallback when the meter has no numeric value. An explicit
+    stopped Tesla with an available numeric zero remains a safe exception.
+    """
+    try:
+        commanded_kw = max(0.0, float(commanded_power_kw))
+    except (TypeError, ValueError):
+        commanded_kw = 0.0
+    try:
+        observed_kw = max(0.0, float(observed_power_kw))
+    except (TypeError, ValueError):
+        observed_kw = 0.0
+
+    if restart_telemetry_pending:
+        return max(commanded_kw, observed_kw)
+
+    if observed_power_available and observed_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+        return observed_kw
+
+    if (
+        observed_power_available
+        and observed_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+        and charging_state in _TESLA_NON_CHARGING_STATES
+        and not restart_telemetry_pending
+    ):
+        return 0.0
+
+    return commanded_kw
+
+
 def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
     """Return whether Tesla telemetry says this vehicle reached its target."""
     return _get_tesla_charging_state(hass, vehicle_vin) == "complete"
@@ -6461,18 +6503,13 @@ async def _dynamic_ev_update_surplus(
             observed_current_power_kw = observed_power_kw
             current_vehicle_power_available = observed_power_available
             current_vehicle_charging_state = charging_state
-        if (
-            observed_power_available
-            and observed_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
-            and charging_state in _TESLA_NON_CHARGING_STATES
-            and not _tesla_restart_telemetry_pending(v_state)
-        ):
-            # A known stopped/complete Tesla is not consuming its previous
-            # dynamic target. Keep the command as a fallback only while the
-            # vehicle state or power observation is unavailable.
-            actual_power_kw = 0.0
-        else:
-            actual_power_kw = max(commanded_power_kw, observed_power_kw)
+        actual_power_kw = _effective_ev_power_kw(
+            commanded_power_kw,
+            observed_power_kw,
+            observed_power_available,
+            charging_state=charging_state,
+            restart_telemetry_pending=_tesla_restart_telemetry_pending(v_state),
+        )
         total_ev_power_kw += actual_power_kw
 
     # Calculate available surplus after the household buffer and any configured
@@ -6647,9 +6684,13 @@ async def _dynamic_ev_update_surplus(
 
     # Calculate current EV power for THIS vehicle. Prefer measured charger
     # power so an already-active charge is treated as controllable load.
-    current_ev_kw = max(
+    restart_telemetry_pending = _tesla_restart_telemetry_pending(state)
+    current_ev_kw = _effective_ev_power_kw(
         (current_amps * voltage * phases) / 1000,
         observed_current_power_kw,
+        current_vehicle_power_available,
+        charging_state=current_vehicle_charging_state,
+        restart_telemetry_pending=restart_telemetry_pending,
     )
     effective_current_amps = current_amps
     stopped_without_restart_lag = (
@@ -6657,7 +6698,7 @@ async def _dynamic_ev_update_surplus(
         and current_vehicle_power_available
         and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
         and current_vehicle_charging_state in _TESLA_NON_CHARGING_STATES
-        and not _tesla_restart_telemetry_pending(state)
+        and not restart_telemetry_pending
     )
     if stopped_without_restart_lag:
         current_ev_kw = 0.0

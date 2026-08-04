@@ -866,6 +866,114 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     assert actions._dynamic_ev_state["entry-1"]["LRW3F7FS1NC484342"]["current_amps"] == 0
 
 
+def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailment(
+    monkeypatch,
+):
+    """A stale 30 A command must not mask a 3.11 kW measured Tesla load."""
+    vehicle_id = "LRW3F7FS1NC484342"
+    set_amps_calls: list[tuple[str, int]] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def home_location(*args, **kwargs):
+        return "home"
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "solar_power": 5200,
+            "grid_power": 0,
+            "battery_power": 0,
+            "load_power": 2090,
+            "battery_soc": 100,
+            "is_curtailed": True,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append((vehicle_id, amps))
+        return True
+
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    ev_planner.get_ev_location = home_location
+
+    async def no_ev_soc(*args, **kwargs):
+        return None
+
+    ev_planner.get_ev_battery_level = no_ev_soc
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 30,
+            "target_amps": 30,
+            "charging_started": True,
+            "entity_max_rechecked": True,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "charger_power_entity": "sensor.tesla_charger_power",
+                "min_charge_amps": 1,
+                "max_charge_amps": 32,
+                "voltage": 240,
+                "phases": 1,
+                "household_buffer_kw": 0.5,
+                "surplus_calculation": "grid_based",
+                "sustained_surplus_minutes": 3,
+                "stop_delay_minutes": 5,
+                "min_battery_soc": 20,
+                "pause_below_soc": 10,
+            },
+        }
+    }
+    hass = _Hass(
+        [
+            _State(
+                "sensor.tesla_charger_power",
+                "3.11",
+                {"unit_of_measurement": "kW"},
+            ),
+            _State(f"sensor.{vehicle_id}_charging_state", "charging"),
+        ]
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", vehicle_id))
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["allocated_surplus_kw"] == 3.11
+    assert state["target_amps"] == 13
+    assert set_amps_calls == [(vehicle_id, 13)]
+
+
+def test_effective_ev_power_keeps_command_during_restart_telemetry_grace():
+    assert actions._effective_ev_power_kw(
+        7.2,
+        3.11,
+        True,
+        charging_state="charging",
+        restart_telemetry_pending=True,
+    ) == 7.2
+
+
+def test_effective_ev_power_prefers_positive_observation_after_restart_grace():
+    assert actions._effective_ev_power_kw(
+        7.2,
+        3.11,
+        True,
+        charging_state="charging",
+        restart_telemetry_pending=False,
+    ) == 3.11
+
+
 def test_solar_surplus_direct_parallel_reserve_tops_up_existing_battery_charge():
     surplus_kw = actions._calculate_solar_surplus(
         {
