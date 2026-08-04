@@ -250,6 +250,24 @@ def test_tariff_schedule_attributes_convert_high_tesla_rates_to_cents():
     assert entity._schedule_cache["tou_schedule"][0]["sell"] == 10.0
 
 
+def test_tariff_schedule_native_value_preserves_two_decimal_cents():
+    sensor = _sensor_module()
+    sensor.get_current_price_from_tariff_schedule = lambda tariff: (6.63, 1.25, "PEAK")
+    entity = sensor.TariffScheduleSensor(_hass("AUD"), _entry("globird"))
+    entity.hass.data = {
+        sensor.DOMAIN: {
+            "entry-1": {
+                "tariff_schedule": {
+                    "currency": "AUD",
+                    "last_sync": "2026-07-10 16:53:49",
+                }
+            }
+        }
+    }
+
+    assert entity.native_value == "PEAK (6.63c/kWh)"
+
+
 def test_flow_power_current_import_price_prefers_tariff_schedule():
     sensor = _sensor_module()
     entity = sensor.FlowPowerPriceSensor(
@@ -816,7 +834,7 @@ def test_nzd_tariff_schedule_prefers_tariff_currency_metadata():
     }
     entity = sensor.TariffScheduleSensor(hass, entry)
 
-    assert entity.native_value == "PEAK (25.0c/kWh)"
+    assert entity.native_value == "PEAK (25.00c/kWh)"
     attrs = entity.extra_state_attributes
     assert attrs["currency"] == "NZD"
     assert attrs["price_unit"] == "NZD/kWh"

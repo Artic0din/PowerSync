@@ -6467,7 +6467,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
-            rate_precision = 2 if is_agl else 1
+            rate_precision = 2
             day_labels = {
                 "weekdays": "Mon-Fri",
                 "weekends": "Sat-Sun",
@@ -6482,7 +6482,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 if not is_agl:
                     line += (
-                        f", export {period['export_rate'] * 100:.1f}{minor_unit}"
+                        f", export {period['export_rate'] * 100:.2f}{minor_unit}"
                     )
                 lines.append(line)
             added_desc = "Added periods:\n" + "\n".join(lines) + "\n\n"
@@ -15702,7 +15702,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
-            rate_precision = 2 if is_agl else 0
+            rate_precision = 2
             day_labels = {
                 "weekdays": "Mon-Fri",
                 "weekends": "Sat-Sun",
@@ -15721,7 +15721,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
                 if not is_agl:
                     rate_summary += (
-                        f", {p['export_rate'] * 100:.0f}{minor_unit} export"
+                        f", {p['export_rate'] * 100:.2f}{minor_unit} export"
                     )
                 lines.append(
                     f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "

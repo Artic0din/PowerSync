@@ -129,6 +129,7 @@ class PowerSyncChart extends HTMLElement {
       rightYUnit: config.rightYUnit,
       rightYUnitCompact: config.rightYUnitCompact,
       rightYMultiplier: config.rightYMultiplier,
+      pricePrecision: config.pricePrecision,
       rightYMin: config.rightYMin,
       rightYMax: config.rightYMax,
       zeroBaseline: config.zeroBaseline,
@@ -216,6 +217,7 @@ class PowerSyncChart extends HTMLElement {
     const H = Math.max(190, Math.round(config.height || (compact ? 220 : 250)));
     const yUnit = String(config.yUnit || '');
     const needsWideYAxis = /\/kWh$/i.test(yUnit) || yUnit.length >= 5;
+    const needsExtraWidePriceYAxis = needsWideYAxis && config.pricePrecision === true;
     const rightYUnit = String(config.rightYUnit || '');
     const needsWideRightYAxis = /\/kWh$/i.test(rightYUnit) || rightYUnit.length >= 5;
     const pad = {
@@ -224,7 +226,9 @@ class PowerSyncChart extends HTMLElement {
         ? (needsWideRightYAxis ? (compact ? 68 : 82) : (compact ? 48 : 56))
         : (compact ? 12 : 20),
       bottom: compact ? 34 : 42,
-      left: needsWideYAxis ? (compact ? 68 : 82) : (compact ? 42 : 56),
+      left: needsWideYAxis
+        ? (needsExtraWidePriceYAxis ? (compact ? 86 : 104) : (compact ? 68 : 82))
+        : (compact ? 42 : 56),
     };
     const chartW = W - pad.left - pad.right;
     const chartH = H - pad.top - pad.bottom;
@@ -323,7 +327,7 @@ class PowerSyncChart extends HTMLElement {
       svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="${isZero ? 'var(--primary-text-color, #333)' : 'var(--divider-color, #e0e0e0)'}" stroke-width="${isZero ? 0.9 : 0.45}" stroke-dasharray="${isZero ? '0' : '4,3'}" opacity="${isZero ? 0.35 : 0.65}"/>`;
       const unit = config.yUnit || '';
       const compactUnit = config.yUnitCompact || ['c', 'p', 'ct', 'c/kWh', 'p/kWh', 'ct/kWh'].includes(unit);
-      const label = this._formatValue(tick, unit, compactUnit);
+      const label = this._formatValue(tick, unit, compactUnit, config.pricePrecision);
       if (!(config.hideZeroTickLabel && isZero)) {
         svg += `<text x="${pad.left - 6}" y="${y + 4}" text-anchor="end" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
       }
@@ -334,7 +338,7 @@ class PowerSyncChart extends HTMLElement {
         const y = rightYScale(tick);
         const unit = config.rightYUnit || '';
         const compactUnit = config.rightYUnitCompact || unit === '%';
-        const label = this._formatValue(tick, unit, compactUnit);
+        const label = this._formatValue(tick, unit, compactUnit, config.pricePrecision);
         svg += `<line x1="${W - pad.right}" y1="${y}" x2="${W - pad.right + 4}" y2="${y}" stroke="var(--secondary-text-color, #888)" stroke-width="0.6" opacity="0.7"/>`;
         svg += `<text x="${W - pad.right + 6}" y="${y + 4}" text-anchor="start" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
       }
@@ -744,7 +748,7 @@ class PowerSyncChart extends HTMLElement {
     const multiplier = rightAxis ? rightYMultiplier : yMultiplier;
     const unit = rightAxis ? config.rightYUnit : config.yUnit;
     const compactUnit = rightAxis ? config.rightYUnitCompact : config.yUnitCompact;
-    return this._formatValue(rawValue * multiplier, unit, compactUnit);
+    return this._formatValue(rawValue * multiplier, unit, compactUnit, config.pricePrecision);
   }
 
   _seriesKey(series, index) {
@@ -780,9 +784,9 @@ class PowerSyncChart extends HTMLElement {
     return point ? Number(point[1]) : null;
   }
 
-  _formatValue(value, unit, compactUnit) {
+  _formatValue(value, unit, compactUnit, pricePrecision = false) {
     if (!Number.isFinite(value)) return '';
-    const decimals = Math.abs(value) >= 100 ? 0 : Math.abs(value) >= 10 ? 1 : 2;
+    const decimals = pricePrecision ? 2 : (Math.abs(value) >= 100 ? 0 : Math.abs(value) >= 10 ? 1 : 2);
     const suffix = unit ? `${compactUnit ? '' : ' '}${unit}` : '';
     return `${value.toFixed(decimals)}${suffix}`;
   }
@@ -1183,8 +1187,7 @@ class PowerSyncForecastSummary extends HTMLElement {
     if (item.price) {
       const meta = _priceMeta(this._hass, item.entity);
       const value = raw * 100;
-      const decimals = Math.abs(value) >= 10 ? 1 : 2;
-      return { value: value.toFixed(decimals), unit: meta.minorPriceUnit };
+      return { value: value.toFixed(2), unit: meta.minorPriceUnit };
     }
 
     const decimals = Number.isInteger(item.decimals)
@@ -3112,8 +3115,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _formatMinorPrice(value, minorUnit) {
     const n = Number(value);
     if (!Number.isFinite(n)) return '--';
-    const decimals = Math.abs(n) >= 10 ? 1 : 2;
-    return `${n.toFixed(decimals)}${minorUnit || ''}`;
+    return `${n.toFixed(2)}${minorUnit || ''}`;
   }
 
   _priceAvgColor(value, action) {
@@ -6318,6 +6320,7 @@ function _svgArcGaugeCard({
   thresholds,
   multiplier = 1,
   decimals = 1,
+  pricePrecision = false,
   showPriceSource = false,
 }) {
   // thresholds: { green, yellow, red } in display units (after multiplier).
@@ -6347,7 +6350,7 @@ function _svgArcGaugeCard({
         const circ = Math.PI * r;
         const fill = pct * circ;
         const decimals = ${decimals};
-        const display = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(decimals);
+        const display = ${pricePrecision ? 'value.toFixed(2)' : 'Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(decimals)'};
         let sourceLabel = '';
         if (${showPriceSource ? 'true' : 'false'}) {
           const attrs = entity?.attributes || {};
@@ -6426,6 +6429,7 @@ function _priceGauges(e, hass) {
         max: 60,
         thresholds: { green: 0, yellow: 25, red: 40 },
         multiplier: 100,
+        pricePrecision: true,
         showPriceSource: true,
       }),
       _svgArcGaugeCard({
@@ -6436,6 +6440,7 @@ function _priceGauges(e, hass) {
         max: 30,
         thresholds: { green: 5, yellow: 0, red: -10 },
         multiplier: 100,
+        pricePrecision: true,
       }),
       _svgArcGaugeCard({
         entityId: e('battery_level'),
@@ -7456,6 +7461,7 @@ function _priceChart(e, hass) {
     yUnit: importMeta.minorPriceUnit,
     yUnitCompact: true,
     yMultiplier: 100,
+    pricePrecision: true,
     zeroBaseline: true,
     stepLine: true,
     series: [
@@ -7485,6 +7491,7 @@ function _touSchedule(e, hass) {
     yUnit: meta.minorPriceUnit,
     yUnitCompact: true,
     yMultiplier: 100,
+    pricePrecision: true,
     hideZeroTickLabel: true,
     series: [
       { key: 'buy', name: 'Buy Price', color: '#FF9800' },
@@ -7535,6 +7542,7 @@ function _lpPriceChart(e, hass) {
     yUnit: meta.minorPriceUnit,
     yUnitCompact: true,
     yMultiplier: 100,
+    pricePrecision: true,
     series: [
       { entity: e('lp_import_price_forecast'), attribute: 'price_values', name: 'Import', color: '#FF9800' },
       { entity: e('lp_export_price_forecast'), attribute: 'price_values', name: 'Export', color: '#4CAF50' },

@@ -2214,6 +2214,35 @@ def test_custom_tariff_export_rates_allow_negative_values():
     assert "Use a negative value when you pay to export" in TRANSLATIONS_PATH.read_text()
 
 
+def test_custom_tariff_period_summaries_show_exactly_two_rate_decimals():
+    """Initial and options summaries format import/export rates consistently."""
+    source = CONFIG_FLOW_PATH.read_text()
+    initial_source = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_tariff_period"),
+    )
+    options_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_tariff_period_options"),
+    )
+
+    assert initial_source is not None
+    assert options_source is not None
+    assert "rate_precision = 2" in initial_source
+    assert "rate_precision = 2" in options_source
+    assert "period['export_rate'] * 100:.2f" in initial_source
+    assert "p['export_rate'] * 100:.2f" in options_source
+    assert ".1f" not in initial_source[initial_source.index("added_desc") :]
+    assert ".0f" not in options_source[options_source.index("added_desc") :]
+
+    # Display precision must not alter the selector's provider-specific input
+    # step or the existing major-unit conversion/storage paths.
+    for method_source in (initial_source, options_source):
+        assert "rate_step = 0.01 if is_agl else 0.1" in method_source
+        assert 'user_input.get("import_rate", 45) / 100' in method_source
+        assert 'user_input.get("export_rate", 5) / 100' in method_source
+
+
 def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
     source = CONFIG_FLOW_PATH.read_text()
     options_method = _options_flow_method("async_step_custom_tariff_options")

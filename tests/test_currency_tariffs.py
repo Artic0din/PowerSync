@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import json
+import shutil
+import subprocess
 import sys
 import types
 from datetime import datetime, timezone
@@ -98,8 +101,8 @@ def test_dashboard_chart_applies_price_multiplier_at_render_boundaries():
     assert "data: series.data.map(([t, v]) => [t, v * configuredYMultiplier])" not in source
     assert "const yMultiplier = Number.isFinite(configuredYMultiplier)" in source
     assert "const scaled = v * yMultiplier" in source
-    assert "const label = this._formatValue(tick, unit, compactUnit)" in source
-    assert "_formatValue(point[1] * yMultiplier" in source
+    assert "const label = this._formatValue(tick, unit, compactUnit, config.pricePrecision)" in source
+    assert "_formatValue(rawValue * multiplier, unit, compactUnit, config.pricePrecision)" in source
 
 
 def test_dashboard_history_chart_projects_series_to_now():
@@ -115,13 +118,104 @@ def test_dashboard_forecast_legend_uses_current_point_not_series_end():
     dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
     source = dashboard.read_text()
     legend_item = source[
-        source.index("  _legendItem(series, yMultiplier, config) {"):
+        source.index("  _legendItem(series, yMultiplier, rightYMultiplier, config) {"):
         source.index("  _seriesKey(series, index) {")
     ]
 
     assert "config.mode === 'tou' || config.mode === 'forecast'" in legend_item
     assert "? this._currentValue(series.data)" in legend_item
     assert ": this._lastValue(series.data)" in legend_item
+
+
+def test_dashboard_price_formatting_keeps_two_decimals_for_all_tariff_values():
+    dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
+    source = dashboard.read_text()
+
+    assert "pricePrecision: true" in source
+    assert "const decimals = pricePrecision ? 2" in source
+    assert "const needsExtraWidePriceYAxis = needsWideYAxis && config.pricePrecision === true;" in source
+    assert "needsExtraWidePriceYAxis ? (compact ? 86 : 104)" in source
+    assert "return `${n.toFixed(2)}${minorUnit || ''}`;" in source
+    assert "return { value: value.toFixed(2), unit: meta.minorPriceUnit };" in source
+    gauges = source.split("function _priceGauges", 1)[1].split(
+        "function _batteryControls", 1
+    )[0]
+    assert gauges.count("pricePrecision: true") == 2
+    assert "entityId: e('battery_level')" in gauges
+
+
+def test_dashboard_price_formatters_cover_units_and_large_negative_values():
+    """Exercise production JS formatters across units and precision boundaries."""
+    if shutil.which("node") is None:
+        return
+
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const registry = {};
+class HTMLElement {
+  attachShadow() { return { innerHTML: '', querySelector() { return null; } }; }
+}
+const context = {
+  HTMLElement,
+  customElements: {
+    get(name) { return registry[name]; },
+    define(name, klass) { registry[name] = klass; },
+  },
+  window: {},
+  ResizeObserver: class {},
+  requestAnimationFrame() {},
+};
+context.globalThis = context;
+vm.runInNewContext(fs.readFileSync('custom_components/power_sync/frontend/power-sync-strategy.js', 'utf8'), context);
+const chart = new registry['power-sync-chart']();
+const plan = new registry['power-sync-optimization-plan']();
+const summary = new registry['power-sync-forecast-summary']();
+summary._hass = {
+  config: { currency: 'AUD' },
+  states: { 'sensor.price': { attributes: { minor_price_unit: 'c/kWh' } } },
+};
+const values = [-123.456, -100, -12.345, -10, -9.999, 0, 9.999, 10, 12.345, 100, 123.456];
+const units = ['c/kWh', 'p/kWh', 'ct/kWh'];
+console.log(JSON.stringify({
+  chart: units.map((unit) => values.map((value) => chart._formatValue(value, unit, true, true))),
+  plan: units.map((unit) => values.map((value) => plan._formatMinorPrice(value, unit.split('/')[0]))),
+  summary: units.map((unit) => {
+    summary._hass.states['sensor.price'].attributes.minor_price_unit = unit;
+    return values.map((value) => summary._formatReading(
+      { entity: 'sensor.price', price: true },
+      { state: String(value / 100) },
+    ));
+  }),
+}));
+'''
+    result = subprocess.run(
+        ["node"],
+        input=script,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        check=True,
+    )
+    formatted = json.loads(result.stdout)
+    values = (-123.456, -100, -12.345, -10, -9.999, 0, 9.999, 10, 12.345, 100, 123.456)
+    units = ("c/kWh", "p/kWh", "ct/kWh")
+    assert formatted["chart"] == [
+        [f"{value:.2f}{unit}" for value in values]
+        for unit in units
+    ]
+    assert formatted["plan"] == [
+        [f"{value:.2f}{unit.split('/')[0]}" for value in values]
+        for unit in units
+    ]
+    assert [
+        [item["value"] for item in readings]
+        for readings in formatted["summary"]
+    ] == [[f"{value:.2f}" for value in values] for _ in units]
+    assert [
+        [item["unit"] for item in readings]
+        for readings in formatted["summary"]
+    ] == [[unit] * len(values) for unit in units]
 
 
 def test_dashboard_history_chart_requests_full_update_history():

@@ -4387,7 +4387,7 @@ class TariffScheduleSensor(SensorEntity):
             buy_price_cents, _, current_period = self._refresh_price(tariff_data)
             if current_period and current_period != "UNKNOWN":
                 unit = minor_price_unit(self._tariff_currency(tariff_data))
-                return f"{current_period} ({buy_price_cents:.1f}{unit})"
+                return f"{current_period} ({buy_price_cents:.2f}{unit})"
             return tariff_data.get("last_sync", "Unknown")
         return "Not synced"
 
