@@ -4546,8 +4546,14 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sigenergy discharge capacity after no-discharge preserve mode."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        preserve_export_limit = (
+            entry_data.get("sigenergy_curtailment_state") == "curtailed"
+        )
         async with self._controller:
-            return await self._controller.restore_normal()
+            return await self._controller.restore_normal(
+                preserve_export_limit=preserve_export_limit,
+            )
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode after IDLE."""

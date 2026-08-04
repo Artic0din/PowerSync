@@ -32391,7 +32391,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     native_control = sigenergy_native_control
                     result = await controller.restore_normal(
-                        native_control=native_control
+                        native_control=native_control,
+                        preserve_export_limit=(
+                            source in ("optimizer", "force_timer")
+                            and not native_control
+                            and entry_data.get("sigenergy_curtailment_state")
+                            == "curtailed"
+                        ),
                     )
                     await controller.disconnect()
 
@@ -34248,8 +34254,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # rather than the bare EMS mode write: a prior no-discharge or
                     # force window may have left REG_ESS_MAX_DISCHARGE_LIMIT at 0,
                     # and only restore_normal resets the ESS limits to rated.
+                    preserve_export_limit = (
+                        source == "optimizer"
+                        and entry_data.get("sigenergy_curtailment_state") == "curtailed"
+                    )
                     result = await _guarded_self_consumption_write(
-                        controller.restore_normal
+                        lambda: controller.restore_normal(
+                            preserve_export_limit=preserve_export_limit,
+                        )
                     )
                     if result:
                         _LOGGER.info(

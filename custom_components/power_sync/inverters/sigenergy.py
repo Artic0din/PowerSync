@@ -1602,7 +1602,12 @@ class SigenergyController(InverterController):
         )
         return charge_success and discharge_success
 
-    async def restore_normal(self, native_control: bool = False) -> bool:
+    async def restore_normal(
+        self,
+        native_control: bool = False,
+        *,
+        preserve_export_limit: bool = False,
+    ) -> bool:
         """Restore normal self-consumption operation.
 
         By default, sets Remote EMS to maximum self-consumption mode (mode 2),
@@ -1613,6 +1618,12 @@ class SigenergyController(InverterController):
 
         When ``native_control`` is true, clears PowerSync limits and disables
         Remote EMS so Sigenergy native/VPP control can resume.
+
+        When ``preserve_export_limit`` is true, the active zero-export limit is
+        reasserted after the self-consumption transition instead of restoring
+        the normal export cap. This is intended for optimizer-owned restores
+        while cached Sigenergy curtailment is active; native/VPP handoff always
+        restores the normal cap.
 
         Returns:
             True if successful
@@ -1630,11 +1641,19 @@ class SigenergyController(InverterController):
                     _LOGGER.error("Failed to set self-consumption mode during restore")
                     return False
 
-            # 2. Restore grid export limit to safety cap
-            # force_discharge sets this to a specific value — need to clear it
-            export_result = await self.restore_export_limit()
-            if not export_result:
-                _LOGGER.warning("Failed to restore grid export limit")
+            # 2. Restore or preserve the grid export limit. Optimizer-owned
+            # restores may overlap with cached DC curtailment; write zero even
+            # when the controller cache is stale so hardware protection is
+            # reasserted rather than silently lifted.
+            if preserve_export_limit and not native_control:
+                export_result = await self.set_export_limit(0.0)
+                if not export_result:
+                    _LOGGER.warning("Failed to reassert zero grid export limit")
+            else:
+                # force_discharge sets this to a specific value — need to clear it
+                export_result = await self.restore_export_limit()
+                if not export_result:
+                    _LOGGER.warning("Failed to restore grid export limit")
 
             # 3. Restore durable user caps for PowerSync control. Native/VPP
             # handoff clears PowerSync's caps back to the hardware ratings.
@@ -1693,7 +1712,15 @@ class SigenergyController(InverterController):
                 _LOGGER.info("Sigenergy restored to native/VPP control")
                 return True
 
-            _LOGGER.info("Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)")
+            export_description = (
+                "zero export preserved"
+                if preserve_export_limit and not native_control
+                else "export limit restored"
+            )
+            _LOGGER.info(
+                "Sigenergy restored to self-consumption (Remote EMS mode 2, %s)",
+                export_description,
+            )
             return True
 
         except Exception as e:

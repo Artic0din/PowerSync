@@ -677,6 +677,58 @@ def test_restore_normal_keeps_remote_ems_for_powersync_control(sigenergy_module)
     ]
 
 
+def test_restore_normal_preserves_active_zero_export_for_optimizer(sigenergy_module):
+    """Optimizer cleanup must reassert zero export while restoring limits."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._restore_backup_reserve_pct = 25
+    events: list[tuple[str, int | float | bool, object]] = []
+
+    async def connect():
+        return True
+
+    async def set_export_limit(limit_kw):
+        events.append(("set_export_limit", limit_kw, None))
+        return True
+
+    async def restore_export_limit():
+        events.append(("restore_export_limit", "called", None))
+        return True
+
+    async def restore_ess_limits(*, use_configured_caps=True):
+        events.append(("restore_ess_limits", "called", use_configured_caps))
+        return True
+
+    async def write(address, values, slave_id=None):
+        events.append(("write", address, list(values)))
+        return True
+
+    async def set_backup_reserve(percent):
+        events.append(("set_backup_reserve", percent, None))
+        return True
+
+    controller.connect = connect
+    controller.set_export_limit = set_export_limit
+    controller.restore_export_limit = restore_export_limit
+    controller._restore_ess_max_limits_to_rated = restore_ess_limits
+    controller._write_holding_registers = write
+    controller.set_backup_reserve = set_backup_reserve
+
+    assert asyncio.run(controller.restore_normal(preserve_export_limit=True))
+
+    assert events == [
+        ("write", controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (
+            "write",
+            controller.REG_REMOTE_EMS_CONTROL_MODE,
+            [controller.REMOTE_EMS_MODE_SELF_CONSUMPTION],
+        ),
+        ("set_export_limit", 0.0, None),
+        ("restore_ess_limits", "called", True),
+        ("set_backup_reserve", 25, None),
+    ]
+    assert not any(event[0] == "restore_export_limit" for event in events)
+
+
 def test_restore_normal_native_control_disables_remote_ems(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     controller._restore_backup_reserve_pct = 25
@@ -707,7 +759,14 @@ def test_restore_normal_native_control_disables_remote_ems(sigenergy_module):
     controller._write_holding_registers = write
     controller.set_backup_reserve = set_backup_reserve
 
-    assert asyncio.run(controller.restore_normal(native_control=True))
+    # Native/VPP handoff always restores the normal cap, even if a caller
+    # accidentally carries the optimizer-only preservation flag.
+    assert asyncio.run(
+        controller.restore_normal(
+            native_control=True,
+            preserve_export_limit=True,
+        )
+    )
 
     assert events == [
         ("restore_export_limit", "called", None),
@@ -880,6 +939,68 @@ def test_restore_normal_reserve_failure_prevents_native_handoff(sigenergy_module
 
     assert not asyncio.run(controller.restore_normal(native_control=True))
     assert disabled_remote_ems is False
+
+
+def test_sigenergy_restore_preservation_propagates_only_optimizer_curtailment():
+    """All optimizer-owned Sigenergy restore routes honor cached curtailment."""
+    coordinator_source = (COMPONENT_ROOT / "coordinator.py").read_text()
+    coordinator_tree = ast.parse(coordinator_source)
+    sigenergy_coordinator = next(
+        node
+        for node in coordinator_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "SigenergyEnergyCoordinator"
+    )
+    no_discharge = next(
+        node
+        for node in sigenergy_coordinator.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "restore_no_discharge_mode"
+    )
+    no_discharge_source = ast.get_source_segment(coordinator_source, no_discharge)
+    assert no_discharge_source is not None
+    assert "preserve_export_limit=preserve_export_limit" in no_discharge_source
+    assert (
+        'entry_data.get("sigenergy_curtailment_state") == "curtailed"'
+        in no_discharge_source
+    )
+
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    init_tree = ast.parse(init_source)
+    setup = next(
+        node
+        for node in init_tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_setup_entry"
+    )
+    restore = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_restore_normal"
+    )
+    restore_source = ast.get_source_segment(init_source, restore)
+    assert restore_source is not None
+    assert 'source in ("optimizer", "force_timer")' in restore_source
+    assert "not native_control" in restore_source
+    assert "preserve_export_limit=" in restore_source
+    assert (
+        'entry_data.get("sigenergy_curtailment_state")' in restore_source
+    )
+
+    self_consumption = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_set_self_consumption"
+    )
+    self_consumption_source = ast.get_source_segment(init_source, self_consumption)
+    assert self_consumption_source is not None
+    assert "source == \"optimizer\"" in self_consumption_source
+    assert "preserve_export_limit=" in self_consumption_source
+    assert (
+        'entry_data.get("sigenergy_curtailment_state")' in self_consumption_source
+    )
 
 
 def test_configured_rate_target_changes_only_after_successful_write(sigenergy_module):
