@@ -9341,6 +9341,67 @@ def test_export_price_gate_uses_action_timestamp(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_zerohero_export_price_gate_uses_bonus_value(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    coordinator._entry = SimpleNamespace(
+        options={
+            "electricity_provider": "globird",
+            "globird_plan": "zerohero_jul_2026",
+        },
+        data={},
+    )
+    start = datetime(2026, 8, 4, 18, 0, tzinfo=timezone.utc)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=start,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_export_prices = [0.0]
+    coordinator._last_zerohero_bonus_prices = [0.10]
+    coordinator._last_zerohero_bonus_cap_kwh = 15.0
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "export"
+
+
+def test_zerohero_export_price_gate_blocks_without_remaining_bonus(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    coordinator._last_executed_action = "export"
+    coordinator._entry = SimpleNamespace(
+        options={
+            "electricity_provider": "globird",
+            "globird_plan": "zerohero_jul_2026",
+        },
+        data={},
+    )
+    start = datetime(2026, 8, 4, 18, 0, tzinfo=timezone.utc)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=start,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_export_prices = [0.0]
+    coordinator._last_zerohero_bonus_prices = [0.10]
+    coordinator._last_zerohero_bonus_cap_kwh = 0.0
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_profit_max_export_floor_does_not_block_when_auto_apply_disabled(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.73)

@@ -6860,6 +6860,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the export tariff price for an action's scheduled interval."""
         return self._current_import_price_for_action(prices, action)
 
+    def _current_effective_export_price_for_action(
+        self,
+        prices: list[float],
+        action: Any | None,
+    ) -> float | None:
+        """Return an action slot's export value including an active quota bonus."""
+        base_price = self._current_export_price_for_action(prices, action)
+        if base_price is None:
+            return None
+
+        try:
+            remaining_bonus_cap = float(
+                getattr(self, "_last_zerohero_bonus_cap_kwh", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            remaining_bonus_cap = 0.0
+        if not math.isfinite(remaining_bonus_cap) or remaining_bonus_cap <= 1e-6:
+            return base_price
+
+        bonus_prices = getattr(self, "_last_zerohero_bonus_prices", None)
+        if not bonus_prices:
+            return base_price
+        bonus_price = self._current_export_price_for_action(bonus_prices, action)
+        if bonus_price is None:
+            return base_price
+        try:
+            return base_price + max(0.0, float(bonus_price))
+        except (TypeError, ValueError):
+            return base_price
+
     def _current_import_price_is_free(self, action: Any | None = None) -> bool:
         prices = getattr(self, "_last_display_import_prices", None) or getattr(
             self, "_last_import_prices", None
@@ -7783,7 +7813,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if effective_action in ("discharge", "export"):
                 _ep = self._last_export_prices
                 if _ep:
-                    _current_export = self._current_export_price_for_action(
+                    _current_export = self._current_effective_export_price_for_action(
                         _ep,
                         action,
                     )
