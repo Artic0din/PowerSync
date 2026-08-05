@@ -103,6 +103,35 @@ def test_cost_neutral_caps_discretionary_battery_export_at_exact_earnings(
     assert max(result.schedule.battery_export_w) < 5_000
 
 
+def test_cost_neutral_export_does_not_collapse_when_later_load_has_value(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+    optimizer.update_config(backup_reserve=0.47)
+    result = optimizer.optimize(
+        import_prices=[0.51] * 4,
+        export_prices=[0.10] * 4,
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0, 0.0, 1.0, 1.0],
+        current_soc=0.88,
+        acquisition_cost_kwh=0.16,
+        allow_battery_export=[True] * 4,
+        priority_export_slots=[False] * 4,
+        schedule_timestamps=_timestamps(4),
+        cost_neutral_earnings_cap=0.20,
+        cost_neutral_slots=[True, True, False, False],
+    )
+
+    assert sum(result.schedule.battery_export_w[:2]) / 1000.0 == pytest.approx(
+        2.0,
+        abs=1e-4,
+    )
+    assert result.lp_stats["cost_neutral_planned_earnings"] == pytest.approx(
+        0.20,
+    )
+    assert min(action.soc for action in result.schedule.actions) >= 0.47
+
+
 def test_cost_neutral_prices_export_induced_later_import_in_same_constraint(
     optimizer_module,
 ):

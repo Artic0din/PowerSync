@@ -2154,6 +2154,16 @@ class BatteryOptimizer:
                 )
             )
 
+        def _cost_neutral_export_slot(t: int) -> bool:
+            """Return whether today's positive-FIT slot may cover daily costs."""
+            return bool(
+                cost_neutral_active
+                and float(cost_neutral_earnings_cap or 0.0) > 1e-9
+                and p_cost_neutral[t]
+                and p_allow_export[t]
+                and (p_export[t] + p_export_bonus[t]) > 0.001
+            )
+
         future_self_consumption_values = self._future_self_consumption_values(
             p_n, p_import, p_solar, p_load
         )
@@ -2994,6 +3004,7 @@ class BatteryOptimizer:
                 export_profitable_slot
                 and future_self_consumption_value
                 and not priority_export_slot
+                and not _cost_neutral_export_slot(t)
                 and not p_block_charge[t]
             )
             if p_allow_export[t] and not suppress_generic_battery_export:
@@ -3076,13 +3087,15 @@ class BatteryOptimizer:
                 export_profitable_slot
                 and future_self_consumption_value
                 and not priority_export_slot
+                and not _cost_neutral_export_slot(t)
                 and not p_block_charge[t]
             )
             restrict_to_self_consumption = (
                 suppress_generic_battery_export
                 or not p_allow_export[t]
                 or (
-                    acquisition_cost_kwh > 0
+                    not _cost_neutral_export_slot(t)
+                    and acquisition_cost_kwh > 0
                     and (p_export[t] + p_export_bonus[t])
                     < _export_acquisition_threshold(t)
                 )
