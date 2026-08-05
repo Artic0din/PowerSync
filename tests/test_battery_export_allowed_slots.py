@@ -6102,6 +6102,93 @@ def test_active_optimizer_charge_stops_when_live_soc_reaches_cap(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_active_optimizer_charge_cap_executes_new_export_same_invocation(opt_module):
+    """A capped charge yields directly to a fresh optimizer export action."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.63)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.59
+    coordinator._get_energy_data = lambda: {"battery_level": 63}
+    coordinator._set_optimizer_force_state("charge", 10, 5000)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_charge_calls == []
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["type"] == "discharge"
+    assert coordinator._last_executed_action == "export"
+
+
+def test_active_optimizer_charge_cap_restore_is_reentrant_safe(opt_module):
+    """A restore callback cannot duplicate the transition's export command."""
+
+    class _ReentrantRestoreBattery(_FakeBattery):
+        def __init__(self):
+            super().__init__()
+            self.coordinator = None
+            self.reentrant_action = None
+
+        async def restore_normal(self):
+            self.restore_normal_calls += 1
+            if self.coordinator is not None and self.reentrant_action is not None:
+                await self.coordinator._execute_optimizer_action(self.reentrant_action)
+            return self.restore_normal_result
+
+    battery = _ReentrantRestoreBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.63)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.59
+    coordinator._get_energy_data = lambda: {"battery_level": 63}
+    coordinator._set_optimizer_force_state("charge", 10, 5000)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    battery.coordinator = coordinator
+    battery.reentrant_action = action
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
+    assert coordinator._optimizer_force_state["type"] == "discharge"
+    assert coordinator._last_executed_action == "export"
+
+
+def test_active_optimizer_charge_cap_restore_failure_keeps_export_pending(opt_module):
+    """A failed cap restore rolls back charge state and does not export."""
+    battery = _FakeBattery(restore_normal_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.63)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.59
+    coordinator._get_energy_data = lambda: {"battery_level": 63}
+    coordinator._set_optimizer_force_state("charge", 10, 5000)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_discharge_calls == []
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["type"] == "charge"
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_active_optimizer_charge_retries_failed_soc_cap_restore(opt_module):
     """A failed cap restore retains force state until a retry succeeds."""
     battery = _FakeBattery(restore_normal_result=False)

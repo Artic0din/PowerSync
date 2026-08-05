@@ -7241,6 +7241,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if not self._executor or not self._executor.battery_controller:
             return
+        if getattr(self, "_optimizer_restore_in_progress", False):
+            _LOGGER.debug(
+                "Optimizer: skipping reentrant action while restoring battery mode"
+            )
+            return
 
         runtime_action = self._effective_runtime_action(
             getattr(action, "action", None),
@@ -7291,6 +7296,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 force_window_action = action
                 force_discharge_soc_now: float | None = None
                 force_discharge_reserve: float | None = None
+                cap_cancelled_for_new_action = False
 
                 if force_type == "charge":
                     try:
@@ -7326,26 +7332,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 charge_soc_now * 100,
                                 charge_soc_cap * 100,
                             )
-                        restore_success = True
-                        if hasattr(battery, "restore_normal"):
-                            restore_success = await battery.restore_normal()
-                        elif hasattr(battery, "set_self_consumption_mode"):
-                            restore_success = await battery.set_self_consumption_mode()
+                        optimizer_force_snapshot = None
+                        if force_state.get("scope") == "optimizer":
+                            optimizer_force_snapshot = dict(self._optimizer_force_state)
+                            self._clear_optimizer_force_state()
+                        elif self._force_state_clearer:
+                            self._force_state_clearer()
+                        self._optimizer_restore_in_progress = True
+                        try:
+                            restore_success = True
+                            if hasattr(battery, "restore_normal"):
+                                restore_success = await battery.restore_normal()
+                            elif hasattr(battery, "set_self_consumption_mode"):
+                                restore_success = await battery.set_self_consumption_mode()
+                        finally:
+                            self._optimizer_restore_in_progress = False
                         if restore_success is False:
+                            if optimizer_force_snapshot is not None:
+                                self._optimizer_force_state = optimizer_force_snapshot
                             _LOGGER.warning(
                                 "Optimizer: Grid-charge SOC-cap restore failed; "
                                 "retaining force state for retry"
                             )
                             return
-                        if force_state.get("scope") == "optimizer":
-                            self._clear_optimizer_force_state()
-                        elif self._force_state_clearer:
-                            self._force_state_clearer()
-                        self._last_executed_planned_action = action.action
-                        self._last_executed_action = "self_consumption"
-                        return
+                        cap_cancelled_for_new_action = action.action in (
+                            "discharge",
+                            "export",
+                        )
+                        if not cap_cancelled_for_new_action:
+                            self._last_executed_planned_action = action.action
+                            self._last_executed_action = "self_consumption"
+                            return
 
-                if lp_matches_force:
+                if not cap_cancelled_for_new_action and lp_matches_force:
                     if force_type == "discharge":
                         try:
                             force_discharge_soc_now, _ = (
@@ -7694,67 +7713,68 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     return
 
-                # LP changed its mind — cancel the optimizer's force mode.
-                if action.action in SELF_USE_ACTIONS or action.action == "idle":
-                    if force_type == "charge":
-                        commitment_remaining = (
-                            self._optimizer_force_charge_commitment_remaining(
-                                force_state,
-                                action,
+                if not cap_cancelled_for_new_action:
+                    # LP changed its mind — cancel the optimizer's force mode.
+                    if action.action in SELF_USE_ACTIONS or action.action == "idle":
+                        if force_type == "charge":
+                            commitment_remaining = (
+                                self._optimizer_force_charge_commitment_remaining(
+                                    force_state,
+                                    action,
+                                )
                             )
-                        )
-                    else:
-                        commitment_remaining = (
-                            self._optimizer_force_discharge_commitment_remaining(
-                                force_state,
-                                action,
+                        else:
+                            commitment_remaining = (
+                                self._optimizer_force_discharge_commitment_remaining(
+                                    force_state,
+                                    action,
+                                )
                             )
-                        )
-                    if commitment_remaining is not None:
-                        remaining_minutes = max(
-                            1,
-                            int((commitment_remaining.total_seconds() + 59) // 60),
-                        )
-                        _LOGGER.info(
-                            "Optimizer: Holding active force %s for %d more min "
-                            "despite LP now wanting %s",
+                        if commitment_remaining is not None:
+                            remaining_minutes = max(
+                                1,
+                                int((commitment_remaining.total_seconds() + 59) // 60),
+                            )
+                            _LOGGER.info(
+                                "Optimizer: Holding active force %s for %d more min "
+                                "despite LP now wanting %s",
+                                force_type,
+                                remaining_minutes,
+                                action.action,
+                            )
+                            return
+
+                    # Clear force state BEFORE calling restore_normal so that
+                    # TOU sync (triggered inside restore_normal) doesn't skip
+                    # due to seeing force_charge_state["active"]=True.
+                    _LOGGER.info(
+                        "Optimizer: LP changed mind (%s → %s) — canceling optimizer-triggered "
+                        "force %s to execute new action",
+                        force_type, action.action, force_type,
+                    )
+                    optimizer_force_snapshot = None
+                    if force_state.get("scope") == "optimizer":
+                        optimizer_force_snapshot = dict(self._optimizer_force_state)
+                        self._clear_optimizer_force_state()
+                    elif self._force_state_clearer:
+                        self._force_state_clearer()
+                    battery = self._executor.battery_controller
+                    restore_success = True
+                    if hasattr(battery, "restore_normal"):
+                        restore_success = await battery.restore_normal()
+                    if restore_success is False:
+                        if optimizer_force_snapshot is not None:
+                            self._optimizer_force_state = optimizer_force_snapshot
+                        _LOGGER.warning(
+                            "Optimizer: Restore after canceling force %s failed; "
+                            "retaining optimizer force state for retry",
                             force_type,
-                            remaining_minutes,
-                            action.action,
                         )
                         return
-
-                # Clear force state BEFORE calling restore_normal so that
-                # TOU sync (triggered inside restore_normal) doesn't skip
-                # due to seeing force_charge_state["active"]=True.
-                _LOGGER.info(
-                    "Optimizer: LP changed mind (%s → %s) — canceling optimizer-triggered "
-                    "force %s to execute new action",
-                    force_type, action.action, force_type,
-                )
-                optimizer_force_snapshot = None
-                if force_state.get("scope") == "optimizer":
-                    optimizer_force_snapshot = dict(self._optimizer_force_state)
-                    self._clear_optimizer_force_state()
-                elif self._force_state_clearer:
-                    self._force_state_clearer()
-                battery = self._executor.battery_controller
-                restore_success = True
-                if hasattr(battery, "restore_normal"):
-                    restore_success = await battery.restore_normal()
-                if restore_success is False:
-                    if optimizer_force_snapshot is not None:
-                        self._optimizer_force_state = optimizer_force_snapshot
-                    _LOGGER.warning(
-                        "Optimizer: Restore after canceling force %s failed; "
-                        "retaining optimizer force state for retry",
-                        force_type,
+                    await self._restore_pre_idle_backup_reserve(
+                        battery,
+                        f"after canceling force {force_type}",
                     )
-                    return
-                await self._restore_pre_idle_backup_reserve(
-                    battery,
-                    f"after canceling force {force_type}",
-                )
 
         try:
             # During demand charge windows, override IDLE → self_consumption.
