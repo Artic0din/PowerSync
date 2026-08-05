@@ -3171,6 +3171,56 @@ def test_pre_export_fill_target_leaves_room_for_forecast_solar(
     assert early_grid_import_kwh <= 1.2
 
 
+def test_pre_export_fill_uses_learned_kwh_shortfall_when_confident(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        efficiency=1.0,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=5,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 4
+    optimizer.pre_window_soc_target = 0.90
+    optimizer.pre_window_solar_error_margin_kwh = 0.5
+    optimizer.pre_window_solar_learning_confidence = 1.0
+
+    ceilings = optimizer._pre_window_solar_prefill_ceilings(
+        pre_window_boundary=4,
+        target_soc=0.90,
+        solar=[0.0, 0.0, 2.0, 2.0, 0.0],
+        load=[0.0] * 5,
+        dt_hours=[1.0] * 5,
+        reserve_floor=[0.05] * 6,
+        current_soc=0.50,
+    )
+
+    # Four kWh expected minus a learned 0.5 kWh shortfall leaves room down to
+    # 55% SOC, instead of the legacy 61% ceiling (80% credit + 3% buffer).
+    assert ceilings[1] == pytest.approx(0.55)
+    assert ceilings[2] == pytest.approx(0.55)
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 5,
+        export_prices=[0.0, 0.0, 0.0, 0.0, 0.50],
+        solar_forecast=[0.0, 0.0, 2.0, 2.0, 0.0],
+        load_forecast=[0.0] * 5,
+        current_soc=0.50,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[False, False, False, False, True],
+        allow_grid_charge=True,
+    )
+
+    # Learning changes only the solar headroom allowance; the hard deadline
+    # floor remains unchanged.
+    assert result.feasible is True
+    assert result.schedule.actions[3].soc >= 0.895
+
+
 def test_pre_export_fill_target_still_prefills_without_forecast_solar(
     battery_optimizer_module,
 ):

@@ -340,6 +340,10 @@ class BatteryOptimizer:
         self.pre_window_slot: int | None = None
         self.pre_window_solar_credit_factor: float = PRE_WINDOW_SOLAR_CREDIT_FACTOR
         self.pre_window_solar_buffer_soc: float = PRE_WINDOW_SOLAR_BUFFER_SOC
+        # Provider-neutral learned forecast shortfall. ``None`` preserves the
+        # exact legacy 80% credit plus 3% SOC buffer during cold start.
+        self.pre_window_solar_error_margin_kwh: float | None = None
+        self.pre_window_solar_learning_confidence: float = 0.0
 
         # Terminal valuation units. The original LP wrote terminal coefficients
         # as `terminal_price * eff * dt / cap`, which is dimensionally wrong:
@@ -1490,11 +1494,22 @@ class BatteryOptimizer:
         ):
             return ceilings
 
-        credit_factor = max(0.0, min(1.0, self.pre_window_solar_credit_factor))
-        if credit_factor <= 0:
+        legacy_credit_factor = max(
+            0.0, min(1.0, self.pre_window_solar_credit_factor)
+        )
+        legacy_buffer_soc = max(0.0, self.pre_window_solar_buffer_soc)
+        learned_margin_kwh = self.pre_window_solar_error_margin_kwh
+        learning_confidence = max(
+            0.0, min(1.0, self.pre_window_solar_learning_confidence)
+        )
+        learned_mode = learned_margin_kwh is not None and learning_confidence > 0
+        if learned_margin_kwh is not None:
+            learned_margin_kwh = max(0.0, float(learned_margin_kwh))
+        else:
+            learning_confidence = 0.0
+        if legacy_credit_factor <= 0 and not learned_mode:
             return ceilings
 
-        buffer_soc = max(0.0, self.pre_window_solar_buffer_soc)
         remaining_solar_kwh = [0.0] * (p_n + 1)
         for idx in range(pre_window_boundary - 1, -1, -1):
             # Solar surplus can only be stored in periods where charging is
@@ -1506,13 +1521,32 @@ class BatteryOptimizer:
                 continue
             surplus_kw = max(0.0, solar[idx] - load[idx])
             usable_kw = min(self.max_charge_kw, surplus_kw)
-            stored_kwh = usable_kw * self.efficiency * dt_hours[idx] * credit_factor
+            stored_kwh = usable_kw * self.efficiency * dt_hours[idx]
             remaining_solar_kwh[idx] = remaining_solar_kwh[idx + 1] + stored_kwh
 
         active_count = 0
         min_ceiling = 1.0
         for boundary in range(1, pre_window_boundary):
-            remaining_soc = remaining_solar_kwh[boundary] / self.capacity_kwh
+            raw_remaining_kwh = remaining_solar_kwh[boundary]
+            legacy_credited_kwh = raw_remaining_kwh * legacy_credit_factor
+            if learned_mode:
+                # The learned allowance describes AC solar energy. Convert it
+                # to stored battery energy before comparing it with the
+                # efficiency-adjusted solar surplus.
+                learned_credited_kwh = max(
+                    0.0,
+                    raw_remaining_kwh
+                    - ((learned_margin_kwh or 0.0) * self.efficiency),
+                )
+                credited_kwh = (
+                    legacy_credited_kwh * (1.0 - learning_confidence)
+                    + learned_credited_kwh * learning_confidence
+                )
+                buffer_soc = legacy_buffer_soc * (1.0 - learning_confidence)
+            else:
+                credited_kwh = legacy_credited_kwh
+                buffer_soc = legacy_buffer_soc
+            remaining_soc = credited_kwh / self.capacity_kwh
             if remaining_soc <= 1e-6:
                 continue
 
@@ -1531,15 +1565,26 @@ class BatteryOptimizer:
                 min_ceiling = min(min_ceiling, ceiling)
 
         if active_count:
-            _LOGGER.debug(
-                "Solar-aware pre-window ceiling: %d boundaries, min %.1f%% "
-                "(target %.1f%%, credit %.0f%%, buffer %.1f%%)",
-                active_count,
-                min_ceiling * 100,
-                target_soc * 100,
-                credit_factor * 100,
-                buffer_soc * 100,
-            )
+            if learned_mode:
+                _LOGGER.debug(
+                    "Solar-aware pre-window ceiling: %d boundaries, min %.1f%% "
+                    "(target %.1f%%, learned shortfall %.2fkWh, confidence %.0f%%)",
+                    active_count,
+                    min_ceiling * 100,
+                    target_soc * 100,
+                    learned_margin_kwh,
+                    learning_confidence * 100,
+                )
+            else:
+                _LOGGER.debug(
+                    "Solar-aware pre-window ceiling: %d boundaries, min %.1f%% "
+                    "(target %.1f%%, credit %.0f%%, buffer %.1f%%)",
+                    active_count,
+                    min_ceiling * 100,
+                    target_soc * 100,
+                    legacy_credit_factor * 100,
+                    legacy_buffer_soc * 100,
+                )
 
         return ceilings
 

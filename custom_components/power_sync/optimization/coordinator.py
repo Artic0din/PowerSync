@@ -26,6 +26,7 @@ from .cost_neutral import CostNeutralBudget
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
+from .solar_forecast_learning import SolarForecastLearner
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
@@ -106,6 +107,8 @@ CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 
 COST_STORE_VERSION = 1
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
+SOLAR_FORECAST_LEARNING_STORE_VERSION = 1
+SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY = 300
 INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0
 FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
@@ -441,6 +444,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._solar_nowcast_derate: float = 1.0
         self._last_solar_nowcast_ratio: float | None = None
         self._last_logged_solar_nowcast_derate: float | None = None
+        self._last_solar_nowcast_allowance_kwh: float = 0.0
+        self._last_solar_effective_error_margin_kwh: float | None = None
+        self._solar_forecast_learner = SolarForecastLearner()
 
         # Battery specs source tracking
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
@@ -493,6 +499,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             COST_STORE_VERSION,
             f"power_sync.costs.{entry_id}",
+        )
+        self._solar_forecast_learning_store = Store(
+            hass,
+            SOLAR_FORECAST_LEARNING_STORE_VERSION,
+            f"power_sync.solar_forecast_learning.{entry_id}",
         )
 
         # Saving sessions coordinator (set from __init__.py when configured)
@@ -3917,6 +3928,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             estimate_type=solcast_estimate_type,
             provider_preference=solar_forecast_provider,
         )
+        await self._restore_solar_forecast_learning()
 
         # Initialize executor (for battery control)
         self._executor = ScheduleExecutor(
@@ -4994,8 +5006,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Convert forecasts from Watts (forecaster output) to kW (LP input)
             solar_forecast = [v / 1000.0 for v in solar] if solar else []
             load_forecast = [v / 1000.0 for v in load] if load else []
+            raw_solar_forecast = list(solar_forecast)
 
             if solar_forecast:
+                self._observe_solar_forecast_accuracy(solar_forecast, soc)
                 solar_forecast = self._apply_solar_nowcast_derate(solar_forecast, soc)
 
             # Curtailment-aware solar: cap forecast during predicted curtailment periods
@@ -5096,6 +5110,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._charge_by_time_target_soc()
                 if self._optimizer.pre_window_slot is not None
                 else 0.0
+            )
+            forecast_source = getattr(
+                self._solar_forecaster, "last_forecast_source", None
+            )
+            learned_margin_kwh = self._solar_forecast_learner.allowance_kwh(
+                forecast_source
+            )
+            learned_margin_kwh, nowcast_allowance_kwh = (
+                self._solar_error_margin_after_nowcast(
+                    learned_margin_kwh=learned_margin_kwh,
+                    raw_solar_forecast=raw_solar_forecast,
+                    adjusted_solar_forecast=solar_forecast,
+                    deadline_slot=_target_slot,
+                    interval_minutes=self._config.interval_minutes,
+                )
+            )
+            self._last_solar_nowcast_allowance_kwh = nowcast_allowance_kwh
+            self._last_solar_effective_error_margin_kwh = learned_margin_kwh
+            self._optimizer.pre_window_solar_error_margin_kwh = learned_margin_kwh
+            self._optimizer.pre_window_solar_learning_confidence = (
+                self._solar_forecast_learner.confidence(forecast_source)
             )
             self._apply_provider_quota_optimizer_inputs(import_prices, export_prices)
             battery_export_allowed = self._battery_export_allowed_slots(
@@ -10441,6 +10476,115 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return (decayed_import, decayed_export)
 
+    @staticmethod
+    def _solar_error_margin_after_nowcast(
+        *,
+        learned_margin_kwh: float | None,
+        raw_solar_forecast: list[float],
+        adjusted_solar_forecast: list[float],
+        deadline_slot: int | None,
+        interval_minutes: int,
+    ) -> tuple[float | None, float]:
+        """Return residual learned margin and overlapping nowcast allowance."""
+        if learned_margin_kwh is None or deadline_slot is None:
+            return learned_margin_kwh, 0.0
+        deadline_slots = max(
+            0,
+            min(
+                len(raw_solar_forecast),
+                len(adjusted_solar_forecast),
+                deadline_slot,
+            ),
+        )
+        interval_hours = interval_minutes / 60.0
+        nowcast_allowance_kwh = sum(
+            max(0.0, raw_solar_forecast[idx] - adjusted_solar_forecast[idx])
+            * interval_hours
+            for idx in range(deadline_slots)
+        )
+        # Combined risk is max(nowcast, learned), not their sum. The LP already
+        # sees the nowcast-adjusted forecast, so pass only the residual learned
+        # allowance into its solar-headroom calculation.
+        return (
+            max(0.0, learned_margin_kwh - nowcast_allowance_kwh),
+            nowcast_allowance_kwh,
+        )
+
+    def _observe_solar_forecast_accuracy(
+        self,
+        solar_forecast: list[float],
+        soc: float,
+    ) -> None:
+        """Feed one raw forecast/live-production pair to the learner.
+
+        The forecast is sampled before nowcast or curtailment adjustments so
+        the model never trains on its own output. Invalid observations break
+        integration continuity instead of being recorded as zero production.
+        """
+        learner = getattr(self, "_solar_forecast_learner", None)
+        forecaster = getattr(self, "_solar_forecaster", None)
+        source = getattr(forecaster, "last_forecast_source", None)
+        if learner is None or not source or not solar_forecast:
+            return
+
+        data = self._get_energy_data() or {}
+        reason: str | None = None
+        if data.get("telemetry_ready") is False:
+            reason = "stale_telemetry"
+        elif data.get("solar_power_valid") is False:
+            reason = "invalid_telemetry"
+        elif soc >= 0.98:
+            reason = "near_full_soc"
+        elif getattr(self, "_last_executed_action", None) == "off_grid":
+            reason = "off_grid"
+
+        entry_data = getattr(self, "hass", None)
+        entry_data = getattr(entry_data, "data", {}) if entry_data else {}
+        if isinstance(entry_data, dict):
+            runtime = entry_data.get("power_sync", {}).get(
+                getattr(self, "entry_id", ""), {}
+            )
+            if isinstance(runtime, dict) and any(
+                key.endswith("_curtailment_state") and value == "curtailed"
+                for key, value in runtime.items()
+            ):
+                reason = "curtailment"
+
+        try:
+            actual_kw = float(data.get("solar_power"))
+        except (TypeError, ValueError):
+            actual_kw = None
+            reason = reason or "invalid_telemetry"
+        if actual_kw is not None and (not math.isfinite(actual_kw) or actual_kw < 0):
+            actual_kw = None
+            reason = reason or "invalid_telemetry"
+
+        try:
+            forecast_now_kw = max(0.0, float(solar_forecast[0]))
+        except (TypeError, ValueError, IndexError):
+            return
+        if not math.isfinite(forecast_now_kw):
+            return
+        observation_time = dt_util.now()
+        interval_seconds = max(60, int(self._config.interval_minutes * 60))
+        aligned_epoch = (
+            int(observation_time.timestamp()) // interval_seconds
+        ) * interval_seconds
+        observation_time = datetime.fromtimestamp(
+            aligned_epoch,
+            tz=observation_time.tzinfo,
+        )
+        changed = learner.observe(
+            timestamp=observation_time,
+            source=source,
+            forecast_kw=forecast_now_kw,
+            actual_kw=actual_kw,
+            valid=reason is None,
+            skip_reason=reason,
+        )
+        if changed:
+            self._schedule_solar_forecast_learning_save()
+
     def _apply_solar_nowcast_derate(
         self,
         solar_forecast: list[float],
@@ -12333,6 +12477,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return abs(float(power) * 1000) if abs(power) < 100 else abs(power)
         return 0.0
 
+    async def _restore_solar_forecast_learning(self) -> None:
+        """Restore provider-specific solar forecast calibration state."""
+        try:
+            data = await self._solar_forecast_learning_store.async_load()
+        except Exception as exc:
+            _LOGGER.warning("Failed to load solar forecast learning data: %s", exc)
+            return
+        self._solar_forecast_learner = SolarForecastLearner.from_dict(data)
+        if data:
+            diagnostics = self._solar_forecast_learner.diagnostics(
+                getattr(self._solar_forecaster, "last_forecast_source", None)
+            )
+            _LOGGER.info(
+                "Restored solar forecast learning: %d provider(s), %d valid day(s)",
+                len(self._solar_forecast_learner.histories),
+                sum(
+                    len(history)
+                    for history in self._solar_forecast_learner.histories.values()
+                ),
+            )
+            _LOGGER.debug("Solar forecast learning state: %s", diagnostics)
+
+    def _schedule_solar_forecast_learning_save(self) -> None:
+        """Schedule a coalesced write of forecast calibration state."""
+        store = getattr(self, "_solar_forecast_learning_store", None)
+        learner = getattr(self, "_solar_forecast_learner", None)
+        if store is None or learner is None:
+            return
+        store.async_delay_save(
+            learner.to_dict,
+            SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY,
+        )
+
     async def _restore_cost_data(self) -> None:
         """Restore daily cost accumulators from persistent storage."""
         # Initialize the provider ledger even on a first run. Its tariff-day
@@ -13914,6 +14091,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "available": self._last_solar_forecast is not None,
             "solar_nowcast_derate": round(self._solar_nowcast_derate, 3),
         }
+        learner = getattr(self, "_solar_forecast_learner", None)
+        forecaster = getattr(self, "_solar_forecaster", None)
+        if learner is not None:
+            learning_diagnostics = learner.diagnostics(
+                getattr(forecaster, "last_forecast_source", None)
+            )
+            learning_diagnostics["nowcast_allowance_kwh"] = round(
+                getattr(self, "_last_solar_nowcast_allowance_kwh", 0.0), 3
+            )
+            learning_diagnostics["effective_margin_kwh"] = getattr(
+                self, "_last_solar_effective_error_margin_kwh", None
+            )
+            data["solar_forecast_learning"] = learning_diagnostics
         if self._last_solar_nowcast_ratio is not None:
             data["solar_nowcast_ratio"] = round(self._last_solar_nowcast_ratio, 3)
         dt_h = self._config.interval_minutes / 60

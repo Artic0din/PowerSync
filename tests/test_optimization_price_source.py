@@ -43,6 +43,7 @@ _STUB_MODULE_NAMES = (
     "power_sync.optimization.executor",
     "power_sync.optimization.load_estimator",
     "power_sync.optimization.schedule_reader",
+    "power_sync.optimization.solar_forecast_learning",
 )
 
 
@@ -2308,6 +2309,95 @@ def test_solar_nowcast_ignores_explicitly_unavailable_live_telemetry(opt_module)
     assert adjusted == solar_forecast
     assert coordinator._solar_nowcast_derate == pytest.approx(1.0)
     assert coordinator._last_solar_nowcast_ratio is None
+
+
+def test_solar_forecast_learning_observes_raw_provider_forecast(opt_module):
+    calls = []
+
+    class _Learner:
+        def observe(self, **kwargs):
+            calls.append(kwargs)
+            return True
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._solar_forecast_learner = _Learner()
+    coordinator._solar_forecaster = SimpleNamespace(last_forecast_source="solcast")
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._last_executed_action = "self_consumption"
+    coordinator.entry_id = "entry-1"
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {"solaredge_curtailment_state": "normal"}}}
+    )
+    coordinator._get_energy_data = lambda: {
+        "solar_power": 3.0,
+        "solar_power_valid": True,
+        "telemetry_ready": True,
+    }
+    saves = []
+    coordinator._schedule_solar_forecast_learning_save = lambda: saves.append(True)
+
+    coordinator._observe_solar_forecast_accuracy([4.0, 5.0, 6.0], soc=0.5)
+
+    assert len(calls) == 1
+    assert calls[0]["source"] == "solcast"
+    assert calls[0]["forecast_kw"] == pytest.approx(4.0)
+    assert calls[0]["actual_kw"] == pytest.approx(3.0)
+    assert calls[0]["valid"] is True
+    assert saves == [True]
+
+
+def test_solar_forecast_learning_does_not_double_count_nowcast_derate(opt_module):
+    residual, nowcast = opt_module.OptimizationCoordinator._solar_error_margin_after_nowcast(
+        learned_margin_kwh=2.0,
+        raw_solar_forecast=[4.0, 4.0, 4.0, 4.0],
+        adjusted_solar_forecast=[2.0, 2.0, 4.0, 4.0],
+        deadline_slot=4,
+        interval_minutes=30,
+    )
+
+    assert nowcast == pytest.approx(2.0)
+    assert residual == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("soc", "runtime", "energy", "action", "reason"),
+    [
+        (0.98, {}, {"solar_power": 3.0}, None, "near_full_soc"),
+        (
+            0.5,
+            {"foxess_curtailment_state": "curtailed"},
+            {"solar_power": 3.0},
+            None,
+            "curtailment",
+        ),
+        (0.5, {}, {"solar_power": 3.0, "telemetry_ready": False}, None, "stale_telemetry"),
+        (0.5, {}, {"solar_power": 3.0}, "off_grid", "off_grid"),
+    ],
+)
+def test_solar_forecast_learning_rejects_constrained_or_invalid_samples(
+    opt_module,
+    soc,
+    runtime,
+    energy,
+    action,
+    reason,
+):
+    calls = []
+    learner = SimpleNamespace(observe=lambda **kwargs: calls.append(kwargs) or True)
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._solar_forecast_learner = learner
+    coordinator._solar_forecaster = SimpleNamespace(last_forecast_source="volcast")
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._last_executed_action = action
+    coordinator.entry_id = "entry-1"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": runtime}})
+    coordinator._get_energy_data = lambda: energy
+    coordinator._schedule_solar_forecast_learning_save = lambda: None
+
+    coordinator._observe_solar_forecast_accuracy([4.0, 4.0, 4.0], soc=soc)
+
+    assert calls[0]["valid"] is False
+    assert calls[0]["skip_reason"] == reason
 
 
 def test_solar_nowcast_recovers_through_live_ratio_deadband(opt_module):

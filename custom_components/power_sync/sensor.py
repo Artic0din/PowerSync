@@ -3807,6 +3807,7 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("solar_peak_kw"),
             "forecast_values_kw": data.get("solar_forecast"),
+            "forecast_learning": data.get("solar_forecast_learning", {}),
         } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
