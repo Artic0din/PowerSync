@@ -8,7 +8,7 @@ import sys
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -2212,6 +2212,548 @@ def test_generic_amps_only_stop_sets_input_number_to_zero():
             {"entity_id": "input_number.smart_charge_set_amps", "value": 0},
         )
     ]
+
+
+def test_generic_effective_minimum_uses_authoritative_entity_floor():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "16",
+            {"min": 6, "max": 32},
+        )
+    ])
+
+    assert actions._effective_min_charge_amps(
+        {
+            "charger_type": "generic",
+            "charger_amps_entity": "number.garage_ev_current",
+            "min_charge_amps": 5,
+        },
+        hass,
+    ) == 6
+
+
+def test_generic_direct_current_clamps_to_authoritative_entity_bounds():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "16",
+            {"min": 6, "max": 32},
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 5,
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.garage_ev_current", "value": 6},
+        )
+    ]
+
+
+def test_generic_read_only_entity_attributes_support_bounds_direct_and_dynamic_start():
+    entity_id = "number.garage_ev_current"
+    read_only_attributes = MappingProxyType({"min": 6, "max": 32})
+    hass = _Hass([
+        _State(entity_id, "16", read_only_attributes),
+    ])
+
+    assert actions._generic_charger_entity_bounds(hass, entity_id) == (6, 32, True)
+    direct_result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": entity_id,
+                "amps": 5,
+            },
+        )
+    )
+
+    assert direct_result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": 6},
+        )
+    ]
+
+    actions._dynamic_ev_state.clear()
+    dynamic_hass = _Hass([
+        _State(entity_id, "16", read_only_attributes),
+        _State("switch.garage_ev", "off"),
+    ])
+    dynamic_result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            dynamic_hass,
+            _Entry(),
+            {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "generic",
+                "charger_amps_entity": entity_id,
+                "charger_switch_entity": "switch.garage_ev",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+            },
+        )
+    )
+
+    assert dynamic_result is True
+    assert actions._dynamic_ev_state["entry-1"]["_default"]["active"] is True
+    assert dynamic_hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": 32},
+        ),
+        ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
+    ]
+
+
+def test_generic_fractional_minimum_rounds_up_before_direct_write():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "16",
+            {"min": 6.5, "max": 32},
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 5,
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.garage_ev_current", "value": 7},
+        )
+    ]
+
+
+def test_generic_fractional_maximum_rounds_down_before_direct_write():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "6",
+            {"min": 1, "max": 6.5},
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.garage_ev_current", "value": 6},
+        )
+    ]
+
+
+def test_generic_contradictory_entity_bounds_fail_closed():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "7",
+            {"min": 9, "max": 7},
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_generic_invalid_entity_bounds_fail_closed():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "16",
+            {"min": "invalid", "max": 32},
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_generic_non_dict_entity_attributes_fail_closed():
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "16",
+            ["invalid attributes"],
+        )
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_generic_dynamic_start_rejects_no_positive_integer_range(monkeypatch):
+    timer_calls: list[tuple] = []
+
+    def fake_track_interval(*args, **kwargs):
+        timer_calls.append((args, kwargs))
+        return lambda: None
+
+    monkeypatch.setattr(actions, "async_track_time_interval", fake_track_interval)
+    actions._dynamic_ev_state.clear()
+    hass = _Hass([
+        _State(
+            "number.garage_ev_current",
+            "0",
+            {"min": 0, "max": 0.5},
+        ),
+        _State("switch.garage_ev", "off"),
+    ])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "charger_switch_entity": "switch.garage_ev",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+            },
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    assert hass.services.calls == []
+    assert timer_calls == []
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+
+
+def test_solar_surplus_stays_paused_at_pause_soc_until_min_soc(monkeypatch):
+    set_amps_calls: list[int] = []
+    start_calls: list[dict] = []
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_full_soc_reason(*args, **kwargs):
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 70,
+            "grid_power": -5000,
+            "solar_power": 0,
+            "battery_power": 0,
+            "load_power": 0,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append(params)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", fake_clear_unplugged)
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", fake_full_soc_reason)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "charging_started": True,
+            "paused": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "high_surplus_start": datetime.now() - timedelta(minutes=5),
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "min_battery_soc": 80,
+                "pause_below_soc": 70,
+                "stop_at_battery_floor": True,
+                "household_buffer_kw": 0,
+                "sustained_surplus_minutes": 2,
+                "stop_delay_minutes": 5,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+    hass = _Hass([
+        _State("number.garage_ev_current", "16", {"min": 6, "max": 32}),
+    ])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert start_calls == []
+    assert set_amps_calls == []
+
+
+def test_solar_surplus_does_not_start_below_generic_entity_floor(monkeypatch):
+    set_amps_calls: list[int] = []
+    start_calls: list[dict] = []
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_full_soc_reason(*args, **kwargs):
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 80,
+            # 5.5 A at 240 V: still below the entity's authoritative 6 A
+            # floor and must not be rounded up into a charging start.
+            "grid_power": -1320,
+            "solar_power": 0,
+            "battery_power": 0,
+            "load_power": 0,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append(params)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", fake_clear_unplugged)
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", fake_full_soc_reason)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "charging_started": False,
+            "paused": False,
+            "current_amps": 0,
+            "target_amps": 0,
+            "high_surplus_start": datetime.now() - timedelta(minutes=5),
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "min_battery_soc": 80,
+                "pause_below_soc": 70,
+                "household_buffer_kw": 0,
+                "sustained_surplus_minutes": 2,
+                "stop_delay_minutes": 5,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+    hass = _Hass([
+        _State("number.garage_ev_current", "16", {"min": 6, "max": 32}),
+    ])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert start_calls == []
+    assert set_amps_calls == []
+    state = actions._dynamic_ev_state["entry-1"]["generic_ev"]
+    assert state["paused"] is False
+    assert state["charging_started"] is False
+
+
+def test_solar_surplus_stops_active_generic_session_with_invalid_entity_bounds(monkeypatch):
+    set_amps_calls: list[int] = []
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_full_soc_reason(*args, **kwargs):
+        return None
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", fake_clear_unplugged)
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", fake_full_soc_reason)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "charging_started": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "notify_on_complete": False,
+            },
+        }
+    }
+    hass = _Hass([
+        _State("number.garage_ev_current", "0", {"min": "nan", "max": 32}),
+    ])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert set_amps_calls == [0]
+    assert "entry-1" not in actions._dynamic_ev_state
+
+
+def test_solar_surplus_resumes_at_pause_threshold_when_floor_stop_disabled(monkeypatch):
+    set_amps_calls: list[int] = []
+    start_calls: list[dict] = []
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_full_soc_reason(*args, **kwargs):
+        return None
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 70,
+            "grid_power": -5000,
+            "solar_power": 0,
+            "battery_power": 0,
+            "load_power": 0,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append(params)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", fake_clear_unplugged)
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", fake_full_soc_reason)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "charging_started": True,
+            "paused": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "high_surplus_start": datetime.now() - timedelta(minutes=5),
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "generic",
+                "charger_amps_entity": "number.garage_ev_current",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "min_battery_soc": 80,
+                "pause_below_soc": 70,
+                "stop_at_battery_floor": False,
+                "household_buffer_kw": 0,
+                "sustained_surplus_minutes": 2,
+                "stop_delay_minutes": 5,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+    hass = _Hass([
+        _State("number.garage_ev_current", "16", {"min": 6, "max": 32}),
+    ])
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert start_calls
+    assert set_amps_calls
+    assert actions._dynamic_ev_state["entry-1"]["generic_ev"]["paused"] is False
 
 
 def test_ocpp_pre_charge_wake_blocks_when_connector_available():

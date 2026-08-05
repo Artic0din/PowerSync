@@ -29,6 +29,7 @@ EV Actions (Tesla Fleet/Teslemetry, Tesla BLE, OCPP, generic HA, Zaptec, or HA-n
 import logging
 import asyncio
 import math
+from collections.abc import Mapping
 from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
@@ -135,6 +136,104 @@ def _is_number_range_error(error_message: str) -> bool:
     return "out_of_range" in error_lower or "out of range" in error_lower
 
 
+def _generic_charger_entity_bounds(
+    hass: HomeAssistant,
+    entity_id: str,
+) -> tuple[Optional[int], Optional[int], bool]:
+    """Return the current HA number bounds for a generic charger entity."""
+    entity_id = str(entity_id or "").strip()
+    states = getattr(hass, "states", None)
+    state = states.get(entity_id) if states is not None else None
+    attributes = getattr(state, "attributes", {}) if state is not None else {}
+    if not isinstance(attributes, Mapping):
+        # A missing state has no authoritative bounds and may use configured
+        # fallback values. An existing state with malformed attributes is
+        # different: fail closed rather than risking an invalid write.
+        return (None, None, state is None)
+
+    def _bound(value: Any, key: str) -> tuple[Optional[int], bool]:
+        if key not in attributes:
+            return None, True
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None, False
+        if not math.isfinite(numeric) or numeric < 0:
+            return None, False
+        # HA accepts decimal number bounds, but charger commands are integer
+        # amps. Never round a command below min or above max.
+        return (
+            math.ceil(numeric) if key == "min" else math.floor(numeric),
+            True,
+        )
+
+    entity_min, min_valid = _bound(attributes.get("min"), "min")
+    entity_max, max_valid = _bound(attributes.get("max"), "max")
+    return entity_min, entity_max, min_valid and max_valid
+
+
+def _normalize_generic_charger_amps(
+    hass: HomeAssistant,
+    entity_id: str,
+    amps: int,
+) -> Optional[int]:
+    """Clamp a nonzero generic current command to the HA entity bounds."""
+    amps = int(amps)
+    if amps == 0:
+        return 0
+    entity_min, entity_max, bounds_valid = _generic_charger_entity_bounds(hass, entity_id)
+    if not bounds_valid:
+        _LOGGER.error(
+            "Generic charger amps entity %s reports invalid number bounds",
+            entity_id,
+        )
+        return None
+    if entity_min is not None and entity_max is not None and entity_min > entity_max:
+        _LOGGER.error(
+            "Generic charger amps entity %s reports contradictory bounds min=%s max=%s",
+            entity_id,
+            entity_min,
+            entity_max,
+        )
+        return None
+    if entity_min is not None:
+        amps = max(amps, entity_min)
+    if entity_max is not None:
+        amps = min(amps, entity_max)
+    if amps <= 0:
+        _LOGGER.error(
+            "Generic charger amps entity %s has no valid positive integer current range",
+            entity_id,
+        )
+        return None
+    return amps
+
+
+def _generic_charger_effective_integer_bounds(
+    hass: HomeAssistant,
+    params: dict,
+    configured_max: Optional[int] = None,
+) -> tuple[int, int, bool]:
+    """Resolve a generic charger's usable integer current range."""
+    configured_min = _coerce_positive_int(params.get("min_charge_amps"), 5) or 5
+    configured_max = (
+        _coerce_positive_int(configured_max, 32)
+        if configured_max is not None
+        else _coerce_positive_int(params.get("max_charge_amps"), 32)
+    ) or 32
+    entity_min, entity_max, bounds_valid = _generic_charger_entity_bounds(
+        hass,
+        params.get("charger_amps_entity"),
+    )
+    if not bounds_valid:
+        return configured_min, configured_max, False
+
+    effective_min = max(configured_min, entity_min) if entity_min is not None else configured_min
+    effective_max = min(configured_max, entity_max) if entity_max is not None else configured_max
+    valid_positive_range = effective_max >= max(1, effective_min)
+    return effective_min, effective_max, valid_positive_range
+
+
 async def _set_generic_charger_amps_entity(
     hass: HomeAssistant,
     entity_id: str,
@@ -150,11 +249,18 @@ async def _set_generic_charger_amps_entity(
         )
         return False
 
+    # A generic number entity is the authoritative last-mile contract. Keep
+    # zero as the explicit pause/stop value, but clamp every nonzero command
+    # before Home Assistant validates it.
+    applied_amps = _normalize_generic_charger_amps(hass, entity_id, amps)
+    if applied_amps is None:
+        return False
+
     try:
         await hass.services.async_call(
             domain,
             "set_value",
-            {"entity_id": entity_id, "value": amps},
+            {"entity_id": entity_id, "value": applied_amps},
             blocking=True,
         )
         return True
@@ -4111,8 +4217,11 @@ async def _action_set_ev_charging_amps(
         if not amps_entity:
             _LOGGER.error("Generic charger set amps: no amps entity configured")
             return False
+        applied_amps = _normalize_generic_charger_amps(hass, amps_entity, int(amps))
+        if applied_amps is None:
+            return False
         if await _set_generic_charger_amps_entity(hass, amps_entity, int(amps)):
-            _LOGGER.info("Generic charger set to %dA via %s", amps, amps_entity)
+            _LOGGER.info("Generic charger set to %dA via %s", applied_amps, amps_entity)
             return True
         return False
 
@@ -4781,6 +4890,7 @@ def _curtailed_full_battery_idle_ev_probe_kw(
     live_status: dict,
     current_ev_power_kw: float,
     config: dict,
+    hass: Optional[HomeAssistant] = None,
 ) -> float:
     """Return a minimum-amp probe when curtailment hides idle EV headroom."""
     if current_ev_power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
@@ -4805,13 +4915,18 @@ def _curtailed_full_battery_idle_ev_probe_kw(
     if grid_kw > grid_import_tolerance_kw:
         return 0.0
 
-    min_amps = _effective_min_charge_amps(config)
+    min_amps = _effective_min_charge_amps(config, hass)
     voltage = config.get("voltage", 240)
     phases = config.get("phases", 1)
     return max(0.0, (min_amps * voltage * phases) / 1000)
 
 
-def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, config: dict) -> float:
+def _calculate_solar_surplus(
+    live_status: dict,
+    current_ev_power_kw: float,
+    config: dict,
+    hass: Optional[HomeAssistant] = None,
+) -> float:
     """
     Calculate available solar surplus for EV charging.
 
@@ -4881,6 +4996,7 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
         live_status,
         current_ev_power_kw,
         config,
+        hass,
     )
     if probe_kw > available_kw:
         _LOGGER.debug(
@@ -5379,6 +5495,7 @@ async def _set_vehicle_amps(
         #      (e.g. Evnex pauses at <=5A — the min_charge_amps floor handles this)
         switch_entity = params.get("charger_switch_entity")
         amps_entity = params.get("charger_amps_entity")
+        applied_amps = amps
 
         try:
             if amps == 0:
@@ -5401,15 +5518,30 @@ async def _set_vehicle_amps(
                     return False
                 if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
                     return False
-                if amps_entity and not await _set_generic_charger_amps_entity(
-                    hass, amps_entity, amps
-                ):
-                    return False
+                if amps_entity:
+                    normalized_amps = _normalize_generic_charger_amps(
+                        hass,
+                        amps_entity,
+                        amps,
+                    )
+                    if normalized_amps is None:
+                        return False
+                    applied_amps = normalized_amps
+                    if not await _set_generic_charger_amps_entity(
+                        hass,
+                        amps_entity,
+                        applied_amps,
+                    ):
+                        return False
                 if switch_entity and not await _start_generic_charger_switch(
                     hass, switch_entity
                 ):
                     return False
-            _LOGGER.info(f"Set generic charger to {amps}A via {amps_entity or switch_entity}")
+            _LOGGER.info(
+                "Set generic charger to %sA via %s",
+                applied_amps,
+                amps_entity or switch_entity,
+            )
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set generic charger amps: {e}")
@@ -5419,7 +5551,28 @@ async def _set_vehicle_amps(
     return False
 
 
-def _effective_min_charge_amps(params: dict) -> int:
+def _effective_max_charge_amps(
+    params: dict,
+    hass: Optional[HomeAssistant] = None,
+) -> int:
+    """Return the configured max current, capped by a generic HA entity max."""
+    configured_max = _coerce_positive_int(params.get("max_charge_amps"), 32) or 32
+    if params.get("charger_type", "tesla") != "generic" or hass is None:
+        return configured_max
+    _effective_min, effective_max, bounds_valid = _generic_charger_effective_integer_bounds(
+        hass,
+        params,
+        configured_max,
+    )
+    if bounds_valid:
+        return effective_max
+    return configured_max
+
+
+def _effective_min_charge_amps(
+    params: dict,
+    hass: Optional[HomeAssistant] = None,
+) -> int:
     """Return the minimum current the selected charger can actually accept."""
     configured_min = _coerce_positive_int(params.get("min_charge_amps"), 5) or 5
     charger_type = params.get("charger_type", "tesla")
@@ -5434,6 +5587,15 @@ def _effective_min_charge_amps(params: dict) -> int:
         return max(configured_min, OCPP_MIN_CHARGE_AMPS)
     if charger_type == "sigenergy":
         return max(configured_min, OCPP_MIN_CHARGE_AMPS)
+    if charger_type == "generic" and hass is not None:
+        effective_min, _effective_max, bounds_valid = _generic_charger_effective_integer_bounds(
+            hass,
+            params,
+        )
+        if not bounds_valid:
+            configured_max = _coerce_positive_int(params.get("max_charge_amps"), 32) or 32
+            return max(configured_min, configured_max) + 1
+        configured_min = effective_min
     return configured_min
 
 
@@ -6387,6 +6549,25 @@ async def _dynamic_ev_update_surplus(
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
 
+    if params.get("charger_type", "tesla") == "generic":
+        _effective_min, _effective_max, bounds_valid = (
+            _generic_charger_effective_integer_bounds(hass, params)
+        )
+        if not bounds_valid:
+            _LOGGER.error(
+                "Solar surplus EV: stopping generic charger session with invalid current bounds"
+            )
+            await _action_stop_ev_charging_dynamic(
+                hass,
+                config_entry,
+                {
+                    "vehicle_id": vehicle_id,
+                    "stop_charging": True,
+                    "stop_reason": "invalid charger current range",
+                },
+            )
+            return
+
     unplugged = await _clear_ble_dynamic_session_if_unplugged(
         hass,
         config_entry,
@@ -6580,7 +6761,12 @@ async def _dynamic_ev_update_surplus(
 
     # Calculate available surplus after the household buffer and any configured
     # parallel battery reserve.
-    raw_surplus_kw = _calculate_solar_surplus(live_status, total_ev_power_kw, params)
+    raw_surplus_kw = _calculate_solar_surplus(
+        live_status,
+        total_ev_power_kw,
+        params,
+        hass,
+    )
 
     # Check if parallel charging is possible below the battery floor. At this
     # point raw_surplus_kw is already the amount left for EV charging after
@@ -6715,6 +6901,13 @@ async def _dynamic_ev_update_surplus(
                 f"Solar surplus EV: Not resuming - stop_at_floor=True, "
                 f"battery {battery_soc:.0f}% < floor {pause_soc}%"
             )
+        elif not stop_at_floor and battery_soc >= pause_soc:
+            # Normal pause policy resumes once the pause threshold is met.
+            can_resume = True
+            _LOGGER.info(
+                f"⚡ Solar surplus EV: Resuming - battery recovered to "
+                f"{battery_soc:.0f}% (pause threshold: {pause_soc}%)"
+            )
         elif state.get("parallel_charging_mode") and strict_surplus_available:
             # Parallel mode: surplus recovered
             can_resume = True
@@ -6747,6 +6940,11 @@ async def _dynamic_ev_update_surplus(
                         _LOGGER.debug(f"Could not send resume notification: {e}")
                     if _session_was_replaced("resume notification"):
                         return
+        else:
+            # A paused session must not fall through to the surplus allocator.
+            # Otherwise sustained solar can issue a new current/start command
+            # while the battery is still below its resume threshold.
+            return
 
     # Calculate current EV power for THIS vehicle. Prefer measured charger
     # power so an already-active charge is treated as controllable load.
@@ -6771,6 +6969,23 @@ async def _dynamic_ev_update_surplus(
         effective_current_amps = 0
     elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
+    if params.get("charger_type", "tesla") == "generic" and effective_current_amps > 0:
+        normalized_current_amps = _normalize_generic_charger_amps(
+            hass,
+            params.get("charger_amps_entity"),
+            effective_current_amps,
+        )
+        if normalized_current_amps is None:
+            _LOGGER.error(
+                "Solar surplus EV: refusing generic charger update with invalid current bounds"
+            )
+            await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+            if _session_was_replaced("invalid generic current bounds stop"):
+                return
+            state["current_amps"] = 0
+            state["target_amps"] = 0
+            return
+        effective_current_amps = normalized_current_amps
 
     # Determine available surplus for EV. _calculate_solar_surplus already
     # applies the household buffer and any configured parallel battery reserve.
@@ -6790,15 +7005,18 @@ async def _dynamic_ev_update_surplus(
     available_amps = (my_surplus_kw * 1000) / (voltage * phases)
 
     # Apply constraints
-    min_amps = _effective_min_charge_amps(params)
-    max_amps = params.get("max_charge_amps", 32)
+    min_amps = _effective_min_charge_amps(params, hass)
+    max_amps = _effective_max_charge_amps(params, hass)
     new_amps = int(round(max(0, min(max_amps, available_amps))))
 
     # Hysteresis: don't start unless we have sustained surplus
     sustained_minutes = params.get("sustained_surplus_minutes", 2)
     stop_delay_minutes = params.get("stop_delay_minutes", 5)
 
-    if new_amps < min_amps:
+    # Keep the existing nearest-amp targeting once charging is viable, but do
+    # not let rounding manufacture the minimum needed to start or continue.
+    # For example, 5.5 A of physical surplus cannot satisfy a 6 A floor.
+    if available_amps < min_amps:
         # Not enough surplus
         if effective_current_amps > 0:
             # Track how long we've been below threshold
@@ -7326,8 +7544,8 @@ async def _dynamic_ev_update(
     grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)  # 100W buffer
     max_inverter_kw = params.get("max_inverter_kw", 10.0)  # PW3=10kW, PW2=5kW per unit
 
-    min_amps = params.get("min_charge_amps", 5)
-    max_amps = params.get("max_charge_amps", 32)
+    min_amps = _effective_min_charge_amps(params, hass)
+    max_amps = _effective_max_charge_amps(params, hass)
     voltage = params.get("voltage", 240)
     phases = params.get("phases", 1)
     fixed_charge_amps = _coerce_positive_int(params.get("fixed_charge_amps"))
@@ -7716,6 +7934,25 @@ async def _action_start_ev_charging_dynamic_locked(
     owner_mode = params.get("owner_mode", dynamic_mode)
     allow_takeover = bool(params.get("allow_ownership_takeover", False))
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+    prevalidated_generic_max: Optional[int] = None
+    prevalidated_generic_max_source: Optional[str] = None
+    if params.get("charger_type", "tesla") == "generic":
+        prevalidated_generic_max, prevalidated_generic_max_source = (
+            _resolve_dynamic_max_charge_amps(hass, config_entry, params)
+        )
+        _generic_min, _generic_max, generic_range_valid = (
+            _generic_charger_effective_integer_bounds(
+                hass,
+                params,
+                prevalidated_generic_max,
+            )
+        )
+        if not generic_range_valid:
+            _LOGGER.warning(
+                "Dynamic EV: refusing generic charger start because no positive "
+                "integer current is valid for the configured/entity bounds"
+            )
+            return False
 
     def _same_loadpoint(candidate_id: str) -> bool:
         return (
@@ -7968,12 +8205,24 @@ async def _action_start_ev_charging_dynamic_locked(
                 return True
 
     # Get common parameters with defaults
-    min_charge_amps = _effective_min_charge_amps(params)
-    max_charge_amps, max_charge_amps_source = _resolve_dynamic_max_charge_amps(
-        hass,
-        config_entry,
-        params,
-    )
+    min_charge_amps = _effective_min_charge_amps(params, hass)
+    if prevalidated_generic_max is not None:
+        max_charge_amps = prevalidated_generic_max
+        max_charge_amps_source = prevalidated_generic_max_source or "params"
+    else:
+        max_charge_amps, max_charge_amps_source = _resolve_dynamic_max_charge_amps(
+            hass,
+            config_entry,
+            params,
+        )
+    if params.get("charger_type", "tesla") == "generic":
+        max_charge_amps = _effective_max_charge_amps(
+            {
+                **params,
+                "max_charge_amps": max_charge_amps,
+            },
+            hass,
+        )
     voltage = params.get("voltage", 240)
     stop_outside_window = params.get("stop_outside_window", False)
     charger_type = params.get("charger_type", "tesla")
