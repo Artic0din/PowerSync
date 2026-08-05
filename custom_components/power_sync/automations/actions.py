@@ -7764,7 +7764,10 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             return False
 
-    if dynamic_mode == "solar_surplus":
+    # A manual dashboard start is an explicit user request and must be able
+    # to restart immediately after a user stop.  Keep the restart hold for
+    # automated Solar Surplus owners only.
+    if dynamic_mode == "solar_surplus" and owner_family(owner_mode) != "manual":
         hold_reason = manual_stop_hold_reason(
             hass,
             config_entry,

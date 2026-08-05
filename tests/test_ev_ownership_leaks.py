@@ -720,6 +720,41 @@ def test_solar_surplus_start_respects_matching_manual_stop_hold(monkeypatch):
     assert actions._dynamic_ev_state["entry-1"]["generic_ev"]["active"] is True
 
 
+def test_manual_solar_surplus_start_bypasses_matching_manual_stop_hold(monkeypatch):
+    """An explicit manual Solar Surplus start must not honor the restart hold.
+
+    The hold suppresses automated restarts after a user stop.  A dashboard
+    action with ``manual_solar_surplus`` is an explicit user request and must
+    create the dynamic session even when the loadpoint has a matching hold.
+    """
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
+    ev_ownership.record_manual_stop_hold(
+        hass,
+        entry,
+        "generic_ev",
+        reason="Manual stop from mobile",
+    )
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "manual_solar_surplus",
+                "vehicle_vin": "generic_ev",
+                "charger_type": "generic",
+            },
+        )
+    )
+
+    assert result is True
+    assert actions._dynamic_ev_state["entry-1"]["generic_ev"]["active"] is True
+
+
 # ---------------------------------------------------------------------------
 # HD-18: release/clear must evict a "_default"-held lease when it is
 # released/cleared under a resolved VIN, mirroring claim_ev_ownership's
