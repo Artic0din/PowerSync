@@ -9177,14 +9177,26 @@ class ScheduledChargingExecutor:
             self._state.last_decision_reason = reason
             return False, reason, ""
 
-        # In time window - check price
+        # In time window - check price.  The coordinator normally supplies a
+        # provider-specific current value.  When that value is unavailable,
+        # resolve only the timestamp-aligned retail slot from the optimizer;
+        # never treat an unknown price as permission to start.
         if current_price_cents is None:
-            # No price data - charge anyway during window
-            reason = f"Scheduled: {start_time}-{end_time}, no price data"
-            self._state.last_decision = "wants_charge"
-            self._state.last_decision_reason = reason
-            return True, reason, "scheduled"
-        elif current_price_cents <= max_price:
+            from .ev_pricing import get_current_retail_price
+
+            current_price_cents = get_current_retail_price(
+                self.hass,
+                self.config_entry.entry_id,
+            )
+            if current_price_cents is None:
+                reason = (
+                    f"Scheduled: {start_time}-{end_time}, current retail price unavailable"
+                )
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+
+        if current_price_cents <= max_price:
             reason = f"Scheduled: {start_time}-{end_time}, price {current_price_cents:.1f}c <= {max_price}c"
             self._state.last_decision = "wants_charge"
             self._state.last_decision_reason = reason

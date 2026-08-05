@@ -97,6 +97,7 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
     sys.modules.pop("power_sync.const", None)
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
 
 
 VIN = "LRWYHCEK3PC907290"
@@ -1204,6 +1205,180 @@ class _FakeStates:
     def async_entity_ids(self, domain: str):
         prefix = f"{domain}."
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
+
+
+def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "11:00",
+        "end_time": "14:00",
+        "max_price_cents": 20,
+    }
+    if schedule is not None:
+        hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
+            SimpleNamespace(data={"schedule": schedule})
+        )
+    return hass
+
+
+def test_scheduled_none_price_uses_timestamp_aligned_optimizer_retail_price(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(
+        ev_planner,
+        "get_ev_location",
+        AsyncMock(return_value="home"),
+    )
+    monkeypatch.setattr(
+        ev_planner,
+        "is_ev_plugged_in",
+        AsyncMock(return_value=True),
+    )
+    schedule = {
+        "timestamps": [
+            "2026-08-05T11:30:00+00:00",
+            "2026-08-05T12:00:00+00:00",
+            "2026-08-05T12:30:00+00:00",
+        ],
+        "import_price": [0.1111, 0.2432, 0.3555],
+    }
+    executor = ev_planner.ScheduledChargingExecutor(
+        _scheduled_price_hass(schedule), _FakeConfigEntry()
+    )
+
+    should_charge, reason, _mode = asyncio.run(
+        executor.get_charging_decision(None)
+    )
+
+    assert should_charge is False
+    assert "24.3c" in reason
+
+
+def test_scheduled_none_price_starts_when_aligned_retail_price_is_under_cap(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    schedule = {
+        "timestamps": [
+            "2026-08-05T11:30:00+00:00",
+            "2026-08-05T12:00:00+00:00",
+            "2026-08-05T12:30:00+00:00",
+        ],
+        "import_price": [0.1111, 0.20, 0.3555],
+    }
+    executor = ev_planner.ScheduledChargingExecutor(
+        _scheduled_price_hass(schedule), _FakeConfigEntry()
+    )
+
+    should_charge, _reason, mode = asyncio.run(executor.get_charging_decision(None))
+
+    assert should_charge is True
+    assert mode == "scheduled"
+
+
+def test_scheduled_none_price_rejects_explicitly_stale_optimizer_plan(monkeypatch):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass = _scheduled_price_hass(
+        {
+            "timestamps": [
+                "2026-08-05T11:30:00+00:00",
+                "2026-08-05T12:00:00+00:00",
+                "2026-08-05T12:30:00+00:00",
+            ],
+            "import_price": [0.1111, 0.10, 0.3555],
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"].data[
+        "optimization_status"
+    ] = "stale"
+    executor = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+
+    should_charge, reason, mode = asyncio.run(executor.get_charging_decision(None))
+
+    assert should_charge is False
+    assert mode == ""
+    assert "unavailable" in reason
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    (
+        None,
+        {
+            "timestamps": [
+                "2026-08-05T11:30:00+00:00",
+                "2026-08-05T12:00:00+00:00",
+            ],
+            "import_price": [0.1111, "not-a-price"],
+        },
+        {
+            "timestamps": [
+                "2026-08-05T11:30:00+00:00",
+                "2026-08-05T12:00:00+00:00",
+            ],
+            "import_price": [0.1111, False],
+        },
+        {
+            "timestamps": [
+                "2026-08-04T11:30:00+00:00",
+                "2026-08-04T12:00:00+00:00",
+            ],
+            "import_price": [0.1111, 0.20],
+        },
+    ),
+)
+def test_scheduled_none_price_fails_closed_without_current_retail_slot(
+    monkeypatch,
+    schedule,
+):
+    now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: now,
+    )
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    executor = ev_planner.ScheduledChargingExecutor(
+        _scheduled_price_hass(schedule), _FakeConfigEntry()
+    )
+
+    should_charge, reason, mode = asyncio.run(executor.get_charging_decision(None))
+
+    assert should_charge is False
+    assert mode == ""
+    assert "price" in reason.lower()
 
 
 def test_explicit_fleet_schedule_does_not_borrow_multi_ble_soc():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +20,115 @@ except ModuleNotFoundError:  # pragma: no cover - lightweight unit-test fallback
 from ..const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _parse_schedule_timestamp(value: Any, local_tz: Any) -> datetime | None:
+    """Parse one optimizer timestamp, preserving an explicit offset."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_tz or timezone.utc)
+    return parsed
+
+
+def get_current_retail_price(hass: Any, entry_id: str) -> float | None:
+    """Resolve the current retail import price from the optimizer schedule.
+
+    ``OptimizationCoordinator`` keeps the tariff in dollars/kWh, aligned to
+    ``schedule.timestamps``.  This intentionally reads only that timestamped
+    retail schedule; provider wholesale arrays and positional fallbacks are not
+    safe inputs for a scheduled EV max-price gate.
+
+    Returns cents/kWh, or ``None`` when the schedule is missing, malformed,
+    stale, or has no slot covering the HA-local current time.
+    """
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+    coordinator = entry_data.get("optimization_coordinator")
+    if getattr(coordinator, "last_update_success", None) is False:
+        return None
+    data = getattr(coordinator, "data", None)
+    if isinstance(data, dict) and data.get("optimization_status") == "stale":
+        return None
+    schedule = data.get("schedule") if isinstance(data, dict) else None
+    if not isinstance(schedule, dict):
+        return None
+
+    timestamps = schedule.get("timestamps")
+    prices = schedule.get("import_price")
+    if (
+        not isinstance(timestamps, (list, tuple))
+        or not isinstance(prices, (list, tuple))
+        or len(timestamps) != len(prices)
+        or len(timestamps) < 2
+    ):
+        return None
+
+    # Treat any malformed/non-finite value in the aligned retail array as an
+    # invalid snapshot.  A valid-looking current slot must not mask a broken
+    # provider refresh elsewhere in the same schedule.
+    for raw_price in prices:
+        if isinstance(raw_price, bool):
+            return None
+        try:
+            if not math.isfinite(float(raw_price)):
+                return None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    try:
+        now = dt_util.now()
+    except Exception:
+        return None
+    if not isinstance(now, datetime):
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    parsed_timestamps: list[datetime] = []
+    for raw_timestamp in timestamps:
+        timestamp = _parse_schedule_timestamp(raw_timestamp, now.tzinfo)
+        if timestamp is None:
+            return None
+        parsed_timestamps.append(timestamp)
+
+    # A schedule must be strictly ordered.  This also prevents an accidental
+    # first/padded-array selection when timestamps do not describe real slots.
+    if any(
+        parsed_timestamps[index] >= parsed_timestamps[index + 1]
+        for index in range(len(parsed_timestamps) - 1)
+    ):
+        return None
+
+    active_index: int | None = None
+    for index, slot_start in enumerate(parsed_timestamps):
+        if index + 1 < len(parsed_timestamps):
+            slot_end = parsed_timestamps[index + 1]
+        else:
+            # The final slot has no following timestamp; use the preceding
+            # interval and reject it once that interval has elapsed.
+            slot_end = slot_start + (
+                parsed_timestamps[index] - parsed_timestamps[index - 1]
+            )
+        if slot_start <= now < slot_end:
+            active_index = index
+            break
+
+    if active_index is None:
+        return None
+
+    try:
+        price_dollars = float(prices[active_index])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(price_dollars):
+        return None
+
+    price_cents = price_dollars * 100.0
+    return price_cents if math.isfinite(price_cents) else None
 
 
 def _prices_from_current(data: dict[str, Any] | None) -> tuple[float, float] | None:

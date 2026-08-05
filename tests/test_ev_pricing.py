@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
 
+from power_sync.automations import ev_pricing  # noqa: E402
 from power_sync.automations.ev_pricing import get_current_ev_prices  # noqa: E402
 
 
@@ -76,3 +78,34 @@ def test_ev_prices_fall_back_to_stored_current_prices():
     )
 
     assert get_current_ev_prices(hass, "entry-1") == (27.0, 9.5)
+
+
+def test_optimizer_retail_price_uses_timestamp_aligned_local_slot(monkeypatch):
+    """The current retail slot is selected, not the first/padded optimizer value."""
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc),
+    )
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": SimpleNamespace(
+                        data={
+                            "schedule": {
+                                "timestamps": [
+                                    "2026-08-05T11:30:00+00:00",
+                                    "2026-08-05T12:00:00+00:00",
+                                    "2026-08-05T12:30:00+00:00",
+                                ],
+                                "import_price": [0.1111, 0.2432, 0.3555],
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert ev_pricing.get_current_retail_price(hass, "entry-1") == 24.32

@@ -3460,6 +3460,144 @@ def test_dynamic_update_holds_fixed_deadline_rate(monkeypatch):
     assert set_amps_calls == [32]
 
 
+def test_scheduled_dynamic_update_uses_solax_kilowatt_snapshot(monkeypatch):
+    """Generic Scheduled dynamic control should consume the canonical SolaX coordinator."""
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        fake_clear_unplugged,
+    )
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "current_amps": 5,
+            "target_amps": 5,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "generic",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "target_battery_charge_kw": 0,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
+        last_update_success=True,
+        data={
+            "battery_level": 70,
+            "grid_power": 0.0,
+            "solar_power": 10.0,
+            "battery_power": -5.0,
+            "load_power": 3.0,
+        }
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert set_amps_calls == [26]
+
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"].data.update(
+        {
+            "grid_power": 12.5,
+            "solar_power": 0.0,
+            "battery_power": 1.2,
+            "load_power": 13.7,
+        }
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert set_amps_calls == [26, 21]
+
+
+def test_normalized_ev_live_data_rejects_unknown_failed_or_stale_health(monkeypatch):
+    now = datetime(2026, 8, 5, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    complete_data = {
+        "battery_level": 70,
+        "grid_power": 0.0,
+        "solar_power": 10.0,
+        "battery_power": -5.0,
+        "load_power": 3.0,
+    }
+
+    coordinators = (
+        SimpleNamespace(data=complete_data),
+        SimpleNamespace(data=complete_data, last_update_success=False),
+        SimpleNamespace(
+            data=complete_data,
+            last_update_success=True,
+            last_update_success_time=now - timedelta(minutes=5),
+            update_interval=timedelta(seconds=30),
+        ),
+    )
+
+    assert all(
+        not actions._coordinator_has_normalized_ev_live_data(coordinator)
+        for coordinator in coordinators
+    )
+
+
+def test_scheduled_dynamic_update_does_not_write_without_solax_telemetry(monkeypatch):
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_clear_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        fake_clear_unplugged,
+    )
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "current_amps": 5,
+            "target_amps": 5,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "generic",
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "target_battery_charge_kw": 0,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
+        last_update_success=True,
+        data={"battery_level": 70, "grid_power": 0.0}
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "generic_ev"))
+
+    assert set_amps_calls == []
+
+
 def test_dynamic_update_skips_sigenergy_evdc_rate_adjustment(monkeypatch):
     set_amps_calls: list[int] = []
 

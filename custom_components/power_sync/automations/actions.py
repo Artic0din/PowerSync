@@ -102,6 +102,26 @@ API_CREDIT_ERROR_PATTERNS = [
     "credits exhausted",
 ]
 
+# Battery energy coordinators expose the same normalized kW telemetry contract.
+# Keep this list explicit so EV control does not accidentally fall back to a
+# provider-specific raw API when a supported inverter coordinator is present.
+EV_LIVE_STATUS_COORDINATOR_KEYS = (
+    "tesla_coordinator",
+    "sigenergy_coordinator",
+    "sungrow_coordinator",
+    "foxess_coordinator",
+    "goodwe_coordinator",
+    "alphaess_coordinator",
+    "esy_sunhome_coordinator",
+    "solax_coordinator",
+    "saj_h2_coordinator",
+    "fronius_reserva_coordinator",
+    "neovolt_coordinator",
+    "solaredge_coordinator",
+    "anker_solix_coordinator",
+    "custom_energy_coordinator",
+)
+
 
 def _is_api_credit_error(error_message: str) -> bool:
     """Check if an error message indicates API credit exhaustion."""
@@ -5604,6 +5624,47 @@ def _is_inside_time_window(
         return window_start <= now < window_end
 
 
+def _coordinator_has_normalized_ev_live_data(coordinator: Any) -> bool:
+    """Return whether a battery coordinator has a usable normalized snapshot."""
+    if getattr(coordinator, "last_update_success", None) is not True:
+        return False
+    data = getattr(coordinator, "data", None)
+    if not isinstance(data, dict) or data.get("telemetry_ready") is False:
+        return False
+    for key in ("grid_power", "solar_power", "battery_power"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if not math.isfinite(float(value)):
+            return False
+
+    last_update = getattr(coordinator, "last_update_success_time", None)
+    if last_update is None:
+        return True
+    try:
+        update_interval = getattr(coordinator, "update_interval", None)
+        stale_after = max(
+            update_interval * 4
+            if update_interval is not None
+            else timedelta(seconds=120),
+            timedelta(seconds=60),
+        )
+        now = dt_util.utcnow()
+        if (
+            getattr(now, "tzinfo", None) is None
+            and getattr(last_update, "tzinfo", None) is not None
+        ):
+            now = now.replace(tzinfo=last_update.tzinfo)
+        elif (
+            getattr(now, "tzinfo", None) is not None
+            and getattr(last_update, "tzinfo", None) is None
+        ):
+            last_update = last_update.replace(tzinfo=now.tzinfo)
+        return (now - last_update) <= stale_after
+    except Exception:
+        return False
+
+
 async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
     """Get live status from Tesla API for battery and grid power.
 
@@ -5617,16 +5678,25 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
 
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
 
-    # Try coordinator data first (cached, no API call needed)
-    for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator"):
+    # Try normalized coordinator data first (cached, no API call needed).
+    coordinator_found = False
+    for coord_key in EV_LIVE_STATUS_COORDINATOR_KEYS:
         coordinator = entry_data.get(coord_key)
-        if coordinator and coordinator.data:
+        if coordinator is None:
+            continue
+        coordinator_found = True
+        if _coordinator_has_normalized_ev_live_data(coordinator):
             live_status = coordinator_data_to_ev_live_status(coordinator.data)
             if entry_data.get("inverter_last_state") == "curtailed":
                 live_status["is_curtailed"] = True
             elif entry_data.get("inverter_last_state") in ("normal", "running"):
                 live_status["is_curtailed"] = False
             return live_status
+
+    # A configured but unhealthy coordinator must not be bypassed by a raw
+    # provider API call.  The coordinator is the canonical site telemetry path.
+    if coordinator_found:
+        return None
 
     # Fall back to direct API call
     token_getter = entry_data.get("token_getter")
@@ -5728,11 +5798,7 @@ async def _get_initial_smart_schedule_live_status(
 
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
     coordinator_found = False
-    for coord_key in (
-        "tesla_coordinator",
-        "sigenergy_coordinator",
-        "sungrow_coordinator",
-    ):
+    for coord_key in EV_LIVE_STATUS_COORDINATOR_KEYS:
         coordinator = entry_data.get(coord_key)
         if coordinator is None:
             continue
