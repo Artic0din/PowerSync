@@ -22,9 +22,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import math
 import sys
 import textwrap
 import types
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -294,9 +297,10 @@ def test_ac_inverter_curtailment_only_no_flap_while_export_earnings_hovers_at_bo
 class _FakeFoxessController:
     """Stand-in for the FoxESS coordinator/controller curtail/restore surface."""
 
-    def __init__(self):
+    def __init__(self, *, restore_success=True):
         self.calls = []
         self.data = {}
+        self.restore_success = restore_success
 
     async def curtail(self):
         self.calls.append("curtail")
@@ -304,20 +308,37 @@ class _FakeFoxessController:
 
     async def restore_curtailment(self):
         self.calls.append("restore")
-        return True
+        return self.restore_success
 
 
-def _build_handle_foxess_curtailment(with_hysteresis, controller):
+def _build_handle_foxess_curtailment(
+    with_hysteresis,
+    controller,
+    *,
+    coordinator_data=None,
+    current_state="normal",
+    force_charge_active=False,
+    force_discharge_active=False,
+):
+    entry_data = {
+        "foxess_coordinator": controller,
+        "foxess_curtailment_state": current_state,
+    }
+    if coordinator_data is not None:
+        controller.data = dict(coordinator_data)
+        controller.data.setdefault("last_update", datetime.now(timezone.utc))
+    controller.last_update_success = True
+    controller.update_interval = timedelta(seconds=30)
     hass = SimpleNamespace(
-        data={"power_sync": {"test_entry": {"foxess_coordinator": controller}}}
+        data={"power_sync": {"test_entry": entry_data}}
     )
     entry = SimpleNamespace(options={}, data={}, entry_id="test_entry")
     namespace = {
         "hass": hass,
         "DOMAIN": "power_sync",
         "entry": entry,
-        "force_charge_state": {"active": False},
-        "force_discharge_state": {"active": False},
+        "force_charge_state": {"active": force_charge_active},
+        "force_discharge_state": {"active": force_discharge_active},
         "_optimizer_current_force_action_matches": lambda action: False,
         "amber_coordinator": None,
         "localvolts_coordinator": None,
@@ -331,16 +352,21 @@ def _build_handle_foxess_curtailment(with_hysteresis, controller):
             warning=lambda *a, **k: None,
             error=lambda *a, **k: None,
         ),
+        "math": math,
+        "Mapping": Mapping,
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "timezone": timezone,
         "with_hysteresis": with_hysteresis,
     }
     exec(textwrap.dedent(_nested_function_source("handle_foxess_curtailment")), namespace)
-    return namespace["handle_foxess_curtailment"]
+    return namespace["handle_foxess_curtailment"], entry_data
 
 
 def test_foxess_curtailment_no_flap_while_export_earnings_hovers_at_boundary():
     with_hysteresis = _load_tariff_utils().with_hysteresis
     controller = _FakeFoxessController()
-    handler = _build_handle_foxess_curtailment(with_hysteresis, controller)
+    handler, _entry_data = _build_handle_foxess_curtailment(with_hysteresis, controller)
 
     async def run():
         for export_earnings in (0.9, 1.05, 0.95, 1.25, 1.1, 0.99):
@@ -353,6 +379,193 @@ def test_foxess_curtailment_no_flap_while_export_earnings_hovers_at_boundary():
     # clean re-entry (0.99c). The dead-zone values (1.05c, 0.95c, 1.1c) must
     # not trigger additional curtail()/restore_curtailment() calls.
     assert controller.calls == ["curtail", "restore", "curtail"], controller.calls
+
+
+def test_foxess_curtailment_gates_on_material_live_export():
+    """Non-negative import plus negligible export must not activate curtailment.
+
+    A previously curtailed inverter is restored once export stops, while a
+    material live export still takes the existing curtailment path.
+    """
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    controller = _FakeFoxessController()
+    handler, entry_data = _build_handle_foxess_curtailment(
+        with_hysteresis,
+        controller,
+        coordinator_data={
+            "grid_power": -0.02,  # 20W export
+            "grid_power_valid": True,
+            "telemetry_ready": True,
+        },
+    )
+
+    async def run():
+        # (a) Non-negative import price + no material export: do not issue an initial
+        # curtail command even though export earnings are uneconomic.
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == []
+        assert entry_data["foxess_curtailment_state"] == "normal"
+
+        # (b) If the prior state was curtailed, stop curtailment through the
+        # same restore surface and clear the timer marker after success.
+        entry_data["foxess_curtailment_state"] = "curtailed"
+        entry_data["_last_foxess_curtailment_reapply"] = 123.0
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == ["restore"]
+        assert entry_data["foxess_curtailment_state"] == "normal"
+        assert "_last_foxess_curtailment_reapply" not in entry_data
+
+        # (c) Material live export preserves the existing curtailment path.
+        controller.data["grid_power"] = -0.3  # 300W export
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == ["restore", "curtail"]
+        assert entry_data["foxess_curtailment_state"] == "curtailed"
+
+    asyncio.run(run())
+
+
+def test_foxess_curtailment_requires_fresh_valid_grid_telemetry():
+    """Only finite, ready, explicitly-valid grid telemetry may suppress curtailment."""
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+
+    async def invoke(
+        coordinator_data,
+        *,
+        import_price=5.0,
+        current_state="normal",
+    ):
+        controller = _FakeFoxessController()
+        handler, entry_data = _build_handle_foxess_curtailment(
+            with_hysteresis,
+            controller,
+            coordinator_data=coordinator_data,
+            current_state=current_state,
+        )
+        await handler(feedin_price=-0.5, import_price=import_price)
+        return controller, entry_data
+
+    async def run():
+        # Exact 250W is non-material; 250.1W is material (no int truncation).
+        controller, _ = await invoke(
+            {"grid_power": -0.25, "grid_power_valid": True, "telemetry_ready": True}
+        )
+        assert controller.calls == []
+        controller, _ = await invoke(
+            {"grid_power": -0.2501, "grid_power_valid": True, "telemetry_ready": True}
+        )
+        assert controller.calls == ["curtail"]
+
+        # Stale readiness, absent/false validity, and malformed/missing values
+        # all retain the conservative curtailment behavior.
+        conservative_data = [
+            {"grid_power": -0.02, "grid_power_valid": True, "telemetry_ready": False},
+            {"grid_power": -0.02, "telemetry_ready": True},
+            {"grid_power": -0.02, "grid_power_valid": False, "telemetry_ready": True},
+            {"grid_power": float("nan"), "grid_power_valid": True, "telemetry_ready": True},
+            {"grid_power": float("inf"), "grid_power_valid": True, "telemetry_ready": True},
+            {"grid_power": "malformed", "grid_power_valid": True, "telemetry_ready": True},
+            {"grid_power": False, "grid_power_valid": True, "telemetry_ready": True},
+            {"grid_power": 10**10000, "grid_power_valid": True, "telemetry_ready": True},
+            {"grid_power_valid": True, "telemetry_ready": True},
+            {
+                "grid_power": -0.02,
+                "grid_power_valid": True,
+                "telemetry_ready": True,
+                "last_update": None,
+            },
+            {
+                "grid_power": -0.02,
+                "grid_power_valid": True,
+                "telemetry_ready": True,
+                "last_update": datetime.now(timezone.utc) - timedelta(minutes=10),
+            },
+        ]
+        for data in conservative_data:
+            controller, _ = await invoke(data)
+            assert controller.calls == ["curtail"], data
+
+        # A known negative import price keeps the existing curtailment path,
+        # even with valid telemetry showing no material export.
+        controller, _ = await invoke(
+            {"grid_power": -0.02, "grid_power_valid": True, "telemetry_ready": True},
+            import_price=-0.1,
+        )
+        assert controller.calls == ["curtail"]
+
+        # An explicitly-ready, valid 20W reading suppresses the initial command.
+        controller, _ = await invoke(
+            {"grid_power": -0.02, "grid_power_valid": True, "telemetry_ready": True}
+        )
+        assert controller.calls == []
+
+        # A coordinator failure invalidates even recent retained data.
+        controller = _FakeFoxessController()
+        handler, _ = _build_handle_foxess_curtailment(
+            with_hysteresis,
+            controller,
+            coordinator_data={
+                "grid_power": -0.02,
+                "grid_power_valid": True,
+                "telemetry_ready": True,
+            },
+        )
+        controller.last_update_success = False
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == ["curtail"]
+
+        # Force dispatch owns the remote-control surface and must remain ahead
+        # of the no-export restore/skip gate.
+        controller = _FakeFoxessController()
+        handler, entry_data = _build_handle_foxess_curtailment(
+            with_hysteresis,
+            controller,
+            coordinator_data={
+                "grid_power": -0.02,
+                "grid_power_valid": True,
+                "telemetry_ready": True,
+            },
+            current_state="curtailed",
+            force_charge_active=True,
+        )
+        entry_data["_last_foxess_curtailment_reapply"] = 123.0
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == []
+        assert entry_data["foxess_curtailment_state"] == "normal"
+        assert "_last_foxess_curtailment_reapply" not in entry_data
+
+    asyncio.run(run())
+
+
+def test_foxess_force_dispatch_guard_precedes_live_export_gate():
+    source = _nested_function_source("handle_foxess_curtailment")
+    assert source.index("if _foxess_force_dispatch_active():") < source.index(
+        'coord_data.get("grid_power_valid")'
+    )
+
+
+def test_foxess_failed_restore_keeps_curtailment_ownership_and_timer():
+    """A failed no-export restore must remain marked for a later safe retry."""
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    controller = _FakeFoxessController(restore_success=False)
+    handler, entry_data = _build_handle_foxess_curtailment(
+        with_hysteresis,
+        controller,
+        coordinator_data={
+            "grid_power": -0.02,
+            "grid_power_valid": True,
+            "telemetry_ready": True,
+        },
+        current_state="curtailed",
+    )
+    entry_data["_last_foxess_curtailment_reapply"] = 123.0
+
+    asyncio.run(handler(feedin_price=-0.5, import_price=5.0))
+
+    assert controller.calls == ["restore"]
+    assert entry_data["foxess_curtailment_state"] == "curtailed"
+    assert entry_data["_last_foxess_curtailment_reapply"] == 123.0
 
 
 def test_brand_curtailment_handlers_use_hysteresis_not_raw_boundary():

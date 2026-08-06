@@ -106,6 +106,54 @@ def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
     return numeric_value / 1000.0 if abs(numeric_value) > 100 else numeric_value
 
 
+def _finite_float(value: Any) -> float | None:
+    """Return a finite numeric value, preserving missing/invalid telemetry."""
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return numeric_value if math.isfinite(numeric_value) else None
+
+
+def _foxess_direct_grid_power(raw_grid_kw: Any) -> tuple[float, bool]:
+    """Normalize direct FoxESS grid power and retain raw validity."""
+    grid_kw = _finite_float(raw_grid_kw)
+    return (grid_kw if grid_kw is not None else 0.0, grid_kw is not None)
+
+
+def _foxess_entity_grid_power_valid(
+    telemetry_ready: bool,
+    raw_grid_kw: Any,
+) -> tuple[float, bool]:
+    """Validate entity-bridge readiness and the current grid reading."""
+    grid_kw = _finite_float(raw_grid_kw)
+    valid = telemetry_ready is True and grid_kw is not None
+    return (grid_kw if grid_kw is not None else 0.0, valid)
+
+
+def _foxess_cloud_grid_power(
+    meter_w: Any,
+    consumption_w: Any,
+    feedin_w: Any,
+) -> tuple[float, bool]:
+    """Resolve cloud grid power from a finite meter or finite import/export pair."""
+    meter_value = _finite_float(meter_w)
+    if meter_value is not None:
+        return meter_value / 1000.0, True
+
+    import_value = _finite_float(consumption_w)
+    export_value = _finite_float(feedin_w)
+    if import_value is None or export_value is None:
+        return 0.0, False
+
+    grid_kw = (import_value - export_value) / 1000.0
+    if not math.isfinite(grid_kw):
+        return 0.0, False
+    return grid_kw, True
+
+
 def _configured_sungrow_ac_inverter_attributes(
     hass: HomeAssistant,
     entry_id: str,
@@ -6719,7 +6767,9 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
 
             # Map to standard format (convention: positive = discharging, negative = charging)
             battery_kw = attrs.get("battery_power_kw", 0) or 0
-            grid_kw = attrs.get("grid_power_kw", 0) or 0
+            grid_kw, grid_power_valid = _foxess_direct_grid_power(
+                attrs.get("grid_power_kw")
+            )
             load_kw = attrs.get("load_power_kw", 0) or 0
             solar_kw = attrs.get("pv_power_kw", 0) or 0
             ct2_kw = attrs.get("ct2_power_kw", 0) or 0
@@ -6745,6 +6795,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "pv2_power": attrs.get("pv2_power_kw", 0) or 0,
                 "pv3_power": attrs.get("pv3_power_kw", 0) or 0,
                 "grid_power": grid_kw,
+                "grid_power_valid": grid_power_valid,
                 "battery_power": battery_kw,
                 "load_power": load_kw,
                 "battery_level": attrs.get("battery_soc", 0),
@@ -7127,6 +7178,8 @@ class NativeBatteryIntegrationReadinessMixin:
             return None
         stale = dict(data)
         stale["telemetry_ready"] = False
+        if "grid_power_valid" in stale:
+            stale["grid_power_valid"] = False
         return stale
 
 
@@ -7183,7 +7236,10 @@ class FoxESSEntityEnergyCoordinator(
 
         telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
-        grid_kw = status.get("grid_power", 0.0) or 0.0
+        grid_kw, grid_power_valid = _foxess_entity_grid_power_valid(
+            telemetry_ready,
+            status.get("grid_power"),
+        )
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
         soc = status.get("battery_level")
@@ -7214,6 +7270,7 @@ class FoxESSEntityEnergyCoordinator(
             "telemetry_ready": telemetry_ready,
             "solar_power": solar_kw,
             "grid_power": grid_kw,
+            "grid_power_valid": grid_power_valid,
             "battery_power": battery_kw,
             "load_power": load_kw,
             "battery_level": soc,
@@ -7488,14 +7545,15 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                 discharge_kw = self._to_float(_first_present("batDischargePower", "dischargePower")) / 1000.0
                 battery_kw = discharge_kw - charge_kw
 
-            # Grid power: prefer the meter reading; otherwise net import minus export.
+            # Grid power: prefer a finite meter reading; otherwise compute the
+            # net value only when both finite import and feed-in readings exist.
+            # Do not turn malformed/missing values into a valid zero.
             meter = _first_present("meterPower")
-            if meter is not None:
-                grid_kw = self._to_float(meter) / 1000.0
-            else:
-                import_kw = self._to_float(values.get("gridConsumptionPower")) / 1000.0
-                export_kw = self._to_float(values.get("feedinPower")) / 1000.0
-                grid_kw = import_kw - export_kw
+            grid_kw, grid_power_valid = _foxess_cloud_grid_power(
+                meter,
+                values.get("gridConsumptionPower"),
+                values.get("feedinPower"),
+            )
 
             # If FoxESS Cloud realtime returned no usable SoC, keep the previous
             # readings rather than reporting SOC=0% — a 0% reading makes the
@@ -7507,7 +7565,10 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning(
                         "FoxESS Cloud realtime returned no battery SoC — keeping previous readings"
                     )
-                    return self.data
+                    stale_data = dict(self.data)
+                    stale_data["telemetry_ready"] = False
+                    stale_data["grid_power_valid"] = False
+                    return stale_data
                 raise UpdateFailed(
                     "FoxESS Cloud realtime returned no battery SoC — no data available"
                 )
@@ -7524,6 +7585,7 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
             data = {
                 "solar_power": max(0, solar_kw),
                 "grid_power": grid_kw,
+                "grid_power_valid": grid_power_valid,
                 "battery_power": battery_kw,
                 "load_power": load_kw,
                 "battery_level": soc,

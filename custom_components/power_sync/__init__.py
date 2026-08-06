@@ -9,6 +9,7 @@ import logging
 import math
 import pathlib
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -24893,6 +24894,97 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     return
 
+                # DC/AC curtailment only needs to block material live export:
+                # solar should keep serving the house and charging the battery
+                # when import is non-negative and the grid is not exporting.
+                # Missing or invalid telemetry stays conservative and follows
+                # the existing price-driven curtailment path below.
+                _grid_telemetry_usable = False
+                _grid_export_w = 0.0
+                try:
+                    coord_data = getattr(fc, "data", None)
+                    raw_grid_power_kw = (
+                        coord_data.get("grid_power")
+                        if isinstance(coord_data, Mapping)
+                        else None
+                    )
+                    if isinstance(raw_grid_power_kw, bool):
+                        raise TypeError("boolean grid power is invalid")
+                    grid_power_kw = float(raw_grid_power_kw)
+                    raw_last_update = (
+                        coord_data.get("last_update")
+                        if isinstance(coord_data, Mapping)
+                        else None
+                    )
+                    if isinstance(raw_last_update, datetime):
+                        last_update = raw_last_update
+                        if last_update.tzinfo is None:
+                            last_update = last_update.replace(tzinfo=timezone.utc)
+                        age_seconds = (
+                            datetime.now(timezone.utc)
+                            - last_update.astimezone(timezone.utc)
+                        ).total_seconds()
+                    else:
+                        age_seconds = float("inf")
+
+                    update_interval = getattr(fc, "update_interval", None)
+                    interval_seconds = (
+                        update_interval.total_seconds()
+                        if isinstance(update_interval, timedelta)
+                        else 0.0
+                    )
+                    max_age_seconds = max(120.0, interval_seconds * 3.0)
+                    if (
+                        isinstance(coord_data, Mapping)
+                        and getattr(fc, "last_update_success", False) is True
+                        and coord_data.get("telemetry_ready") is not False
+                        and coord_data.get("grid_power_valid") is True
+                        and math.isfinite(grid_power_kw)
+                        and 0.0 <= age_seconds <= max_age_seconds
+                    ):
+                        _grid_telemetry_usable = True
+                        _grid_export_w = max(0.0, -grid_power_kw * 1000.0)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+                _nonnegative_import_price = False
+                try:
+                    parsed_import_price = float(import_price)
+                    _nonnegative_import_price = (
+                        math.isfinite(parsed_import_price)
+                        and parsed_import_price >= 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+                if (
+                    _nonnegative_import_price
+                    and _grid_telemetry_usable
+                    and _grid_export_w <= 250
+                ):
+                    if current_state == "curtailed":
+                        _LOGGER.info(
+                            "FoxESS curtailment RESTORED: import is non-negative "
+                            "and grid export stopped at %.1fW",
+                            _grid_export_w,
+                        )
+                        if hasattr(fc, "restore_curtailment"):
+                            success = await fc.restore_curtailment()
+                        else:
+                            success = await controller.restore()
+                        if success:
+                            entry_data["foxess_curtailment_state"] = "normal"
+                            entry_data.pop("_last_foxess_curtailment_reapply", None)
+                        else:
+                            _LOGGER.error("FoxESS restore() failed")
+                    else:
+                        _LOGGER.debug(
+                            "FoxESS curtailment skipped: import is non-negative "
+                            "and grid export is only %.1fW",
+                            _grid_export_w,
+                        )
+                    return
+
                 import time as _time_mod
                 _foxess_reapply_interval = 480  # Keep ahead of FoxESS 600s remote-control timeout
                 _last_reapply = entry_data.get("_last_foxess_curtailment_reapply", 0)
@@ -24902,14 +24994,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 try:
                     coord_data = getattr(fc, "data", None) or {}
                     grid_power_kw = float(coord_data.get("grid_power", 0) or 0)
-                    grid_export_w = max(0, int(abs(grid_power_kw) * 1000)) if grid_power_kw < -0.25 else 0
+                    grid_export_w = max(0.0, abs(grid_power_kw) * 1000.0) if grid_power_kw < -0.25 else 0.0
                     if current_state == "curtailed" and grid_export_w > 250:
                         _live_export_reapply = True
                         _LOGGER.info(
                             "FoxESS curtailment RE-APPLY: cached curtailed but grid export is %dW",
                             grid_export_w,
                         )
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     pass
                 _needs_reapply = (
                     current_state == "curtailed"
