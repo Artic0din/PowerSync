@@ -6503,6 +6503,146 @@ def test_optimizer_owned_force_discharge_cancels_when_export_window_ends(opt_mod
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_optimizer_owned_priority_export_holds_after_one_solve_drops_export(opt_module):
+    """A fresh LP omission cannot flap an active priority export after five minutes."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._config.battery_capacity_wh = 38600
+    coordinator._config.max_discharge_w = 8000
+    start = datetime(2026, 8, 6, 7, 55, tzinfo=timezone.utc)
+    current_time = {"now": start}
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
+    opt_module.dt_util.now = lambda *args, **kwargs: current_time["now"]
+    initial_action = SimpleNamespace(
+        action="export",
+        power_w=8000,
+        timestamp=start,
+        soc=0.882,
+    )
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_battery_export_allowed_slots = [True]
+    coordinator._last_priority_export_slots = [True]
+    coordinator._current_schedule = SimpleNamespace(
+        actions=[
+            initial_action,
+            SimpleNamespace(
+                action="export",
+                power_w=8000,
+                timestamp=start + timedelta(minutes=5),
+                soc=0.864,
+            ),
+        ]
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(initial_action))
+    current_time["now"] = start + timedelta(minutes=5)
+    dropped_action = SimpleNamespace(
+        action="self_consumption",
+        power_w=0,
+        timestamp=start + timedelta(minutes=5),
+        soc=0.89,
+    )
+    coordinator._last_price_timestamps = [dropped_action.timestamp]
+    coordinator._last_battery_export_allowed_slots = [True]
+    coordinator._last_priority_export_slots = [True]
+    coordinator._current_schedule = SimpleNamespace(actions=[dropped_action])
+
+    asyncio.run(coordinator._execute_optimizer_action(dropped_action))
+
+    assert battery.force_discharge_calls == [(10, 8000, False, None)]
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._last_executed_action == "export"
+
+
+def test_optimizer_owned_priority_export_releases_when_fresh_gate_closes(opt_module):
+    """The commitment cannot carry export past a fresh hard eligibility gate."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.90)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._config.battery_capacity_wh = 38600
+    coordinator._config.max_discharge_w = 8000
+    start = datetime(2026, 8, 6, 7, 55, tzinfo=timezone.utc)
+    current_time = {"now": start}
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
+    opt_module.dt_util.now = lambda *args, **kwargs: current_time["now"]
+    initial_action = SimpleNamespace(
+        action="export",
+        power_w=8000,
+        timestamp=start,
+        soc=0.882,
+    )
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_battery_export_allowed_slots = [True]
+    coordinator._last_priority_export_slots = [True]
+    coordinator._current_schedule = SimpleNamespace(
+        actions=[
+            initial_action,
+            SimpleNamespace(
+                action="export",
+                power_w=8000,
+                timestamp=start + timedelta(minutes=5),
+                soc=0.864,
+            ),
+        ]
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(initial_action))
+    current_time["now"] = start + timedelta(minutes=5)
+    stopped_action = SimpleNamespace(
+        action="self_consumption",
+        power_w=0,
+        timestamp=start + timedelta(minutes=5),
+        soc=0.89,
+    )
+    coordinator._last_price_timestamps = [stopped_action.timestamp]
+    coordinator._last_battery_export_allowed_slots = [False]
+    coordinator._last_priority_export_slots = [False]
+    coordinator._current_schedule = SimpleNamespace(actions=[stopped_action])
+
+    asyncio.run(coordinator._execute_optimizer_action(stopped_action))
+
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_optimizer_owned_priority_export_commitment_respects_reserve(opt_module):
+    """The anti-flap hold releases when its remaining energy would cross reserve."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.215)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    coordinator._config.battery_capacity_wh = 13500
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.backup_reserve = 0.20
+    start = datetime(2026, 8, 6, 7, 55, tzinfo=timezone.utc)
+    current_time = {"now": start}
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
+    opt_module.dt_util.now = lambda *args, **kwargs: current_time["now"]
+    coordinator._set_optimizer_force_state("discharge", 20, 5000)
+    current_time["now"] = start + timedelta(minutes=5)
+    stopped_action = SimpleNamespace(
+        action="self_consumption",
+        power_w=0,
+        timestamp=start + timedelta(minutes=5),
+        soc=0.215,
+    )
+    coordinator._last_price_timestamps = [stopped_action.timestamp]
+    coordinator._last_battery_export_allowed_slots = [True]
+    coordinator._last_priority_export_slots = [True]
+    coordinator._current_schedule = SimpleNamespace(actions=[stopped_action])
+
+    asyncio.run(coordinator._execute_optimizer_action(stopped_action))
+
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_optimizer_owned_force_charge_preserves_commitment_start_on_refresh(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     current_time = {"now": start}

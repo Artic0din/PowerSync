@@ -417,6 +417,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_grid_charge_cap_import_prices: list[float] | None = None  # $/kWh hard cap reference
         self._last_export_boost_allowed_slots: list[bool] = []
+        self._last_battery_export_allowed_slots: list[bool] = []
+        self._last_priority_export_slots: list[bool] = []
         self._last_price_timestamps: list[datetime] | None = None
         self._pending_price_timestamps: list[datetime] | None = None
         self._last_grid_export_limits_w: list[float | None] | None = None
@@ -5276,6 +5278,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(import_prices),
                 export_prices,
             )
+            # Keep the exact fresh-solve masks used by execution commitment
+            # checks. Recomputing these later can observe a different quota or
+            # provider state from the schedule currently being executed.
+            self._last_battery_export_allowed_slots = list(
+                battery_export_allowed
+            )
+            self._last_priority_export_slots = list(priority_export_slots)
             spread_export_prices = self._spread_export_prices_for_run(
                 export_prices,
             )
@@ -6562,8 +6571,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # charge anywhere in the remaining window. A price spike flips every
         # remaining slot away from "charge" (e.g. to self_consumption), so
         # without this the battery would keep grid-charging at the spike price
-        # for the full 20-minute commitment. Mirrors the discharge variant,
-        # which releases when no future export action remains.
+        # for the full 20-minute commitment. Discharge has an additional
+        # priority-window hold because its tariff opportunity is time-bounded.
         if not self._schedule_has_future_action(action, CHARGE_ACTIONS, remaining):
             return None
         return remaining
@@ -6591,9 +6600,86 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if remaining <= timedelta(0):
             return None
 
+        # A priority tariff window is deliberately stable even when one fresh
+        # LP solve temporarily values future self-consumption above exporting.
+        # Without this, a rolling forecast can restart an export and cancel it
+        # again five minutes later, making the nominal 20-minute commitment
+        # ineffective.  Only hold while the *fresh* solve still says battery
+        # export is permitted and the current slot remains a priority window;
+        # window endings and hard export gates therefore still release at once.
+        calibration_data = self.hass.data.get("power_sync", {}).get(
+            self.entry_id,
+            {},
+        )
+        hard_runtime_block = bool(
+            calibration_data.get("calibration_suspected")
+            or self._scheduled_ev_preserve_active()
+            or self._should_block_export_for_demand()
+        )
+        export_price = None
+        if self._last_export_prices:
+            export_price = self._current_effective_export_price_for_action(
+                self._last_export_prices,
+                action,
+            )
+        price_is_usable = export_price is None or export_price >= 0.01
+        if hard_runtime_block or not price_is_usable:
+            return None
+
+        export_allowed_slots = getattr(
+            self,
+            "_last_battery_export_allowed_slots",
+            [],
+        )
+        export_allowed_now = self._action_slot_enabled(
+            action,
+            export_allowed_slots,
+        )
+        if export_allowed_slots and not export_allowed_now:
+            return None
+
+        if (
+            export_allowed_now
+            and self._action_slot_enabled(
+                action,
+                getattr(self, "_last_priority_export_slots", []),
+            )
+        ):
+            return remaining
+
         if not self._schedule_has_future_action(action, EXPORT_ACTIONS, remaining):
             return None
         return remaining
+
+    def _action_slot_enabled(
+        self,
+        action: Any,
+        enabled_slots: list[bool],
+    ) -> bool:
+        """Return whether an action timestamp maps to an enabled solve slot."""
+        if not enabled_slots:
+            return False
+
+        action_ts = self._as_utc_datetime(getattr(action, "timestamp", None))
+        if action_ts is None:
+            return False
+
+        interval_minutes = max(
+            1,
+            int(getattr(self._config, "interval_minutes", 5) or 5),
+        )
+        interval = timedelta(minutes=interval_minutes)
+        timestamps = self._price_timestamps(len(enabled_slots))
+        for idx, enabled in enumerate(enabled_slots):
+            if not enabled or idx >= len(timestamps):
+                continue
+            slot_start = self._as_utc_datetime(timestamps[idx])
+            if (
+                slot_start is not None
+                and slot_start <= action_ts < slot_start + interval
+            ):
+                return True
+        return False
 
     def _schedule_has_future_action(
         self,
@@ -7814,6 +7900,66 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     action,
                                 )
                             )
+                            if commitment_remaining is not None:
+                                try:
+                                    commitment_soc, _ = (
+                                        await self._get_battery_state()
+                                    )
+                                    commitment_reserve = (
+                                        self._force_discharge_reserve_floor(action)
+                                    )
+                                    capacity_wh = float(
+                                        getattr(
+                                            self._config,
+                                            "battery_capacity_wh",
+                                            0.0,
+                                        )
+                                        or 0.0
+                                    )
+                                    command_w = max(
+                                        0.0,
+                                        float(force_state.get("power_w", 0.0) or 0.0),
+                                    )
+                                    efficiency = float(
+                                        getattr(
+                                            getattr(self, "_optimizer", None),
+                                            "efficiency",
+                                            0.92,
+                                        )
+                                        or 0.92
+                                    )
+                                    if (
+                                        commitment_soc is None
+                                        or capacity_wh <= 0
+                                        or command_w <= 0
+                                        or not 0 < efficiency <= 1
+                                    ):
+                                        commitment_remaining = None
+                                    else:
+                                        projected_soc = commitment_soc - (
+                                            command_w
+                                            * commitment_remaining.total_seconds()
+                                            / 3600.0
+                                            / efficiency
+                                            / capacity_wh
+                                        )
+                                        if projected_soc < commitment_reserve - 0.0001:
+                                            _LOGGER.info(
+                                                "Optimizer: Releasing force discharge "
+                                                "commitment — projected SOC %.1f%% would "
+                                                "cross reserve %.0f%%",
+                                                projected_soc * 100,
+                                                commitment_reserve * 100,
+                                            )
+                                            commitment_remaining = None
+                                except Exception as err:
+                                    _LOGGER.warning(
+                                        "Optimizer: Releasing force discharge "
+                                        "commitment because reserve safety could not "
+                                        "be verified: %s",
+                                        err,
+                                    )
+                                    commitment_remaining = None
                         if commitment_remaining is not None:
                             remaining_minutes = max(
                                 1,
