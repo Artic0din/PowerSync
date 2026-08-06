@@ -20,6 +20,9 @@ def test_cost_neutral_is_exposed_on_config_api_metadata_and_switch_surfaces():
     assert "cost_neutral_enabled: bool = False" in coordinator_source
     assert "def set_cost_neutral_enabled" in coordinator_source
     assert '"cost_neutral": dict(' in coordinator_source
+    assert '"days": day_status' in coordinator_source
+    assert '"cost_neutral_earnings_caps_by_day"' in coordinator_source
+    assert '"cost_neutral_planned_earnings_by_day"' in coordinator_source
     assert '"cost_neutral_enabled": opt_coordinator.cost_neutral_enabled' in init_source
     assert "Profit Max and Cost Neutral cannot both be enabled" in init_source
     assert config_flow_source.count("CONF_COST_NEUTRAL_ENABLED") >= 10

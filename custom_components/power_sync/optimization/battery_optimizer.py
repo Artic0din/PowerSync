@@ -19,12 +19,13 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from .cost_neutral import CostNeutralPlan
 from .schedule_reader import ScheduleAction, OptimizationSchedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -239,6 +240,7 @@ class _LpPeriod:
     grid_charge_allowed: bool
     priority_export: bool
     cost_neutral: bool = False
+    cost_neutral_day: str | None = None
     mode: str | None = None
     required_self_use_kw: float = 0.0
 
@@ -558,6 +560,7 @@ class BatteryOptimizer:
         cost_neutral_slots: bool | list[bool] | None = None,
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
+        cost_neutral_plan: CostNeutralPlan | None = None,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -608,6 +611,8 @@ class BatteryOptimizer:
             cost_neutral_fixed_cost_allowance: Unclipped local-day balance
                 excluding replaceable forecast imports. This preserves surplus
                 export credit when the final plan's import cost is substituted.
+            cost_neutral_plan: Provider-neutral date-partitioned budgets. When
+                supplied, this replaces the legacy scalar/mask constraint.
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -697,6 +702,20 @@ class BatteryOptimizer:
                 )
         else:
             cost_neutral_fixed_cost_allowance = None
+        if cost_neutral_plan is None:
+            cost_neutral_plan = CostNeutralPlan.from_legacy(
+                length=n_steps,
+                earnings_cap=cost_neutral_earnings_cap,
+                slots=cost_neutral_slots,
+                forecast_import_cost=cost_neutral_forecast_import_cost,
+                fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+            )
+        else:
+            cost_neutral_plan = cost_neutral_plan.normalized(n_steps)
+        if cost_neutral_plan is not None:
+            cost_neutral_slots = [
+                day is not None for day in cost_neutral_plan.day_ids
+            ]
         # Priority/provider windows affect export permissions and settlement
         # value only. They must not manufacture a home-load bridge floor: that
         # hidden floor forced recovery charging even when direct future imports
@@ -747,9 +766,17 @@ class BatteryOptimizer:
             if HIGHS_AVAILABLE:
                 try:
                     def _run_lp_once(
-                        earnings_cap: float | None,
-                        account_for_planned_imports: bool,
+                        plan: CostNeutralPlan | None,
+                        account_for_planned_imports: bool | dict[str, bool],
                     ) -> OptimizerResult:
+                        legacy_cap = cost_neutral_earnings_cap
+                        if (
+                            plan is not None
+                            and plan.current_day in plan.earnings_caps_by_day
+                        ):
+                            legacy_cap = plan.earnings_caps_by_day[
+                                plan.current_day
+                            ]
                         return self._solve_lp(
                             n_steps,
                             import_prices,
@@ -770,50 +797,113 @@ class BatteryOptimizer:
                             schedule_timestamps,
                             priority_export_slots,
                             disable_idle,
-                            earnings_cap,
+                            legacy_cap,
                             cost_neutral_slots,
                             cost_neutral_forecast_import_cost,
                             cost_neutral_fixed_cost_allowance,
                             account_for_planned_imports,
+                            plan,
                         )
 
-                    seeded_cap = cost_neutral_earnings_cap
-                    account_for_planned_imports = bool(
-                        seeded_cap is not None
-                        and seeded_cap > 1e-9
-                        and cost_neutral_fixed_cost_allowance is not None
-                        and cost_neutral_fixed_cost_allowance >= -1e-9
-                    )
+                    seeded_plan = cost_neutral_plan
+                    account_for_planned_imports: bool | dict[str, bool]
+                    if seeded_plan is None:
+                        account_for_planned_imports = False
+                    else:
+                        # Each settlement day stands alone. A clipped/negative
+                        # day must use the bounded reconciliation path, while a
+                        # later day with a valid positive allowance can still
+                        # account for its own planned imports.
+                        account_by_day = {
+                            day: (
+                                seeded_plan.fixed_cost_allowances_by_day.get(
+                                    day,
+                                    0.0,
+                                )
+                                >= -1e-9
+                            )
+                            for day in seeded_plan.earnings_caps_by_day
+                        }
+                        account_values = set(account_by_day.values())
+                        account_for_planned_imports = (
+                            account_values.pop()
+                            if len(account_values) == 1
+                            else account_by_day
+                        )
                     result = _run_lp_once(
-                        seeded_cap,
+                        seeded_plan,
                         account_for_planned_imports,
                     )
                     reconciliation_iterations = 0
-                    if seeded_cap is not None and not account_for_planned_imports:
+                    all_days_account_for_imports = (
+                        all(account_for_planned_imports.values())
+                        if isinstance(account_for_planned_imports, dict)
+                        else account_for_planned_imports
+                    )
+                    if seeded_plan is not None and not all_days_account_for_imports:
                         # A clipped zero cap or negative fixed balance must
                         # first produce a safe static-cap plan. Required imports
                         # in that emitted plan may then reopen only the uncovered
                         # balance. Bounded static-cap re-solves avoid allowing
                         # arbitrary grid import to bootstrap discretionary export.
                         for _ in range(3):
-                            effective_cap = max(
-                                0.0,
-                                float(
-                                    result.lp_stats.get(
-                                        "cost_neutral_earnings_cap",
-                                        seeded_cap,
-                                    )
-                                ),
+                            raw_effective_caps = dict(
+                                result.lp_stats.get(
+                                    "cost_neutral_earnings_caps_by_day",
+                                    {},
+                                )
+                                or {}
                             )
-                            if effective_cap <= seeded_cap + 0.005:
+                            if (
+                                not raw_effective_caps
+                                and seeded_plan.current_day is not None
+                                and "cost_neutral_earnings_cap"
+                                in result.lp_stats
+                            ):
+                                raw_effective_caps[
+                                    seeded_plan.current_day
+                                ] = result.lp_stats[
+                                    "cost_neutral_earnings_cap"
+                                ]
+                            effective_caps = {
+                                str(day): max(0.0, float(value))
+                                for day, value in {
+                                    **seeded_plan.earnings_caps_by_day,
+                                    **raw_effective_caps,
+                                }.items()
+                            }
+                            changed = any(
+                                effective_caps.get(day, 0.0)
+                                > seeded_plan.earnings_caps_by_day.get(day, 0.0)
+                                + 0.005
+                                for day in seeded_plan.earnings_caps_by_day
+                            )
+                            if not changed:
                                 break
-                            seeded_cap = effective_cap
-                            result = _run_lp_once(seeded_cap, False)
+                            seeded_plan = replace(
+                                seeded_plan,
+                                earnings_caps_by_day=effective_caps,
+                            )
+                            result = _run_lp_once(
+                                seeded_plan,
+                                account_for_planned_imports,
+                            )
                             reconciliation_iterations += 1
-                    if cost_neutral_earnings_cap is not None:
+                    if cost_neutral_plan is not None:
+                        baseline_caps = {
+                            day: round(cap, 6)
+                            for day, cap in (
+                                cost_neutral_plan.earnings_caps_by_day.items()
+                            )
+                        }
                         result.lp_stats[
-                            "cost_neutral_baseline_earnings_cap"
-                        ] = round(cost_neutral_earnings_cap, 6)
+                            "cost_neutral_baseline_earnings_caps_by_day"
+                        ] = baseline_caps
+                        current_day = cost_neutral_plan.current_day
+                        if current_day in baseline_caps:
+                            result.lp_stats[
+                                "cost_neutral_baseline_earnings_cap"
+                            ] = baseline_caps[current_day]
                         result.lp_stats[
                             "cost_neutral_reconciliation_iterations"
                         ] = reconciliation_iterations
@@ -852,6 +942,7 @@ class BatteryOptimizer:
                 cost_neutral_slots,
                 cost_neutral_forecast_import_cost,
                 cost_neutral_fixed_cost_allowance,
+                cost_neutral_plan,
             )
             result.solve_time_s = time.monotonic() - start_time
             result.modeled_backup_reserve = modeled_backup_reserve
@@ -1276,6 +1367,7 @@ class BatteryOptimizer:
         mode_slots: list[str | None] | None = None,
         required_self_use_kw: list[float] | None = None,
         cost_neutral_slots: list[bool] | None = None,
+        cost_neutral_day_ids: list[str | None] | None = None,
     ) -> list[_LpPeriod]:
         """Aggregate base 5-minute slots into internal LP periods."""
         near_slots = int(LP_NEAR_HORIZON_HOURS * 60 / self.interval_minutes)
@@ -1289,6 +1381,7 @@ class BatteryOptimizer:
         mode_slots = mode_slots or [None] * n
         required_self_use_kw = required_self_use_kw or [0.0] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
+        cost_neutral_day_ids = cost_neutral_day_ids or [None] * n
         periods: list[_LpPeriod] = []
         idx = 0
 
@@ -1317,6 +1410,7 @@ class BatteryOptimizer:
                 mode_slots,
                 required_self_use_kw,
                 cost_neutral_slots,
+                cost_neutral_day_ids,
             )
 
             # Keep the pre-window SOC deadline on an exact internal boundary.
@@ -1338,6 +1432,7 @@ class BatteryOptimizer:
                     grid_charge_allowed=all(grid_charge_allowed[idx:end]),
                     priority_export=priority_export_slots[idx],
                     cost_neutral=cost_neutral_slots[idx],
+                    cost_neutral_day=cost_neutral_day_ids[idx],
                     mode=mode_slots[idx],
                     required_self_use_kw=(
                         sum(required_self_use_kw[idx:end]) / (end - idx)
@@ -1365,6 +1460,7 @@ class BatteryOptimizer:
         mode_slots: list[str | None],
         required_self_use_kw: list[float],
         cost_neutral_slots: list[bool],
+        cost_neutral_day_ids: list[str | None],
     ) -> int:
         """Shorten a coarse period when correctness-sensitive inputs change."""
         if proposed_end <= start + 1:
@@ -1375,6 +1471,7 @@ class BatteryOptimizer:
         first_grid_charge_allowed = grid_charge_allowed[start]
         first_priority_export = priority_export_slots[start]
         first_cost_neutral = cost_neutral_slots[start]
+        first_cost_neutral_day = cost_neutral_day_ids[start]
         first_mode = mode_slots[start]
         import_group_ids = self._quota_import_group_ids or []
         export_group_ids = self._quota_export_group_ids or []
@@ -1401,7 +1498,10 @@ class BatteryOptimizer:
         min_surplus = max_surplus = first_surplus
 
         for idx in range(start + 1, proposed_end):
-            if cost_neutral_slots[idx] != first_cost_neutral:
+            if (
+                cost_neutral_slots[idx] != first_cost_neutral
+                or cost_neutral_day_ids[idx] != first_cost_neutral_day
+            ):
                 return idx
             min_import = min(min_import, import_prices[idx])
             max_import = max(max_import, import_prices[idx])
@@ -1690,7 +1790,8 @@ class BatteryOptimizer:
         cost_neutral_slots: list[bool] | None = None,
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
-        cost_neutral_account_for_planned_imports: bool = True,
+        cost_neutral_account_for_planned_imports: bool | dict[str, bool] = True,
+        cost_neutral_plan: CostNeutralPlan | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -1783,6 +1884,7 @@ class BatteryOptimizer:
                     cost_neutral_account_for_planned_imports=(
                         cost_neutral_account_for_planned_imports
                     ),
+                    cost_neutral_plan=cost_neutral_plan,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -1851,6 +1953,7 @@ class BatteryOptimizer:
                     cost_neutral_slots,
                     cost_neutral_forecast_import_cost,
                     cost_neutral_fixed_cost_allowance,
+                    cost_neutral_plan,
                 )
             last_result.lp_stats = {
                 **last_result.lp_stats,
@@ -2024,7 +2127,8 @@ class BatteryOptimizer:
         cost_neutral_slots: list[bool] | None = None,
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
-        cost_neutral_account_for_planned_imports: bool = True,
+        cost_neutral_account_for_planned_imports: bool | dict[str, bool] = True,
+        cost_neutral_plan: CostNeutralPlan | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -2044,6 +2148,22 @@ class BatteryOptimizer:
         import_bonus_prices = import_bonus_prices or [0.0] * n
         priority_export_slots = priority_export_slots or [False] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
+        if cost_neutral_plan is None:
+            cost_neutral_plan = CostNeutralPlan.from_legacy(
+                length=n,
+                earnings_cap=cost_neutral_earnings_cap,
+                slots=cost_neutral_slots,
+                forecast_import_cost=cost_neutral_forecast_import_cost,
+                fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+            )
+        elif cost_neutral_plan is not None:
+            cost_neutral_plan = cost_neutral_plan.normalized(n)
+        cost_neutral_day_ids = (
+            list(cost_neutral_plan.day_ids)
+            if cost_neutral_plan is not None
+            else [None] * n
+        )
+        cost_neutral_slots = [day is not None for day in cost_neutral_day_ids]
         allow_grid_charge = bool(allow_grid_charge)
         periods = self._build_lp_periods(
             n,
@@ -2060,6 +2180,7 @@ class BatteryOptimizer:
             mode_slots,
             required_self_use_kw,
             cost_neutral_slots,
+            cost_neutral_day_ids,
         )
         p_n = len(periods)
         p_import = [period.import_price for period in periods]
@@ -2067,6 +2188,34 @@ class BatteryOptimizer:
         p_export_bonus = [period.export_bonus_price for period in periods]
         p_import_bonus = [period.import_bonus_price for period in periods]
         p_cost_neutral = [period.cost_neutral for period in periods]
+        p_cost_neutral_days = [period.cost_neutral_day for period in periods]
+        cost_neutral_caps_by_day = (
+            dict(cost_neutral_plan.earnings_caps_by_day)
+            if cost_neutral_plan is not None
+            else {}
+        )
+        settlement_import_prices = (
+            cost_neutral_plan.settlement_import_prices
+            if cost_neutral_plan is not None
+            and cost_neutral_plan.settlement_import_prices
+            else import_prices
+        )
+        settlement_export_prices = (
+            cost_neutral_plan.settlement_export_prices
+            if cost_neutral_plan is not None
+            and cost_neutral_plan.settlement_export_prices
+            else export_prices
+        )
+        p_cost_neutral_import = [
+            sum(settlement_import_prices[period.start:period.end])
+            / period.slot_count
+            for period in periods
+        ]
+        p_cost_neutral_export = [
+            sum(settlement_export_prices[period.start:period.end])
+            / period.slot_count
+            for period in periods
+        ]
         import_group_ids = list(self._quota_import_group_ids or [])
         export_group_ids = list(self._quota_export_group_ids or [])
         if len(import_group_ids) < n:
@@ -2156,12 +2305,16 @@ class BatteryOptimizer:
 
         def _cost_neutral_export_slot(t: int) -> bool:
             """Return whether today's positive-FIT slot may cover daily costs."""
+            day = p_cost_neutral_days[t]
             return bool(
                 cost_neutral_active
-                and float(cost_neutral_earnings_cap or 0.0) > 1e-9
+                and day is not None
+                and cost_neutral_caps_by_day.get(day, 0.0) > 1e-9
                 and p_cost_neutral[t]
                 and p_allow_export[t]
-                and (p_export[t] + p_export_bonus[t]) > 0.001
+                and (
+                    p_cost_neutral_export[t] + p_export_bonus[t]
+                ) > 0.001
             )
 
         future_self_consumption_values = self._future_self_consumption_values(
@@ -2332,10 +2485,14 @@ class BatteryOptimizer:
         grid_charge_cap_binary_offset = next_offset
         if grid_charge_cap_active:
             next_offset += p_n
-        cost_neutral_active = (
-            cost_neutral_earnings_cap is not None
-            and any(p_cost_neutral)
+        cost_neutral_days = sorted(
+            {
+                day
+                for day in p_cost_neutral_days
+                if day is not None and day in cost_neutral_caps_by_day
+            }
         )
+        cost_neutral_active = bool(cost_neutral_days)
         battery_to_grid_offset = next_offset
         if cost_neutral_active:
             next_offset += p_n
@@ -2637,8 +2794,8 @@ class BatteryOptimizer:
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
         if cost_neutral_active:
-            # Four source-split rows per period plus the daily earnings cap.
-            A_ub_rows += 4 * p_n + 1
+            # Four source-split rows per period plus one earnings cap per day.
+            A_ub_rows += 4 * p_n + len(cost_neutral_days)
         if (
             allow_grid_charge
             and self.pre_window_slot is not None
@@ -2774,35 +2931,52 @@ class BatteryOptimizer:
                 b_ub.append(slot_export_limit_kw)
 
         if cost_neutral_active:
-            if cost_neutral_account_for_planned_imports:
-                fixed_cost_allowance = float(
-                    cost_neutral_fixed_cost_allowance
-                    if cost_neutral_fixed_cost_allowance is not None
-                    else float(cost_neutral_earnings_cap or 0.0)
-                    - float(cost_neutral_forecast_import_cost or 0.0)
-                )
-            else:
-                fixed_cost_allowance = max(
-                    0.0, float(cost_neutral_earnings_cap or 0.0)
-                )
-            for t in range(p_n):
-                if not p_cost_neutral[t]:
-                    continue
-                recognised_price = max(0.0, p_export[t] + p_export_bonus[t])
-                A_ub[len(b_ub), battery_to_grid_var(t)] = (
-                    recognised_price * p_dt[t]
-                )
-                if cost_neutral_account_for_planned_imports:
-                    # Replace the self-consumption baseline import estimate in
-                    # the target with the import cost caused by this LP plan.
-                    A_ub[len(b_ub), grid_import_var(t)] = (
-                        -p_import[t] * p_dt[t]
+            for day in cost_neutral_days:
+                account_for_day_imports = (
+                    cost_neutral_account_for_planned_imports.get(day, False)
+                    if isinstance(
+                        cost_neutral_account_for_planned_imports,
+                        dict,
                     )
-                    if bonus_import_active and p_import_bonus[t] > 0:
-                        A_ub[len(b_ub), bonus_import_var(t)] = (
-                            p_import_bonus[t] * p_dt[t]
+                    else cost_neutral_account_for_planned_imports
+                )
+                if account_for_day_imports:
+                    fixed_cost_allowance = float(
+                        cost_neutral_plan.fixed_cost_allowances_by_day.get(
+                            day,
+                            cost_neutral_caps_by_day.get(day, 0.0)
+                            - cost_neutral_plan.forecast_import_costs_by_day.get(
+                                day,
+                                0.0,
+                            ),
                         )
-            b_ub.append(fixed_cost_allowance)
+                    )
+                else:
+                    fixed_cost_allowance = max(
+                        0.0,
+                        cost_neutral_caps_by_day.get(day, 0.0),
+                    )
+                for t in range(p_n):
+                    if p_cost_neutral_days[t] != day:
+                        continue
+                    recognised_price = max(
+                        0.0,
+                        p_cost_neutral_export[t] + p_export_bonus[t],
+                    )
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = (
+                        recognised_price * p_dt[t]
+                    )
+                    if account_for_day_imports:
+                        # Replace this day's self-consumption baseline imports
+                        # with the imports caused by the emitted LP plan.
+                        A_ub[len(b_ub), grid_import_var(t)] = (
+                            -p_cost_neutral_import[t] * p_dt[t]
+                        )
+                        if bonus_import_active and p_import_bonus[t] > 0:
+                            A_ub[len(b_ub), bonus_import_var(t)] = (
+                                p_import_bonus[t] * p_dt[t]
+                            )
+                b_ub.append(fixed_cost_allowance)
 
         if paired_priority_recharge_periods:
             # Per-period pairing prevents a cheap slot before a later export
@@ -3317,6 +3491,7 @@ class BatteryOptimizer:
                 cost_neutral_slots,
                 cost_neutral_forecast_import_cost,
                 cost_neutral_fixed_cost_allowance,
+                cost_neutral_plan,
             )
             greedy.lp_stats = {**lp_stats, "fallback_reason": "solver_failed"}
             return greedy
@@ -3370,27 +3545,30 @@ class BatteryOptimizer:
         provisional_grid_import, _ = self._grid_flows_from_schedule(
             schedule, n, solar, load
         )
-        effective_cost_neutral_cap = self._cost_neutral_effective_earnings_cap(
-            grid_import_kw=provisional_grid_import,
-            import_prices=import_prices,
-            import_bonus_prices=import_bonus_prices,
-            import_bonus_cap_kwh=import_bonus_cap_kwh,
-            earnings_cap=cost_neutral_earnings_cap,
-            forecast_import_cost=cost_neutral_forecast_import_cost,
-            cost_neutral_slots=cost_neutral_slots,
-            fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+        effective_cost_neutral_caps = (
+            self._cost_neutral_effective_earnings_caps_by_day(
+                grid_import_kw=provisional_grid_import,
+                import_prices=import_prices,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                plan=cost_neutral_plan,
+            )
         )
-        schedule, planned_cost_neutral_earnings = self.enforce_cost_neutral_schedule(
+        planned_cost_neutral_by_day: dict[str, float] = {}
+        schedule, _ = self.enforce_cost_neutral_schedule(
             schedule,
             export_prices=export_prices,
             solar=solar,
             load=load,
-            earnings_cap=effective_cost_neutral_cap,
+            earnings_cap=None,
             cost_neutral_slots=cost_neutral_slots,
             export_bonus_prices=export_bonus_prices,
             export_bonus_cap_kwh=export_bonus_cap_kwh,
             export_bonus_group_ids=self._quota_export_group_ids,
             export_bonus_caps_by_group=self._quota_export_caps_by_group,
+            cost_neutral_plan=cost_neutral_plan,
+            earnings_caps_by_day=effective_cost_neutral_caps,
+            planned_earnings_by_day=planned_cost_neutral_by_day,
         )
 
         # _build_schedule re-models "hold" slots (LP imports to serve load while
@@ -3447,16 +3625,35 @@ class BatteryOptimizer:
             solar,
             load,
         )
-        if cost_neutral_earnings_cap is not None:
-            lp_stats["cost_neutral_earnings_cap"] = round(
-                max(0.0, float(effective_cost_neutral_cap or 0.0)), 6
-            )
-            lp_stats["cost_neutral_baseline_earnings_cap"] = round(
-                max(0.0, float(cost_neutral_earnings_cap)), 6
-            )
-            lp_stats["cost_neutral_planned_earnings"] = round(
-                planned_cost_neutral_earnings, 6
-            )
+        if cost_neutral_plan is not None:
+            lp_stats["cost_neutral_earnings_caps_by_day"] = {
+                day: round(value, 6)
+                for day, value in effective_cost_neutral_caps.items()
+            }
+            lp_stats["cost_neutral_baseline_earnings_caps_by_day"] = {
+                day: round(value, 6)
+                for day, value in (
+                    cost_neutral_plan.earnings_caps_by_day.items()
+                )
+            }
+            lp_stats["cost_neutral_planned_earnings_by_day"] = {
+                day: round(value, 6)
+                for day, value in planned_cost_neutral_by_day.items()
+            }
+            current_day = cost_neutral_plan.current_day
+            if current_day in effective_cost_neutral_caps:
+                lp_stats["cost_neutral_earnings_cap"] = round(
+                    effective_cost_neutral_caps[current_day],
+                    6,
+                )
+                lp_stats["cost_neutral_baseline_earnings_cap"] = round(
+                    cost_neutral_plan.earnings_caps_by_day[current_day],
+                    6,
+                )
+                lp_stats["cost_neutral_planned_earnings"] = round(
+                    planned_cost_neutral_by_day.get(current_day, 0.0),
+                    6,
+                )
 
         return OptimizerResult(
             schedule=schedule,
@@ -3835,6 +4032,7 @@ class BatteryOptimizer:
         cost_neutral_slots: list[bool] | None = None,
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
+        cost_neutral_plan: CostNeutralPlan | None = None,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
@@ -3851,6 +4049,20 @@ class BatteryOptimizer:
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
+        if cost_neutral_plan is None:
+            cost_neutral_plan = CostNeutralPlan.from_legacy(
+                length=n,
+                earnings_cap=cost_neutral_earnings_cap,
+                slots=cost_neutral_slots,
+                forecast_import_cost=cost_neutral_forecast_import_cost,
+                fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+            )
+        else:
+            cost_neutral_plan = cost_neutral_plan.normalized(n)
+        if cost_neutral_plan is not None:
+            cost_neutral_slots = [
+                day is not None for day in cost_neutral_plan.day_ids
+            ]
         import_group_ids = list(self._quota_import_group_ids or [None] * n)[:n]
         export_group_ids = list(self._quota_export_group_ids or [None] * n)[:n]
         if len(import_group_ids) < n:
@@ -3942,6 +4154,22 @@ class BatteryOptimizer:
                 effective_acquisition_costs[t],
             )
 
+        def _cost_neutral_export_slot(t: int) -> bool:
+            if cost_neutral_plan is None:
+                return False
+            day = cost_neutral_plan.day_ids[t]
+            settlement_export = (
+                cost_neutral_plan.settlement_export_prices[t]
+                if cost_neutral_plan.settlement_export_prices
+                else export_prices[t]
+            )
+            return bool(
+                day is not None
+                and cost_neutral_plan.earnings_caps_by_day.get(day, 0.0) > 1e-9
+                and allow_battery_export[t]
+                and settlement_export + export_bonus_prices[t] > 0.001
+            )
+
         def _max_grid_export_kw(t: int) -> float | None:
             return self._grid_export_limit_kw_for_range(t, t + 1)
         optimizer_reserve = self.backup_reserve
@@ -3988,12 +4216,17 @@ class BatteryOptimizer:
         soc_tracker = soc_0
         for spread, t, net_load in spreads:
             max_grid_export_kw = _max_grid_export_kw(t)
-            battery_export_allowed = allow_battery_export[t] and not below_optimizer_reserve
+            battery_export_allowed = (
+                allow_battery_export[t] and not below_optimizer_reserve
+            )
             export_profitable_slot = (
                 battery_export_allowed
                 and _economic_export_slot(t)
             )
             priority_export_slot = battery_export_allowed and _priority_export_slot(t)
+            cost_neutral_export_slot = (
+                battery_export_allowed and _cost_neutral_export_slot(t)
+            )
             future_self_consumption_value = self._has_future_self_consumption_value(
                 t, n, import_prices, solar, load
             )
@@ -4006,12 +4239,19 @@ class BatteryOptimizer:
                 )
             )
             if (
-                export_profitable_slot
-                and (priority_export_slot or not future_self_consumption_value)
+                (
+                    export_profitable_slot
+                    and (
+                        priority_export_slot
+                        or not future_self_consumption_value
+                    )
+                )
+                or cost_neutral_export_slot
                 or self_consumption_value_slot
             ):
-                forced_export_slot = export_profitable_slot and (
-                    priority_export_slot or not future_self_consumption_value
+                forced_export_slot = cost_neutral_export_slot or (
+                    export_profitable_slot
+                    and (priority_export_slot or not future_self_consumption_value)
                 )
                 # Profitable to discharge; cap to home load when battery export
                 # is not explicitly permitted or export is below acquisition cost.
@@ -4030,6 +4270,7 @@ class BatteryOptimizer:
                     not battery_export_allowed
                     or (
                         not priority_export_slot
+                        and not cost_neutral_export_slot
                         and acquisition_cost_kwh > 0
                         and effective_export_prices[t] < effective_acquisition_costs[t]
                     )
@@ -4289,17 +4530,28 @@ class BatteryOptimizer:
         ):
             if t in actions:
                 continue
-            battery_export_allowed = allow_battery_export[t] and not below_optimizer_reserve
+            battery_export_allowed = (
+                allow_battery_export[t] and not below_optimizer_reserve
+            )
             export_profitable_slot = (
                 battery_export_allowed
                 and _economic_export_slot(t)
             )
             priority_export_slot = battery_export_allowed and _priority_export_slot(t)
+            cost_neutral_export_slot = (
+                battery_export_allowed and _cost_neutral_export_slot(t)
+            )
             future_self_consumption_value = self._has_future_self_consumption_value(
                 t, n, import_prices, solar, load
             )
-            if block_battery_charge[t] or priority_export_slot or (
-                export_profitable_slot and not future_self_consumption_value
+            if (
+                block_battery_charge[t]
+                or priority_export_slot
+                or cost_neutral_export_slot
+                or (
+                    export_profitable_slot
+                    and not future_self_consumption_value
+                )
             ):
                 continue
             projected_soc = _projected_soc_before(t)
@@ -4996,21 +5248,19 @@ class BatteryOptimizer:
         )
 
         candidate_schedule = schedule
-        if (
-            cost_neutral_earnings_cap is not None
-            and float(cost_neutral_earnings_cap) <= 1e-9
-        ):
+        if cost_neutral_plan is not None:
             import_basis_schedule, _ = self.enforce_cost_neutral_schedule(
                 candidate_schedule,
                 export_prices=export_prices,
                 solar=solar,
                 load=load,
-                earnings_cap=0.0,
+                earnings_cap=None,
                 cost_neutral_slots=cost_neutral_slots,
                 export_bonus_prices=export_bonus_prices,
                 export_bonus_cap_kwh=export_bonus_cap_kwh,
                 export_bonus_group_ids=self._quota_export_group_ids,
                 export_bonus_caps_by_group=self._quota_export_caps_by_group,
+                cost_neutral_plan=cost_neutral_plan,
             )
         else:
             import_basis_schedule = candidate_schedule
@@ -5020,27 +5270,30 @@ class BatteryOptimizer:
             solar,
             load,
         )
-        effective_cost_neutral_cap = self._cost_neutral_effective_earnings_cap(
-            grid_import_kw=provisional_grid_import,
-            import_prices=import_prices,
-            import_bonus_prices=import_bonus_prices,
-            import_bonus_cap_kwh=import_bonus_cap_kwh,
-            earnings_cap=cost_neutral_earnings_cap,
-            forecast_import_cost=cost_neutral_forecast_import_cost,
-            cost_neutral_slots=cost_neutral_slots,
-            fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+        effective_cost_neutral_caps = (
+            self._cost_neutral_effective_earnings_caps_by_day(
+                grid_import_kw=provisional_grid_import,
+                import_prices=import_prices,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                plan=cost_neutral_plan,
+            )
         )
-        schedule, planned_cost_neutral_earnings = self.enforce_cost_neutral_schedule(
+        planned_cost_neutral_by_day: dict[str, float] = {}
+        schedule, _ = self.enforce_cost_neutral_schedule(
             candidate_schedule,
             export_prices=export_prices,
             solar=solar,
             load=load,
-            earnings_cap=effective_cost_neutral_cap,
+            earnings_cap=None,
             cost_neutral_slots=cost_neutral_slots,
             export_bonus_prices=export_bonus_prices,
             export_bonus_cap_kwh=export_bonus_cap_kwh,
             export_bonus_group_ids=self._quota_export_group_ids,
             export_bonus_caps_by_group=self._quota_export_caps_by_group,
+            cost_neutral_plan=cost_neutral_plan,
+            earnings_caps_by_day=effective_cost_neutral_caps,
+            planned_earnings_by_day=planned_cost_neutral_by_day,
         )
 
         grid_import, grid_export = self._grid_flows_from_schedule(
@@ -5122,18 +5375,39 @@ class BatteryOptimizer:
         )
 
         lp_stats: dict[str, Any] = {}
-        if cost_neutral_earnings_cap is not None:
+        if cost_neutral_plan is not None:
             lp_stats = {
-                "cost_neutral_earnings_cap": round(
-                    max(0.0, float(effective_cost_neutral_cap or 0.0)), 6
-                ),
-                "cost_neutral_baseline_earnings_cap": round(
-                    max(0.0, float(cost_neutral_earnings_cap)), 6
-                ),
-                "cost_neutral_planned_earnings": round(
-                    planned_cost_neutral_earnings, 6
-                ),
+                "cost_neutral_earnings_caps_by_day": {
+                    day: round(value, 6)
+                    for day, value in effective_cost_neutral_caps.items()
+                },
+                "cost_neutral_baseline_earnings_caps_by_day": {
+                    day: round(value, 6)
+                    for day, value in (
+                        cost_neutral_plan.earnings_caps_by_day.items()
+                    )
+                },
+                "cost_neutral_planned_earnings_by_day": {
+                    day: round(value, 6)
+                    for day, value in planned_cost_neutral_by_day.items()
+                },
             }
+            current_day = cost_neutral_plan.current_day
+            if current_day in effective_cost_neutral_caps:
+                lp_stats.update({
+                    "cost_neutral_earnings_cap": round(
+                        effective_cost_neutral_caps[current_day],
+                        6,
+                    ),
+                    "cost_neutral_baseline_earnings_cap": round(
+                        cost_neutral_plan.earnings_caps_by_day[current_day],
+                        6,
+                    ),
+                    "cost_neutral_planned_earnings": round(
+                        planned_cost_neutral_by_day.get(current_day, 0.0),
+                        6,
+                    ),
+                })
         return OptimizerResult(
             schedule=schedule,
             solver_used="greedy",
@@ -5790,6 +6064,59 @@ class BatteryOptimizer:
             fixed_allowance = baseline_cap - float(forecast_import_cost or 0.0)
         return max(0.0, fixed_allowance + actual_import_cost)
 
+    def _cost_neutral_effective_earnings_caps_by_day(
+        self,
+        *,
+        grid_import_kw: list[float],
+        import_prices: list[float],
+        import_bonus_prices: list[float] | None,
+        import_bonus_cap_kwh: float | None,
+        plan: CostNeutralPlan | None,
+    ) -> dict[str, float]:
+        """Replace every day's baseline imports with final-plan imports."""
+
+        if plan is None:
+            return {}
+        normalized = plan.normalized(len(grid_import_kw))
+        settlement_import_prices = (
+            normalized.settlement_import_prices or import_prices
+        )
+        bonuses = import_bonus_prices or [0.0] * len(grid_import_kw)
+        bonus_import = self._allocate_capped_bonus(
+            grid_import_kw,
+            bonuses,
+            import_bonus_cap_kwh,
+            self._quota_import_group_ids,
+            self._quota_import_caps_by_group,
+        )
+        actual_by_day = {day: 0.0 for day in normalized.earnings_caps_by_day}
+        for idx, grid_import in enumerate(grid_import_kw):
+            day = normalized.day_ids[idx]
+            if day is None or day not in actual_by_day:
+                continue
+            actual_by_day[day] += (
+                float(
+                    settlement_import_prices[idx]
+                    if idx < len(settlement_import_prices)
+                    else 0.0
+                )
+                * float(grid_import or 0.0)
+                - float(bonuses[idx] if idx < len(bonuses) else 0.0)
+                * float(bonus_import[idx] if idx < len(bonus_import) else 0.0)
+            ) * self.dt_hours
+        return {
+            day: max(
+                0.0,
+                normalized.fixed_cost_allowances_by_day.get(
+                    day,
+                    normalized.earnings_caps_by_day[day]
+                    - normalized.forecast_import_costs_by_day.get(day, 0.0),
+                )
+                + actual_by_day.get(day, 0.0),
+            )
+            for day in normalized.earnings_caps_by_day
+        }
+
     def enforce_cost_neutral_schedule(
         self,
         schedule: OptimizationSchedule,
@@ -5803,19 +6130,49 @@ class BatteryOptimizer:
         export_bonus_cap_kwh: float | None = None,
         export_bonus_group_ids: list[str | None] | None = None,
         export_bonus_caps_by_group: dict[str, float] | None = None,
+        cost_neutral_plan: CostNeutralPlan | None = None,
+        earnings_caps_by_day: dict[str, float] | None = None,
+        planned_earnings_by_day: dict[str, float] | None = None,
     ) -> tuple[OptimizationSchedule, float]:
         """Trim discretionary battery export to a chronological earnings cap.
 
         Natural solar export is never changed. This final schedule guard also
         covers coordinator overlays that run after the LP solve.
         """
-        if earnings_cap is None:
+        if cost_neutral_plan is not None:
+            normalized_plan = cost_neutral_plan.normalized(
+                len(schedule.actions or [])
+            )
+            slots_by_day = normalized_plan.day_ids
+            remaining_by_day = {
+                day: max(0.0, float(value))
+                for day, value in (
+                    earnings_caps_by_day
+                    or normalized_plan.earnings_caps_by_day
+                ).items()
+            }
+            if normalized_plan.settlement_export_prices:
+                export_prices = normalized_plan.settlement_export_prices
+        elif earnings_cap is not None:
+            legacy_day = "__legacy__"
+            slots = cost_neutral_slots or [False] * len(schedule.actions or [])
+            slots_by_day = [
+                legacy_day if idx < len(slots) and slots[idx] else None
+                for idx in range(len(schedule.actions or []))
+            ]
+            try:
+                remaining_by_day = {
+                    legacy_day: max(0.0, float(earnings_cap))
+                }
+            except (TypeError, ValueError):
+                return schedule, 0.0
+        else:
             return schedule, 0.0
-        try:
-            remaining = max(0.0, float(earnings_cap))
-        except (TypeError, ValueError):
-            return schedule, 0.0
-        slots = cost_neutral_slots or [False] * len(schedule.actions or [])
+        if planned_earnings_by_day is not None:
+            planned_earnings_by_day.clear()
+            planned_earnings_by_day.update(
+                {day: 0.0 for day in remaining_by_day}
+            )
         bonuses = export_bonus_prices or []
         grouped_bonus = bool(
             export_bonus_caps_by_group
@@ -5833,9 +6190,11 @@ class BatteryOptimizer:
         planned_earnings = 0.0
         trimmed: list[ScheduleAction] = []
         for idx, action in enumerate(schedule.actions or []):
-            if idx >= len(slots) or not slots[idx]:
+            day = slots_by_day[idx] if idx < len(slots_by_day) else None
+            if day is None or day not in remaining_by_day:
                 trimmed.append(action)
                 continue
+            remaining = remaining_by_day[day]
             solar_w = max(0.0, float(solar[idx] if idx < len(solar) else 0.0)) * 1000
             load_w = max(0.0, float(load[idx] if idx < len(load) else 0.0)) * 1000
             net_home_w = max(0.0, load_w - solar_w)
@@ -5909,6 +6268,11 @@ class BatteryOptimizer:
                 + allowed_base_kwh * base_price
             )
             planned_earnings += earned
+            remaining_by_day[day] = remaining
+            if planned_earnings_by_day is not None:
+                planned_earnings_by_day[day] = (
+                    planned_earnings_by_day.get(day, 0.0) + earned
+                )
             new_discharge_w = min(discharge_w, net_home_w) + allowed_export_w
             emitted_action = action.action
             power_w = float(action.power_w or 0.0)
@@ -5951,35 +6315,49 @@ class BatteryOptimizer:
         cost_neutral_slots: list[bool] | None = None,
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
+        cost_neutral_plan: CostNeutralPlan | None = None,
     ) -> OptimizerResult:
         """Make result flows and economics describe the final emitted schedule."""
+        if cost_neutral_plan is None:
+            cost_neutral_plan = CostNeutralPlan.from_legacy(
+                length=len(import_prices),
+                earnings_cap=cost_neutral_earnings_cap,
+                slots=cost_neutral_slots or [False] * len(import_prices),
+                forecast_import_cost=cost_neutral_forecast_import_cost,
+                fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+            )
+        else:
+            cost_neutral_plan = cost_neutral_plan.normalized(len(import_prices))
         provisional_grid_import, _ = self._grid_flows_from_schedule(
             schedule,
             len(import_prices),
             solar,
             load,
         )
-        effective_cost_neutral_cap = self._cost_neutral_effective_earnings_cap(
-            grid_import_kw=provisional_grid_import,
-            import_prices=import_prices,
-            import_bonus_prices=import_bonus_prices,
-            import_bonus_cap_kwh=import_bonus_cap_kwh,
-            earnings_cap=cost_neutral_earnings_cap,
-            forecast_import_cost=cost_neutral_forecast_import_cost,
-            cost_neutral_slots=cost_neutral_slots,
-            fixed_cost_allowance=cost_neutral_fixed_cost_allowance,
+        effective_cost_neutral_caps = (
+            self._cost_neutral_effective_earnings_caps_by_day(
+                grid_import_kw=provisional_grid_import,
+                import_prices=import_prices,
+                import_bonus_prices=import_bonus_prices,
+                import_bonus_cap_kwh=import_bonus_cap_kwh,
+                plan=cost_neutral_plan,
+            )
         )
-        schedule, planned_cost_neutral_earnings = self.enforce_cost_neutral_schedule(
+        planned_cost_neutral_by_day: dict[str, float] = {}
+        schedule, _ = self.enforce_cost_neutral_schedule(
             schedule,
             export_prices=export_prices,
             solar=solar,
             load=load,
-            earnings_cap=effective_cost_neutral_cap,
+            earnings_cap=None,
             cost_neutral_slots=cost_neutral_slots,
             export_bonus_prices=export_bonus_prices,
             export_bonus_cap_kwh=export_bonus_cap_kwh,
             export_bonus_group_ids=self._quota_export_group_ids,
             export_bonus_caps_by_group=self._quota_export_caps_by_group,
+            cost_neutral_plan=cost_neutral_plan,
+            earnings_caps_by_day=effective_cost_neutral_caps,
+            planned_earnings_by_day=planned_cost_neutral_by_day,
         )
         actions = list(schedule.actions or [])
         if initial_soc is None and actions and actions[0].soc is not None:
@@ -6265,16 +6643,35 @@ class BatteryOptimizer:
             )
             for idx, action in enumerate(schedule.actions[:n])
         ]
-        if cost_neutral_earnings_cap is not None:
-            result.lp_stats["cost_neutral_planned_earnings"] = round(
-                planned_cost_neutral_earnings, 6
-            )
-            result.lp_stats["cost_neutral_earnings_cap"] = round(
-                max(0.0, float(effective_cost_neutral_cap or 0.0)), 6
-            )
-            result.lp_stats["cost_neutral_baseline_earnings_cap"] = round(
-                max(0.0, float(cost_neutral_earnings_cap)), 6
-            )
+        if cost_neutral_plan is not None:
+            result.lp_stats["cost_neutral_earnings_caps_by_day"] = {
+                day: round(value, 6)
+                for day, value in effective_cost_neutral_caps.items()
+            }
+            result.lp_stats["cost_neutral_baseline_earnings_caps_by_day"] = {
+                day: round(value, 6)
+                for day, value in (
+                    cost_neutral_plan.earnings_caps_by_day.items()
+                )
+            }
+            result.lp_stats["cost_neutral_planned_earnings_by_day"] = {
+                day: round(value, 6)
+                for day, value in planned_cost_neutral_by_day.items()
+            }
+            current_day = cost_neutral_plan.current_day
+            if current_day in effective_cost_neutral_caps:
+                result.lp_stats["cost_neutral_planned_earnings"] = round(
+                    planned_cost_neutral_by_day.get(current_day, 0.0),
+                    6,
+                )
+                result.lp_stats["cost_neutral_earnings_cap"] = round(
+                    effective_cost_neutral_caps[current_day],
+                    6,
+                )
+                result.lp_stats["cost_neutral_baseline_earnings_cap"] = round(
+                    cost_neutral_plan.earnings_caps_by_day[current_day],
+                    6,
+                )
         if result.feasible:
             result.reserve_recommendation = self._build_reserve_recommendation(
                 schedule,

@@ -2,7 +2,9 @@
 
 import importlib.util
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 MODULE_PATH = (
@@ -18,6 +20,8 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 CostNeutralBudget = MODULE.CostNeutralBudget
+CostNeutralPlan = MODULE.CostNeutralPlan
+elapsed_settlement_seconds = MODULE.elapsed_settlement_seconds
 
 
 def test_exact_daily_cost_example_produces_two_dollar_export_cap():
@@ -57,3 +61,40 @@ def test_missing_or_zero_supply_still_covers_import_costs():
     )
 
     assert budget.battery_export_earnings_cap == 1.0
+
+
+def test_cost_neutral_plan_normalizes_alignment_and_invalid_values():
+    plan = CostNeutralPlan(
+        day_ids=["2026-08-01", "missing", "2026-08-02"],
+        earnings_caps_by_day={
+            "2026-08-01": 1.25,
+            "2026-08-02": -1.0,
+            "invalid": float("nan"),
+        },
+        forecast_import_costs_by_day={"2026-08-01": 0.25},
+        fixed_cost_allowances_by_day={"2026-08-01": 1.0},
+        current_day="2026-08-01",
+        timezone="Australia/Sydney",
+    ).normalized(4)
+
+    assert plan.day_ids == ["2026-08-01", None, "2026-08-02", None]
+    assert plan.earnings_caps_by_day == {
+        "2026-08-01": 1.25,
+        "2026-08-02": 0.0,
+    }
+    assert plan.forecast_import_costs_by_day == {
+        "2026-08-01": 0.25,
+        "2026-08-02": 0.0,
+    }
+    assert plan.fixed_cost_allowances_by_day == {
+        "2026-08-01": 1.0,
+        "2026-08-02": 0.0,
+    }
+
+
+def test_elapsed_settlement_time_uses_real_instants_across_dst_fallback():
+    local_tz = ZoneInfo("Australia/Sydney")
+    first_130 = datetime(2026, 4, 5, 2, 30, tzinfo=local_tz, fold=0)
+    second_130 = datetime(2026, 4, 5, 2, 30, tzinfo=local_tz, fold=1)
+
+    assert elapsed_settlement_seconds(first_130, second_130) == 3600.0

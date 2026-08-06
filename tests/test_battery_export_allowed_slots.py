@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -2004,6 +2005,322 @@ def test_zero_daily_supply_charge_keeps_legacy_monthly_fallback(opt_module):
 
     assert value == pytest.approx(1.0)
     assert source == "configured_monthly"
+
+
+def _cost_neutral_accounting_coordinator(
+    opt_module,
+    provider: str,
+    *,
+    supply_charge: float = 1.0,
+):
+    coordinator = _coordinator(
+        opt_module,
+        provider,
+        daily_supply_charge=supply_charge,
+    )
+    coordinator._config.cost_neutral_enabled = True
+    coordinator._config.interval_minutes = 60
+    coordinator._actual_import_cost_today = 0.0
+    coordinator._actual_export_earnings_today = 0.0
+    coordinator._last_cost_date = None
+    coordinator._last_cost_tracking_time = None
+    coordinator._last_import_bonus_group_ids = None
+    coordinator._last_import_bonus_caps_by_group = {}
+    coordinator._last_export_bonus_group_ids = None
+    coordinator._last_export_bonus_caps_by_group = {}
+    coordinator._optimizer = SimpleNamespace(
+        capacity_kwh=10.0,
+        efficiency=1.0,
+        max_charge_kw=5.0,
+        max_discharge_kw=5.0,
+        _natural_self_consumption_floor=lambda soc: 0.0,
+        _grid_export_limit_kw_for_range=lambda start, end: None,
+        _allocate_capped_bonus=lambda flows, *args, **kwargs: [0.0] * len(flows),
+    )
+    return coordinator
+
+
+@pytest.mark.parametrize("provider", _registered_electricity_providers())
+def test_cost_neutral_builds_tomorrow_budget_for_every_electricity_provider(
+    opt_module,
+    provider,
+):
+    coordinator = _cost_neutral_accounting_coordinator(opt_module, provider)
+    local_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 1, 22, 0, tzinfo=local_tz)
+    timestamps = [now + timedelta(hours=idx) for idx in range(4)]
+
+    plan, status = coordinator._cost_neutral_solve_inputs(
+        now=now,
+        timestamps=timestamps,
+        import_prices=[0.20] * 4,
+        export_prices=[0.10] * 4,
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0] * 4,
+        load=[1.0] * 4,
+        current_soc=0.0,
+    )
+
+    assert plan is not None
+    assert plan.day_ids == [
+        "2026-08-01",
+        "2026-08-01",
+        "2026-08-02",
+        "2026-08-02",
+    ]
+    assert plan.earnings_caps_by_day == pytest.approx({
+        "2026-08-01": 1.2,
+        "2026-08-02": 1.4,
+    })
+    assert set(status["days"]) == {"2026-08-01", "2026-08-02"}
+    assert status["current_day"] == "2026-08-01"
+
+
+def test_cost_neutral_uses_each_target_month_for_monthly_supply_charge(
+    opt_module,
+):
+    coordinator = _cost_neutral_accounting_coordinator(
+        opt_module,
+        "globird",
+        supply_charge=0.0,
+    )
+    coordinator._entry.options.pop("daily_supply_charge", None)
+    coordinator._entry.options["monthly_supply_charge"] = 61.0
+    now = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+
+    plan, status = coordinator._cost_neutral_solve_inputs(
+        now=now,
+        timestamps=[now, now + timedelta(hours=1)],
+        import_prices=[0.0, 0.0],
+        export_prices=[0.0, 0.0],
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0, 0.0],
+        load=[0.0, 0.0],
+        current_soc=0.5,
+    )
+
+    assert plan is not None
+    assert status["days"]["2026-08-31"]["supply_charge"]["value"] == pytest.approx(
+        61.0 / 31,
+        abs=1e-4,
+    )
+    assert status["days"]["2026-09-01"]["supply_charge"]["value"] == pytest.approx(
+        61.0 / 30,
+        abs=1e-4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("local_day", "expected_slots"),
+    [
+        (datetime(2026, 10, 4), 23),
+        (datetime(2026, 4, 5), 25),
+    ],
+)
+def test_cost_neutral_groups_dst_horizons_by_ha_local_date(
+    opt_module,
+    local_day,
+    expected_slots,
+):
+    coordinator = _cost_neutral_accounting_coordinator(opt_module, "other")
+    local_tz = ZoneInfo("Australia/Sydney")
+    local_start = local_day.replace(tzinfo=local_tz)
+    local_end = (local_day + timedelta(days=1)).replace(tzinfo=local_tz)
+    cursor = local_start.astimezone(timezone.utc)
+    end_utc = local_end.astimezone(timezone.utc)
+    timestamps = []
+    while cursor < end_utc:
+        timestamps.append(cursor)
+        cursor += timedelta(hours=1)
+
+    plan, _ = coordinator._cost_neutral_solve_inputs(
+        now=local_start,
+        timestamps=timestamps,
+        import_prices=[0.0] * len(timestamps),
+        export_prices=[0.0] * len(timestamps),
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0] * len(timestamps),
+        load=[0.0] * len(timestamps),
+        current_soc=0.5,
+    )
+
+    assert plan is not None
+    assert len(plan.day_ids) == expected_slots
+    assert set(plan.day_ids) == {local_start.date().isoformat()}
+    assert plan.timezone == "Australia/Sydney"
+
+
+def test_cost_neutral_48_hour_horizon_contains_three_local_dates(opt_module):
+    coordinator = _cost_neutral_accounting_coordinator(opt_module, "amber")
+    local_tz = ZoneInfo("Australia/Sydney")
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=local_tz)
+    timestamps = [now + timedelta(hours=idx) for idx in range(48)]
+
+    plan, status = coordinator._cost_neutral_solve_inputs(
+        now=now,
+        timestamps=timestamps,
+        import_prices=[0.0] * 48,
+        export_prices=[0.0] * 48,
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0] * 48,
+        load=[0.0] * 48,
+        current_soc=0.5,
+    )
+
+    assert plan is not None
+    assert list(status["days"]) == [
+        "2026-08-01",
+        "2026-08-02",
+        "2026-08-03",
+    ]
+
+
+def test_cost_neutral_drops_stale_measured_counters_after_midnight(opt_module):
+    coordinator = _cost_neutral_accounting_coordinator(opt_module, "flow_power")
+    coordinator._actual_import_cost_today = 99.0
+    coordinator._actual_export_earnings_today = 25.0
+    coordinator._last_cost_date = "2026-08-01"
+    coordinator._last_cost_tracking_time = datetime(
+        2026,
+        8,
+        1,
+        23,
+        55,
+        tzinfo=timezone.utc,
+    )
+    now = datetime(2026, 8, 2, 0, 1, tzinfo=timezone.utc)
+
+    plan, status = coordinator._cost_neutral_solve_inputs(
+        now=now,
+        timestamps=[now],
+        import_prices=[0.0],
+        export_prices=[0.0],
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0],
+        load=[0.0],
+        current_soc=0.5,
+    )
+
+    assert plan is not None
+    assert plan.earnings_caps_by_day == {"2026-08-02": pytest.approx(1.0)}
+    assert status["measured_import_cost"] == 0.0
+    assert status["measured_export_earnings"] == 0.0
+
+
+def test_cost_neutral_keeps_today_covered_and_builds_tomorrow_target(
+    opt_module,
+):
+    coordinator = _cost_neutral_accounting_coordinator(opt_module, "globird")
+    coordinator._actual_import_cost_today = 1.0
+    coordinator._actual_export_earnings_today = 3.0
+    local_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 1, 22, 0, tzinfo=local_tz)
+    coordinator._last_cost_date = "2026-08-01"
+    coordinator._last_cost_tracking_time = now
+    timestamps = [now + timedelta(hours=idx) for idx in range(4)]
+
+    plan, status = coordinator._cost_neutral_solve_inputs(
+        now=now,
+        timestamps=timestamps,
+        import_prices=[0.20] * 4,
+        export_prices=[0.10] * 4,
+        export_bonus_prices=None,
+        export_bonus_cap_kwh=None,
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        solar=[0.0] * 4,
+        load=[1.0] * 4,
+        current_soc=0.0,
+    )
+
+    assert plan is not None
+    assert plan.earnings_caps_by_day["2026-08-01"] == 0.0
+    assert plan.earnings_caps_by_day["2026-08-02"] == pytest.approx(1.4)
+    assert status["days"]["2026-08-01"]["reason"] == (
+        "already_covered_by_measured_or_natural_export"
+    )
+    assert status["days"]["2026-08-02"][
+        "battery_export_earnings_cap"
+    ] == pytest.approx(1.4)
+
+
+def test_cost_neutral_uses_billable_prices_not_lp_overlays(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._last_display_import_prices = [0.20, 0.30]
+    coordinator._last_display_export_prices = [0.10, -0.05]
+
+    import_prices, export_prices = coordinator._cost_neutral_settlement_prices(
+        [9.0, 8.0, 7.0],
+        [6.0, 5.0, 4.0],
+    )
+
+    assert import_prices == [0.20, 0.30, 0.30]
+    assert export_prices == [0.10, -0.05, -0.05]
+
+
+def test_cost_neutral_uses_base_rates_before_quota_bonus(opt_module):
+    coordinator = _coordinator(opt_module, "covau")
+    coordinator._last_display_import_prices = [0.0]
+    coordinator._last_display_export_prices = [0.12]
+    coordinator._last_settlement_import_prices = [0.30]
+    coordinator._last_settlement_export_prices = [0.06]
+
+    import_prices, export_prices = coordinator._cost_neutral_settlement_prices(
+        [0.30],
+        [0.06],
+    )
+
+    assert import_prices == [0.30]
+    assert export_prices == [0.06]
+
+
+@pytest.mark.parametrize(
+    ("local_day", "expected_slots"),
+    [
+        (datetime(2026, 10, 4), 23),
+        (datetime(2026, 4, 5), 25),
+    ],
+)
+def test_production_price_timeline_is_dst_safe(
+    opt_module,
+    monkeypatch,
+    local_day,
+    expected_slots,
+):
+    coordinator = _coordinator(opt_module, "globird")
+    coordinator._config.interval_minutes = 60
+    coordinator._pending_price_timestamps = None
+    coordinator._last_price_timestamps = None
+    local_tz = ZoneInfo("Australia/Sydney")
+    local_start = local_day.replace(tzinfo=local_tz)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: local_start)
+
+    timestamps = coordinator._price_timestamps(26)
+    utc_timestamps = [value.astimezone(timezone.utc) for value in timestamps]
+
+    assert all(
+        right - left == timedelta(hours=1)
+        for left, right in zip(utc_timestamps, utc_timestamps[1:])
+    )
+    assert sum(
+        value.date() == local_start.date()
+        for value in timestamps
+    ) == expected_slots
 
 
 def test_optimizer_settings_reject_both_exclusive_modes(opt_module):

@@ -480,3 +480,505 @@ def test_final_schedule_guard_values_only_remaining_capped_export_bonus(
 
     assert trimmed.actions[0].battery_discharge_w == pytest.approx(1_000.0)
     assert earnings == pytest.approx(0.19)
+
+
+def test_multiday_plan_keeps_covered_today_separate_from_tomorrow(
+    optimizer_module,
+):
+    module = optimizer_module
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-01", "2026-08-02", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        current_day="2026-08-01",
+        timezone="UTC",
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20] * 4,
+        export_prices=[1.00] * 4,
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0] * 4,
+        current_soc=1.0,
+        allow_battery_export=[True] * 4,
+        priority_export_slots=[True] * 4,
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(4),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w[:2] == pytest.approx([0.0, 0.0])
+    assert sum(result.schedule.battery_export_w[2:]) / 1000.0 == pytest.approx(
+        1.0,
+        abs=1e-4,
+    )
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"] == {
+        "2026-08-01": pytest.approx(0.0),
+        "2026-08-02": pytest.approx(1.0),
+    }
+
+
+def test_multiday_import_accounting_is_selected_per_settlement_day(
+    optimizer_module,
+    monkeypatch,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    captured: list[bool | dict[str, bool]] = []
+    solve_signature = inspect.signature(optimizer._solve_lp)
+    start = _timestamps(2)[0]
+
+    def fake_solve(*args, **kwargs):
+        bound = solve_signature.bind(*args, **kwargs)
+        captured.append(
+            bound.arguments["cost_neutral_account_for_planned_imports"]
+        )
+        return module.OptimizerResult(
+            schedule=module.OptimizationSchedule(
+                actions=[
+                    module.ScheduleAction(
+                        timestamp=start + timedelta(hours=idx),
+                        action="self_consumption",
+                        power_w=0.0,
+                    )
+                    for idx in range(2)
+                ],
+                predicted_cost=0.0,
+                predicted_savings=0.0,
+                last_updated=start,
+            ),
+            solver_used="highs",
+            grid_import_w=[0.0, 0.0],
+            grid_export_w=[0.0, 0.0],
+            battery_to_grid_w=[0.0, 0.0],
+            lp_stats={
+                "cost_neutral_earnings_caps_by_day": {
+                    "2026-08-01": 0.0,
+                    "2026-08-02": 1.0,
+                }
+            },
+        )
+
+    monkeypatch.setattr(optimizer, "_solve_lp", fake_solve)
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": -0.1, "2026-08-02": 1.0},
+        current_day="2026-08-01",
+    )
+
+    optimizer.optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[0.10, 0.10],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=0.5,
+        allow_battery_export=[False, False],
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert captured == [
+        {"2026-08-01": False, "2026-08-02": True}
+    ]
+
+
+def test_multiday_final_guard_spends_each_local_day_cap_independently(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    start = _timestamps(4)[0]
+    schedule = module.OptimizationSchedule(
+        actions=[
+            module.ScheduleAction(
+                timestamp=start + timedelta(hours=idx),
+                action="export",
+                power_w=1_000,
+                battery_discharge_w=1_000,
+            )
+            for idx in range(4)
+        ],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+        last_updated=start,
+    )
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-01", "2026-08-02", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.5, "2026-08-02": 1.5},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.5, "2026-08-02": 1.5},
+        current_day="2026-08-01",
+    )
+    planned: dict[str, float] = {}
+
+    trimmed, earnings = optimizer.enforce_cost_neutral_schedule(
+        schedule,
+        export_prices=[1.0] * 4,
+        solar=[0.0] * 4,
+        load=[0.0] * 4,
+        earnings_cap=None,
+        cost_neutral_slots=None,
+        cost_neutral_plan=plan,
+        planned_earnings_by_day=planned,
+    )
+
+    assert trimmed.battery_export_w == pytest.approx(
+        [500.0, 0.0, 1_000.0, 500.0]
+    )
+    assert planned == {
+        "2026-08-01": pytest.approx(0.5),
+        "2026-08-02": pytest.approx(1.5),
+    }
+    assert earnings == pytest.approx(2.0)
+
+
+def test_multiday_effective_caps_use_only_same_day_final_imports(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": -0.2, "2026-08-02": 0.0},
+        current_day="2026-08-01",
+    )
+
+    caps = optimizer._cost_neutral_effective_earnings_caps_by_day(
+        grid_import_kw=[2.0, 3.0],
+        import_prices=[0.20, 0.20],
+        import_bonus_prices=None,
+        import_bonus_cap_kwh=None,
+        plan=plan,
+    )
+
+    assert caps == {
+        "2026-08-01": pytest.approx(0.2),
+        "2026-08-02": pytest.approx(0.6),
+    }
+
+
+def test_multiday_greedy_fallback_uses_the_same_daily_guards(
+    optimizer_module,
+    monkeypatch,
+):
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", False)
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.5},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 0.5},
+        current_day="2026-08-01",
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[1.00, 1.00],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[True, True],
+        priority_export_slots=[True, True],
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 500.0])
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"] == {
+        "2026-08-01": pytest.approx(0.0),
+        "2026-08-02": pytest.approx(0.5),
+    }
+
+
+def test_multiday_greedy_cost_neutral_can_use_low_value_export_slot(
+    optimizer_module,
+    monkeypatch,
+):
+    module = optimizer_module
+    monkeypatch.setattr(module, "HIGHS_AVAILABLE", False)
+    optimizer = _optimizer(module)
+    optimizer.update_config(backup_reserve=0.5)
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        current_day="2026-08-01",
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.10] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[0.0, 0.0, 1.0],
+        current_soc=1.0,
+        acquisition_cost_kwh=0.30,
+        allow_battery_export=[False, True, False],
+        schedule_timestamps=_timestamps(3),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.battery_export_w[1] == pytest.approx(2_000.0)
+    assert sum(
+        action.battery_discharge_w
+        for action in result.schedule.actions
+    ) <= 5_000.0
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"][
+        "2026-08-02"
+    ] == pytest.approx(0.2)
+
+
+def test_four4free_can_charge_then_cover_tomorrows_cost_neutral_budget(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=60,
+        horizon_hours=6,
+        terminal_weight=0.0,
+    )
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01"] * 2 + ["2026-08-02"] * 4,
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        current_day="2026-08-01",
+        timezone="Australia/Sydney",
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.30, 0.0, 0.0, 0.30, 0.30],
+        export_prices=[0.10] * 6,
+        solar_forecast=[0.0] * 6,
+        load_forecast=[0.0] * 6,
+        current_soc=0.0,
+        allow_battery_export=[False, False, False, False, True, True],
+        schedule_timestamps=_timestamps(6),
+        cost_neutral_plan=plan,
+    )
+
+    assert sum(
+        action.battery_charge_w
+        for action in result.schedule.actions[2:4]
+    ) > 0.0
+    assert result.schedule.battery_export_w[:2] == pytest.approx([0.0, 0.0])
+    assert sum(result.schedule.battery_export_w[4:]) / 1000.0 == pytest.approx(
+        2.0,
+        abs=1e-4,
+    )
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"][
+        "2026-08-02"
+    ] == pytest.approx(0.2)
+
+
+def test_zerohero_daily_bonus_quota_and_cost_neutral_days_coexist(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=None,
+        import_caps_by_group=None,
+        export_group_ids=["2026-08-01"] * 2 + ["2026-08-02"] * 2,
+        export_caps_by_group={"2026-08-01": 0.0, "2026-08-02": 1.0},
+    )
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01"] * 2 + ["2026-08-02"] * 2,
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        current_day="2026-08-01",
+        timezone="Australia/Sydney",
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.30] * 4,
+        export_prices=[0.10] * 4,
+        export_bonus_prices=[0.90] * 4,
+        export_bonus_cap_kwh=1.0,
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0] * 4,
+        current_soc=1.0,
+        allow_battery_export=[True] * 4,
+        priority_export_slots=[True] * 4,
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(4),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w[:2] == pytest.approx([0.0, 0.0])
+    assert sum(result.schedule.battery_export_w[2:]) / 1000.0 == pytest.approx(
+        1.0,
+        abs=1e-4,
+    )
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"][
+        "2026-08-02"
+    ] == pytest.approx(1.0)
+
+
+def test_multiday_plan_preserves_reserve_floor_and_site_export_limit(
+    optimizer_module,
+):
+    module = optimizer_module
+    optimizer = _optimizer(module)
+    optimizer.update_config(backup_reserve=0.5)
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02", "2026-08-02", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 5.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 5.0},
+        current_day="2026-08-01",
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.20] * 4,
+        export_prices=[1.00] * 4,
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0] * 4,
+        current_soc=1.0,
+        allow_battery_export=[True] * 4,
+        priority_export_slots=[True] * 4,
+        priority_export_enabled=True,
+        grid_export_limits_w=[0.0, 2_000.0, 2_000.0, 2_000.0],
+        schedule_timestamps=_timestamps(4),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w[0] == 0.0
+    assert max(result.schedule.battery_export_w[1:]) <= 2_000.0
+    assert sum(result.schedule.battery_export_w[1:]) / 1000.0 == pytest.approx(
+        5.0,
+        abs=1e-4,
+    )
+    assert min(action.soc for action in result.schedule.actions) >= 0.5
+
+
+def test_multiday_zero_caps_do_not_bootstrap_imports_or_cross_dates(
+    optimizer_module,
+):
+    module = optimizer_module
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": -0.2, "2026-08-02": -0.2},
+        current_day="2026-08-01",
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[1.00, 1.00],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[True, True],
+        priority_export_slots=[True, True],
+        priority_export_enabled=True,
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.grid_import_w == pytest.approx([0.0, 0.0])
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 0.0])
+    assert result.lp_stats["cost_neutral_earnings_caps_by_day"] == {
+        "2026-08-01": pytest.approx(0.0),
+        "2026-08-02": pytest.approx(0.0),
+    }
+
+
+def test_multiday_zero_cap_preserves_natural_solar_export_on_each_date(
+    optimizer_module,
+):
+    module = optimizer_module
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        current_day="2026-08-01",
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[0.50, 0.50],
+        solar_forecast=[2.0, 2.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[True, True],
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 0.0])
+    assert result.grid_export_w == pytest.approx([2_000.0, 2_000.0])
+
+
+def test_multiday_plan_cannot_export_when_permission_mask_is_false(
+    optimizer_module,
+):
+    module = optimizer_module
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 1.0},
+        current_day="2026-08-01",
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[1.00, 1.00],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[False, False],
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 0.0])
+
+
+def test_multiday_constraints_use_billable_rates_not_lp_export_boost(
+    optimizer_module,
+):
+    module = optimizer_module
+    plan = module.CostNeutralPlan(
+        day_ids=["2026-08-01", "2026-08-02"],
+        earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
+        fixed_cost_allowances_by_day={"2026-08-01": 0.0, "2026-08-02": 0.2},
+        current_day="2026-08-01",
+        settlement_import_prices=[0.20, 0.20],
+        settlement_export_prices=[0.10, 0.10],
+    )
+
+    result = _optimizer(module).optimize(
+        import_prices=[0.20, 0.20],
+        export_prices=[1.00, 1.00],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[False, True],
+        schedule_timestamps=_timestamps(2),
+        cost_neutral_plan=plan,
+    )
+
+    assert result.schedule.battery_export_w == pytest.approx([0.0, 2_000.0])
+    assert result.lp_stats["cost_neutral_planned_earnings_by_day"][
+        "2026-08-02"
+    ] == pytest.approx(0.2)

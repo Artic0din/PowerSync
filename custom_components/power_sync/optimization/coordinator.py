@@ -22,7 +22,11 @@ from homeassistant.exceptions import ConfigEntryNotReady
 
 from .battery_controller import TRUSTED_FOR_PERSIST
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
-from .cost_neutral import CostNeutralBudget
+from .cost_neutral import (
+    CostNeutralBudget,
+    CostNeutralPlan,
+    elapsed_settlement_seconds,
+)
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
@@ -415,6 +419,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
+        # Contractual rates before optimizer-only overlays and bounded quota
+        # bonuses. Cost Neutral uses these to value each local settlement day.
+        self._last_settlement_import_prices: list[float] | None = None
+        self._last_settlement_export_prices: list[float] | None = None
         self._last_grid_charge_cap_import_prices: list[float] | None = None  # $/kWh hard cap reference
         self._last_export_boost_allowed_slots: list[bool] = []
         self._last_battery_export_allowed_slots: list[bool] = []
@@ -2964,9 +2972,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             microsecond=0,
         )
         n_steps = int(self._config.horizon_hours * 60) // interval
-        timestamps = [
-            start + timedelta(minutes=idx * interval) for idx in range(n_steps)
-        ]
+        timestamps = self._interval_timestamps(start, n_steps, interval)
         (
             import_prices,
             export_prices,
@@ -2993,6 +2999,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             base + bonus
             for base, bonus in zip(export_prices, export_bonus, strict=False)
         ]
+        self._last_settlement_import_prices = list(import_prices)
+        self._last_settlement_export_prices = list(export_prices)
         self._last_grid_charge_cap_import_prices = list(
             self._last_display_import_prices
         )
@@ -3281,6 +3289,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._logged_inferred_zerohero_plan = config.plan
         return config
 
+    def _cost_neutral_settlement_prices(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+    ) -> tuple[list[float], list[float]]:
+        """Return billable prices, excluding optimizer-only price overlays."""
+
+        display_import = (
+            getattr(self, "_last_settlement_import_prices", None)
+            or getattr(self, "_last_display_import_prices", None)
+            or []
+        )
+        display_export = (
+            getattr(self, "_last_settlement_export_prices", None)
+            or getattr(self, "_last_display_export_prices", None)
+            or []
+        )
+        fallback_import = display_import[-1] if display_import else None
+        fallback_export = display_export[-1] if display_export else None
+        settlement_import = [
+            float(display_import[idx])
+            if idx < len(display_import)
+            else float(fallback_import if fallback_import is not None else value)
+            for idx, value in enumerate(import_prices)
+        ]
+        settlement_export = [
+            float(display_export[idx])
+            if idx < len(display_export)
+            else float(fallback_export if fallback_export is not None else value)
+            for idx, value in enumerate(export_prices)
+        ]
+        return settlement_import, settlement_export
+
     def _price_timestamps(self, n: int) -> list[datetime]:
         """Return local timestamps aligned with the current optimizer interval."""
         pending_timestamps = getattr(self, "_pending_price_timestamps", None)
@@ -3296,7 +3337,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             second=0,
             microsecond=0,
         )
-        return [start + timedelta(minutes=idx * interval) for idx in range(n)]
+        return self._interval_timestamps(start, n, interval)
+
+    @staticmethod
+    def _interval_timestamps(
+        local_start: datetime,
+        count: int,
+        interval_minutes: int,
+    ) -> list[datetime]:
+        """Build an instant-contiguous timeline rendered in the HA timezone."""
+
+        if local_start.tzinfo is None:
+            return [
+                local_start + timedelta(minutes=idx * interval_minutes)
+                for idx in range(count)
+            ]
+        utc_start = local_start.astimezone(timezone.utc)
+        return [
+            (
+                utc_start + timedelta(minutes=idx * interval_minutes)
+            ).astimezone(local_start.tzinfo)
+            for idx in range(count)
+        ]
 
     def _commit_price_forecast_cache(
         self,
@@ -5192,6 +5254,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._optimizer.pre_window_solar_learning_confidence = (
                 self._solar_forecast_learner.confidence(forecast_source)
             )
+            # Cost Neutral accounts using billable tariff rates. The price
+            # builder keeps those separately from export boosts, saving-session
+            # overlays, demand penalties, and confidence decay used only by the
+            # LP objective.
+            (
+                cost_neutral_import_prices,
+                cost_neutral_export_prices,
+            ) = self._cost_neutral_settlement_prices(
+                import_prices,
+                export_prices,
+            )
             self._apply_provider_quota_optimizer_inputs(import_prices, export_prices)
             battery_export_allowed = self._battery_export_allowed_slots(
                 len(import_prices),
@@ -5301,17 +5374,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     export_caps_by_group=self._last_export_bonus_caps_by_group,
                 )
 
-            (
-                cost_neutral_cap,
-                cost_neutral_slots,
-                cost_neutral_status,
-                cost_neutral_fixed_cost_allowance,
-            ) = (
+            cost_neutral_plan, cost_neutral_status = (
                 self._cost_neutral_solve_inputs(
                     now=dt_util.now(),
                     timestamps=schedule_timestamps,
-                    import_prices=import_prices,
-                    export_prices=export_prices,
+                    import_prices=cost_neutral_import_prices,
+                    export_prices=cost_neutral_export_prices,
                     export_bonus_prices=self._last_zerohero_bonus_prices,
                     export_bonus_cap_kwh=self._last_zerohero_bonus_cap_kwh,
                     import_bonus_prices=self._last_zerocharge_bonus_prices,
@@ -5322,8 +5390,42 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             self._cost_neutral_status = cost_neutral_status
-            cost_neutral_forecast_import_cost = float(
-                cost_neutral_status.get("forecast_import_cost", 0.0) or 0.0
+            current_cost_neutral_day = (
+                cost_neutral_plan.current_day
+                if cost_neutral_plan is not None
+                else None
+            )
+            cost_neutral_cap = (
+                cost_neutral_plan.earnings_caps_by_day.get(
+                    current_cost_neutral_day,
+                    0.0,
+                )
+                if cost_neutral_plan is not None
+                and current_cost_neutral_day is not None
+                else None
+            )
+            cost_neutral_slots = (
+                [day is not None for day in cost_neutral_plan.day_ids]
+                if cost_neutral_plan is not None
+                else [False] * len(schedule_timestamps)
+            )
+            cost_neutral_forecast_import_cost = (
+                cost_neutral_plan.forecast_import_costs_by_day.get(
+                    current_cost_neutral_day,
+                    0.0,
+                )
+                if cost_neutral_plan is not None
+                and current_cost_neutral_day is not None
+                else 0.0
+            )
+            cost_neutral_fixed_cost_allowance = (
+                cost_neutral_plan.fixed_cost_allowances_by_day.get(
+                    current_cost_neutral_day,
+                    0.0,
+                )
+                if cost_neutral_plan is not None
+                and current_cost_neutral_day is not None
+                else None
             )
 
             reference_reserve_floor = (
@@ -5386,6 +5488,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_slots,
                         cost_neutral_forecast_import_cost,
                         cost_neutral_fixed_cost_allowance,
+                        cost_neutral_plan,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5455,6 +5558,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cost_neutral_fixed_cost_allowance=(
                     cost_neutral_fixed_cost_allowance
                 ),
+                cost_neutral_plan=cost_neutral_plan,
             )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
@@ -5537,6 +5641,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     cost_neutral_fixed_cost_allowance=(
                         cost_neutral_fixed_cost_allowance
                     ),
+                    cost_neutral_plan=cost_neutral_plan,
                 )
                 final_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
@@ -5554,67 +5659,131 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._current_schedule = result.schedule
                 self._last_optimizer_result = result
                 self._last_update_time = dt_util.now()
-            if cost_neutral_cap is not None:
-                effective_cost_neutral_cap = max(
-                    0.0,
-                    float(
+            if cost_neutral_plan is not None:
+                effective_caps = {
+                    str(day): max(0.0, float(value))
+                    for day, value in dict(
                         result.lp_stats.get(
-                            "cost_neutral_earnings_cap", cost_neutral_cap
+                            "cost_neutral_earnings_caps_by_day",
+                            cost_neutral_plan.earnings_caps_by_day,
                         )
-                    ),
-                )
-                planned = max(
-                    0.0,
-                    float(
+                        or {}
+                    ).items()
+                }
+                planned_by_day = {
+                    str(day): max(0.0, float(value))
+                    for day, value in dict(
                         result.lp_stats.get(
-                            "cost_neutral_planned_earnings", 0.0
+                            "cost_neutral_planned_earnings_by_day",
+                            {},
                         )
-                    ),
+                        or {}
+                    ).items()
+                }
+                days_status = {
+                    str(day): dict(value)
+                    for day, value in dict(
+                        cost_neutral_status.get("days", {})
+                    ).items()
+                }
+                cost_neutral_export_bonus_prices = (
+                    self._last_zerohero_bonus_prices or []
                 )
-                uncovered = max(0.0, effective_cost_neutral_cap - planned)
-                eligible_indices = [
-                    idx
-                    for idx, in_today in enumerate(cost_neutral_slots)
-                    if in_today
-                    and idx < len(battery_export_allowed)
-                    and bool(battery_export_allowed[idx])
-                    and idx < len(export_prices)
-                    and float(export_prices[idx] or 0.0) > 0.0
-                ]
-                blocking_reasons: list[str] = []
-                if effective_cost_neutral_cap <= 1e-6:
-                    reason = "already_covered_by_measured_or_natural_export"
-                elif not eligible_indices:
-                    reason = "no_eligible_export_slots_before_midnight"
-                elif grid_export_limits_w is not None and all(
-                    idx >= len(grid_export_limits_w)
-                    or grid_export_limits_w[idx] is not None
-                    and float(grid_export_limits_w[idx] or 0.0) <= 0.0
-                    for idx in eligible_indices
-                ):
-                    reason = "site_or_network_export_limit"
-                    blocking_reasons.append("site_or_network_export_limit")
-                elif soc <= reference_reserve_floor + 1e-6 and planned <= 1e-6:
-                    reason = "battery_or_reserve_limit"
-                    blocking_reasons.append("reserve_floor")
-                elif uncovered <= 0.005:
-                    reason = "covered"
-                else:
-                    reason = "insufficient_eligible_capacity"
-                    if self.charge_by_time_enabled:
-                        blocking_reasons.append("charge_by_time_requirement")
-                    if self._should_spread_export_schedule():
-                        blocking_reasons.append("spread_export_limit")
+                for day in cost_neutral_plan.earnings_caps_by_day:
+                    effective_cap = effective_caps.get(day, 0.0)
+                    planned = planned_by_day.get(day, 0.0)
+                    uncovered = max(0.0, effective_cap - planned)
+                    eligible_indices = [
+                        idx
+                        for idx, slot_day in enumerate(cost_neutral_plan.day_ids)
+                        if slot_day == day
+                        and idx < len(battery_export_allowed)
+                        and bool(battery_export_allowed[idx])
+                        and idx < len(cost_neutral_export_prices)
+                        and (
+                            float(cost_neutral_export_prices[idx] or 0.0)
+                            + float(
+                                cost_neutral_export_bonus_prices[idx]
+                                if idx < len(cost_neutral_export_bonus_prices)
+                                else 0.0
+                            )
+                        )
+                        > 0.0
+                    ]
+                    blocking_reasons: list[str] = []
+                    if effective_cap <= 1e-6:
+                        reason = "already_covered_by_measured_or_natural_export"
+                    elif not eligible_indices:
+                        reason = (
+                            "no_eligible_export_slots_before_midnight"
+                            if day == current_cost_neutral_day
+                            else "no_eligible_export_slots_for_local_day"
+                        )
+                    elif grid_export_limits_w is not None and all(
+                        idx >= len(grid_export_limits_w)
+                        or (
+                            grid_export_limits_w[idx] is not None
+                            and float(grid_export_limits_w[idx] or 0.0) <= 0.0
+                        )
+                        for idx in eligible_indices
+                    ):
+                        reason = "site_or_network_export_limit"
+                        blocking_reasons.append("site_or_network_export_limit")
+                    elif (
+                        soc <= reference_reserve_floor + 1e-6
+                        and planned <= 1e-6
+                    ):
+                        reason = "battery_or_reserve_limit"
+                        blocking_reasons.append("reserve_floor")
+                    elif uncovered <= 0.005:
+                        reason = "covered"
+                    else:
+                        reason = "insufficient_eligible_capacity"
+                        if self.charge_by_time_enabled:
+                            blocking_reasons.append("charge_by_time_requirement")
+                        if self._should_spread_export_schedule():
+                            blocking_reasons.append("spread_export_limit")
+                    days_status[day] = {
+                        **days_status.get(day, {"local_date": day}),
+                        "battery_export_earnings_cap": round(effective_cap, 4),
+                        "planned_battery_export_earnings": round(planned, 4),
+                        "uncovered_amount": round(uncovered, 4),
+                        "projected_net_daily_cost": round(uncovered, 4),
+                        "reason": reason,
+                        "blocking_reasons": blocking_reasons,
+                    }
+
+                current_status = days_status.get(
+                    current_cost_neutral_day or "",
+                    {},
+                )
                 self._cost_neutral_status = {
                     **cost_neutral_status,
-                    "battery_export_earnings_cap": round(
-                        effective_cost_neutral_cap, 4
+                    "days": days_status,
+                    "battery_export_earnings_cap": current_status.get(
+                        "battery_export_earnings_cap",
+                        0.0,
                     ),
-                    "planned_battery_export_earnings": round(planned, 4),
-                    "uncovered_amount": round(uncovered, 4),
-                    "projected_net_daily_cost": round(uncovered, 4),
-                    "reason": reason,
-                    "blocking_reasons": blocking_reasons,
+                    "planned_battery_export_earnings": current_status.get(
+                        "planned_battery_export_earnings",
+                        0.0,
+                    ),
+                    "uncovered_amount": current_status.get(
+                        "uncovered_amount",
+                        0.0,
+                    ),
+                    "projected_net_daily_cost": current_status.get(
+                        "projected_net_daily_cost",
+                        0.0,
+                    ),
+                    "reason": current_status.get(
+                        "reason",
+                        cost_neutral_status.get("reason", "no_forecast_days"),
+                    ),
+                    "blocking_reasons": current_status.get(
+                        "blocking_reasons",
+                        [],
+                    ),
                 }
             self._set_active_export_reserve_floor_slots(None, None)
 
@@ -11907,6 +12076,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if is_flow_power:
                             display_export_raw = list(export_prices)
 
+                        self._last_settlement_import_prices = list(import_prices)
+                        self._last_settlement_export_prices = list(export_prices)
+
                         # Store prices for UI display BEFORE LP adjustments.
                         # Clip to actual forecast length so the app chart doesn't
                         # show flat-line padding where the forecast ran out.
@@ -11955,10 +12127,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # a fresh grid then would shift every cached price one
                         # position. Stage a fresh grid every run so a successful
                         # provider switch cannot retain static-TOU metadata.
-                        self._pending_price_timestamps = [
-                            current_window + timedelta(minutes=idx * interval)
-                            for idx in range(n_steps)
-                        ]
+                        self._pending_price_timestamps = self._interval_timestamps(
+                            current_window,
+                            n_steps,
+                            interval,
+                        )
 
                         _price_label = "Flow Power" if is_flow_power else "Dynamic"
                         _LOGGER.debug(
@@ -12018,7 +12191,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_prices: list[float] = []
         display_import: list[float] = []
         display_export: list[float] = []
-        timestamps: list[datetime] = []
 
         # Log TOU period windows for debugging day-of-week matching
         dow_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -12032,10 +12204,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     sell_rates.get(pname, "?"),
                 )
 
-        for t in range(n_steps):
-            ts = now + timedelta(minutes=t * interval)
-            timestamps.append(ts)
-
+        timestamps = self._interval_timestamps(now, n_steps, interval)
+        for t, ts in enumerate(timestamps):
             matched_period = find_matching_tou_period(
                 tou_periods,
                 ts,
@@ -12101,7 +12271,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Log price profile summary: unique (buy, sell) combos with hour ranges
             price_profile: dict[tuple[float, float], list[int]] = {}
             for t_idx in range(len(import_prices)):
-                ts = now + timedelta(minutes=t_idx * interval)
+                ts = timestamps[t_idx]
                 key = (round(import_prices[t_idx] * 100, 1), round(export_prices[t_idx] * 100, 1))
                 if key not in price_profile:
                     price_profile[key] = []
@@ -12121,6 +12291,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store actual tariff prices for mobile app display
         self._last_display_import_prices = display_import
         self._last_display_export_prices = display_export
+        self._last_settlement_import_prices = list(display_import)
+        self._last_settlement_export_prices = list(display_export)
         self._last_grid_charge_cap_import_prices = list(import_prices)
         self._pending_price_timestamps = timestamps
 
@@ -13338,7 +13510,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_cost_tracking_time = now
             return  # First call — no interval to accumulate yet
 
-        elapsed_seconds = (now - self._last_cost_tracking_time).total_seconds()
+        # Subtract UTC instants rather than local wall times so a daylight-saving
+        # transition cannot double-count or skip an hour of measured settlement.
+        elapsed_seconds = elapsed_settlement_seconds(
+            self._last_cost_tracking_time,
+            now,
+        )
 
         # Skip if called too frequently (< 30s) — eliminates multi-counting
         if elapsed_seconds < 30:
@@ -13851,16 +14028,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar: list[float],
         load: list[float],
         current_soc: float,
-    ) -> tuple[float | None, list[bool], dict[str, Any], float | None]:
-        """Build a non-self-referential current-local-day earnings budget."""
+    ) -> tuple[CostNeutralPlan | None, dict[str, Any]]:
+        """Build independent non-self-referential HA-local daily budgets."""
         local_midnight = now.replace(
             hour=0, minute=0, second=0, microsecond=0
         ) + timedelta(days=1)
-        slots = [timestamp < local_midnight for timestamp in timestamps]
         if not self.cost_neutral_enabled:
             return (
                 None,
-                slots,
                 {
                     "enabled": False,
                     "effective_mode": (
@@ -13868,7 +14043,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ),
                     "reason": "disabled",
                 },
-                None,
             )
 
         n = min(
@@ -13878,7 +14052,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             len(solar),
             len(load),
         )
-        measurement_as_of = self._last_cost_tracking_time or now
+        local_tz = now.tzinfo
+        current_day = now.date().isoformat()
+        timezone_name = getattr(local_tz, "key", None) or str(local_tz or "local")
+        day_ids: list[str | None] = []
+        for timestamp in timestamps[:n]:
+            local_timestamp = (
+                timestamp.astimezone(local_tz)
+                if timestamp.tzinfo is not None and local_tz is not None
+                else timestamp
+            )
+            day = local_timestamp.date().isoformat()
+            day_ids.append(day if day >= current_day else None)
+
+        measured_day_matches = getattr(
+            self,
+            "_last_cost_date",
+            None,
+        ) in (None, current_day)
+        measurement_as_of = (
+            self._last_cost_tracking_time
+            if measured_day_matches and self._last_cost_tracking_time is not None
+            else now
+        )
         dt_hours = self._config.interval_minutes / 60.0
         capacity_kwh = max(0.001, self._optimizer.capacity_kwh)
         efficiency = max(0.01, min(1.0, self._optimizer.efficiency))
@@ -13890,7 +14086,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         forecast_import_kw = [0.0] * n
         forecast_natural_export_kw = [0.0] * n
         for idx in range(n):
-            if not slots[idx] or timestamps[idx] <= measurement_as_of:
+            if day_ids[idx] is None:
+                continue
+            if (
+                day_ids[idx] == current_day
+                and timestamps[idx] <= measurement_as_of
+            ):
                 continue
             net_load_kw = float(load[idx] or 0.0) - float(solar[idx] or 0.0)
             if net_load_kw > 0:
@@ -13940,8 +14141,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_import_bonus_group_ids,
             self._last_import_bonus_caps_by_group,
         )
-        forecast_import_cost = sum(
-            (
+        days = sorted({day for day in day_ids if day is not None})
+        forecast_import_costs = {day: 0.0 for day in days}
+        forecast_natural_export_earnings = {day: 0.0 for day in days}
+        for idx, day in enumerate(day_ids):
+            if day is None:
+                continue
+            forecast_import_costs[day] += (
                 float(import_prices[idx]) * forecast_import_kw[idx]
                 - float(
                     import_bonus_prices[idx]
@@ -13949,10 +14155,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else 0.0
                 ) * import_bonus[idx]
             ) * dt_hours
-            for idx in range(n)
-        )
-        forecast_natural_export_earnings = sum(
-            (
+            forecast_natural_export_earnings[day] += (
                 float(export_prices[idx]) * forecast_natural_export_kw[idx]
                 + float(
                     export_bonus_prices[idx]
@@ -13960,49 +14163,132 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else 0.0
                 ) * export_bonus[idx]
             ) * dt_hours
-            for idx in range(n)
+
+        measured_import_cost = (
+            self._actual_import_cost_today if measured_day_matches else 0.0
         )
-        supply_charge, supply_source = self._daily_supply_charge_for_cost_neutral(now)
-        budget = CostNeutralBudget(
-            supply_charge=supply_charge,
-            measured_import_cost=self._actual_import_cost_today,
-            measured_export_earnings=self._actual_export_earnings_today,
-            forecast_import_cost=forecast_import_cost,
-            forecast_natural_export_earnings=forecast_natural_export_earnings,
+        measured_export_earnings = (
+            self._actual_export_earnings_today if measured_day_matches else 0.0
         )
-        base_projected_cost = budget.base_projected_cost
-        fixed_cost_allowance = budget.fixed_cost_allowance
-        cap = budget.battery_export_earnings_cap
+        caps_by_day: dict[str, float] = {}
+        fixed_allowances_by_day: dict[str, float] = {}
+        day_status: dict[str, dict[str, Any]] = {}
+        for day in days:
+            day_date = datetime.fromisoformat(day)
+            day_reference = now.replace(
+                year=day_date.year,
+                month=day_date.month,
+                day=day_date.day,
+                hour=12,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            supply_charge, supply_source = (
+                self._daily_supply_charge_for_cost_neutral(day_reference)
+            )
+            budget = CostNeutralBudget(
+                supply_charge=supply_charge,
+                measured_import_cost=(
+                    measured_import_cost if day == current_day else 0.0
+                ),
+                measured_export_earnings=(
+                    measured_export_earnings if day == current_day else 0.0
+                ),
+                forecast_import_cost=forecast_import_costs[day],
+                forecast_natural_export_earnings=(
+                    forecast_natural_export_earnings[day]
+                ),
+            )
+            cap = budget.battery_export_earnings_cap
+            caps_by_day[day] = cap
+            fixed_allowances_by_day[day] = budget.fixed_cost_allowance
+            day_status[day] = {
+                "local_date": day,
+                "base_projected_cost": round(budget.base_projected_cost, 4),
+                "battery_export_earnings_cap": round(cap, 4),
+                "planned_battery_export_earnings": 0.0,
+                "uncovered_amount": round(cap, 4),
+                "projected_net_daily_cost": round(cap, 4),
+                "supply_charge": {
+                    "value": round(supply_charge, 4),
+                    "source": supply_source,
+                },
+                "measured_import_cost": round(
+                    measured_import_cost if day == current_day else 0.0,
+                    4,
+                ),
+                "measured_export_earnings": round(
+                    measured_export_earnings if day == current_day else 0.0,
+                    4,
+                ),
+                "forecast_import_cost": round(forecast_import_costs[day], 4),
+                "forecast_natural_export_earnings": round(
+                    forecast_natural_export_earnings[day],
+                    4,
+                ),
+                "reason": (
+                    "already_covered_by_measured_or_natural_export"
+                    if cap <= 1e-6
+                    else "insufficient_eligible_capacity"
+                ),
+                "blocking_reasons": [],
+            }
+
+        plan = CostNeutralPlan(
+            day_ids=day_ids,
+            earnings_caps_by_day=caps_by_day,
+            forecast_import_costs_by_day=forecast_import_costs,
+            fixed_cost_allowances_by_day=fixed_allowances_by_day,
+            current_day=current_day,
+            timezone=timezone_name,
+            settlement_import_prices=list(import_prices[:n]),
+            settlement_export_prices=list(export_prices[:n]),
+        )
+        current_status = day_status.get(current_day, {})
         status = {
             "enabled": True,
             "effective_mode": "cost_neutral",
+            "timezone": timezone_name,
+            "current_day": current_day,
+            "days": day_status,
             "local_day_end": local_midnight.isoformat(),
             "measurement_as_of": measurement_as_of.isoformat(),
-            "base_projected_cost": round(base_projected_cost, 4),
-            "battery_export_earnings_cap": round(cap, 4),
+            "base_projected_cost": current_status.get("base_projected_cost", 0.0),
+            "battery_export_earnings_cap": current_status.get(
+                "battery_export_earnings_cap",
+                0.0,
+            ),
             "planned_battery_export_earnings": 0.0,
-            "uncovered_amount": round(cap, 4),
-            "projected_net_daily_cost": round(cap, 4),
-            "supply_charge": {
-                "value": round(supply_charge, 4),
-                "source": supply_source,
-            },
-            "measured_import_cost": round(self._actual_import_cost_today, 4),
-            "measured_export_earnings": round(
-                self._actual_export_earnings_today, 4
+            "uncovered_amount": current_status.get("uncovered_amount", 0.0),
+            "projected_net_daily_cost": current_status.get(
+                "projected_net_daily_cost",
+                0.0,
             ),
-            "forecast_import_cost": round(forecast_import_cost, 4),
-            "forecast_natural_export_earnings": round(
-                forecast_natural_export_earnings, 4
+            "supply_charge": current_status.get(
+                "supply_charge",
+                {"value": 0.0, "source": "missing"},
             ),
-            "reason": (
-                "already_covered_by_measured_or_natural_export"
-                if cap <= 1e-6
-                else "insufficient_eligible_capacity"
+            "measured_import_cost": current_status.get(
+                "measured_import_cost",
+                0.0,
             ),
+            "measured_export_earnings": current_status.get(
+                "measured_export_earnings",
+                0.0,
+            ),
+            "forecast_import_cost": current_status.get(
+                "forecast_import_cost",
+                0.0,
+            ),
+            "forecast_natural_export_earnings": current_status.get(
+                "forecast_natural_export_earnings",
+                0.0,
+            ),
+            "reason": current_status.get("reason", "no_forecast_days"),
             "blocking_reasons": [],
         }
-        return cap, slots, status, fixed_cost_allowance
+        return plan, status
 
     def _get_daily_cost(self) -> float:
         """Get today's total cost: actual (midnight→now) + predicted (now→midnight)."""
