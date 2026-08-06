@@ -3319,6 +3319,47 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for ts in self._price_timestamps(n)
         ]
 
+    def _zerohero_bonus_window_slots(self, n: int) -> list[bool]:
+        """Return ZeroHero window slots with a positive daily bonus quota.
+
+        The scalar ``_last_zerohero_bonus_cap_kwh`` is intentionally the
+        current-day remainder for public/runtime compatibility.  A forecast
+        can also contain future local days, so use the staged per-day quota
+        groups when they are available; this keeps a spent current day from
+        hiding a still-available future-day window.
+        """
+        config = self._zerohero_config()
+        if config is None or n <= 0:
+            return [False] * max(0, n)
+
+        group_ids = getattr(self, "_last_export_bonus_group_ids", None)
+        caps_by_group = getattr(self, "_last_export_bonus_caps_by_group", None)
+        if group_ids is not None and caps_by_group is not None:
+            timestamps = self._price_timestamps(n)
+            return [
+                idx < len(group_ids)
+                and group_ids[idx] is not None
+                and max(
+                    0.0,
+                    float(caps_by_group.get(str(group_ids[idx]), 0.0) or 0.0),
+                )
+                > 1e-6
+                and zerohero_is_in_window(timestamps[idx], config)
+                for idx in range(n)
+            ]
+
+        # Lightweight callers/tests predating quota grouping may set only the
+        # scalar cap; retain their established window behaviour.
+        try:
+            scalar_cap = float(
+                getattr(self, "_last_zerohero_bonus_cap_kwh", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            scalar_cap = 0.0
+        if scalar_cap <= 1e-6:
+            return [False] * n
+        return self._zerohero_window_slots(n)
+
     def _zerocharge_window_slots(self, n: int) -> list[bool]:
         """Return optimizer slots inside the configured ZeroCharge window."""
         config = self._zerohero_config()
@@ -3504,18 +3545,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             0.0,
             config.export_cap_kwh - self._actual_zerohero_bonus_export_kwh_today,
         )
+        current_day = dt_util.now().date().isoformat()
+        export_groups: list[str | None] = [None] * n
+        export_caps: dict[str, float] = {}
         for idx, ts in enumerate(timestamps):
             if not zerohero_is_in_window(ts, config):
                 continue
+            # Keep planned grid import out of every no-import window, even
+            # when that local day has exhausted its export bonus allowance.
+            import_prices[idx] += 5.0
+            tariff_day = ts.date().isoformat()
+            if tariff_day == current_day:
+                day_cap = remaining_cap
+            elif tariff_day > current_day:
+                day_cap = max(0.0, config.export_cap_kwh)
+            else:
+                # A stale forecast must not spend a prior day's allowance.
+                continue
+            if day_cap <= 1e-9:
+                continue
+            export_groups[idx] = tariff_day
+            export_caps[tariff_day] = day_cap
             base_fit = max(0.0, export_prices[idx] if idx < len(export_prices) else 0.0)
             self._last_zerohero_bonus_prices[idx] = max(
                 0.0,
                 config.super_export_rate - base_fit,
             )
-            # Keep planned grid import out of the no-import window without
-            # making the LP infeasible when household load must still be served.
-            import_prices[idx] += 5.0
 
+        self._last_export_bonus_group_ids = export_groups
+        self._last_export_bonus_caps_by_group = export_caps
         self._last_zerohero_bonus_cap_kwh = remaining_cap
         if remaining_cap > 0 and any(self._last_zerohero_bonus_prices):
             _LOGGER.info(
@@ -6853,20 +6911,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return True
 
-    def _current_import_price_for_action(
+    def _current_price_index_for_action(
         self,
-        prices: list[float],
+        length: int,
         action: Any | None,
-    ) -> float | None:
-        """Return the tariff price for an action's scheduled interval."""
+    ) -> int | None:
+        """Return the price interval index matching an action timestamp."""
         if action is None:
             return None
         action_time = self._as_utc_datetime(getattr(action, "timestamp", None))
         if action_time is None:
             return None
-        if not prices:
+        if length <= 0:
             return None
-        timestamps = self._price_timestamps(len(prices))
+        timestamps = self._price_timestamps(length)
         if not timestamps:
             return None
 
@@ -6875,17 +6933,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             int(getattr(self._config, "interval_minutes", 5) or 5),
         )
         slot_limit = timedelta(minutes=interval_minutes)
-        n = min(len(prices), len(timestamps))
+        n = min(length, len(timestamps))
         for idx in range(n):
             slot_start = self._as_utc_datetime(timestamps[idx])
             if slot_start is None:
                 continue
             if slot_start <= action_time < slot_start + slot_limit:
-                try:
-                    return float(prices[idx])
-                except (TypeError, ValueError):
-                    return None
+                return idx
         return None
+
+    def _current_import_price_for_action(
+        self,
+        prices: list[float],
+        action: Any | None,
+    ) -> float | None:
+        """Return the tariff price for an action's scheduled interval."""
+        idx = self._current_price_index_for_action(len(prices), action)
+        if idx is None:
+            return None
+        try:
+            return float(prices[idx])
+        except (TypeError, ValueError):
+            return None
 
     def _current_export_price_for_action(
         self,
@@ -6905,12 +6974,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if base_price is None:
             return None
 
-        try:
-            remaining_bonus_cap = float(
-                getattr(self, "_last_zerohero_bonus_cap_kwh", 0.0) or 0.0
-            )
-        except (TypeError, ValueError):
-            remaining_bonus_cap = 0.0
+        group_ids = getattr(self, "_last_export_bonus_group_ids", None)
+        caps_by_group = getattr(self, "_last_export_bonus_caps_by_group", None)
+        if group_ids is not None and caps_by_group is not None:
+            action_idx = self._current_price_index_for_action(len(group_ids), action)
+            action_group = group_ids[action_idx] if action_idx is not None else None
+            if action_group is None:
+                remaining_bonus_cap = 0.0
+            else:
+                try:
+                    remaining_bonus_cap = float(
+                        caps_by_group.get(str(action_group), 0.0) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    remaining_bonus_cap = 0.0
+        else:
+            try:
+                remaining_bonus_cap = float(
+                    getattr(self, "_last_zerohero_bonus_cap_kwh", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                remaining_bonus_cap = 0.0
         if not math.isfinite(remaining_bonus_cap) or remaining_bonus_cap <= 1e-6:
             return base_price
 
@@ -8683,10 +8767,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._saving_session_export_slots(n),
         ]
         zerohero_config = self._zerohero_config()
-        zerohero_cap = self._last_zerohero_bonus_cap_kwh
         if zerohero_config is not None:
-            if zerohero_cap is not None and zerohero_cap > 1e-6:
-                slot_sources.append(self._zerohero_window_slots(n))
+            slot_sources.append(self._zerohero_bonus_window_slots(n))
         else:
             slot_sources.insert(0, self._positive_price_export_slots(n, export_prices))
 
@@ -8720,9 +8802,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._saving_session_export_slots(n),
         ]
         zerohero_config = self._zerohero_config()
-        zerohero_cap = self._last_zerohero_bonus_cap_kwh
-        if zerohero_config is not None and zerohero_cap is not None and zerohero_cap > 1e-6:
-            slot_sources.append(self._zerohero_window_slots(n))
+        if zerohero_config is not None:
+            slot_sources.append(self._zerohero_bonus_window_slots(n))
         if self._provider_key() == "covau":
             slot_sources.append(self._covau_export_window_slots(n))
 

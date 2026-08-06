@@ -2531,6 +2531,82 @@ def test_priority_export_pairs_with_next_days_zerocharge_allowance(
     )
 
 
+def test_zerohero_future_group_activates_when_current_group_is_exhausted(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32_200,
+        max_charge_w=10_000,
+        max_discharge_w=5_000,
+        max_battery_export_w=5_000,
+        backup_reserve=0.18,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=30,
+        terminal_weight=0.0,
+    )
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 6, 17, 0, tzinfo=aest)
+    n = 30 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    today = start.date().isoformat()
+    tomorrow = (start + timedelta(days=1)).date().isoformat()
+    export_prices = [0.0] * n
+    export_bonus_prices = [0.0] * n
+    allow_export = [False] * n
+    export_groups: list[str | None] = [None] * n
+    for idx, timestamp in enumerate(timestamps):
+        if timestamp.date().isoformat() not in {today, tomorrow}:
+            continue
+        if not 18 <= timestamp.hour < 21:
+            continue
+        export_bonus_prices[idx] = 0.15
+        allow_export[idx] = True
+        export_groups[idx] = timestamp.date().isoformat()
+
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=None,
+        import_caps_by_group=None,
+        export_group_ids=export_groups,
+        export_caps_by_group={today: 0.0, tomorrow: 15.0},
+    )
+    result = optimizer.optimize(
+        import_prices=[0.30] * n,
+        export_prices=export_prices,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=0.0,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * n,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=allow_export,
+        block_battery_charge=[False] * n,
+        allow_grid_charge=False,
+        priority_export_slots=[group == tomorrow for group in export_groups],
+        priority_export_enabled=True,
+        schedule_timestamps=timestamps,
+    )
+
+    current_slots = [
+        idx for idx, group in enumerate(export_groups) if group == today
+    ]
+    future_slots = [
+        idx for idx, group in enumerate(export_groups) if group == tomorrow
+    ]
+    assert current_slots and future_slots
+    assert max(result.grid_export_w[idx] for idx in current_slots) == pytest.approx(0.0)
+    assert max(result.grid_export_w[idx] for idx in future_slots) > 1_000, repr(result.lp_stats)
+    assert (
+        sum(result.grid_export_w[idx] for idx in future_slots)
+        * optimizer.dt_hours
+        / 1000
+        <= 15.001
+    )
+
+
 def test_zerohero_low_value_export_does_not_force_paid_prefill_without_priority(
     battery_optimizer_module,
 ):

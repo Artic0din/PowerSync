@@ -2285,14 +2285,22 @@ class BatteryOptimizer:
         # Boundary-energy state model: power variables per period, battery energy
         # variables at period boundaries. This removes the dense cumulative SOC
         # rows that made the 48h/5min model expensive to build and solve.
-        bonus_export_active = (
-            export_bonus_cap_kwh is not None
-            and export_bonus_cap_kwh > 1e-6
-            and any(price > 1e-6 for price in p_export_bonus)
+        export_group_caps = self._quota_export_caps_by_group
+        grouped_export_bonus = bool(export_group_caps and any(p_export_groups))
+        has_export_bonus_quota = (
+            export_bonus_cap_kwh is not None and export_bonus_cap_kwh > 1e-6
+        ) or any(
+            float(cap) > 1e-6 for cap in (export_group_caps or {}).values()
         )
         bonus_export_periods = [
-            idx for idx, price in enumerate(p_export_bonus) if price > 1e-6
+            idx
+            for idx, price in enumerate(p_export_bonus)
+            if price > 1e-6
+            and (not grouped_export_bonus or p_export_groups[idx] is not None)
         ]
+        bonus_export_active = bool(
+            has_export_bonus_quota and bonus_export_periods
+        )
         bonus_import_active = (
             import_bonus_cap_kwh is not None
             and import_bonus_cap_kwh > 1e-6
@@ -2612,9 +2620,7 @@ class BatteryOptimizer:
         A_ub_rows = 2 * p_n
         if bonus_export_active:
             export_bonus_cap_rows = (
-                len(self._quota_export_caps_by_group)
-                if self._quota_export_caps_by_group and any(p_export_groups)
-                else 1
+                len(export_group_caps) if grouped_export_bonus else 1
             )
             A_ub_rows += 2 * len(bonus_export_periods) + export_bonus_cap_rows
         if bonus_import_active:
@@ -2847,8 +2853,7 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), bonus_export_var(t)] = -1.0
                 b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
-            export_group_caps = self._quota_export_caps_by_group
-            if export_group_caps and any(p_export_groups):
+            if grouped_export_bonus:
                 for group_id, cap_kwh in export_group_caps.items():
                     for t in bonus_export_periods:
                         if p_export_groups[t] == group_id:

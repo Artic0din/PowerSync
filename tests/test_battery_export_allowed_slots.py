@@ -2103,6 +2103,161 @@ def test_grid_charge_allowed_slots_apply_price_caps_before_lp_soc_cap(opt_module
     assert allowed == [True, True, False, True]
 
 
+def test_globird_zerohero_groups_bonus_caps_by_local_date(
+    opt_module,
+    monkeypatch,
+):
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 6, 20, 5, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+    )
+    coordinator._config.horizon_hours = 48
+    n = 48 * 12
+    coordinator._last_price_timestamps = [
+        start + timedelta(minutes=5 * idx) for idx in range(n)
+    ]
+    coordinator._actual_zerohero_bonus_export_kwh_today = 12.06
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    assert coordinator._last_zerohero_bonus_cap_kwh == pytest.approx(2.94)
+    assert coordinator._last_export_bonus_caps_by_group == {
+        "2026-08-06": pytest.approx(2.94),
+        "2026-08-07": pytest.approx(15.0),
+        "2026-08-08": pytest.approx(15.0),
+    }
+    assert {
+        group
+        for group in coordinator._last_export_bonus_group_ids
+        if group is not None
+    } == {"2026-08-06", "2026-08-07", "2026-08-08"}
+
+
+def test_globird_zerohero_exhausted_today_keeps_future_bonus_windows(
+    opt_module,
+    monkeypatch,
+):
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 6, 17, 0, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+    )
+    n = 30 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerohero_bonus_export_kwh_today = 15.0
+    import_prices = [0.33] * n
+
+    coordinator._apply_zerohero_optimizer_inputs(import_prices, [0.0] * n)
+
+    assert coordinator._last_zerohero_bonus_cap_kwh == pytest.approx(0.0)
+    assert coordinator._last_export_bonus_caps_by_group == {
+        "2026-08-07": pytest.approx(15.0),
+    }
+    current_slots = [
+        idx
+        for idx, timestamp in enumerate(timestamps)
+        if timestamp.date() == start.date() and 18 <= timestamp.hour < 21
+    ]
+    future_slots = [
+        idx
+        for idx, timestamp in enumerate(timestamps)
+        if timestamp.date() == (start + timedelta(days=1)).date()
+        and 18 <= timestamp.hour < 21
+    ]
+    assert current_slots and future_slots
+    assert coordinator._last_export_bonus_group_ids[current_slots[0]] is None
+    assert coordinator._last_export_bonus_group_ids[future_slots[0]] == "2026-08-07"
+    assert all(import_prices[idx] == pytest.approx(5.33) for idx in current_slots)
+    assert _true_indexes(
+        coordinator._battery_export_allowed_slots(n, [0.0] * n)
+    ) == future_slots
+    assert _true_indexes(
+        coordinator._priority_export_slots_for_run(n, [0.0] * n)
+    ) == future_slots
+
+
+def test_globird_zerohero_same_day_keeps_remaining_bonus_cap(
+    opt_module,
+    monkeypatch,
+):
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 6, 17, 0, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="18:00",
+        globird_zerohero_end="21:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+    )
+    n = 24 * 12
+    coordinator._last_price_timestamps = [
+        start + timedelta(minutes=5 * idx) for idx in range(n)
+    ]
+    coordinator._actual_zerohero_bonus_export_kwh_today = 6.0
+
+    coordinator._apply_zerohero_optimizer_inputs(
+        [0.33] * n,
+        [0.0] * n,
+    )
+
+    assert coordinator._last_zerohero_bonus_cap_kwh == pytest.approx(9.0)
+    assert coordinator._last_export_bonus_caps_by_group == {
+        "2026-08-06": pytest.approx(9.0),
+    }
+
+
+def test_globird_zerohero_overnight_groups_slots_by_timestamp_local_date(
+    opt_module,
+    monkeypatch,
+):
+    """Overnight windows retain each slot's local calendar date as its group."""
+    aest = timezone(timedelta(hours=10))
+    start = datetime(2026, 8, 6, 22, 55, tzinfo=aest)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerohero_start="23:00",
+        globird_zerohero_end="02:00",
+        globird_zerohero_export_cap_kwh=15.0,
+        globird_zerohero_super_export_rate=0.15,
+    )
+    n = 8 * 12
+    timestamps = [start + timedelta(minutes=5 * idx) for idx in range(n)]
+    coordinator._last_price_timestamps = timestamps
+    coordinator._actual_zerohero_bonus_export_kwh_today = 6.0
+
+    coordinator._apply_zerohero_optimizer_inputs([0.33] * n, [0.0] * n)
+
+    assert coordinator._last_export_bonus_caps_by_group == {
+        "2026-08-06": pytest.approx(9.0),
+        "2026-08-07": pytest.approx(15.0),
+    }
+
+
 def test_globird_zerocharge_limits_grid_charge_to_configured_window(
     opt_module,
     monkeypatch,
@@ -9487,6 +9642,39 @@ def test_zerohero_export_price_gate_blocks_without_remaining_bonus(opt_module):
     assert battery.force_discharge_calls == []
     assert battery.self_consumption_calls == 1
     assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_zerohero_export_price_gate_uses_future_day_group_cap(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    coordinator._entry = SimpleNamespace(
+        options={
+            "electricity_provider": "globird",
+            "globird_plan": "zerohero_jul_2026",
+        },
+        data={},
+    )
+    today = datetime(2026, 8, 6, 18, 0, tzinfo=timezone.utc)
+    tomorrow = today + timedelta(days=1)
+    action = SimpleNamespace(
+        action="export",
+        power_w=4200,
+        timestamp=tomorrow,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_price_timestamps = [today, tomorrow]
+    coordinator._last_export_prices = [0.0, 0.0]
+    coordinator._last_zerohero_bonus_prices = [0.10, 0.10]
+    coordinator._last_zerohero_bonus_cap_kwh = 0.0
+    coordinator._last_export_bonus_group_ids = [None, "2026-08-07"]
+    coordinator._last_export_bonus_caps_by_group = {"2026-08-07": 15.0}
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "export"
 
 
 def test_profit_max_export_floor_does_not_block_when_auto_apply_disabled(opt_module):
