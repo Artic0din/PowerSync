@@ -31,7 +31,3 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v5
-        with:
-          # GitHub's Pages backend can remain queued for the action's default
-          # 10-minute limit even though the artifact uploaded successfully.
-          timeout: 1200000
