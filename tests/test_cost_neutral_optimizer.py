@@ -867,15 +867,20 @@ def test_multiday_plan_preserves_reserve_floor_and_site_export_limit(
     assert min(action.soc for action in result.schedule.actions) >= 0.5
 
 
+@pytest.mark.parametrize("fixed_allowance", [-0.2, 0.0])
 def test_multiday_zero_caps_do_not_bootstrap_imports_or_cross_dates(
     optimizer_module,
+    fixed_allowance,
 ):
     module = optimizer_module
     plan = module.CostNeutralPlan(
         day_ids=["2026-08-01", "2026-08-02"],
         earnings_caps_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
         forecast_import_costs_by_day={"2026-08-01": 0.0, "2026-08-02": 0.0},
-        fixed_cost_allowances_by_day={"2026-08-01": -0.2, "2026-08-02": -0.2},
+        fixed_cost_allowances_by_day={
+            "2026-08-01": fixed_allowance,
+            "2026-08-02": fixed_allowance,
+        },
         current_day="2026-08-01",
     )
 

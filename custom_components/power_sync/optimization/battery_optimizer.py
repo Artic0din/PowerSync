@@ -816,7 +816,12 @@ class BatteryOptimizer:
                         # account for its own planned imports.
                         account_by_day = {
                             day: (
-                                seeded_plan.fixed_cost_allowances_by_day.get(
+                                seeded_plan.earnings_caps_by_day.get(
+                                    day,
+                                    0.0,
+                                )
+                                > 1e-9
+                                and seeded_plan.fixed_cost_allowances_by_day.get(
                                     day,
                                     0.0,
                                 )
