@@ -1,7 +1,9 @@
 """Convert Amber Electric pricing to Tesla tariff format."""
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta
+import math
 
 from homeassistant.util import dt as dt_util
 import logging
@@ -22,6 +24,330 @@ except ImportError:
     AEMO_TARIFF_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _numeric_tariff_rates(values: Any) -> dict[str, int | float]:
+    """Keep only values that Tesla can accept as tariff rates."""
+    if not isinstance(values, dict):
+        return {}
+
+    rates: dict[str, int | float] = {}
+    for period, value in values.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            if math.isfinite(float(value)):
+                rates[str(period)] = value
+            continue
+        # Config/API round trips can represent a number as a string. Convert
+        # those values while dropping UI metadata and other non-rate fields.
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric_value):
+            rates[str(period)] = numeric_value
+    return rates
+
+
+def _finite_tariff_rate(value: Any) -> int | float | None:
+    """Coerce one tariff rate, rejecting booleans and non-finite values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else None
+    if isinstance(value, str) and value.strip():
+        try:
+            numeric_value = float(value)
+        except ValueError:
+            return None
+        return numeric_value if math.isfinite(numeric_value) else None
+    return None
+
+
+def _raw_rate_map(section: Any) -> dict[str, Any] | None:
+    """Return a raw direct/nested rate map without dropping bad values."""
+    if not isinstance(section, dict):
+        return None
+    if "rates" in section:
+        rates = section.get("rates")
+        return rates if isinstance(rates, dict) else None
+    return section
+
+
+def _valid_raw_rate_map(section: Any) -> dict[str, Any] | None:
+    """Validate a non-empty raw rate map and return it unchanged."""
+    rates = _raw_rate_map(section)
+    if not rates:
+        return None
+    for period, value in rates.items():
+        if not isinstance(period, str) or not period.strip():
+            return None
+        if _finite_tariff_rate(value) is None:
+            return None
+    return rates
+
+
+def _valid_day_or_month(value: Any, minimum: int, maximum: int) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and minimum <= value <= maximum
+    )
+
+
+def _valid_tou_range(range_data: Any) -> bool:
+    """Validate one config-flow/Tesla TOU range without normalizing it."""
+    if not isinstance(range_data, dict):
+        return False
+    required = {
+        "fromDayOfWeek",
+        "toDayOfWeek",
+        "fromHour",
+        "toHour",
+    }
+    allowed = required | {"fromMinute", "toMinute"}
+    if set(range_data) - allowed:
+        return False
+    if not required.issubset(range_data):
+        return False
+    if not _valid_day_or_month(range_data["fromDayOfWeek"], 0, 6):
+        return False
+    if not _valid_day_or_month(range_data["toDayOfWeek"], 0, 6):
+        return False
+    if not _valid_day_or_month(range_data["fromHour"], 0, 23):
+        return False
+    if not _valid_day_or_month(range_data["toHour"], 0, 24):
+        return False
+    for field in ("fromMinute", "toMinute"):
+        if field in range_data and not _valid_day_or_month(range_data[field], 0, 59):
+            return False
+    if ("fromMinute" in range_data) != ("toMinute" in range_data):
+        return False
+    # An equal start/end boundary is empty; overnight ranges use distinct
+    # hour values (for example 22:00-07:00).
+    if (
+        range_data["fromHour"] == range_data["toHour"]
+        and range_data.get("fromMinute", 0) == range_data.get("toMinute", 0)
+    ):
+        return False
+    return True
+
+
+def _valid_tou_periods(tou_periods: Any) -> set[str] | None:
+    """Validate all TOU period names and ranges, returning their names."""
+    if not isinstance(tou_periods, dict) or not tou_periods:
+        return None
+    period_names: set[str] = set()
+    for period_name, raw_ranges in tou_periods.items():
+        if not isinstance(period_name, str) or not period_name.strip():
+            return None
+        ranges = raw_ranges
+        if isinstance(raw_ranges, dict):
+            if set(raw_ranges) != {"periods"}:
+                return None
+            ranges = raw_ranges.get("periods")
+        if not isinstance(ranges, list) or not ranges:
+            return None
+        if not all(_valid_tou_range(range_data) for range_data in ranges):
+            return None
+        period_names.add(period_name)
+    return period_names
+
+
+def _valid_season_metadata(season_data: Any) -> bool:
+    if not isinstance(season_data, dict):
+        return False
+    for field in ("fromMonth", "toMonth"):
+        if not _valid_day_or_month(season_data.get(field), 1, 12):
+            return False
+    for field in ("fromDay", "toDay"):
+        if field in season_data and not _valid_day_or_month(season_data[field], 1, 31):
+            return False
+    if ("fromDay" in season_data) != ("toDay" in season_data):
+        return False
+    return True
+
+
+def _valid_raw_custom_tariff(custom_tariff: Any) -> bool:
+    """Validate the complete required custom/AGL tariff graph."""
+    if not isinstance(custom_tariff, dict):
+        return False
+    raw_seasons = custom_tariff.get("seasons")
+    raw_energy = custom_tariff.get("energy_charges")
+    raw_sell = custom_tariff.get("sell_tariff")
+    if not isinstance(raw_seasons, dict) or not raw_seasons:
+        return False
+    if not isinstance(raw_energy, dict) or set(raw_energy) != set(raw_seasons):
+        return False
+    if not isinstance(raw_sell, dict):
+        return False
+    raw_sell_energy = raw_sell.get("energy_charges")
+    if not isinstance(raw_sell_energy, dict) or set(raw_sell_energy) != set(raw_seasons):
+        return False
+
+    for season_name, season_data in raw_seasons.items():
+        if not isinstance(season_name, str) or not season_name.strip():
+            return False
+        if not _valid_season_metadata(season_data):
+            return False
+        period_names = _valid_tou_periods(season_data.get("tou_periods"))
+        buy_rates = _valid_raw_rate_map(raw_energy.get(season_name))
+        sell_rates = _valid_raw_rate_map(raw_sell_energy.get(season_name))
+        if period_names is None or buy_rates is None or sell_rates is None:
+            return False
+        if set(buy_rates) != period_names or set(sell_rates) != period_names:
+            return False
+    return True
+
+
+def _safe_tariff_string(value: Any, fallback: str) -> str:
+    """Return a usable user label without forwarding malformed values."""
+    return value.strip() if isinstance(value, str) and value.strip() else fallback
+
+
+def _normalise_tariff_charge_sections(sections: Any) -> dict[str, dict[str, Any]]:
+    """Normalize direct season maps and Tesla ``rates`` season maps alike."""
+    if not isinstance(sections, dict):
+        return {}
+
+    normalised: dict[str, dict[str, Any]] = {}
+    for season, charge_data in sections.items():
+        if not isinstance(charge_data, dict):
+            continue
+        rates = charge_data.get("rates")
+        if not isinstance(rates, dict):
+            rates = charge_data
+        normalised[str(season)] = {"rates": _numeric_tariff_rates(rates)}
+    return normalised
+
+
+def _default_tariff_demand_charges(
+    seasons: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Return a non-user-controlled zero-demand envelope for Tesla."""
+    normalised = {"ALL": {"rates": {"ALL": 0}}}
+    for season in seasons:
+        normalised.setdefault(season, {})
+    return normalised
+
+
+def _has_usable_static_tariff_content(
+    seasons: dict[str, dict[str, Any]],
+    energy_charges: dict[str, dict[str, Any]],
+) -> bool:
+    """Require at least one season with related rates and TOU ranges."""
+    if not seasons or not energy_charges:
+        return False
+
+    for season_name, season_data in seasons.items():
+        if not isinstance(season_data, dict):
+            continue
+        tou_periods = season_data.get("tou_periods")
+        season_rates = energy_charges.get(season_name, {}).get("rates", {})
+        if not isinstance(tou_periods, dict) or not isinstance(season_rates, dict):
+            continue
+        for period_name, ranges in tou_periods.items():
+            if period_name not in season_rates:
+                continue
+            if isinstance(ranges, dict):
+                ranges = ranges.get("periods", [])
+            if isinstance(ranges, dict):
+                ranges = [ranges]
+            if not isinstance(ranges, list):
+                continue
+            if any(
+                isinstance(period, dict)
+                and "fromHour" in period
+                and "toHour" in period
+                for period in ranges
+            ):
+                return True
+    return False
+
+
+def convert_custom_tariff_to_tesla_tariff(
+    custom_tariff: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Convert a saved custom tariff to a Tesla ``tariff_content_v2`` payload.
+
+    Custom tariffs are also used as PowerSync/UI state and may contain AGL
+    reward baselines, quota metadata, timestamps, and other fields that must
+    not be sent to Tesla. Build a fresh payload from the accepted Tesla
+    envelope instead of mutating (or reusing) the saved object. Every season
+    is retained, and direct season rate maps are wrapped in ``rates``.
+    """
+    if not isinstance(custom_tariff, dict):
+        return None
+    if not _valid_raw_custom_tariff(custom_tariff):
+        _LOGGER.warning("Saved custom tariff failed static Tesla payload validation")
+        return None
+
+    raw_seasons = custom_tariff.get("seasons", {})
+    seasons: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_seasons, dict):
+        for season, season_data in raw_seasons.items():
+            if not isinstance(season_data, dict):
+                continue
+            # Keep only fields in Tesla's season contract. In particular, do
+            # not carry UI descriptions, IDs, or other saved metadata across.
+            clean_season: dict[str, Any] = {}
+            for field in ("fromMonth", "toMonth", "fromDay", "toDay"):
+                if field in season_data:
+                    clean_season[field] = deepcopy(season_data[field])
+            if isinstance(season_data.get("tou_periods"), dict):
+                clean_season["tou_periods"] = deepcopy(season_data["tou_periods"])
+            seasons[str(season)] = clean_season
+
+    energy_charges = _normalise_tariff_charge_sections(
+        custom_tariff.get("energy_charges", {})
+    )
+    sell_source = custom_tariff.get("sell_tariff", {})
+    if not isinstance(sell_source, dict):
+        sell_source = {}
+    sell_energy_charges = _normalise_tariff_charge_sections(
+        sell_source.get("energy_charges", {})
+    )
+
+    # A malformed/legacy tariff can omit season metadata while retaining the
+    # rate maps. Keep those rate seasons rather than collapsing them into one.
+    for season in (*energy_charges.keys(), *sell_energy_charges.keys()):
+        seasons.setdefault(season, {})
+
+    if not _has_usable_static_tariff_content(seasons, energy_charges):
+        _LOGGER.warning("Saved custom tariff has no usable season/rate TOU content")
+        return None
+
+    name = _safe_tariff_string(custom_tariff.get("name"), "Custom Tariff")
+    utility = _safe_tariff_string(custom_tariff.get("utility"), "Custom")
+    currency = _safe_tariff_string(custom_tariff.get("currency"), DEFAULT_CURRENCY)
+    sell_name = _safe_tariff_string(
+        sell_source.get("name"), f"{name} (managed by PowerSync)"
+    )
+    sell_utility = _safe_tariff_string(sell_source.get("utility"), utility)
+
+    payload = {
+        "version": 1,
+        # Stable marker used to apply strict multi-season readback only to
+        # normalized static payloads. Never forward an arbitrary saved code.
+        "code": "POWER_SYNC:STATIC_TOU",
+        "name": name,
+        "utility": utility,
+        "currency": currency,
+        "daily_charges": [{"name": "Charge"}],
+        "demand_charges": _default_tariff_demand_charges(seasons),
+        "energy_charges": energy_charges,
+        "seasons": seasons,
+        "sell_tariff": {
+            "name": sell_name,
+            "utility": sell_utility,
+            "daily_charges": [{"name": "Charge"}],
+            "demand_charges": _default_tariff_demand_charges(seasons),
+            "energy_charges": sell_energy_charges,
+            "seasons": deepcopy(seasons),
+        },
+    }
+    return payload
 
 
 def parse_spike_alert_datetime(

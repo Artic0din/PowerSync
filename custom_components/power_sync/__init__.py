@@ -3912,8 +3912,82 @@ def _normalise_tariff_rate_map(rates: Any) -> dict[str, float]:
     return normalised
 
 
+def _tariff_charge_rates_by_season(
+    tariff: dict[str, Any] | None,
+    *,
+    sell: bool,
+) -> dict[str, dict[str, float]]:
+    """Extract every non-empty season's comparable TOU rates."""
+    if not isinstance(tariff, dict):
+        return {}
+    source = tariff.get("sell_tariff", {}) if sell else tariff
+    if not isinstance(source, dict):
+        return {}
+    energy_charges = source.get("energy_charges", {})
+    if not isinstance(energy_charges, dict):
+        return {}
+
+    normalised: dict[str, dict[str, float]] = {}
+    for season_name, season in energy_charges.items():
+        if not isinstance(season, dict):
+            continue
+        rates = season.get("rates")
+        comparable = (
+            _normalise_tariff_rate_map(rates)
+            if isinstance(rates, dict)
+            else _normalise_tariff_rate_map(season)
+        )
+        if comparable:
+            normalised[str(season_name)] = comparable
+    return normalised
+
+
+def _strict_static_tariff_rates_by_season(
+    tariff: dict[str, Any] | None,
+    *,
+    sell: bool,
+) -> dict[str, dict[str, float]] | None:
+    """Extract static readback rates without silently dropping bad values."""
+    if not isinstance(tariff, dict):
+        return None
+    source = tariff.get("sell_tariff", {}) if sell else tariff
+    if not isinstance(source, dict):
+        return None
+    energy_charges = source.get("energy_charges")
+    if not isinstance(energy_charges, dict) or not energy_charges:
+        return None
+
+    normalised: dict[str, dict[str, float]] = {}
+    for season_name, season in energy_charges.items():
+        if not isinstance(season_name, str) or not season_name.strip():
+            return None
+        if not isinstance(season, dict) or not season:
+            return None
+        if "rates" in season:
+            if set(season) != {"rates"} or not isinstance(season["rates"], dict):
+                return None
+            rates = season["rates"]
+        else:
+            rates = season
+        if not rates:
+            return None
+        season_rates: dict[str, float] = {}
+        for period, value in rates.items():
+            if not isinstance(period, str) or not period.strip() or isinstance(value, bool):
+                return None
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(numeric_value):
+                return None
+            season_rates[period] = round(numeric_value, 6)
+        normalised[season_name] = season_rates
+    return normalised or None
+
+
 def _tariff_charge_rates(tariff: dict[str, Any] | None, *, sell: bool) -> dict[str, float]:
-    """Extract Summer TOU rates from Tesla tariff_content or tariff_content_v2 shapes."""
+    """Extract Summer TOU rates from Tesla tariff_content shapes."""
     if not isinstance(tariff, dict):
         return {}
     source = tariff.get("sell_tariff", {}) if sell else tariff
@@ -3936,6 +4010,23 @@ def _tesla_tariff_matches_readback(
     if not isinstance(observed, dict):
         return False
 
+    # Static custom payloads carry a stable marker and must verify every
+    # non-empty buy and sell season. This prevents a correct All Year map from
+    # masking a mismatched secondary season (or a missing sell map).
+    if expected.get("code") == "POWER_SYNC:STATIC_TOU":
+        expected_buy_by_season = _strict_static_tariff_rates_by_season(expected, sell=False)
+        observed_buy_by_season = _strict_static_tariff_rates_by_season(observed, sell=False)
+        expected_sell_by_season = _strict_static_tariff_rates_by_season(expected, sell=True)
+        observed_sell_by_season = _strict_static_tariff_rates_by_season(observed, sell=True)
+        return bool(expected_buy_by_season) and bool(expected_sell_by_season) and (
+            observed_buy_by_season is not None
+            and observed_sell_by_season is not None
+            and expected_buy_by_season == observed_buy_by_season
+            and expected_sell_by_season == observed_sell_by_season
+        )
+
+    # Dynamic payloads retain the original preferred-Summer comparison and
+    # optional-sell semantics. Tesla may omit its sentinel ALL season on readback.
     expected_buy = _tariff_charge_rates(expected, sell=False)
     observed_buy = _tariff_charge_rates(observed, sell=False)
     if expected_buy and observed_buy:
@@ -22595,6 +22686,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return tariff_schedule
         return None
 
+    def _static_tou_custom_tariff_for_sync() -> dict | None:
+        """Return the saved raw custom tariff for a manual Tesla upload.
+
+        ``tariff_schedule`` is intentionally a lossy display/planner shape;
+        the raw custom tariff retains every season and AGL reward period.
+        """
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        automation_store_ref = (
+            entry_data.get("automation_store")
+            or hass.data.get(DOMAIN, {}).get("automation_store")
+        )
+        custom_tariff = None
+        if automation_store_ref:
+            try:
+                custom_tariff = automation_store_ref.get_custom_tariff()
+            except Exception as err:
+                _LOGGER.debug("Could not load raw custom tariff for Tesla TOU sync: %s", err)
+        if not isinstance(custom_tariff, dict):
+            # The initial config-flow value is normally moved into the store
+            # during setup, but keep this fallback for an in-flight reload.
+            custom_tariff = entry.data.get("initial_custom_tariff")
+        return custom_tariff if isinstance(custom_tariff, dict) else None
+
     async def handle_sync_rest_api_check(check_name="manual") -> None:
         """Run a single TOU sync against the live (settled) price.
 
@@ -23480,6 +23594,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Import tariff converter from existing code
         from .tariff_converter import (
             convert_amber_to_tesla_tariff,
+            convert_custom_tariff_to_tesla_tariff,
             extract_most_recent_actual_interval,
             compare_forecast_types,
             detect_price_spikes,
@@ -23514,13 +23629,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             octopus_coordinator is not None and
             electricity_provider_check == "octopus"
         )
+        static_tou_schedule = _static_tou_tariff_schedule_for_sync()
+        static_tou_custom_tariff = _static_tou_custom_tariff_for_sync()
         use_static_tou = (
             not use_localvolts
             and not use_octopus
             and not use_aemo_sensor
             and not use_kwatch
             and amber_coordinator is None
-            and _static_tou_tariff_schedule_for_sync() is not None
+            and static_tou_schedule is not None
         )
 
         def _flow_power_price_source_metadata() -> dict[str, Any]:
@@ -23986,6 +24103,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        # Static tariffs are display/planner state for non-Tesla systems. Do
+        # not pass an empty forecast into a Tesla converter or create a
+        # synthetic upload path for those systems.
+        if use_static_tou and battery_system != "tesla":
+            _LOGGER.info(
+                "Static TOU schedule retained for %s; no Tesla tariff upload",
+                battery_system,
+            )
+            return
+
         # FoxESS: sync to Cloud API if configured, otherwise store for sensors only
         if battery_system == "foxess":
             foxess_api_key = entry.data.get(CONF_FOXESS_CLOUD_API_KEY)
@@ -24102,27 +24229,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
         rolling_metadata: dict[str, Any] = {}
-        tariff = convert_amber_to_tesla_tariff(
-            forecast_data,
-            tesla_energy_site_id=entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
-            forecast_type=forecast_type,
-            powerwall_timezone=powerwall_timezone,
-            current_actual_interval=current_actual_interval,
-            demand_charge_enabled=demand_charge_enabled,
-            demand_charge_rate=demand_charge_rate,
-            demand_charge_start_time=demand_charge_start_time,
-            demand_charge_end_time=demand_charge_end_time,
-            demand_charge_apply_to=demand_charge_apply_to,
-            demand_charge_days=demand_charge_days,
-            demand_artificial_price_enabled=demand_artificial_price_enabled,
-            electricity_provider=electricity_provider,
-            spike_protection_enabled=spike_protection_enabled,
-            export_boost_enabled=export_boost_enabled,
-            export_price_offset=export_price_offset,
-            export_min_price=export_min_price,
-            currency=currency_for_entry(entry, hass),
-            rolling_metadata=rolling_metadata,
-        )
+        if use_static_tou:
+            tariff = convert_custom_tariff_to_tesla_tariff(static_tou_custom_tariff)
+            if not tariff:
+                _LOGGER.error("Saved static TOU tariff is unavailable for Tesla upload")
+                return
+        else:
+            tariff = convert_amber_to_tesla_tariff(
+                forecast_data,
+                tesla_energy_site_id=entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
+                forecast_type=forecast_type,
+                powerwall_timezone=powerwall_timezone,
+                current_actual_interval=current_actual_interval,
+                demand_charge_enabled=demand_charge_enabled,
+                demand_charge_rate=demand_charge_rate,
+                demand_charge_start_time=demand_charge_start_time,
+                demand_charge_end_time=demand_charge_end_time,
+                demand_charge_apply_to=demand_charge_apply_to,
+                demand_charge_days=demand_charge_days,
+                demand_artificial_price_enabled=demand_artificial_price_enabled,
+                electricity_provider=electricity_provider,
+                spike_protection_enabled=spike_protection_enabled,
+                export_boost_enabled=export_boost_enabled,
+                export_price_offset=export_price_offset,
+                export_min_price=export_min_price,
+                currency=currency_for_entry(entry, hass),
+                rolling_metadata=rolling_metadata,
+            )
 
         if not tariff:
             _LOGGER.error("Failed to convert prices to Tesla tariff")
@@ -24322,20 +24455,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     reference_tariff=chip_reference_tariff,
                 )
 
-        # Store tariff schedule in hass.data for the sensor to read
+        # Store dynamic tariff schedules in hass.data for the sensor to read.
+        # Static custom tariffs were already stored in their lossless internal
+        # schedule shape; never replace that display data with Summer-only
+        # maps (AGL custom tariffs normally use All Year).
         from homeassistant.helpers.dispatcher import async_dispatcher_send
-        # Buy prices are at top level, sell prices are under sell_tariff
-        buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
-        sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+        if use_static_tou:
+            buy_prices = (
+                static_tou_schedule.get("buy_rates")
+                or static_tou_schedule.get("buy_prices", {})
+            ) if static_tou_schedule else {}
+            sell_prices = (
+                static_tou_schedule.get("sell_rates")
+                or static_tou_schedule.get("sell_prices", {})
+            ) if static_tou_schedule else {}
+        else:
+            # Buy prices are at top level, sell prices are under sell_tariff.
+            buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
+            sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
 
-        hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
-            "buy_prices": buy_prices,
-            "sell_prices": sell_prices,
-            **currency_metadata(tariff.get("currency")),
-            **_flow_power_price_source_metadata(),
-            **rolling_metadata,
-            "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                "buy_prices": buy_prices,
+                "sell_prices": sell_prices,
+                **currency_metadata(tariff.get("currency")),
+                **_flow_power_price_source_metadata(),
+                **rolling_metadata,
+                "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
 
         # Log price summary for debugging dashboard display issues
         if buy_prices:
