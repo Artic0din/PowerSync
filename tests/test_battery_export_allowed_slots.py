@@ -8607,6 +8607,212 @@ def test_bridged_export_gap_keeps_optimizer_force_active(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_bridged_sungrow_gap_preserves_committed_force_power(opt_module):
+    """A bridged gap must not refresh a committed 10 kW export at LP gap power."""
+    now = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "sungrow"
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.battery_capacity_wh = 30000
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=10000,
+            battery_charge_w=0,
+            battery_discharge_w=10000,
+            timestamp=now + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._bridge_short_export_gaps(
+        coordinator._current_schedule,
+        [0.45, 0.45, 0.45],
+    )
+    coordinator._last_export_prices = [0.45, 0.45, 0.45]
+    coordinator._last_price_timestamps = [
+        action.timestamp for action in actions
+    ]
+    coordinator._last_battery_export_allowed_slots = [True, True, True]
+    coordinator._last_priority_export_slots = [True, True, True]
+    coordinator._set_optimizer_force_state("discharge", 20, 10000)
+    coordinator._last_executed_action = "export"
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[1]))
+
+    assert battery.force_discharge_calls == []
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["power_w"] == 10000
+
+
+def test_reconciled_bridged_sungrow_gap_preserves_committed_force_power(
+    opt_module,
+):
+    """Reconciliation restamping must retain the bridge commitment marker."""
+    now = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "sungrow"
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.battery_capacity_wh = 30000
+    source_actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=10000,
+            battery_charge_w=0,
+            battery_discharge_w=10000,
+            timestamp=now + timedelta(minutes=10),
+        ),
+    ]
+    source_schedule = SimpleNamespace(actions=source_actions)
+    coordinator._bridge_short_export_gaps(
+        source_schedule,
+        [0.45, 0.45, 0.45],
+    )
+
+    # Model reconcile_result_with_schedule's ScheduleAction restamping: the
+    # rebuilt instances cannot carry dynamic attributes from the source.
+    class _Reconciler:
+        efficiency = 0.92
+
+        def reconcile_result_with_schedule(self, result, schedule, **kwargs):
+            return SimpleNamespace(
+                schedule=SimpleNamespace(
+                    actions=[
+                        opt_module.ScheduleAction(
+                            timestamp=action.timestamp,
+                            action=action.action,
+                            power_w=round(action.power_w, 1),
+                            soc=getattr(action, "soc", None),
+                            battery_charge_w=action.battery_charge_w,
+                            battery_discharge_w=action.battery_discharge_w,
+                        )
+                        for action in schedule.actions
+                    ]
+                )
+            )
+
+    coordinator._optimizer = _Reconciler()
+    reconciled_result = coordinator._optimizer.reconcile_result_with_schedule(
+        SimpleNamespace(),
+        source_schedule,
+    )
+    reconciled_schedule = reconciled_result.schedule
+    coordinator._restore_bridged_export_gap_provenance(
+        source_schedule,
+        reconciled_schedule,
+    )
+    assert getattr(
+        reconciled_schedule.actions[1],
+        "_optimizer_bridged_export_gap",
+        False,
+    ) is True
+
+    coordinator._current_schedule = reconciled_schedule
+    coordinator._last_export_prices = [0.45, 0.45, 0.45]
+    coordinator._last_price_timestamps = [
+        action.timestamp for action in reconciled_schedule.actions
+    ]
+    coordinator._last_battery_export_allowed_slots = [True, True, True]
+    coordinator._last_priority_export_slots = [True, True, True]
+    coordinator._set_optimizer_force_state("discharge", 20, 10000)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(reconciled_schedule.actions[1])
+    )
+
+    assert battery.force_discharge_calls == []
+    assert coordinator._optimizer_force_state["power_w"] == 10000
+
+
+def test_bridged_sungrow_gap_releases_expired_commitment(opt_module):
+    """Once the 20-minute hold expires, a bridged LP target may be applied."""
+    now = datetime(2026, 5, 3, 18, 55, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "sungrow"
+    coordinator._config.max_discharge_w = 10000
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=329,
+            battery_charge_w=0,
+            battery_discharge_w=329,
+            timestamp=now + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=10000,
+            battery_charge_w=0,
+            battery_discharge_w=10000,
+            timestamp=now + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._bridge_short_export_gaps(
+        coordinator._current_schedule,
+        [0.45, 0.45, 0.45],
+    )
+    coordinator._last_export_prices = [0.45, 0.45, 0.45]
+    coordinator._last_price_timestamps = [
+        action.timestamp for action in actions
+    ]
+    coordinator._last_battery_export_allowed_slots = [True, True, True]
+    coordinator._last_priority_export_slots = [True, True, True]
+    coordinator._set_optimizer_force_state("discharge", 20, 10000)
+    coordinator._optimizer_force_state["started_at"] = now - timedelta(minutes=21)
+    coordinator._optimizer_force_state["expires_at"] = now + timedelta(minutes=5)
+    coordinator._optimizer_force_state["hardware_expires_at"] = now + timedelta(minutes=5)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[1]))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_discharge_calls == [(10, 329, False, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 329
+
+
 def test_export_command_power_respects_grid_export_cap(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

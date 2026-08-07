@@ -5583,6 +5583,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ),
                 cost_neutral_plan=cost_neutral_plan,
             )
+            self._restore_bridged_export_gap_provenance(
+                schedule,
+                result.schedule,
+            )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
                 reference_export_windows,
@@ -5665,6 +5669,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_fixed_cost_allowance
                     ),
                     cost_neutral_plan=cost_neutral_plan,
+                )
+                self._restore_bridged_export_gap_provenance(
+                    schedule,
+                    result.schedule,
                 )
                 final_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
@@ -6376,6 +6384,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             last_updated=schedule.last_updated,
         )
 
+    def _restore_bridged_export_gap_provenance(
+        self,
+        source_schedule: OptimizationSchedule,
+        reconciled_schedule: OptimizationSchedule,
+    ) -> None:
+        """Carry bridged-slot provenance across reconciliation restamping."""
+        bridged_timestamps = {
+            self._as_utc_datetime(getattr(action, "timestamp", None))
+            for action in (getattr(source_schedule, "actions", None) or [])
+            if getattr(action, "_optimizer_bridged_export_gap", False)
+        }
+        bridged_timestamps.discard(None)
+        if not bridged_timestamps:
+            return
+
+        for action in getattr(reconciled_schedule, "actions", None) or []:
+            if (
+                self._as_utc_datetime(getattr(action, "timestamp", None))
+                in bridged_timestamps
+                and getattr(action, "action", None) in EXPORT_ACTIONS
+            ):
+                setattr(action, "_optimizer_bridged_export_gap", True)
+
     def _bridge_short_export_gaps(
         self,
         schedule: OptimizationSchedule,
@@ -6488,6 +6519,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 gap_action.power_w = bridge_power_w
                 gap_action.battery_charge_w = 0.0
                 gap_action.battery_discharge_w = battery_discharge_w
+                # Keep this one-slot provenance so execution can apply the
+                # optimizer force commitment to the bridged action.  A
+                # bridged LP target is not a new hardware power request.
+                setattr(gap_action, "_optimizer_bridged_export_gap", True)
                 bridged_soc = self._bridged_gap_soc(
                     previous_action,
                     battery_discharge_w,
@@ -7653,7 +7688,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 preserve_active_for_force = self._scheduled_ev_preserve_active()
                 lp_matches_force = _action_matches_force(action)
+                bridged_export_gap = bool(
+                    force_type == "discharge"
+                    and getattr(action, "_optimizer_bridged_export_gap", False)
+                )
                 if preserve_active_for_force and force_type == "discharge":
+                    lp_matches_force = False
+                elif bridged_export_gap:
+                    # The bridge keeps the action in export mode for the LP,
+                    # but it must still use the existing commitment safety
+                    # path.  Otherwise the normal matching-action path would
+                    # refresh hardware with the bridge's lower power.
                     lp_matches_force = False
                 force_window_action = action
                 force_discharge_soc_now: float | None = None
@@ -8077,7 +8122,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if not cap_cancelled_for_new_action:
                     # LP changed its mind — cancel the optimizer's force mode.
-                    if action.action in SELF_USE_ACTIONS or action.action == "idle":
+                    if (
+                        action.action in SELF_USE_ACTIONS
+                        or action.action == "idle"
+                        or bridged_export_gap
+                    ):
                         if force_type == "charge":
                             commitment_remaining = (
                                 self._optimizer_force_charge_commitment_remaining(
