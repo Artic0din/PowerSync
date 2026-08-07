@@ -5057,7 +5057,6 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
-        self._recovered_export_limit_state: tuple[bool, int | None] | None = None
         self._optimizer_restore_retry_pending = False
         self._persisted_export_control_recovery_pending = not self._telemetry_only
 
@@ -5431,6 +5430,43 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                     return stale_data
                 raise UpdateFailed("Sungrow Modbus connection failed — no data available")
 
+            recovery_failed = False
+            if getattr(
+                self,
+                "_persisted_export_control_recovery_pending",
+                False,
+            ):
+                if self._monitoring_mode_active():
+                    _LOGGER.info(
+                        "Sungrow interrupted export-control recovery is deferred "
+                        "while Monitoring Mode is active"
+                    )
+                else:
+                    export_control_restored = (
+                        await self.async_restore_persisted_export_control()
+                    )
+                    self._persisted_export_control_recovery_pending = (
+                        not export_control_restored
+                    )
+                    if export_control_restored:
+                        async with self._modbus_lock:
+                            data = await self._controller.get_battery_data()
+                        if "battery_soc" not in data:
+                            if self.data:
+                                _LOGGER.warning(
+                                    "Sungrow Modbus returned no battery data after "
+                                    "export-control recovery — keeping previous readings"
+                                )
+                                stale_data = dict(self.data)
+                                stale_data["telemetry_ready"] = False
+                                return stale_data
+                            raise UpdateFailed(
+                                "Sungrow Modbus connection failed after export-control "
+                                "recovery — no data available"
+                            )
+                    else:
+                        recovery_failed = True
+
             # Map Sungrow data to standard format
             battery_power_w = data.get("battery_power", 0)  # Signed: positive = discharging
             export_power_w = data.get("export_power", 0)  # Signed: positive = exporting
@@ -5616,40 +5652,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             }
             await self._async_save_daily_energy_baselines()
 
-            if getattr(
-                self,
-                "_persisted_export_control_recovery_pending",
-                False,
-            ):
-                if self._monitoring_mode_active():
-                    _LOGGER.info(
-                        "Sungrow interrupted export-control recovery is deferred "
-                        "while Monitoring Mode is active"
-                    )
-                else:
-                    export_control_restored = (
-                        await self.async_restore_persisted_export_control()
-                    )
-                    self._persisted_export_control_recovery_pending = (
-                        not export_control_restored
-                    )
-                    if not export_control_restored:
-                        energy_data["telemetry_ready"] = False
-                        _LOGGER.warning(
-                            "Sungrow interrupted export control could not be fully "
-                            "restored; telemetry will remain control-blocked for retry"
-                        )
-                    else:
-                        recovered_state = getattr(
-                            self,
-                            "_recovered_export_limit_state",
-                            None,
-                        )
-                        if recovered_state is not None:
-                            baseline_enabled, baseline_limit_w = recovered_state
-                            energy_data["export_limit_enabled"] = baseline_enabled
-                            energy_data["export_limit_w"] = baseline_limit_w
-                            self._recovered_export_limit_state = None
+            if recovery_failed:
+                energy_data["telemetry_ready"] = False
+                _LOGGER.warning(
+                    "Sungrow interrupted export control could not be fully "
+                    "restored; telemetry will remain control-blocked for retry"
+                )
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
@@ -5749,6 +5757,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             forced_power_w = int(round(normal_limit_kw * 1000))
             limit_changed = False
             export_limit_changed = False
+            force_discharge_attempted = False
             try:
                 if getattr(self._controller, "rate_limit_writable", None) is False:
                     self._pre_control_discharge_limit_kw = None
@@ -5770,7 +5779,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                                 "Sungrow spread export: failed to set discharge limit to %.2fkW",
                                 normal_limit_kw,
                             )
-                            await self._restore_captured_export_limit()
+                            await self._rollback_force_grid_export(
+                                restore_discharge_limit=False,
+                                restore_controller_mode=False,
+                            )
                             return False
 
                 export_limit_changed = await self._controller.set_export_limit(target_export_w)
@@ -5779,22 +5791,77 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                         "Sungrow spread export: failed to set grid export limit to %dW",
                         target_export_w,
                     )
-                    await self._restore_captured_export_limit()
-                    await self._restore_captured_discharge_limit()
+                    await self._rollback_force_grid_export(
+                        restore_discharge_limit=limit_changed,
+                        restore_controller_mode=False,
+                    )
                     return False
 
+                force_discharge_attempted = True
                 result = await self._controller.force_discharge(power_w=forced_power_w)
             except Exception:
-                await self._restore_captured_export_limit()
-                if limit_changed:
-                    await self._restore_captured_discharge_limit()
+                await self._rollback_force_grid_export(
+                    restore_discharge_limit=limit_changed,
+                    restore_controller_mode=force_discharge_attempted,
+                )
                 raise
 
             if not result:
-                await self._restore_captured_export_limit()
-                await self._restore_captured_discharge_limit()
+                await self._rollback_force_grid_export(
+                    restore_discharge_limit=limit_changed,
+                    restore_controller_mode=force_discharge_attempted,
+                )
 
             return result
+
+    async def _rollback_force_grid_export(
+        self,
+        *,
+        restore_discharge_limit: bool,
+        restore_controller_mode: bool,
+    ) -> bool:
+        """Rollback force-export writes without consuming partial ownership.
+
+        This helper is called inside ``force_grid_export``'s Modbus/controller
+        context, so it must not acquire either lock itself. Persisted export
+        ownership is cleared only after normal mode and every control changed
+        by this attempt have been restored.
+        """
+        controller_mode_ok = True
+        if restore_controller_mode:
+            try:
+                controller_mode_ok = bool(await self._controller.restore_normal())
+            except Exception as err:
+                _LOGGER.warning(
+                    "Sungrow force-export rollback could not restore normal mode: %s",
+                    err,
+                )
+                controller_mode_ok = False
+
+        export_limit_ok = await self._restore_captured_export_limit(
+            clear_persisted=False
+        )
+        if restore_discharge_limit:
+            discharge_limit_ok = await self._restore_captured_discharge_limit()
+        else:
+            # The discharge write never succeeded, so its captured baseline is
+            # not an outstanding hardware restore.
+            self._pre_control_discharge_limit_kw = None
+            discharge_limit_ok = True
+
+        rollback_ok = bool(
+            controller_mode_ok and export_limit_ok and discharge_limit_ok
+        )
+        if rollback_ok:
+            persisted_ok = await self._clear_persisted_export_control_state()
+            rollback_ok = bool(rollback_ok and persisted_ok)
+            if persisted_ok:
+                self._pre_control_export_limit_w = None
+                self._pre_control_export_limit_captured = False
+                self._optimizer_restore_retry_pending = False
+        else:
+            self._optimizer_restore_retry_pending = True
+        return rollback_ok
 
     async def restore_normal(self) -> bool:
         """Restore Sungrow to self-consumption mode.
@@ -5810,12 +5877,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 or getattr(self, "_optimizer_restore_retry_pending", False)
             )
             normal_ok = await self._controller.restore_normal()
-            export_limit_ok = await self._restore_captured_export_limit()
+            export_limit_ok = await self._restore_captured_export_limit(
+                clear_persisted=False
+            )
             charge_limit_ok = await self._restore_captured_charge_limit()
             limit_ok = await self._restore_captured_discharge_limit()
             restore_ok = bool(
                 normal_ok and export_limit_ok and charge_limit_ok and limit_ok
             )
+            if restore_ok and optimizer_restore_owned:
+                persisted_ok = await self._clear_persisted_export_control_state()
+                restore_ok = bool(restore_ok and persisted_ok)
+                if persisted_ok:
+                    self._pre_control_export_limit_w = None
+                    self._pre_control_export_limit_captured = False
             if optimizer_restore_owned:
                 self._optimizer_restore_retry_pending = not restore_ok
             return restore_ok
@@ -6012,7 +6087,6 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         self._pre_control_export_limit_w = baseline_limit_w
         self._pre_control_export_limit_captured = True
-        self._recovered_export_limit_state = None
         _LOGGER.warning(
             "Recovering interrupted Sungrow temporary export control (target=%sW, baseline=%s)",
             state.get("target_export_w"),
@@ -6020,11 +6094,6 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         )
         try:
             restored = await self.restore_normal()
-            if restored:
-                self._recovered_export_limit_state = (
-                    baseline_limit_w is not None,
-                    baseline_limit_w,
-                )
             return restored
         except Exception as err:
             _LOGGER.warning(
@@ -6340,7 +6409,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return None
         return watts / 1000.0 if watts > 0 else None
 
-    async def _restore_captured_export_limit(self) -> bool:
+    async def _restore_captured_export_limit(
+        self, *, clear_persisted: bool = True
+    ) -> bool:
         """Restore a Sungrow export limit saved before temporary control."""
         if not getattr(self, "_pre_control_export_limit_captured", False):
             return True
@@ -6351,8 +6422,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         else:
             limit_ok = await self._controller.set_export_limit(int(restore_limit_w))
 
-        persisted_ok = False
-        if limit_ok:
+        persisted_ok = True
+        if limit_ok and clear_persisted:
             persisted_ok = await self._clear_persisted_export_control_state()
         if limit_ok and persisted_ok:
             coord_data = getattr(self, "data", None)
@@ -6361,8 +6432,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 coord_data["export_limit_w"] = (
                     int(restore_limit_w) if restore_limit_w is not None else None
                 )
-            self._pre_control_export_limit_w = None
-            self._pre_control_export_limit_captured = False
+            if clear_persisted:
+                self._pre_control_export_limit_w = None
+                self._pre_control_export_limit_captured = False
         return bool(limit_ok and persisted_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:

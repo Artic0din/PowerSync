@@ -2493,6 +2493,223 @@ def test_sungrow_pending_export_restore_lifecycle_retries_failed_cleanup():
     assert export_limits == [4400, None, None]
 
 
+def test_sungrow_partial_force_export_rollback_preserves_restart_ownership():
+    """A failed discharge-cap rollback must remain recoverable after restart."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class PartialRollbackController(_FakeSungrowController):
+        def __init__(self):
+            super().__init__()
+            self.fail_discharge_restore = False
+
+        async def set_discharge_rate_limit(self, kw: float) -> bool:
+            self.discharge_rate_limits.append(kw)
+            if self.fail_discharge_restore:
+                return False
+            self._rate_limit_writable = True
+            return True
+
+        async def force_discharge(self, power_w: float = 5000) -> bool:
+            self.force_discharge_power_w.append(power_w)
+            self.fail_discharge_restore = True
+            return False
+
+    async def run_partial_rollback():
+        controller = PartialRollbackController()
+        controller.battery_data = {
+            "charge_rate_limit_kw": 15.0,
+            "discharge_rate_limit_kw": 15.0,
+            "export_limit_enabled": True,
+            "export_limit_w": 2240,
+        }
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": True,
+                "baseline_limit_w": 2240,
+                "target_export_w": 4500,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            controller,
+        )
+        coordinator._export_control_store = store
+        coordinator.data = dict(controller.battery_data)
+
+        force_result = await coordinator.force_grid_export(export_limit_w=4500)
+        store_after_partial = dict(store.data)
+        pending_after_partial = coordinator.pending_optimizer_export_restore
+        controller.fail_discharge_restore = False
+        restore_result = await coordinator.restore_normal()
+        return (
+            force_result,
+            store_after_partial,
+            pending_after_partial,
+            restore_result,
+            store,
+            coordinator,
+            controller,
+        )
+
+    try:
+        (
+            force_result,
+            store_after_partial,
+            pending_after_partial,
+            restore_result,
+            store,
+            coordinator,
+            controller,
+        ) = asyncio.run(run_partial_rollback())
+    finally:
+        restore()
+
+    assert force_result is False
+    assert store_after_partial["active"] is True
+    assert pending_after_partial is True
+    assert restore_result is True
+    assert store.data == {"active": False}
+    assert coordinator.pending_optimizer_export_restore is False
+    assert controller.export_limits == [4500, 2240, 2240]
+    assert controller.discharge_rate_limits == [15.0, 15.0, 15.0]
+
+
+@pytest.mark.parametrize("failure_kind", ("false", "exception"))
+def test_sungrow_force_export_failure_restores_ems_before_clearing_ownership(
+    failure_kind,
+):
+    """Force-export rollback must restore EMS and remain retryable on failure."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class EMSFailureController(_FakeSungrowController):
+        def __init__(self):
+            super().__init__()
+            self.restore_results = iter((False, False, True))
+
+        async def force_discharge(self, power_w: float = 5000) -> bool:
+            self.force_discharge_power_w.append(power_w)
+            self.battery_data.update(
+                {
+                    "ems_mode": "forced",
+                    "ems_mode_name": "Forced",
+                }
+            )
+            if failure_kind == "exception":
+                raise RuntimeError("force-discharge failed")
+            return False
+
+        async def restore_normal(self) -> bool:
+            self.restore_normal_calls += 1
+            restored = next(self.restore_results)
+            if restored:
+                self.battery_data.update(
+                    {
+                        "ems_mode": "self_consumption",
+                        "ems_mode_name": "Self Consumption",
+                    }
+                )
+            return restored
+
+    async def run_failure_and_retries():
+        controller = EMSFailureController()
+        controller.battery_data = {
+            "charge_rate_limit_kw": 15.0,
+            "discharge_rate_limit_kw": 15.0,
+            "export_limit_enabled": True,
+            "export_limit_w": 2240,
+            "ems_mode": "self_consumption",
+            "ems_mode_name": "Self Consumption",
+        }
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": True,
+                "baseline_limit_w": 2240,
+                "target_export_w": 4500,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            controller,
+        )
+        coordinator._export_control_store = store
+        coordinator.data = dict(controller.battery_data)
+
+        raised = None
+        force_result = None
+        try:
+            force_result = await coordinator.force_grid_export(export_limit_w=4500)
+        except RuntimeError as err:
+            raised = err
+        after_force_store = dict(store.data)
+        after_force_pending = coordinator.pending_optimizer_export_restore
+        after_force_mode = controller.battery_data["ems_mode"]
+        after_force_restore_calls = controller.restore_normal_calls
+
+        first_retry = await coordinator.restore_normal()
+        after_first_retry_store = dict(store.data)
+        after_first_retry_pending = coordinator.pending_optimizer_export_restore
+        first_retry_mode = controller.battery_data["ems_mode"]
+        second_retry = await coordinator.restore_normal()
+        return (
+            force_result,
+            raised,
+            after_force_store,
+            after_force_pending,
+            after_force_mode,
+            after_force_restore_calls,
+            first_retry,
+            after_first_retry_store,
+            after_first_retry_pending,
+            first_retry_mode,
+            second_retry,
+            store,
+            coordinator,
+            controller,
+        )
+
+    try:
+        (
+            force_result,
+            raised,
+            after_force_store,
+            after_force_pending,
+            after_force_mode,
+            after_force_restore_calls,
+            first_retry,
+            after_first_retry_store,
+            after_first_retry_pending,
+            first_retry_mode,
+            second_retry,
+            store,
+            coordinator,
+            controller,
+        ) = asyncio.run(run_failure_and_retries())
+    finally:
+        restore()
+
+    if failure_kind == "exception":
+        assert isinstance(raised, RuntimeError)
+        assert force_result is None
+    else:
+        assert raised is None
+        assert force_result is False
+    assert after_force_store["active"] is True
+    assert after_force_pending is True
+    assert after_force_mode == "forced"
+    assert after_force_restore_calls == 1
+    assert first_retry is False
+    assert after_first_retry_store["active"] is True
+    assert after_first_retry_pending is True
+    assert first_retry_mode == "forced"
+    assert second_retry is True
+    assert store.data == {"active": False}
+    assert coordinator.pending_optimizer_export_restore is False
+    assert controller.battery_data["ems_mode"] == "self_consumption"
+    assert controller.restore_normal_calls == 3
+
+
 def test_sungrow_partial_normal_restore_remains_pending_until_complete():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
@@ -2543,7 +2760,7 @@ def test_sungrow_partial_normal_restore_remains_pending_until_complete():
     assert second_restore is True
     assert pending_after_complete_restore is False
     assert fake_controller.restore_normal_calls == 2
-    assert fake_controller.export_limits == [4400, None]
+    assert fake_controller.export_limits == [4400, None, None]
 
 
 def test_sungrow_user_restore_failure_does_not_claim_optimizer_ownership():
@@ -2748,7 +2965,20 @@ def test_sungrow_first_refresh_publishes_recovered_export_baseline(
     async def run_recovered_refresh_cycle():
         old_target_w = 4500
         new_target_w = 4251
-        fake_controller = _FakeSungrowController()
+        class RecoveredController(_FakeSungrowController):
+            async def restore_normal(self):
+                self.restore_normal_calls += 1
+                self.battery_data.update(
+                    {
+                        "export_limit_enabled": baseline_enabled,
+                        "export_limit_w": baseline_limit_w or 0,
+                        "ems_mode": "self_consumption",
+                        "ems_mode_name": "Self Consumption",
+                    }
+                )
+                return True
+
+        fake_controller = RecoveredController()
         fake_controller.battery_data.update(
             {
                 "battery_soc": 54.0,
@@ -2759,6 +2989,8 @@ def test_sungrow_first_refresh_publishes_recovered_export_baseline(
                 "daily_pv_generation": 0,
                 "export_limit_enabled": True,
                 "export_limit_w": old_target_w,
+                "ems_mode": "forced",
+                "ems_mode_name": "Forced",
             }
         )
         store = _FakeStore(
@@ -2811,6 +3043,8 @@ def test_sungrow_first_refresh_publishes_recovered_export_baseline(
 
     assert first_snapshot["export_limit_enabled"] is baseline_enabled
     assert first_snapshot["export_limit_w"] == expected_restore_limit
+    assert first_snapshot["ems_mode"] == "self_consumption"
+    assert first_snapshot["ems_mode_name"] == "Self Consumption"
     assert force_result is True
     assert restore_result is True
     assert active_state == {
@@ -2825,6 +3059,93 @@ def test_sungrow_first_refresh_publishes_recovered_export_baseline(
         expected_restore_limit,
     ]
     assert store.data == {"active": False}
+
+
+def test_sungrow_failed_recovery_keeps_persisted_ownership_for_retry():
+    """A partial restore must not consume persisted export ownership."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FlakyRecoveryController(_FakeSungrowController):
+        def __init__(self):
+            super().__init__()
+            self.battery_data = {
+                "battery_soc": 54.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+                "charge_rate_limit_kw": 15.0,
+                "discharge_rate_limit_kw": 15.0,
+                "export_limit_enabled": True,
+                "export_limit_w": 4500,
+                "ems_mode": "forced",
+                "ems_mode_name": "Forced",
+            }
+            self.restore_results = iter((False, True))
+
+        async def restore_normal(self):
+            self.restore_normal_calls += 1
+            restored = next(self.restore_results)
+            if restored:
+                self.battery_data.update(
+                    {
+                        "ems_mode": "self_consumption",
+                        "ems_mode_name": "Self Consumption",
+                    }
+                )
+            return restored
+
+        async def set_export_limit(self, watts):
+            self.export_limits.append(watts)
+            self.battery_data["export_limit_enabled"] = watts is not None
+            self.battery_data["export_limit_w"] = watts or 0
+            return True
+
+    async def run_recovery_retries():
+        controller = FlakyRecoveryController()
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": True,
+                "baseline_limit_w": 2240,
+                "target_export_w": 4500,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            controller,
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}}
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._export_control_store = store
+        coordinator._persisted_export_control_recovery_pending = True
+
+        first = await coordinator._async_update_data()
+        first_store = dict(store.data)
+        coordinator.data = first
+        second = await coordinator._async_update_data()
+        return first, first_store, second, store, controller
+
+    try:
+        first, first_store, second, store, controller = asyncio.run(
+            run_recovery_retries()
+        )
+    finally:
+        restore()
+
+    assert first["telemetry_ready"] is False
+    assert first_store["active"] is True
+    assert second["telemetry_ready"] is True
+    assert second["export_limit_w"] == 2240
+    assert second["ems_mode"] == "self_consumption"
+    assert second["ems_mode_name"] == "Self Consumption"
+    assert store.data == {"active": False}
+    assert controller.restore_normal_calls == 2
+    assert controller.export_limits == [2240, 2240]
 
 
 def test_sungrow_spread_export_refuses_hardware_write_when_state_cannot_persist():
