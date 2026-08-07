@@ -1851,9 +1851,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except (TypeError, ValueError):
                 return 0.0
 
+        current_local_now = dt_util.now()
+
+        def _is_current_local_day(window_start: int) -> bool:
+            """Keep the scalar reserve recommendation scoped to today's episode."""
+            window_timestamp = getattr(actions[window_start], "timestamp", None)
+            if (
+                not isinstance(window_timestamp, datetime)
+                or window_timestamp.tzinfo is None
+                or not isinstance(current_local_now, datetime)
+                or current_local_now.tzinfo is None
+            ):
+                # An unknown calendar day must not raise today's scalar floor.
+                return False
+            try:
+                return (
+                    dt_util.as_local(window_timestamp).date()
+                    == dt_util.as_local(current_local_now).date()
+                )
+            except (TypeError, ValueError, OverflowError):
+                return False
+
         for raw_start, raw_end, boundary_source in reference_export_windows:
             window_start = int(raw_start)
             if window_start < 0 or window_start >= slot_count:
+                continue
+            if not _is_current_local_day(window_start):
                 continue
             window_end = max(window_start + 1, min(slot_count, int(raw_end)))
 

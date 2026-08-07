@@ -34,6 +34,11 @@ Auto-Apply never lowers the Calculated Reserve below the selected minimum. It
 does not change the hardware backup reserve or force the battery to recharge;
 actual unforecast load can still consume the software buffer.
 
+Because Calculated Reserve is one live software floor, only export episodes
+that begin on the current local calendar day can raise it. A future-day export
+episode is recalculated when that local day begins, so tomorrow's forecast load
+cannot block an eligible export today.
+
 ### Hardware backup reserve
 
 The battery's own backup reserve. PowerSync restores this value after temporary

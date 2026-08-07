@@ -98,6 +98,7 @@ def _install_ha_stubs() -> None:
     )
     ha_dt.now = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    ha_dt.as_local = lambda value: value.astimezone(timezone.utc)
     ha_dt.UTC = timezone.utc
     ha_helpers.storage = ha_storage
     ha_helpers.dispatcher = ha_dispatcher
@@ -1364,6 +1365,9 @@ def test_auto_apply_forecast_bridge_is_independent_of_export_run_length(opt_modu
     coordinator._optimizer = SimpleNamespace(efficiency=1.0)
 
     start = datetime(2026, 7, 13, 17, 0, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda: datetime(
+        2026, 7, 13, 8, 30, tzinfo=timezone.utc
+    )
     export_allowed = [False, True, True, True] + [False] * 6
 
     def _result(export_slots):
@@ -1434,6 +1438,136 @@ def test_auto_apply_forecast_bridge_is_independent_of_export_run_length(opt_modu
         )
 
 
+def test_auto_apply_forecast_bridge_uses_current_local_day_only(opt_module):
+    """Ticket #243: a future-day bridge must not raise today's scalar floor."""
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        optimization_backup_reserve=0.05,
+        optimization_manual_reserve=0.05,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.05,
+    )
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.05
+    coordinator._config.backup_reserve = 0.05
+    coordinator._config.battery_capacity_wh = 40000
+    coordinator._config.interval_minutes = 60
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+
+    local_tz = timezone(timedelta(hours=10))
+    opt_module.dt_util.as_local = lambda value: value.astimezone(local_tz)
+    opt_module.dt_util.now = lambda: datetime(
+        2026, 5, 3, 14, 0, tzinfo=timezone.utc
+    )
+    # UTC dates differ while both values fall on 4 May in the configured
+    # local timezone. Comparing in a slot's own offset would skip this window.
+    start = datetime(2026, 5, 4, 0, 30, tzinfo=timezone.utc)
+    export_slots = {0, 24}
+    charge_slots = {9, 44}
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(hours=idx),
+            action=(
+                "export"
+                if idx in export_slots
+                else ("charge" if idx in charge_slots else "self_consumption")
+            ),
+            power_w=5000 if idx in export_slots or idx in charge_slots else 0,
+            soc=0.50,
+            battery_charge_w=5000 if idx in charge_slots else 0,
+            battery_discharge_w=5000 if idx in export_slots else 0,
+        )
+        for idx in range(60)
+    ]
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+    load_forecast = [
+        2.0 if 1 <= idx <= 8 or 25 <= idx <= 43 else 0.0
+        for idx in range(len(actions))
+    ]
+    result = SimpleNamespace(
+        schedule=schedule,
+        reserve_recommendation={"suggested_optimizer_reserve_percent": 5},
+    )
+
+    windows = coordinator._reference_export_bridge_windows(
+        schedule,
+        [True] * len(actions),
+        [False] * len(actions),
+    )
+    assert windows == [
+        (0, 1, "manual_baseline_export_episode"),
+        (24, 25, "manual_baseline_export_episode"),
+    ]
+
+    coordinator._set_forecast_bridge_reserve_recommendation(
+        result,
+        windows,
+        None,
+        load_forecast,
+    )
+
+    recommendation = result.reserve_recommendation
+    assert recommendation["forecast_bridge_kwh"] == pytest.approx(16.0)
+    assert recommendation["forecast_bridge_reserve_percent"] == 40
+    assert recommendation["suggested_optimizer_reserve_percent"] == 45
+    assert recommendation["forecast_bridge_export_window_start"] == (
+        actions[0].timestamp.isoformat()
+    )
+
+
+@pytest.mark.parametrize(
+    "unknown_timestamp",
+    [None, datetime(2026, 5, 4, 0, 30)],
+)
+def test_auto_apply_forecast_bridge_ignores_unknown_window_day(
+    opt_module,
+    unknown_timestamp,
+):
+    """An unknown local date must not leak a future bridge or crash metadata."""
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        optimization_backup_reserve=0.05,
+        optimization_manual_reserve=0.05,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.05,
+    )
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.05
+    coordinator._config.backup_reserve = 0.05
+    coordinator._config.battery_capacity_wh = 40000
+    coordinator._config.interval_minutes = 60
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=unknown_timestamp,
+            action="export" if idx == 0 else "self_consumption",
+            power_w=5000 if idx == 0 else 0,
+            soc=0.50,
+            battery_discharge_w=5000 if idx == 0 else 0,
+        )
+        for idx in range(10)
+    ]
+    result = SimpleNamespace(
+        schedule=opt_module.OptimizationSchedule(actions, 0, 0, None),
+        reserve_recommendation={"suggested_optimizer_reserve_percent": 5},
+    )
+
+    coordinator._set_forecast_bridge_reserve_recommendation(
+        result,
+        [(0, 1, "manual_baseline_export_episode")],
+        None,
+        [0.0] + [4.0] * 9,
+    )
+
+    recommendation = result.reserve_recommendation
+    assert recommendation["suggested_optimizer_reserve_percent"] == 5
+    assert recommendation["needs_optimizer_reserve_raise"] is False
+    assert "forecast_bridge_kwh" not in recommendation
+
+
 def test_auto_apply_forecast_bridge_uses_manual_episode_for_flat_export_tariff(
     opt_module,
 ):
@@ -1455,6 +1589,9 @@ def test_auto_apply_forecast_bridge_uses_manual_episode_for_flat_export_tariff(
     coordinator._optimizer = SimpleNamespace(efficiency=1.0)
 
     start = datetime(2026, 7, 18, 17, 0, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda: datetime(
+        2026, 7, 18, 8, 30, tzinfo=timezone.utc
+    )
     actions = []
     for idx in range(12):
         is_export = idx in {2, 3}
