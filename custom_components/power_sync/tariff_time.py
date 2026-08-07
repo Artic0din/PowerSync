@@ -50,7 +50,8 @@ def tou_period_matches(period: Mapping[str, Any], when: datetime) -> bool:
     now_minute = when.hour * 60 + when.minute
 
     from_day = int(period.get("fromDayOfWeek", 0) or 0)
-    to_day = int(period.get("toDayOfWeek", 6) or 6)
+    raw_to_day = period.get("toDayOfWeek", 6)
+    to_day = 6 if raw_to_day is None else int(raw_to_day)
     active_start_days = _day_range(from_day, to_day)
 
     start_minute = _time_minutes(period, "from", 0)

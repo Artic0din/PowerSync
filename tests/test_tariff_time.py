@@ -159,3 +159,45 @@ def test_rate_aware_matching_handles_nested_free_import_override():
         buy_rates={"PARTIAL_PEAK": 0.31, "WINDOW_2": 0.0},
         sell_rates={"PARTIAL_PEAK": 0.0, "WINDOW_2": 0.0},
     ) == "WINDOW_2"
+
+
+def test_sunday_only_period_does_not_match_friday():
+    period = {
+        "fromDayOfWeek": 0,
+        "toDayOfWeek": 0,
+        "fromHour": 16,
+        "toHour": 17,
+    }
+
+    assert tou_period_matches(period, datetime(2026, 5, 3, 16, 30)) is True
+    assert tou_period_matches(period, datetime(2026, 5, 1, 16, 30)) is False
+
+
+def test_rate_aware_agl_reward_matching_keeps_weekday_peak_rate():
+    periods = {
+        "PEAK_AGL_REWARD": [{
+            "fromDayOfWeek": 1,
+            "toDayOfWeek": 5,
+            "fromHour": 17,
+            "toHour": 20,
+        }],
+        "OFF_PEAK_AUTO_AGL_REWARD": [{
+            "fromDayOfWeek": 0,
+            "toDayOfWeek": 0,
+            "fromHour": 17,
+            "toHour": 20,
+        }],
+    }
+
+    assert find_matching_tou_period(
+        periods,
+        datetime(2026, 8, 7, 17, 30),
+        buy_rates={
+            "PEAK_AGL_REWARD": 0.4242,
+            "OFF_PEAK_AUTO_AGL_REWARD": 0.3212,
+        },
+        sell_rates={
+            "PEAK_AGL_REWARD": 0.28,
+            "OFF_PEAK_AUTO_AGL_REWARD": 0.28,
+        },
+    ) == "PEAK_AGL_REWARD"
