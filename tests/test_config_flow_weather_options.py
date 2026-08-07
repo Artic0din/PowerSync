@@ -1051,6 +1051,159 @@ def test_flow_power_options_collects_kwatch_key_before_network_options():
         ]["update_flow_power_api_key"]
 
 
+def test_amber_site_selection_prefers_valid_then_active_sites():
+    helper = _top_level_function("_preferred_amber_site_id")
+    validator = _top_level_function("_validated_amber_site_id")
+    pending_guard = _top_level_function("_pending_amber_site_required")
+    module = ast.Module(
+        body=[helper, validator, pending_guard],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = {"Any": object}
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+    preferred_site = namespace["_preferred_amber_site_id"]
+    validated_site = namespace["_validated_amber_site_id"]
+    site_required = namespace["_pending_amber_site_required"]
+
+    sites = [
+        {"id": "closed-site", "status": "closed"},
+        {"id": "active-site", "status": "active"},
+    ]
+    assert preferred_site(sites, "closed-site") == "closed-site"
+    assert preferred_site(sites, "active-site") == "active-site"
+    assert preferred_site(sites, "missing-site") == "active-site"
+    assert preferred_site(sites) == "active-site"
+    assert preferred_site([]) is None
+    assert validated_site(sites, "active-site") == "active-site"
+    assert validated_site(sites, "attacker-site") is None
+    assert validated_site(sites, None) is None
+    assert site_required(sites, "replacement-token", None) is True
+    assert site_required(sites, "replacement-token", "attacker-site") is True
+    assert site_required(sites, "replacement-token", "active-site") is False
+    assert site_required([], "replacement-token", None) is False
+    assert site_required(sites, None, None) is False
+
+
+def test_amber_provider_switch_is_atomic_and_preserves_valid_site_selection():
+    source = CONFIG_FLOW_PATH.read_text()
+    pricing_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_pricing"),
+    )
+    provider_helper = ast.get_source_segment(
+        source,
+        _options_flow_method("_electricity_provider"),
+    )
+    amber_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_amber_options"),
+    )
+    save_source = ast.get_source_segment(
+        source,
+        _options_flow_method("_save_and_finish"),
+    )
+
+    assert pricing_source is not None
+    assert provider_helper is not None
+    assert amber_source is not None
+    assert save_source is not None
+    assert "async_update_entry" not in pricing_source
+    assert 'getattr(self, "_provider", None)' in provider_helper
+    assert '(user_input.get("update_amber_token") or "").strip()' in amber_source
+    assert 'errors["base"] = "no_token_provided"' in amber_source
+    assert "_validated_amber_site_id(" in amber_source
+    assert "_pending_amber_site_required(" in amber_source
+    assert 'errors[CONF_AMBER_SITE_ID] = "invalid_site"' in amber_source
+    assert "async_update_entry" not in amber_source
+    assert 'user_input["update_amber_token"] = ""' in amber_source
+    assert "default=default_site_id" in amber_source
+    assert 'getattr(self, "_pending_amber_token", None)' in save_source
+    assert 'getattr(self, "_pending_amber_site_id", None)' in save_source
+    assert "new_data[CONF_AMBER_API_TOKEN]" in save_source
+    assert "new_data[CONF_AMBER_SITE_ID]" in save_source
+
+
+def test_amber_token_rotation_persists_selected_site_in_same_submission():
+    helper = _top_level_function("_preferred_amber_site_id")
+    validator = _top_level_function("_validated_amber_site_id")
+    save_method = _options_flow_method("_save_and_finish")
+    method = _options_flow_method("async_step_amber_options")
+    module = ast.Module(
+        body=[helper, validator, save_method, method],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+
+    async def validate_amber_token(_hass, token):
+        assert token == "replacement-token"
+        return {
+            "success": True,
+            "sites": [
+                {"id": "closed-site", "status": "closed"},
+                {"id": "active-site", "status": "active"},
+            ],
+        }
+
+    namespace = {
+        "Any": object,
+        "FlowResult": object,
+        "BATTERY_SYSTEM_TESLA": "tesla",
+        "CONF_BATTERY_SYSTEM": "battery_system",
+        "CONF_AMBER_API_TOKEN": "amber_api_token",
+        "CONF_AMBER_SITE_ID": "amber_site_id",
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "validate_amber_token": validate_amber_token,
+        "_LOGGER": SimpleNamespace(info=lambda *args: None),
+    }
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    entry = SimpleNamespace(
+        data={"battery_system": "tesla"},
+        options={"electricity_provider": "flow_power", "unchanged": True},
+    )
+
+    class ConfigEntries:
+        def async_update_entry(self, target, **changes):
+            if "data" in changes:
+                target.data = dict(changes["data"])
+            if "options" in changes:
+                target.options = dict(changes["options"])
+
+    class Flow:
+        _from_menu = True
+        _save_and_finish = namespace["_save_and_finish"]
+
+        def __init__(self):
+            self.config_entry = entry
+            self.hass = SimpleNamespace(config_entries=ConfigEntries())
+
+        def _apply_legacy_data_key_removals(self):
+            return None
+
+        def async_create_entry(self, *, title, data):
+            return {"type": "create_entry", "title": title, "data": data}
+
+    flow = Flow()
+    result = asyncio.run(
+        namespace["async_step_amber_options"](
+            flow,
+            {
+                "update_amber_token": " replacement-token ",
+                "amber_site_id": "active-site",
+                "auto_sync_enabled": True,
+            },
+        )
+    )
+
+    assert entry.data["amber_api_token"] == "replacement-token"
+    assert entry.data["amber_site_id"] == "active-site"
+    assert result["data"]["electricity_provider"] == "amber"
+    assert result["data"]["auto_sync_enabled"] is True
+    assert result["data"]["unchanged"] is True
+    assert "update_amber_token" not in result["data"]
+
+
 def test_flow_power_network_tariff_prefill_preserves_manual_selection():
     helper = ast.get_source_segment(
         CONFIG_FLOW_PATH.read_text(),

@@ -1204,6 +1204,49 @@ def _should_collect_flow_power_api_key(
     )
 
 
+def _preferred_amber_site_id(
+    sites: list[dict[str, Any]],
+    preferred_site_id: str | None = None,
+) -> str | None:
+    """Return a valid Amber site, preferring an active site for new selections."""
+    valid_sites = [site for site in sites if site.get("id")]
+    valid_ids = {str(site["id"]) for site in valid_sites}
+    if preferred_site_id is not None and str(preferred_site_id) in valid_ids:
+        return str(preferred_site_id)
+    for site in valid_sites:
+        if str(site.get("status", "")).lower() == "active":
+            return str(site["id"])
+    return str(valid_sites[0]["id"]) if valid_sites else None
+
+
+def _validated_amber_site_id(
+    sites: list[dict[str, Any]],
+    submitted_site_id: str | None,
+) -> str | None:
+    """Return a submitted Amber site only when it belongs to the validated token."""
+    if submitted_site_id is None:
+        return None
+    resolved_site_id = _preferred_amber_site_id(sites, submitted_site_id)
+    return (
+        resolved_site_id
+        if resolved_site_id == str(submitted_site_id)
+        else None
+    )
+
+
+def _pending_amber_site_required(
+    sites: list[dict[str, Any]],
+    pending_token: str | None,
+    pending_site_id: str | None,
+) -> bool:
+    """Return whether a replacement token still needs a validated site choice."""
+    return bool(
+        pending_token
+        and sites
+        and _validated_amber_site_id(sites, pending_site_id) is None
+    )
+
+
 def _flow_power_site_label(site: dict[str, Any]) -> str:
     """Return a display label for a Flow Power site."""
     nmi = site.get("nmi", "")
@@ -7395,6 +7438,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
     def _electricity_provider(self) -> str:
         """Return the configured electricity provider."""
+        pending_provider = getattr(self, "_provider", None)
+        if pending_provider:
+            return pending_provider
         return self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
 
     def _selector_unit(self, unit_kind: str = "minor_rate") -> str:
@@ -7422,6 +7468,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final = dict(self.config_entry.options)
         final.update(section_data)
         self._apply_legacy_data_key_removals()
+        pending_amber_token = getattr(self, "_pending_amber_token", None)
+        pending_amber_site_id = getattr(self, "_pending_amber_site_id", None)
+        if pending_amber_token or pending_amber_site_id:
+            new_data = dict(self.config_entry.data)
+            if pending_amber_token:
+                new_data[CONF_AMBER_API_TOKEN] = pending_amber_token
+            if pending_amber_site_id:
+                new_data[CONF_AMBER_SITE_ID] = pending_amber_site_id
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data=new_data,
+            )
+            self._pending_amber_token = None
+            self._pending_amber_site_id = None
         return self.async_create_entry(title="", data=final)
 
     def _remove_legacy_data_keys(self, keys: tuple[str, ...]) -> None:
@@ -8805,12 +8865,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
             self._provider = provider
-            # Save the provider choice immediately so downstream steps see it
-            current_options = dict(self.config_entry.options)
-            current_options[CONF_ELECTRICITY_PROVIDER] = provider
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, options=current_options
-            )
 
             if provider == "amber":
                 return await self.async_step_amber_options()
@@ -12873,39 +12927,71 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            new_amber_token = user_input.get("update_amber_token", "").strip()
-            # Validate new token immediately and re-render so the site picker appears
+            new_amber_token = (user_input.get("update_amber_token") or "").strip()
+            # Validate a replacement token before saving any provider options.
             if new_amber_token:
+                self._pending_amber_token = None
+                self._pending_amber_site_id = None
                 try:
                     result = await validate_amber_token(self.hass, new_amber_token)
                     if result["success"]:
-                        new_data = dict(self.config_entry.data)
-                        new_data[CONF_AMBER_API_TOKEN] = new_amber_token
-                        self.hass.config_entries.async_update_entry(
-                            self.config_entry, data=new_data
-                        )
-                        _LOGGER.info("Amber API token updated via options flow")
+                        submitted_site_id = user_input.get(CONF_AMBER_SITE_ID)
                         self._opt_amber_sites = result.get("sites", [])
-                        user_input = None  # Re-render with site dropdown now visible
+                        valid_submitted_site_id = _validated_amber_site_id(
+                            self._opt_amber_sites,
+                            submitted_site_id,
+                        )
+                        self._pending_amber_token = new_amber_token
+                        if valid_submitted_site_id:
+                            self._pending_amber_site_id = valid_submitted_site_id
+                            user_input = dict(user_input)
+                            user_input[CONF_AMBER_SITE_ID] = valid_submitted_site_id
+                            user_input["update_amber_token"] = ""
+                        elif submitted_site_id is not None:
+                            errors[CONF_AMBER_SITE_ID] = "invalid_site"
+                            user_input = None
+                        elif self._opt_amber_sites:
+                            user_input = None
+                        else:
+                            user_input = dict(user_input)
+                            user_input["update_amber_token"] = ""
                     else:
                         errors["base"] = "invalid_auth"
                         user_input = None
                 except Exception:
                     errors["base"] = "cannot_connect"
                     user_input = None
+            elif not (
+                self.config_entry.data.get(CONF_AMBER_API_TOKEN)
+                or getattr(self, "_pending_amber_token", None)
+            ):
+                errors["base"] = "no_token_provided"
+                user_input = None
 
         if user_input is not None:
             # Handle site selection before popping other fields
             new_site_id = user_input.pop(CONF_AMBER_SITE_ID, None)
             user_input.pop("update_amber_token", None)
 
-            new_data = dict(self.config_entry.data)
             if new_site_id:
-                new_data[CONF_AMBER_SITE_ID] = new_site_id
-                _LOGGER.info("Amber site ID updated to %s via options flow", new_site_id)
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
+                validated_site_id = _validated_amber_site_id(
+                    getattr(self, "_opt_amber_sites", []),
+                    new_site_id,
                 )
+                if validated_site_id is None:
+                    errors[CONF_AMBER_SITE_ID] = "invalid_site"
+                    user_input = None
+                else:
+                    self._pending_amber_site_id = validated_site_id
+            elif _pending_amber_site_required(
+                getattr(self, "_opt_amber_sites", []),
+                getattr(self, "_pending_amber_token", None),
+                getattr(self, "_pending_amber_site_id", None),
+            ):
+                errors[CONF_AMBER_SITE_ID] = "invalid_site"
+                user_input = None
+
+        if user_input is not None:
 
             # Store amber options temporarily
             self._amber_options = user_input
@@ -12952,6 +13038,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         opt_sites = getattr(self, "_opt_amber_sites", [])
         if len(opt_sites) >= 1:
             current_site_id = self.config_entry.data.get(CONF_AMBER_SITE_ID, "")
+            default_site_id = _preferred_amber_site_id(
+                opt_sites,
+                current_site_id or None,
+            )
             amber_site_list: list[SelectOptionDict] = []
             for site in opt_sites:
                 sid = site["id"]
@@ -12960,7 +13050,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 label = f"{nmi} ({'Active' if status == 'active' else status})"
                 amber_site_list.append(SelectOptionDict(value=sid, label=label))
             schema_dict[
-                vol.Optional(CONF_AMBER_SITE_ID, default=current_site_id or amber_site_list[0]["value"])
+                vol.Optional(CONF_AMBER_SITE_ID, default=default_site_id)
             ] = SelectSelector(SelectSelectorConfig(
                 options=amber_site_list,
                 mode=SelectSelectorMode.DROPDOWN,
