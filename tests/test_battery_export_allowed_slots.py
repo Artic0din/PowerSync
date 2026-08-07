@@ -5908,6 +5908,74 @@ def test_self_consumption_reapplies_sungrow_when_discharge_is_blocked(opt_module
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_reapplies_pending_sungrow_export_restore(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.pending_optimizer_export_restore = True
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 2
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_self_consumption_does_not_reapply_without_pending_sungrow_export_restore(
+    opt_module,
+):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.pending_optimizer_export_restore = False
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_pending_sungrow_export_restore_retries_after_false_mode_apply(opt_module):
+    class RejectingBattery(_FakeBattery):
+        async def set_self_consumption_mode(self):
+            self.self_consumption_calls += 1
+            return False
+
+    battery = RejectingBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.pending_optimizer_export_restore = True
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 2
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_self_consumption_throttles_inferred_sungrow_restore(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.15)

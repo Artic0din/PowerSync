@@ -790,6 +790,45 @@ def test_sungrow_direct_connection_keeps_native_control_enabled():
         restore()
 
 
+def test_sungrow_pending_optimizer_export_restore_is_ownership_only():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        assert coordinator.pending_optimizer_export_restore is False
+        coordinator._pre_control_export_limit_captured = True
+        assert coordinator.pending_optimizer_export_restore is True
+        coordinator._pre_control_export_limit_captured = False
+        assert coordinator.pending_optimizer_export_restore is False
+        coordinator._optimizer_restore_retry_pending = True
+        assert coordinator.pending_optimizer_export_restore is True
+    finally:
+        restore()
+
+
+def test_dual_sungrow_aggregates_pending_optimizer_export_restore():
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        pending_optimizer_export_restore = False
+
+    try:
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        coordinator._coord1 = Child()
+        coordinator._coord2 = Child()
+        assert coordinator.pending_optimizer_export_restore is False
+        coordinator._coord2.pending_optimizer_export_restore = True
+        assert coordinator.pending_optimizer_export_restore is True
+        coordinator._coord2.pending_optimizer_export_restore = False
+        coordinator._coord1.pending_optimizer_export_restore = True
+        assert coordinator.pending_optimizer_export_restore is True
+    finally:
+        restore()
+
+
 def test_sungrow_startup_control_requires_a_valid_telemetry_snapshot():
     """A retained coordinator must not authorize planning from empty defaults."""
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
@@ -1186,6 +1225,79 @@ def test_sungrow_successful_retry_rechecks_persisted_export_recovery_once():
     assert second["telemetry_ready"] is True
     assert third["telemetry_ready"] is True
     assert recovery_calls == 2
+
+
+def test_sungrow_monitoring_mode_defers_persisted_export_recovery_writes():
+    """Monitoring Mode must publish telemetry without replaying control writes."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class RecoveredController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 42.0,
+                "battery_power": 0,
+                "meter_power": 0,
+                "load_power": 0,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+            }
+
+    async def run_updates():
+        entry = types.SimpleNamespace(
+            data={},
+            options={"monitoring_mode": True},
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            RecoveredController(),
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}},
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._persisted_export_control_recovery_pending = True
+        recovery_calls = 0
+
+        async def recover():
+            nonlocal recovery_calls
+            recovery_calls += 1
+            return True
+
+        coordinator.async_restore_persisted_export_control = recover
+        monitoring_snapshot = await coordinator._async_update_data()
+        pending_while_monitoring = (
+            coordinator._persisted_export_control_recovery_pending
+        )
+        entry.options["monitoring_mode"] = False
+        active_snapshot = await coordinator._async_update_data()
+        return (
+            monitoring_snapshot,
+            pending_while_monitoring,
+            active_snapshot,
+            coordinator._persisted_export_control_recovery_pending,
+            recovery_calls,
+        )
+
+    try:
+        (
+            monitoring_snapshot,
+            pending_while_monitoring,
+            active_snapshot,
+            pending_after_control_enabled,
+            recovery_calls,
+        ) = asyncio.run(run_updates())
+    finally:
+        restore()
+
+    assert monitoring_snapshot["telemetry_ready"] is True
+    assert pending_while_monitoring is True
+    assert active_snapshot["telemetry_ready"] is True
+    assert pending_after_control_enabled is False
+    assert recovery_calls == 1
 
 
 def test_sungrow_coordinator_combines_separate_ac_inverter_solar_telemetry():
@@ -2322,6 +2434,142 @@ def test_sungrow_spread_export_uses_export_limit_not_discharge_cap():
     assert fake_controller.restore_normal_calls == 1
     assert fake_controller.discharge_rate_limits == [7.9, 7.9]
     assert fake_controller.export_limits == [4400, 5000]
+
+
+def test_sungrow_pending_export_restore_lifecycle_retries_failed_cleanup():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FailingRestoreController(_FakeSungrowController):
+        def __init__(self):
+            super().__init__()
+            self.fail_restore_once = True
+
+        async def set_export_limit(self, watts: int | None) -> bool:
+            self.export_limits.append(watts)
+            if watts is None and self.fail_restore_once:
+                self.fail_restore_once = False
+                return False
+            return True
+
+    async def run_cycle():
+        fake_controller = FailingRestoreController()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 15.0,
+            "discharge_rate_limit_kw": 15.0,
+        }
+        coordinator.data = dict(fake_controller.battery_data)
+        fake_controller.force_discharge_result = False
+
+        first_result = await coordinator.force_grid_export(export_limit_w=4400)
+        pending_after_failed_cleanup = coordinator.pending_optimizer_export_restore
+        second_result = await coordinator.restore_normal()
+        return (
+            first_result,
+            pending_after_failed_cleanup,
+            second_result,
+            coordinator.pending_optimizer_export_restore,
+            fake_controller.export_limits,
+        )
+
+    try:
+        (
+            first_result,
+            pending_after_failed_cleanup,
+            second_result,
+            pending_after_restore,
+            export_limits,
+        ) = asyncio.run(run_cycle())
+    finally:
+        restore()
+
+    assert first_result is False
+    assert pending_after_failed_cleanup is True
+    assert second_result is True
+    assert pending_after_restore is False
+    assert export_limits == [4400, None, None]
+
+
+def test_sungrow_partial_normal_restore_remains_pending_until_complete():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class PartialRestoreController(_FakeSungrowController):
+        def __init__(self):
+            super().__init__()
+            self.restore_results = iter((False, True))
+
+        async def restore_normal(self) -> bool:
+            self.restore_normal_calls += 1
+            return next(self.restore_results)
+
+    async def run_cycle():
+        fake_controller = PartialRestoreController()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator.data = dict(fake_controller.battery_data)
+
+        assert await coordinator.force_grid_export(export_limit_w=4400)
+        first_restore = await coordinator.restore_normal()
+        pending_after_partial_restore = (
+            coordinator.pending_optimizer_export_restore
+        )
+        second_restore = await coordinator.restore_normal()
+        return (
+            first_restore,
+            pending_after_partial_restore,
+            second_restore,
+            coordinator.pending_optimizer_export_restore,
+            fake_controller,
+        )
+
+    try:
+        (
+            first_restore,
+            pending_after_partial_restore,
+            second_restore,
+            pending_after_complete_restore,
+            fake_controller,
+        ) = asyncio.run(run_cycle())
+    finally:
+        restore()
+
+    assert first_restore is False
+    assert pending_after_partial_restore is True
+    assert second_restore is True
+    assert pending_after_complete_restore is False
+    assert fake_controller.restore_normal_calls == 2
+    assert fake_controller.export_limits == [4400, None]
+
+
+def test_sungrow_user_restore_failure_does_not_claim_optimizer_ownership():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FailedUserRestoreController(_FakeSungrowController):
+        async def restore_normal(self) -> bool:
+            self.restore_normal_calls += 1
+            return False
+
+    async def run_restore():
+        fake_controller = FailedUserRestoreController()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        result = await coordinator.restore_normal()
+        return result, coordinator.pending_optimizer_export_restore
+
+    try:
+        result, pending = asyncio.run(run_restore())
+    finally:
+        restore()
+
+    assert result is False
+    assert pending is False
 
 
 @pytest.mark.parametrize(

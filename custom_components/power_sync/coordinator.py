@@ -5057,6 +5057,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
+        self._optimizer_restore_retry_pending = False
         self._persisted_export_control_recovery_pending = not self._telemetry_only
 
         super().__init__(
@@ -5075,6 +5076,24 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             operation,
         )
         return False
+
+    def _monitoring_mode_active(self) -> bool:
+        """Return whether this entry is configured for read-only monitoring."""
+        if not getattr(self, "_entry_id", None):
+            return False
+        config_entries = getattr(getattr(self, "hass", None), "config_entries", None)
+        get_entry = getattr(config_entries, "async_get_entry", None)
+        if not callable(get_entry):
+            return False
+        entry = get_entry(self._entry_id)
+        if entry is None:
+            return False
+        return bool(
+            entry.options.get(
+                CONF_MONITORING_MODE,
+                entry.data.get(CONF_MONITORING_MODE, False),
+            )
+        )
 
     def startup_control_ready(self) -> bool:
         """Return True only after a complete, current Modbus snapshot."""
@@ -5100,6 +5119,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             ):
                 return False
         return 0 <= float(data["battery_level"]) <= 100
+
+    @property
+    def pending_optimizer_export_restore(self) -> bool:
+        """Return whether an optimizer-owned export limit still needs restoring.
+
+        This is an ownership marker, not a telemetry inference.  It remains set
+        after a failed or partial restore so the optimizer can retry the captured
+        baseline and normal mode on a later self-consumption cycle, including
+        Sungrow models that do not expose readable export-limit registers.
+        """
+        return bool(
+            getattr(self, "_pre_control_export_limit_captured", False)
+            or getattr(self, "_optimizer_restore_retry_pending", False)
+        )
 
     @staticmethod
     def _valid_daily_total(value: Any) -> float | None:
@@ -5587,18 +5620,24 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "_persisted_export_control_recovery_pending",
                 False,
             ):
-                export_control_restored = (
-                    await self.async_restore_persisted_export_control()
-                )
-                self._persisted_export_control_recovery_pending = (
-                    not export_control_restored
-                )
-                if not export_control_restored:
-                    energy_data["telemetry_ready"] = False
-                    _LOGGER.warning(
-                        "Sungrow interrupted export control could not be fully "
-                        "restored; telemetry will remain control-blocked for retry"
+                if self._monitoring_mode_active():
+                    _LOGGER.info(
+                        "Sungrow interrupted export-control recovery is deferred "
+                        "while Monitoring Mode is active"
                     )
+                else:
+                    export_control_restored = (
+                        await self.async_restore_persisted_export_control()
+                    )
+                    self._persisted_export_control_recovery_pending = (
+                        not export_control_restored
+                    )
+                    if not export_control_restored:
+                        energy_data["telemetry_ready"] = False
+                        _LOGGER.warning(
+                            "Sungrow interrupted export control could not be fully "
+                            "restored; telemetry will remain control-blocked for retry"
+                        )
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
@@ -5754,11 +5793,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if not self._native_control_allowed("Sungrow restore normal"):
             return False
         async with self._modbus_lock, self._controller:
+            optimizer_restore_owned = bool(
+                getattr(self, "_pre_control_export_limit_captured", False)
+                or getattr(self, "_optimizer_restore_retry_pending", False)
+            )
             normal_ok = await self._controller.restore_normal()
             export_limit_ok = await self._restore_captured_export_limit()
             charge_limit_ok = await self._restore_captured_charge_limit()
             limit_ok = await self._restore_captured_discharge_limit()
-            return bool(normal_ok and export_limit_ok and charge_limit_ok and limit_ok)
+            restore_ok = bool(
+                normal_ok and export_limit_ok and charge_limit_ok and limit_ok
+            )
+            if optimizer_restore_owned:
+                self._optimizer_restore_retry_pending = not restore_ok
+            return restore_ok
 
     async def set_max_soc(self, percent: int) -> bool:
         """Set maximum battery SOC percentage.
@@ -6401,6 +6449,14 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             getattr(self, "last_update_success", False) is True
             and isinstance(data, dict)
             and data.get("telemetry_ready") is True
+        )
+
+    @property
+    def pending_optimizer_export_restore(self) -> bool:
+        """Return whether either inverter owns a pending export-limit restore."""
+        return bool(
+            getattr(self._coord1, "pending_optimizer_export_restore", False)
+            or getattr(self._coord2, "pending_optimizer_export_restore", False)
         )
 
     # ------------------------------------------------------------------

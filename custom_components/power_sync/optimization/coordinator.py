@@ -8878,6 +8878,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 apply_self_consumption = True
                         if self.battery_system == "sungrow" and self.energy_coordinator:
                             coord_data = getattr(self.energy_coordinator, "data", None) or {}
+                            if getattr(
+                                self.energy_coordinator,
+                                "pending_optimizer_export_restore",
+                                False,
+                            ):
+                                _LOGGER.info(
+                                    "Optimizer: Sungrow has a pending optimizer-owned "
+                                    "export-limit restore — reapplying restore_normal"
+                                )
+                                apply_self_consumption = True
 
                             def _coord_float(*keys: str) -> float | None:
                                 for key in keys:
