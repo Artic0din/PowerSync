@@ -2529,6 +2529,30 @@ def test_sigenergy_optimizer_discharge_rejects_unconfirmed_hardware_write():
     assert '"Sigenergy Modbus host"' in missing_host_branch
 
 
+def test_sungrow_optimizer_discharge_rejects_unconfirmed_hardware_write():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert function_source is not None
+    sungrow_branch = function_source.split("sungrow_coord =", 1)[1].split(
+        "goodwe_coord =",
+        1,
+    )[0]
+    assert sungrow_branch.count(
+        "sungrow_result = await _guarded_force_discharge_write("
+    ) == 2
+    assert sungrow_branch.count("if not sungrow_result:") == 2
+    assert (
+        '"Sungrow spread export hardware refresh was not confirmed"'
+        in sungrow_branch
+    )
+    assert '"Sungrow force discharge hardware refresh was not confirmed"' in sungrow_branch
+
+
 def test_optimizer_discharge_early_blocks_raise_service_error():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

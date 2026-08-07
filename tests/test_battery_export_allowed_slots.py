@@ -4337,6 +4337,34 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
     return coordinator
 
 
+def test_optimizer_waits_for_startup_hardware_restore_task(opt_module):
+    async def run_wait():
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._enabled = True
+        restore_started = asyncio.Event()
+        allow_restore = asyncio.Event()
+
+        async def restore_hardware():
+            restore_started.set()
+            await allow_restore.wait()
+
+        restore_task = asyncio.create_task(restore_hardware())
+        coordinator._deferred_restore_task = restore_task
+        wait_task = asyncio.create_task(
+            coordinator._wait_for_deferred_enable_restore()
+        )
+        await restore_started.wait()
+        await asyncio.sleep(0)
+        was_waiting = not wait_task.done()
+        allow_restore.set()
+        result = await wait_task
+        return was_waiting, result
+
+    was_waiting, result = asyncio.run(run_wait())
+    assert was_waiting is True
+    assert result is True
+
+
 def test_rejected_optimizer_export_does_not_record_active_force_state(opt_module):
     battery = _FakeBattery(force_discharge_result=False)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

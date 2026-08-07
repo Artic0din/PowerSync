@@ -5057,6 +5057,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
+        self._recovered_export_limit_state: tuple[bool, int | None] | None = None
         self._optimizer_restore_retry_pending = False
         self._persisted_export_control_recovery_pending = not self._telemetry_only
 
@@ -5638,6 +5639,17 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                             "Sungrow interrupted export control could not be fully "
                             "restored; telemetry will remain control-blocked for retry"
                         )
+                    else:
+                        recovered_state = getattr(
+                            self,
+                            "_recovered_export_limit_state",
+                            None,
+                        )
+                        if recovered_state is not None:
+                            baseline_enabled, baseline_limit_w = recovered_state
+                            energy_data["export_limit_enabled"] = baseline_enabled
+                            energy_data["export_limit_w"] = baseline_limit_w
+                            self._recovered_export_limit_state = None
 
             es = energy_data["energy_summary"]
             _LOGGER.debug(
@@ -6000,13 +6012,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         self._pre_control_export_limit_w = baseline_limit_w
         self._pre_control_export_limit_captured = True
+        self._recovered_export_limit_state = None
         _LOGGER.warning(
             "Recovering interrupted Sungrow temporary export control (target=%sW, baseline=%s)",
             state.get("target_export_w"),
             f"{baseline_limit_w}W" if baseline_limit_w is not None else "disabled",
         )
         try:
-            return await self.restore_normal()
+            restored = await self.restore_normal()
+            if restored:
+                self._recovered_export_limit_state = (
+                    baseline_limit_w is not None,
+                    baseline_limit_w,
+                )
+            return restored
         except Exception as err:
             _LOGGER.warning(
                 "Could not restore interrupted Sungrow temporary export control; "
@@ -6339,8 +6358,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             coord_data = getattr(self, "data", None)
             if isinstance(coord_data, dict):
                 coord_data["export_limit_enabled"] = restore_limit_w is not None
-                if restore_limit_w is not None:
-                    coord_data["export_limit_w"] = int(restore_limit_w)
+                coord_data["export_limit_w"] = (
+                    int(restore_limit_w) if restore_limit_w is not None else None
+                )
             self._pre_control_export_limit_w = None
             self._pre_control_export_limit_captured = False
         return bool(limit_ok and persisted_ok)

@@ -28864,23 +28864,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     and hasattr(sungrow_coord, "force_grid_export")
                 )
                 if spread_export_active:
-                    await _guarded_force_discharge_write(
+                    sungrow_result = await _guarded_force_discharge_write(
                         lambda guarded_w: sungrow_coord.force_grid_export(
                             duration,
                             export_limit_w=guarded_w,
                         )
                     )
+                    if not sungrow_result:
+                        raise HomeAssistantError(
+                            "Sungrow spread export hardware refresh was not confirmed"
+                        )
                     _LOGGER.debug(
                         "Sungrow spread export hardware refreshed (%dmin, export_limit=%.0fW)",
                         duration,
                         power_w,
                     )
                 else:
-                    await _guarded_force_discharge_write(
+                    sungrow_result = await _guarded_force_discharge_write(
                         lambda guarded_w: sungrow_coord.force_discharge(
                             duration, power_w=guarded_w
                         )
                     )
+                    if not sungrow_result:
+                        raise HomeAssistantError(
+                            "Sungrow force discharge hardware refresh was not confirmed"
+                        )
                     _LOGGER.debug(f"Sungrow force discharge hardware extended ({duration}min)")
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")

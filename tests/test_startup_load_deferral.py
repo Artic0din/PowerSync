@@ -207,6 +207,33 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
     assert "self._energy_telemetry_ready()" in deferred_restore_source
 
 
+def test_optimizer_solve_waits_for_deferred_startup_restore():
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    run_optimization = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "_run_optimization",
+    )
+    wait_for_restore = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "_wait_for_deferred_enable_restore",
+    )
+    run_source = ast.get_source_segment(source, run_optimization)
+    wait_source = ast.get_source_segment(source, wait_for_restore)
+
+    assert run_source is not None
+    assert wait_source is not None
+    assert "if not await self._wait_for_deferred_enable_restore():" in run_source
+    assert run_source.index("_wait_for_deferred_enable_restore") < run_source.index(
+        "await self._optimization_lock.acquire()"
+    )
+    assert 'getattr(self, "_deferred_restore_task", None)' in wait_source
+    assert "await restore_task" in wait_source
+    assert "restore_task is asyncio.current_task()" in wait_source
+
+
 def test_native_energy_coordinators_propagate_startup_telemetry_readiness():
     source = ENERGY_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

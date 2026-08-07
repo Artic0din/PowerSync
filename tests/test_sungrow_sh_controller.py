@@ -2730,6 +2730,103 @@ def test_sungrow_recovery_does_not_recapture_stale_export_target(
     assert not coordinator._pre_control_export_limit_captured
 
 
+@pytest.mark.parametrize(
+    ("baseline_enabled", "baseline_limit_w", "expected_restore_limit"),
+    (
+        (False, None, None),
+        (True, 2240, 2240),
+    ),
+)
+def test_sungrow_first_refresh_publishes_recovered_export_baseline(
+    baseline_enabled,
+    baseline_limit_w,
+    expected_restore_limit,
+):
+    """A restart snapshot must not republish the interrupted export target."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_recovered_refresh_cycle():
+        old_target_w = 4500
+        new_target_w = 4251
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data.update(
+            {
+                "battery_soc": 54.0,
+                "battery_power": 5600,
+                "meter_power": -4500,
+                "load_power": 900,
+                "pv_power": 0,
+                "daily_pv_generation": 0,
+                "export_limit_enabled": True,
+                "export_limit_w": old_target_w,
+            }
+        )
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": baseline_enabled,
+                "baseline_limit_w": baseline_limit_w,
+                "target_export_w": old_target_w,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator.hass = types.SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        coordinator._export_control_store = store
+        coordinator._persisted_export_control_recovery_pending = True
+
+        first_snapshot = await coordinator._async_update_data()
+        # Match DataUpdateCoordinator's assignment after a successful refresh.
+        coordinator.data = first_snapshot
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=new_target_w,
+        )
+        active_state = dict(store.data)
+        restore_result = await coordinator.restore_normal()
+        return (
+            first_snapshot,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+        )
+
+    try:
+        (
+            first_snapshot,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+        ) = asyncio.run(run_recovered_refresh_cycle())
+    finally:
+        restore()
+
+    assert first_snapshot["export_limit_enabled"] is baseline_enabled
+    assert first_snapshot["export_limit_w"] == expected_restore_limit
+    assert force_result is True
+    assert restore_result is True
+    assert active_state == {
+        "active": True,
+        "baseline_enabled": baseline_enabled,
+        "baseline_limit_w": expected_restore_limit,
+        "target_export_w": 4251,
+    }
+    assert fake_controller.export_limits == [
+        expected_restore_limit,
+        4251,
+        expected_restore_limit,
+    ]
+    assert store.data == {"active": False}
+
+
 def test_sungrow_spread_export_refuses_hardware_write_when_state_cannot_persist():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 

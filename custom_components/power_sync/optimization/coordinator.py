@@ -4786,6 +4786,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as e:
                 _LOGGER.debug("Optimizer startup: off-grid orphan check failed: %s", e)
 
+    async def _wait_for_deferred_enable_restore(self) -> bool:
+        """Wait for startup hardware restoration before running a solve.
+
+        The restore and first optimization remain background tasks so Home
+        Assistant setup stays responsive, but hardware writes must be ordered.
+        Otherwise a late startup self-consumption restore can cancel a force
+        action that the first optimizer solve has just issued.
+        """
+        restore_task = getattr(self, "_deferred_restore_task", None)
+        if restore_task is None or restore_task is asyncio.current_task():
+            return self._enabled
+
+        if not restore_task.done():
+            _LOGGER.debug(
+                "Optimizer: waiting for startup hardware restoration before solving"
+            )
+        try:
+            await restore_task
+        except asyncio.CancelledError:
+            if not self._enabled:
+                return False
+            raise
+        except Exception as err:
+            _LOGGER.warning(
+                "Optimizer: startup hardware restoration failed; skipping solve: %s",
+                err,
+            )
+            return False
+        return self._enabled
+
     async def disable(self) -> None:
         """Disable optimization."""
         if not self._enabled:
@@ -5045,6 +5075,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info(
                 "Optimizer: battery telemetry is not ready — skipping this run"
             )
+            return False
+
+        if not await self._wait_for_deferred_enable_restore():
             return False
 
         if await self._wait_for_restart_force_restore():
