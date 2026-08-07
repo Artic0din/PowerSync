@@ -56,6 +56,57 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_optimizer_plan_labels_next_day_ranges_as_tomorrow():
+    """A rolling 24-hour plan must not make tomorrow's slot look active today."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "this._formatPlanTime(data.next_action_time)" in source
+    assert "const anchor = this._data?.schedule?.timestamps?.[0];" in source
+    assert "if (dayOffset === 1) return `Tomorrow ${time}`;" in source
+    assert "const startText = this._formatPlanTime(start);" in source
+    assert "startOffset === endOffset" in source
+
+    assert "18:05 - Tomorrow 17:30" == _render_optimizer_time_range(
+        source,
+        "2026-08-07T18:05:00+10:00",
+        "2026-08-08T17:30:00+10:00",
+    )
+    assert "Tomorrow 17:30 - 17:50" == _render_optimizer_time_range(
+        source,
+        "2026-08-08T17:30:00+10:00",
+        "2026-08-08T17:50:00+10:00",
+    )
+
+
+def _render_optimizer_time_range(source: str, start: str, end: str) -> str:
+    method_names = ("_formatTime", "_planDayOffset", "_formatPlanTime", "_timeRange")
+    methods = []
+    for index, name in enumerate(method_names):
+        next_name = method_names[index + 1] if index + 1 < len(method_names) else "_clockMinutes"
+        match = re.search(
+            rf"  {name}\((?P<args>[^)]*)\) \{{(?P<body>.*?)\n  \}}\n\n  {next_name}\(",
+            source,
+            re.DOTALL,
+        )
+        assert match is not None
+        methods.append(f"{name}({match.group('args')}) {{{match.group('body')}\n  }}")
+
+    runtime = f"""
+      const card = {{
+        _data: {{schedule: {{timestamps: ['2026-08-07T18:05:00+10:00']}}}},
+        {','.join(methods)}
+      }};
+      process.stdout.write(card._timeRange({start!r}, {end!r}));
+    """
+    result = subprocess.run(
+        ["node", "-e", runtime],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
 def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():
     source = STRATEGY_PATH.read_text()
     start = source.index("class PowerSyncAIPlanExplanation extends HTMLElement")

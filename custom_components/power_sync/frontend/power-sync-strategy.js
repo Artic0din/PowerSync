@@ -2383,7 +2383,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     chips.push(['Mode', this._title(status)]);
     chips.push(['Now', this._actionLabel(data.current_action || 'idle')]);
     if (data.next_action && data.next_action_time) {
-      chips.push(['Next', `${this._actionLabel(data.next_action)} ${this._formatTime(data.next_action_time)}`]);
+      chips.push(['Next', `${this._actionLabel(data.next_action)} ${this._formatPlanTime(data.next_action_time)}`]);
     }
     if (data.last_optimization) {
       chips.push(['Optimized', this._formatTime(data.last_optimization)]);
@@ -3150,9 +3150,38 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  _planDayOffset(value) {
+    const anchor = this._data?.schedule?.timestamps?.[0];
+    const parseDate = (candidate) => {
+      const match = String(candidate || '').match(/^(\d{4})-(\d{2})-(\d{2})T/);
+      return match
+        ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+        : NaN;
+    };
+    const anchorDay = parseDate(anchor);
+    const valueDay = parseDate(value);
+    return Number.isFinite(anchorDay) && Number.isFinite(valueDay)
+      ? Math.round((valueDay - anchorDay) / 86400000)
+      : NaN;
+  }
+
+  _formatPlanTime(value) {
+    const time = this._formatTime(value);
+    const dayOffset = this._planDayOffset(value);
+    if (!Number.isFinite(dayOffset) || dayOffset === 0) return time;
+    if (dayOffset === 1) return `Tomorrow ${time}`;
+    if (dayOffset === -1) return `Yesterday ${time}`;
+    const date = String(value || '').substring(0, 10);
+    return date ? `${date} ${time}` : time;
+  }
+
   _timeRange(start, end) {
-    const startText = this._formatTime(start);
-    const endText = this._formatTime(end);
+    const startOffset = this._planDayOffset(start);
+    const endOffset = this._planDayOffset(end);
+    const startText = this._formatPlanTime(start);
+    const endText = Number.isFinite(startOffset) && startOffset === endOffset
+      ? this._formatTime(end)
+      : this._formatPlanTime(end);
     return endText && endText !== '--:--' && endText !== startText ? `${startText} - ${endText}` : startText;
   }
 
