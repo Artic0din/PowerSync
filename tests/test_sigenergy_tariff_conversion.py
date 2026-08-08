@@ -211,6 +211,196 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
     assert by_start["20:30"] == 35.33
 
 
+def test_static_tou_tariff_schedule_converts_to_sigenergy_slots(
+    sigenergy_api_module,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+    tariff_schedule = {
+        "plan_name": "Aurora TOU",
+        "tou_periods": {
+            "PEAK": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 1,
+                        "toDayOfWeek": 5,
+                        "fromHour": 16,
+                        "fromMinute": 0,
+                        "toHour": 21,
+                        "toMinute": 0,
+                    }
+                ]
+            },
+            "OFF_PEAK": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": 0,
+                        "fromMinute": 0,
+                        "toHour": 24,
+                        "toMinute": 0,
+                    }
+                ]
+            },
+        },
+        "buy_rates": {"PEAK": 0.302, "OFF_PEAK": 0.142},
+        "sell_rates": {"PEAK": 0.093, "OFF_PEAK": 0.093, "ALL": 0.093},
+    }
+
+    buy_prices, sell_prices = sigenergy_api_module.convert_static_tariff_schedule_to_sigenergy(
+        tariff_schedule,
+        now=datetime(2026, 7, 9, 15, 10, tzinfo=brisbane),
+    )
+
+    buy_by_week_start = {
+        (slot["weekRange"], slot["timeRange"].split("-")[0]): slot["price"]
+        for slot in buy_prices
+    }
+    sell_by_week_start = {
+        (slot["weekRange"], slot["timeRange"].split("-")[0]): slot["price"]
+        for slot in sell_prices
+    }
+
+    assert {slot["weekRange"] for slot in buy_prices} == {"1-5", "6-7"}
+    assert {slot["weekRange"] for slot in sell_prices} == {"1-7"}
+    assert len(buy_prices) == 96
+    assert len(sell_prices) == 48
+    assert buy_by_week_start[("1-5", "15:30")] == 14.2
+    assert buy_by_week_start[("1-5", "16:00")] == 30.2
+    assert buy_by_week_start[("6-7", "16:00")] == 14.2
+    assert sell_by_week_start[("1-7", "16:00")] == 9.3
+
+
+def test_static_period_tariff_schedule_converts_to_sigenergy_slots(
+    sigenergy_api_module,
+):
+    buy_prices, sell_prices = sigenergy_api_module.convert_static_tariff_schedule_to_sigenergy(
+        {
+            "buy_prices": {
+                "PERIOD_00_00": 0.142,
+                "PERIOD_16_00": 0.302,
+            },
+            "sell_prices": {
+                "PERIOD_00_00": 0.08,
+                "PERIOD_16_00": 0.093,
+            },
+        }
+    )
+
+    buy_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in buy_prices}
+    sell_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in sell_prices}
+
+    assert buy_by_start == {"00:00": 14.2, "16:00": 30.2}
+    assert sell_by_start == {"00:00": 8.0, "16:00": 9.3}
+
+
+def test_sigenergy_upload_groups_day_aware_static_tou_slots(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[
+                {"weekRange": "1-5", "timeRange": "16:00-16:30", "price": 30.2},
+                {"weekRange": "6-7", "timeRange": "16:00-16:30", "price": 14.2},
+            ],
+            sell_prices=[
+                {"weekRange": "1-7", "timeRange": "16:00-16:30", "price": 9.3},
+            ],
+        )
+    )
+
+    payload = session.post_kwargs[0]["json"]
+    buy_week_prices = payload["buyPrice"]["staticPricing"]["combinedPrices"][0][
+        "weekPrices"
+    ]
+    sell_week_prices = payload["sellPrice"]["staticPricing"]["combinedPrices"][0][
+        "weekPrices"
+    ]
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert buy_week_prices == [
+        {
+            "weekRange": "1-5",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 30.2}],
+        },
+        {
+            "weekRange": "6-7",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 14.2}],
+        },
+    ]
+    assert sell_week_prices == [
+        {
+            "weekRange": "1-7",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 9.3}],
+        }
+    ]
+
+
+def test_sigenergy_upload_uses_provider_label_for_buy_and_sell(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[{"timeRange": "00:00-00:30", "price": 14.2}],
+            sell_prices=[{"timeRange": "00:00-00:30", "price": 9.3}],
+            plan_name="PowerSync Flow Power",
+            provider_label="Flow Power",
+        )
+    )
+
+    payload = session.post_kwargs[0]["json"]
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert payload["buyPrice"]["staticPricing"]["providerName"] == "Flow Power"
+    assert payload["sellPrice"]["staticPricing"]["providerName"] == "Flow Power"
+    assert payload["buyPrice"]["staticPricing"]["planName"] == (
+        "PowerSync Flow Power 30-min"
+    )
+    assert payload["sellPrice"]["staticPricing"]["planName"] == (
+        "PowerSync Flow Power 30-min"
+    )
+
+
+def test_sigenergy_manual_sync_uses_static_tou_without_price_coordinator():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+
+    setup_source = init_source[
+        init_source.index("def _static_tou_tariff_schedule_for_sync"):
+        init_source.index("async def handle_sync_tou")
+    ]
+    sync_source = init_source[
+        init_source.index("async def _handle_sync_tou_internal"):
+        init_source.index("# Fetch Powerwall timezone")
+    ]
+    sigenergy_source = init_source[
+        init_source.index("async def _sync_tariff_to_sigenergy"):
+        init_source.index("async def _sync_tariff_to_foxess")
+    ]
+
+    assert "and not _static_tou_tariff_schedule_for_sync()" in setup_source
+    assert "use_static_tou = (" in sync_source
+    assert "amber_coordinator is None" in sync_source
+    assert "forecast_data = []" in sync_source
+    assert "convert_static_tariff_schedule_to_sigenergy" in sigenergy_source
+    assert 'payload_source = "static_tou_tariff_schedule"' in sigenergy_source
+
+
 def test_flow_power_canonical_tariff_ignores_raw_current_wholesale_spike(
     tariff_converter_module,
     monkeypatch,
@@ -327,8 +517,64 @@ def test_flow_power_pea_uses_current_wholesale_without_raw_tariff_injection(
     )
 
     adjusted_rates = adjusted["energy_charges"]["Summer"]["rates"]
-    assert adjusted_rates["PERIOD_18_30"] == 0.4196
+    assert adjusted_rates["PERIOD_18_30"] == 0.3311
+    assert adjusted_rates["PERIOD_18_30"] != 0.4196
     assert adjusted_rates["PERIOD_18_30"] != 0.8801
+
+
+def test_flow_power_pea_current_interval_fills_leading_forecast_gap(
+    tariff_converter_module,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+    forecast = [
+        {
+            "nemTime": datetime(2026, 7, 11, 9, 0, tzinfo=brisbane).isoformat(),
+            "duration": 30,
+            "type": "ForecastInterval",
+            "channelType": "general",
+            "perKwh": 2.1,
+        }
+    ]
+    current_actual = {
+        "general": {
+            "nemTime": datetime(2026, 7, 11, 8, 5, tzinfo=brisbane).isoformat(),
+            "duration": 5,
+            "type": "CurrentInterval",
+            "channelType": "general",
+            "perKwh": 5.65,
+        },
+    }
+
+    wholesale_lookup = tariff_converter_module.get_wholesale_lookup(
+        forecast,
+        current_actual_interval=current_actual,
+    )
+
+    assert wholesale_lookup["PERIOD_08_00"] == 0.0565
+    assert wholesale_lookup["PERIOD_08_30"] == 0.021
+
+    tariff = {
+        "energy_charges": {
+            "Summer": {
+                "rates": {
+                    "PERIOD_08_00": 0.9999,
+                    "PERIOD_08_30": 0.9999,
+                },
+            },
+        },
+    }
+    adjusted = tariff_converter_module.apply_flow_power_pea(
+        tariff,
+        wholesale_lookup,
+        base_rate=34.0,
+        twap=8.0,
+        bpea=1.7,
+    )
+
+    adjusted_rates = adjusted["energy_charges"]["Summer"]["rates"]
+    assert adjusted_rates["PERIOD_08_00"] == 0.2995
+    assert adjusted_rates["PERIOD_08_00"] != 0.323
+    assert adjusted_rates["PERIOD_08_30"] == 0.264
 
 
 def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
@@ -378,6 +624,74 @@ def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
     assert buy_by_start["20:30"] == 35.33
     assert sell_by_start["20:30"] == 9.82
     assert sell_by_start["20:30"] != buy_by_start["20:30"]
+
+
+def test_convert_amber_to_tesla_tariff_demand_artificial_price_uses_ha_local_weekday(
+    tariff_converter_module, monkeypatch
+):
+    """HD-23 regression: when no timezone can be auto-detected from price data
+    (detected_tz is None), the demand-artificial-price "Weekdays Only" check
+    must use HA's configured clock (dt_util.now()), not the OS-local clock
+    (datetime.now())."""
+    # OS-local "now" lands on a Saturday - if the buggy code path is used,
+    # "Weekdays Only" is (wrongly) treated as invalid and no artificial
+    # price increase is applied.
+    os_local_now = datetime(2026, 7, 11, 15, 0)
+    # HA-local "now" (dt_util.now()) lands on a Wednesday - the correct
+    # weekday to use for the "Weekdays Only" check.
+    ha_local_now = datetime(2026, 7, 8, 15, 0)
+
+    real_datetime = tariff_converter_module.datetime
+
+    class _FakeDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return os_local_now.replace(tzinfo=tz)
+            return os_local_now
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        tariff_converter_module.dt_util, "now", lambda: ha_local_now, raising=False
+    )
+
+    # Build a full day of naive (no tzinfo) forecast points so timezone
+    # auto-detection fails and detected_tz stays None - the only condition
+    # under which the OS-local vs HA-local distinction matters.
+    day = real_datetime(2026, 7, 11)
+    forecast: list[dict] = []
+    for slot in range(48):
+        slot_end = day + timedelta(minutes=(slot + 1) * 30)
+        for channel, price in (("general", 20.0), ("feedIn", -5.0)):
+            forecast.append(
+                {
+                    "nemTime": slot_end.isoformat(),
+                    "duration": 30,
+                    "type": "ForecastInterval",
+                    "channelType": channel,
+                    "advancedPrice": {"predicted": price},
+                    "perKwh": price,
+                }
+            )
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="none",
+        forecast_type="predicted",
+        demand_charge_enabled=True,
+        demand_charge_rate=1.0,
+        demand_charge_start_time="14:00",
+        demand_charge_end_time="20:00",
+        demand_charge_days="Weekdays Only",
+        demand_artificial_price_enabled=True,
+    )
+
+    assert tariff is not None
+    buy_price = tariff["energy_charges"]["Summer"]["rates"]["PERIOD_15_00"]
+    # $0.20/kWh base price + the $2/kWh artificial increase should land here
+    # only if the weekday check used HA-local time (Wednesday), not OS-local
+    # time (Saturday).
+    assert buy_price == pytest.approx(2.2)
 
 
 def test_chip_mode_threshold_uses_unboosted_tesla_tariff_price(tariff_converter_module):
@@ -532,6 +846,9 @@ def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_
     assert "new_data[CONF_SIGENERGY_STATION_ID] = tariff_station_id" not in helper_source
     assert "configured station ID remains" in helper_source
     assert "station_id=tariff_station_id" in helper_source
+    assert helper_source.count("hass.data.setdefault(DOMAIN, {}).setdefault") >= 2
+    assert 'entry_data["tariff_schedule"]' in helper_source
+    assert 'entry_data["sigenergy_tariff"]' in helper_source
 
 
 def test_sigenergy_station_picker_preserves_system_id_and_caches_tariff_id():

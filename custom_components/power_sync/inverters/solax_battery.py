@@ -527,6 +527,7 @@ class SolaxBatteryController:
             )
             return True
 
+        self._save_force_time_states(("charge_current",))
         await self._set_number("charge_current", amps)
         await self._set_select("charger_use_mode", _MODE_MANUAL)
         await self._set_select("manual_mode_select", _MANUAL_CHARGE)
@@ -568,6 +569,7 @@ class SolaxBatteryController:
             )
             return True
 
+        self._save_force_time_states(("discharge_current",))
         await self._set_number("discharge_current", amps)
         await self._set_select("charger_use_mode", _MODE_MANUAL)
         await self._set_select("manual_mode_select", _MANUAL_DISCHARGE)
@@ -596,6 +598,7 @@ class SolaxBatteryController:
 
         await self._set_select("manual_mode_select", _MANUAL_STOP)
         await self._set_manual_mode_control(_MANUAL_CONTROL_OFF)
+        await self._restore_force_time_states()
         await self._set_select("charger_use_mode", _MODE_SELF_USE)
         _LOGGER.info("Solax restored to Self Use mode")
         return True
@@ -603,7 +606,7 @@ class SolaxBatteryController:
     # -- Reserve / mode / export ------------------------------------------
 
     async def set_backup_reserve(self, percent: int) -> bool:
-        """Set backup reserve (minimum SOC). Clamped to [15, 100]."""
+        """Set backup reserve using the mapped number entity's supported bounds."""
         await self._ensure_connected()
         if not self._entity_exists("backup_reserve"):
             _LOGGER.warning(
@@ -611,11 +614,26 @@ class SolaxBatteryController:
                 ", ".join(_WRITE_ENTITIES["backup_reserve"]),
             )
             return False
-        clamped = max(15, min(100, int(percent)))
+        # Older SolaX models commonly expose a 15% minimum, but newer
+        # selfuse_discharge_min_soc entities can advertise and accept 10%.
+        # Trust HA's number bounds when present and retain the historical 15%
+        # fallback for entities that provide no metadata.
+        clamped = self._clamp_number_to_entity_bounds(
+            "backup_reserve",
+            int(percent),
+            default_minimum=15.0,
+            default_maximum=100.0,
+        )
         await self._set_number("backup_reserve", clamped)
         if self._control_profile == "force_time" and self._entity_exists("grid_tied_min_soc"):
-            await self._set_number("grid_tied_min_soc", clamped)
-        _LOGGER.info("Solax backup reserve set to %d%%", clamped)
+            grid_tied_clamped = self._clamp_number_to_entity_bounds(
+                "grid_tied_min_soc",
+                int(percent),
+                default_minimum=15.0,
+                default_maximum=100.0,
+            )
+            await self._set_number("grid_tied_min_soc", grid_tied_clamped)
+        _LOGGER.info("Solax backup reserve set to %g%%", clamped)
         return True
 
     async def get_backup_reserve(self) -> int | None:
@@ -814,6 +832,36 @@ class SolaxBatteryController:
         except (ValueError, TypeError):
             return None
 
+    def _clamp_number_to_entity_bounds(
+        self,
+        key: str,
+        value: float,
+        *,
+        default_minimum: float,
+        default_maximum: float,
+    ) -> float:
+        """Clamp a write to the bounds advertised by its mapped HA number entity."""
+        entity_id = self._entity_map.get(key)
+        state = self.hass.states.get(entity_id) if entity_id else None
+        attributes = state.attributes if state else {}
+
+        def _bound(attribute: str, native_attribute: str, fallback: float) -> float:
+            try:
+                return float(
+                    attributes.get(
+                        attribute,
+                        attributes.get(native_attribute, fallback),
+                    )
+                )
+            except (TypeError, ValueError):
+                return fallback
+
+        minimum = _bound("min", "native_min_value", default_minimum)
+        maximum = _bound("max", "native_max_value", default_maximum)
+        minimum = max(0.0, min(100.0, minimum))
+        maximum = max(minimum, min(100.0, maximum))
+        return max(minimum, min(maximum, value))
+
     async def _set_number(self, key: str, value: float) -> None:
         entity_id = self._entity_map.get(key)
         if not entity_id:
@@ -1007,14 +1055,48 @@ class SolaxBatteryController:
         await self._set_select("export_duration", best_option or options[0])
 
     def _save_force_time_states(self, keys: tuple[str, ...]) -> None:
-        """Remember Gen2/Gen3 entities so restore_normal can unwind cleanly."""
-        saved: dict[str, str] = {}
+        """Remember Gen2/Gen3 entities so restore_normal can unwind cleanly.
+
+        Guarded per-key (only on first capture, not re-entry) — the optimizer
+        re-issues force_charge/force_discharge every cycle to keep the
+        hardware timeout alive, so a later cycle would otherwise read back
+        the already-force-modified entities (grid_export_limit, currents,
+        charge window, allow_grid_charge) and overwrite the real restore
+        baseline. Keys already captured this force session are left alone;
+        only keys not yet captured are read fresh, so a force direction
+        switch without an intervening restore still saves its own keys.
+        """
+        saved = self._saved_force_time_states or {}
         for key in keys:
+            if key in saved:
+                continue
             entity_id = self._entity_map.get(key)
             state = self.hass.states.get(entity_id) if entity_id else None
             if state and state.state not in ("unknown", "unavailable", ""):
                 saved[key] = state.state
+            elif key == "charge_current":
+                saved[key] = str(self._max_charge_a)
+            elif key == "discharge_current":
+                saved[key] = str(self._max_discharge_a)
         self._saved_force_time_states = saved
+
+    def get_force_restore_state(self) -> dict[str, str]:
+        """Return the captured pre-force values for restart persistence."""
+        return dict(self._saved_force_time_states or {})
+
+    def set_force_restore_state(self, state: dict[str, Any] | None) -> None:
+        """Restore a validated pre-force snapshot before a restart reissue."""
+        if not isinstance(state, dict):
+            return
+        restored = {
+            key: str(value)
+            for key, value in state.items()
+            if key in _WRITE_ENTITIES
+            and isinstance(value, (str, int, float))
+            and str(value) not in ("", "unknown", "unavailable")
+        }
+        if restored:
+            self._saved_force_time_states = restored
 
     async def _restore_force_time_states(self) -> None:
         saved = self._saved_force_time_states or {}

@@ -214,6 +214,49 @@ def test_tesla_preserve_charge_fails_without_home_battery_soc():
     assert hass.services.calls == []
 
 
+def test_tesla_grid_export_supports_legacy_entry_without_battery_system():
+    """Pre-multi-brand Tesla entries implicitly use the Tesla battery system."""
+    hass = _Hass([])
+    legacy_entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+
+    result = asyncio.run(
+        actions._action_set_grid_export(
+            hass,
+            legacy_entry,
+            {"rule": "pv_only"},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "power_sync",
+            "set_grid_export",
+            {"rule": "pv_only", "source": "automation"},
+        )
+    ]
+
+
+def test_tesla_grid_export_respects_explicit_non_tesla_option():
+    hass = _Hass([])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"battery_system": "sungrow"},
+    )
+
+    result = asyncio.run(
+        actions._action_set_grid_export(
+            hass,
+            entry,
+            {"rule": "pv_only"},
+        )
+    )
+
+    assert result is None
+    assert hass.services.calls == []
+
+
 def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     vin = "LRWYHCEKXTC687964"
     device = SimpleNamespace(
@@ -434,6 +477,64 @@ def test_solar_surplus_parallel_reserve_allows_excess_above_battery_rate():
     assert surplus_kw == 2.0
 
 
+def test_active_solar_surplus_refreshes_threshold_with_hysteresis(monkeypatch):
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["automation_store"] = types.SimpleNamespace(
+        _data={
+            "solar_surplus_config": {
+                "enabled": True,
+                "home_battery_minimum": 90,
+                "allow_parallel_charging": False,
+                "household_buffer_kw": 0.5,
+            }
+        }
+    )
+    vehicle_id = "generic_ev"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=10)
+    state["params"].update(
+        {
+            "charger_type": "generic",
+            "min_battery_soc": 80,
+            "pause_below_soc": 70,
+            "notify_on_error": False,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+
+    live_status = {
+        "battery_soc": 81,
+        "grid_power": -2500,
+        "battery_power": -500,
+        "solar_power": 5000,
+        "load_power": 2000,
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["params"]["min_battery_soc"] == 90
+    assert state["params"]["pause_below_soc"] == 80
+    assert state.get("paused") is not True
+    assert 0 not in set_amps_calls
+
+    live_status["battery_soc"] = 79
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state["paused"] is True
+    assert set_amps_calls[-1] == 0
+
+
 def test_solar_surplus_curtailed_full_battery_keeps_active_ev_headroom():
     surplus_kw = actions._calculate_solar_surplus(
         {
@@ -616,12 +717,17 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_amps)
 
-    ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def home_location(*args, **kwargs):
         return "home"
 
-    monkeypatch.setattr(ev_planner, "get_ev_location", home_location)
+    ev_planner.get_ev_location = home_location
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
 
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
@@ -1242,6 +1348,162 @@ def test_generic_start_runs_pre_charge_wake_before_switch_on():
     ]
 
 
+def test_generic_direct_start_skips_switch_that_is_already_on():
+    hass = _Hass([_State("switch.charger_charge_control", "on")])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == []
+
+
+def test_generic_ocpp_wrapper_resets_finishing_switch_before_start(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(actions.asyncio, "sleep", fake_sleep)
+    hass = _Hass([
+        _State("switch.charger_charge_control", "on"),
+        _State("sensor.charger_status_connector", "Finishing"),
+    ])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.charger_charge_control"}),
+        ("switch", "turn_on", {"entity_id": "switch.charger_charge_control"}),
+    ]
+    assert sleeps == [1]
+
+
+def test_generic_set_vehicle_amps_uses_input_number_and_skips_duplicate_start():
+    hass = _Hass([
+        _State("input_number.smart_charge_set_amps", "16"),
+        _State("switch.charger_charge_control", "on"),
+    ])
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            _Entry(),
+            "generic_ev",
+            12,
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "input_number",
+            "set_value",
+            {"entity_id": "input_number.smart_charge_set_amps", "value": 12},
+        )
+    ]
+
+
+def test_generic_direct_set_amps_uses_configured_entity_domain():
+    hass = _Hass([_State("input_number.smart_charge_set_amps", "16")])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "input_number",
+            "set_value",
+            {"entity_id": "input_number.smart_charge_set_amps", "value": 10},
+        )
+    ]
+
+
+def test_generic_switch_stop_does_not_require_zero_amp_write():
+    hass = _Hass([
+        _State("input_number.smart_charge_set_amps", "6", {"min": 6, "max": 32}),
+        _State("switch.charger_charge_control", "on"),
+    ])
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            _Entry(),
+            "generic_ev",
+            0,
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.charger_charge_control"})
+    ]
+
+
+def test_generic_amps_only_stop_sets_input_number_to_zero():
+    hass = _Hass([_State("input_number.smart_charge_set_amps", "6")])
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            _Entry(),
+            "generic_ev",
+            0,
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "input_number",
+            "set_value",
+            {"entity_id": "input_number.smart_charge_set_amps", "value": 0},
+        )
+    ]
+
+
 def test_ocpp_pre_charge_wake_blocks_when_connector_available():
     hass = _Hass([
         _State("switch.evse_1_charge_control", "off"),
@@ -1431,6 +1693,22 @@ def test_dynamic_start_claims_business_owner_mode():
 
 
 def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(monkeypatch):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def ev_soc(*args, **kwargs):
+        return 50.0
+
+    ev_planner.is_ev_plugged_in = plugged_in
+    ev_planner.get_ev_battery_level = ev_soc
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
     async def fake_get_tesla_ev_entity(*args, **kwargs):
         return "number.car_charging_amps"
 
@@ -1469,12 +1747,21 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
 
 
 def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
-    ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def plugged_in(*args, **kwargs):
+        return True
 
     async def full_ev_soc(*args, **kwargs):
         return 100.0
 
-    monkeypatch.setattr(ev_planner, "get_ev_battery_level", full_ev_soc)
+    ev_planner.is_ev_plugged_in = plugged_in
+    ev_planner.get_ev_battery_level = full_ev_soc
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
     hass = _Hass([])
     actions._dynamic_ev_state.clear()
 
@@ -1498,6 +1785,98 @@ def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
     assert last_command["command"] == "start_solar_surplus"
     assert last_command["success"] is False
     assert last_command["reason"] == "EV 100.0% >= 100%, already full"
+
+
+def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def unplugged(*args, **kwargs):
+        return False
+
+    async def ev_soc(*args, **kwargs):
+        return 50.0
+
+    ev_planner.is_ev_plugged_in = unplugged
+    ev_planner.get_ev_battery_level = ev_soc
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "VIN123",
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
+    assert last_command["command"] == "start_solar_surplus"
+    assert last_command["success"] is False
+    assert last_command["reason"] == "vehicle is not plugged in"
+
+
+def test_solar_surplus_active_default_session_debounces_resolved_vin_unplug(
+    monkeypatch,
+):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def unplugged(*args, **kwargs):
+        return False
+
+    async def ev_soc(*args, **kwargs):
+        return 50.0
+
+    ev_planner.is_ev_plugged_in = unplugged
+    ev_planner.get_ev_battery_level = ev_soc
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        actions.DEFAULT_VEHICLE_ID: {
+            "active": True,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+            },
+        }
+    }
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "VIN123",
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert set(actions._dynamic_ev_state["entry-1"]) == {
+        actions.DEFAULT_VEHICLE_ID
+    }
 
 
 def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):

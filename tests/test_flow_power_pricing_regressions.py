@@ -28,6 +28,22 @@ def _method_source(file_path: Path, class_name: str, method_name: str) -> str:
     raise AssertionError(f"{class_name}.{method_name} not found")
 
 
+def _class_source(file_path: Path, class_name: str) -> str:
+    module = ast.parse(file_path.read_text())
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return ast.unparse(node)
+    raise AssertionError(f"{class_name} not found")
+
+
+def _function_source(file_path: Path, function_name: str) -> str:
+    module = ast.parse(file_path.read_text())
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return ast.unparse(node)
+    raise AssertionError(f"{function_name} not found")
+
+
 class _FakeResponse:
     def __init__(self, payload, status=200):
         self._payload = payload
@@ -62,6 +78,256 @@ class _FakeSession:
         else:
             payload, status = response, 200
         return _FakeResponse(payload, status=status)
+
+
+class _FakeKWatchClient:
+    def __init__(
+        self,
+        *,
+        dispatch=None,
+        forecast_30=None,
+        forecast_5=None,
+        error: Exception | None = None,
+    ) -> None:
+        self.dispatch = dispatch
+        self.forecast_30 = forecast_30
+        self.forecast_5 = forecast_5
+        self.error = error
+
+    async def dispatch5mins(self, _region, period=60):
+        if self.error is not None:
+            raise self.error
+        return self.dispatch if self.dispatch is not None else [_price_record(10.0)]
+
+    async def predispatch30mins(self, _region, period=1):
+        if self.forecast_30 is not None:
+            return self.forecast_30
+        return [_price_record(12.0, minutes=30)]
+
+    async def predispatch5mins(self, _region, period=60):
+        return self.forecast_5 if self.forecast_5 is not None else [_price_record(11.0)]
+
+
+def _price_record(price: float, *, minutes: int = 5) -> dict:
+    return {
+        "nemTime": f"2026-06-08T10:{minutes:02d}:00+10:00",
+        "perKwh": price,
+        "duration": minutes,
+    }
+
+
+def _aemo_data(price: float = 8.0) -> dict:
+    return {
+        "current": [
+            {"channelType": "general", "perKwh": price, "type": "CurrentInterval"},
+            {"channelType": "feedIn", "perKwh": -price, "type": "CurrentInterval"},
+        ],
+        "forecast": [
+            {"channelType": "general", "perKwh": price, "type": "ForecastInterval"},
+            {"channelType": "feedIn", "perKwh": -price, "type": "ForecastInterval"},
+        ],
+        "last_update": datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc),
+        "source": "aemo_api",
+    }
+
+
+def test_cost_tracking_uses_flow_power_kwatch_current_price():
+    """KWatch-only installs must expose a price to the energy cost accumulator."""
+    coordinator_path = COMPONENT_ROOT / "coordinator.py"
+    saved_modules = {
+        name: sys.modules.get(name)
+        for name in ("power_sync", "power_sync.const", "power_sync.flow_power_pricing")
+    }
+
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    const_module = types.ModuleType("power_sync.const")
+    for name, value in {
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "CONF_PEA_ENABLED": "pea_enabled",
+        "CONF_FLOW_POWER_BASE_RATE": "flow_power_base_rate",
+        "CONF_PEA_CUSTOM_VALUE": "pea_custom_value",
+        "CONF_FLOW_POWER_STATE": "flow_power_state",
+        "FLOW_POWER_DEFAULT_BASE_RATE": 28.0,
+        "FLOW_POWER_HAPPY_HOUR_PERIODS": {"PERIOD_17_30"},
+    }.items():
+        setattr(const_module, name, value)
+    pricing_module = types.ModuleType("power_sync.flow_power_pricing")
+    pricing_module.resolve_flow_power_pricing_context = lambda *args: object()
+    pricing_module.calculate_flow_power_pea = lambda wholesale, *_args, **_kwargs: wholesale - 10.0
+
+    sys.modules["power_sync"] = package
+    sys.modules["power_sync.const"] = const_module
+    sys.modules["power_sync.flow_power_pricing"] = pricing_module
+    try:
+        namespace = {
+            "__name__": "power_sync.coordinator_cost_test",
+            "__package__": "power_sync",
+            "Any": object,
+            "DOMAIN": "power_sync",
+            "HomeAssistant": object,
+            "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+            "_flow_power_export_rate_dollars": lambda *_args: 0.45,
+            "dt_util": SimpleNamespace(
+                now=lambda: datetime(2026, 7, 13, 12, 5, tzinfo=timezone.utc)
+            ),
+        }
+        exec(
+            "from __future__ import annotations\n"
+            + _function_source(coordinator_path, "_get_current_prices"),
+            namespace,
+        )
+
+        entry_id = "kwatch-cost-entry"
+        config_entry = SimpleNamespace(
+            data={
+                "electricity_provider": "flow_power",
+                "pea_enabled": True,
+                "flow_power_base_rate": 31.0,
+                "pea_custom_value": 4.0,
+                "flow_power_state": "QLD1",
+            },
+            options={},
+        )
+        kwatch_coordinator = SimpleNamespace(
+            data={
+                "current": [
+                    {"channelType": "general", "perKwh": 12.0},
+                    {"channelType": "feedIn", "perKwh": -12.0},
+                ]
+            }
+        )
+        hass = SimpleNamespace(
+            data={
+                "power_sync": {
+                    entry_id: {"flow_power_kwatch_coordinator": kwatch_coordinator}
+                }
+            },
+            config_entries=SimpleNamespace(async_get_entry=lambda candidate: config_entry),
+        )
+
+        buy_price, sell_price = namespace["_get_current_prices"](hass, entry_id)
+
+        assert buy_price == 0.35
+        assert sell_price == 0.0
+    finally:
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+def _kwatch_coordinator_test_env():
+    class UpdateFailed(Exception):
+        pass
+
+    class FakeClientError(Exception):
+        pass
+
+    class FakeDataUpdateCoordinator:
+        def __init__(self, hass, logger, name=None, update_interval=None):
+            self.hass = hass
+            self.logger = logger
+            self.name = name
+            self.update_interval = update_interval
+            self.data = None
+
+    class FakeAEMOPriceCoordinator:
+        def __init__(self, hass, region, session):
+            self.hass = hass
+            self.region = region
+            self.session = session
+            self.data = None
+            self.refresh_count = 0
+            session.aemo_fallback = self
+
+        async def async_request_refresh(self):
+            self.refresh_count += 1
+            error = getattr(self.session, "aemo_error", None)
+            if error is not None:
+                raise error
+            self.data = getattr(self.session, "aemo_data", _aemo_data())
+
+    class FakeLogger:
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    class FlowPowerAPIError(Exception):
+        pass
+
+    class FlowPowerAPIClient:
+        def __new__(cls, _api_key, session):
+            return session.kwatch_client
+
+    def kwatch_prices_to_amber_format(prices, *, interval_type, default_duration):
+        entries = []
+        for price in prices:
+            duration = price.get("duration", default_duration)
+            cents = float(price["perKwh"])
+            for channel, value in (("general", cents), ("feedIn", -cents)):
+                entries.append(
+                    {
+                        "nemTime": price["nemTime"],
+                        "perKwh": value,
+                        "channelType": channel,
+                        "type": interval_type,
+                        "duration": duration,
+                        "wholesaleKWHPrice": cents,
+                    }
+                )
+        return entries
+
+    saved_modules = {
+        name: sys.modules.get(name)
+        for name in ("power_sync", "power_sync.flow_power_api")
+    }
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    api_module = types.ModuleType("power_sync.flow_power_api")
+    api_module.FlowPowerAPIClient = FlowPowerAPIClient
+    api_module.FlowPowerAPIError = FlowPowerAPIError
+    api_module.kwatch_prices_to_amber_format = kwatch_prices_to_amber_format
+    sys.modules["power_sync"] = package
+    sys.modules["power_sync.flow_power_api"] = api_module
+
+    namespace = {
+        "__name__": "power_sync.coordinator_test",
+        "__package__": "power_sync",
+        "AEMOPriceCoordinator": FakeAEMOPriceCoordinator,
+        "Any": object,
+        "DataUpdateCoordinator": FakeDataUpdateCoordinator,
+        "DOMAIN": "power_sync",
+        "FLOW_POWER_KWATCH_REGIONS": {"QLD1": "qld1"},
+        "UpdateFailed": UpdateFailed,
+        "_LOGGER": FakeLogger(),
+        "aiohttp": SimpleNamespace(ClientError=FakeClientError),
+        "asyncio": asyncio,
+        "datetime": datetime,
+        "dt_util": SimpleNamespace(
+            utcnow=lambda: datetime(2026, 6, 8, 0, 5, tzinfo=timezone.utc)
+        ),
+        "timedelta": __import__("datetime").timedelta,
+    }
+    exec(
+        "from __future__ import annotations\n"
+        + _function_source(COMPONENT_ROOT / "coordinator.py", "_merge_kwatch_forecasts"),
+        namespace,
+    )
+    exec(
+        "from __future__ import annotations\n"
+        + _class_source(COMPONENT_ROOT / "coordinator.py", "FlowPowerKWatchPriceCoordinator"),
+        namespace,
+    )
+
+    def restore():
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    return namespace["FlowPowerKWatchPriceCoordinator"], FlowPowerAPIError, UpdateFailed, restore
 
 
 def _flow_power_api_module():
@@ -177,15 +443,13 @@ def test_flow_power_api_client_posts_key_and_normalizes_sites_summary_and_prices
     assert all(call[2]["x-api-key"] == "secret-key" for call in session.calls)
 
 
-def test_flow_power_kwatch_account_summary_warning_waits_for_portal_fallback():
+def test_flow_power_kwatch_account_summary_has_no_portal_fallback():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
 
-    assert "KWatch account summary failed, trying portal fallback" not in source
-    assert "KWatch account summary unavailable (%s); using portal fallback" in source
-    assert (
-        "KWatch account summary failed and portal fallback did not load account data: %s"
-        in source
-    )
+    assert "FlowPowerPortalClient" not in source
+    assert "flow_power_portal_client" not in source
+    assert "portal fallback" not in source
+    assert "Flow Power KWatch account summary failed: %s" in source
 
 
 def test_flow_power_api_client_decodes_nested_json_string_payloads():
@@ -423,7 +687,7 @@ def test_flow_power_kwatch_coordinator_publishes_amber_compatible_data():
     source = _method_source(
         COMPONENT_ROOT / "coordinator.py",
         "FlowPowerKWatchPriceCoordinator",
-        "_async_update_data",
+        "_fetch_kwatch_data",
     )
 
     assert "dispatch5mins" in source
@@ -433,6 +697,257 @@ def test_flow_power_kwatch_coordinator_publishes_amber_compatible_data():
     assert "'current': current_prices" in source
     assert "'forecast': forecast" in source
     assert "'source': 'flow_power_kwatch'" in source
+
+
+def test_flow_power_kwatch_success_does_not_call_aemo_fallback():
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        assert data["source"] == "flow_power_kwatch"
+        assert data["using_fallback"] is False
+        assert data["kwatch_consecutive_failures"] == 0
+        assert data["kwatch_last_attempt"] is not None
+        assert data["kwatch_last_success"] is not None
+        assert session.aemo_fallback.refresh_count == 0
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_uses_5min_forecast_before_first_30min_interval():
+    """Near-term KWatch data must bridge a delayed first 30-minute interval."""
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        # These timestamps are Amber-compatible interval ends, matching the
+        # production converter: the first 30-minute interval starts at 10:10.
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(
+                forecast_5=[
+                    {
+                        "nemTime": "2026-06-08T10:05:00+10:00",
+                        "perKwh": 11.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:10:00+10:00",
+                        "perKwh": 12.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:15:00+10:00",
+                        "perKwh": 99.0,
+                        "duration": 5,
+                    },
+                ],
+                forecast_30=[
+                    {
+                        "nemTime": "2026-06-08T10:40:00+10:00",
+                        "perKwh": 20.0,
+                        "duration": 30,
+                    },
+                    {
+                        "nemTime": "2026-06-08T11:10:00+10:00",
+                        "perKwh": 21.0,
+                        "duration": 30,
+                    },
+                ],
+            ),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+        general = [
+            (entry["nemTime"], entry["perKwh"])
+            for entry in data["forecast"]
+            if entry["channelType"] == "general"
+        ]
+
+        assert general == [
+            ("2026-06-08T10:05:00+10:00", 11.0),
+            ("2026-06-08T10:10:00+10:00", 12.0),
+            ("2026-06-08T10:40:00+10:00", 20.0),
+            ("2026-06-08T11:10:00+10:00", 21.0),
+        ]
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_does_not_overlap_complete_30min_forecast():
+    """Five-minute entries must not duplicate an already covered half-hour."""
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(
+                forecast_5=[
+                    {
+                        "nemTime": "2026-06-08T10:05:00+10:00",
+                        "perKwh": 11.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:10:00+10:00",
+                        "perKwh": 12.0,
+                        "duration": 5,
+                    },
+                ],
+                forecast_30=[
+                    {
+                        "nemTime": "2026-06-08T10:30:00+10:00",
+                        "perKwh": 20.0,
+                        "duration": 30,
+                    },
+                    {
+                        "nemTime": "2026-06-08T11:00:00+10:00",
+                        "perKwh": 21.0,
+                        "duration": 30,
+                    },
+                ],
+            ),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+        general = [
+            (entry["nemTime"], entry["perKwh"])
+            for entry in data["forecast"]
+            if entry["channelType"] == "general"
+        ]
+
+        assert general == [
+            ("2026-06-08T10:30:00+10:00", 20.0),
+            ("2026-06-08T11:00:00+10:00", 21.0),
+        ]
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_transient_failure_uses_aemo_fallback():
+    cls, api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(error=api_error("api_status_500")),
+            aemo_data=_aemo_data(7.5),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        assert data["source"] == "flow_power_kwatch_fallback_aemo"
+        assert data["primary_source"] == "flow_power_kwatch"
+        assert data["fallback_source"] == "aemo_api"
+        assert data["using_fallback"] is True
+        assert data["fallback_reason"] == "api_status_500"
+        assert data["kwatch_consecutive_failures"] == 1
+        assert data["kwatch_last_attempt"] is not None
+        assert data["kwatch_last_success"] is None
+        assert data["current"][0]["perKwh"] == 7.5
+        assert session.aemo_fallback.refresh_count == 1
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_invalid_api_key_does_not_use_aemo_fallback():
+    cls, api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(error=api_error("invalid_api_key")),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        try:
+            asyncio.run(coordinator._async_update_data())
+        except api_error as err:
+            assert str(err) == "invalid_api_key"
+        else:
+            raise AssertionError("invalid_api_key should not be hidden by fallback")
+        assert coordinator._kwatch_consecutive_failures == 1
+        assert session.aemo_fallback.refresh_count == 0
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_empty_dispatch_or_forecast_uses_aemo_fallback():
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(dispatch=[]),
+            aemo_data=_aemo_data(9.0),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        assert data["source"] == "flow_power_kwatch_fallback_aemo"
+        assert "No KWatch dispatch prices returned" in data["fallback_reason"]
+
+        coordinator._client = _FakeKWatchClient(
+            dispatch=[_price_record(10.0)],
+            forecast_30=[],
+            forecast_5=[],
+        )
+        data = asyncio.run(coordinator._async_update_data())
+
+        assert data["source"] == "flow_power_kwatch_fallback_aemo"
+        assert "No KWatch forecast prices returned" in data["fallback_reason"]
+        assert session.aemo_fallback.refresh_count == 2
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_recovery_switches_back_to_primary_source():
+    cls, api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(error=api_error("api_status_500")),
+            aemo_data=_aemo_data(7.5),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        fallback = asyncio.run(coordinator._async_update_data())
+        second_fallback = asyncio.run(coordinator._async_update_data())
+        coordinator._client = _FakeKWatchClient()
+        recovered = asyncio.run(coordinator._async_update_data())
+
+        assert fallback["source"] == "flow_power_kwatch_fallback_aemo"
+        assert second_fallback["kwatch_consecutive_failures"] == 2
+        assert recovered["source"] == "flow_power_kwatch"
+        assert recovered["using_fallback"] is False
+        assert recovered["kwatch_consecutive_failures"] == 0
+        assert recovered["kwatch_last_success"] is not None
+        assert coordinator._using_fallback is False
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_and_aemo_failure_surfaces_both_reasons():
+    cls, api_error, update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(error=api_error("api_status_500")),
+            aemo_error=update_failed("AEMO unavailable"),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        try:
+            asyncio.run(coordinator._async_update_data())
+        except update_failed as err:
+            message = str(err)
+        else:
+            raise AssertionError("both price sources failing should fail the refresh")
+
+        assert "Flow Power KWatch unavailable (api_status_500)" in message
+        assert "AEMO fallback failed: AEMO unavailable" in message
+    finally:
+        restore()
 
 
 def test_flow_power_sensor_uses_shared_pricing_context():
@@ -446,12 +961,44 @@ def test_flow_power_sensor_uses_shared_pricing_context():
     assert "calculate_flow_power_pea" in source
 
 
+def test_flow_power_sensor_exposes_effective_price_source_metadata():
+    helper = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "_coordinator_source_attributes",
+    )
+    attrs = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "extra_state_attributes",
+    )
+
+    assert "'price_source'" in helper
+    assert "'using_price_fallback'" in helper
+    assert "'price_update_success'" in helper
+    assert "'fallback_reason'" in helper
+    assert "'kwatch_consecutive_failures'" in helper
+    assert "'kwatch_last_attempt'" in helper
+    assert "'kwatch_last_success'" in helper
+    assert "_coordinator_source_attributes" in attrs
+    assert "tariff_data.get('price_source'" in attrs
+
+
 def test_flow_power_tariff_generation_uses_portal_aware_context():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
 
     assert "resolve_flow_power_pricing_context" in source
     assert "bpea=pricing.bpea" in source
     assert "gst_multiplier=pricing.gst_multiplier" in source
+
+
+def test_flow_power_tariff_schedule_carries_effective_price_source_metadata():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+
+    assert "def _flow_power_price_source_metadata" in source
+    assert 'metadata["price_source"] = source_data.get(' in source
+    assert '"using_price_fallback": False' in source
+    assert "**_flow_power_price_source_metadata()" in source
 
 
 def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
@@ -483,7 +1030,7 @@ def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.25),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 21.0,
                 "twap_import": 20.5,
                 "bpea": 2.3,
@@ -496,7 +1043,7 @@ def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
     assert context.twap == 8.25
     assert context.twap_source == "dynamic"
     assert context.bpea == 2.1
-    assert context.bpea_source == "portal"
+    assert context.bpea_source == "api"
     assert context.gst_multiplier == 1.2
     assert round(helper.calculate_flow_power_pea(
         20.0,
@@ -535,7 +1082,7 @@ def test_flow_power_pricing_context_uses_raw_wholesale_twap_for_pea():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=11.49),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 21.02,
                 "twap_import": 21.02,
                 "bpea_import": 1.7,
@@ -562,7 +1109,7 @@ def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=11.49),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 18.56,
                 "twap_import": 18.56,
                 "bpea": 2.057245,
@@ -580,7 +1127,7 @@ def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
     )
 
     assert context.bpea == 2.057245
-    assert context.bpea_source == "portal"
+    assert context.bpea_source == "api"
     assert round(pea, 2) == -12.44
     assert round(34.0 + pea, 2) == 21.56
 
@@ -593,7 +1140,7 @@ def test_flow_power_portal_account_twap_does_not_double_subtract_network_average
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.42),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 19.50647193287,
                 "twap_import": 19.50647193287,
                 "bpea": 2.30677,
@@ -648,7 +1195,7 @@ def test_flow_power_v2_pea_subtracts_average_daily_tariff():
         bpea_source="portal",
         gst_multiplier=1.1,
         gst_source="portal",
-        portal_active=True,
+        account_data_active=True,
     )
 
     pea = helper.calculate_flow_power_pea(
@@ -704,7 +1251,7 @@ def test_flow_power_pricing_context_uses_override_before_raw_twap():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.25),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap_import": 20.5,
                 "bpea_import": 2.1,
                 "gst_multiplier": 1.1,
@@ -877,15 +1424,48 @@ def test_sigenergy_flow_power_sync_stores_canonical_tariff_schedule():
     assert "current_actual_interval=current_actual_interval" in sync_source
 
 
-def test_flow_power_display_schedule_pea_ignores_raw_current_interval():
+def test_flow_power_display_schedule_pea_uses_current_interval():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
     helper_source = source[
         source.index("def _apply_provider_tariff_adjustments"):
         source.index("async def _sync_tariff_to_sigenergy")
     ]
 
-    assert "raw 5-minute KWatch dispatch" in helper_source
-    assert "current_actual_interval=None" in helper_source
+    assert "sensor/dashboard-only" in helper_source
+    assert "current_actual_interval=current_actual_interval" in helper_source
+
+
+def test_flow_power_tariff_schedules_reuse_legacy_entry_data_pricing():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    display_source = source[
+        source.index("def _apply_provider_tariff_adjustments"):
+        source.index("async def _sync_tariff_to_sigenergy")
+    ]
+    sync_start = source.index("async def _handle_sync_tou_internal")
+    sync_source = source[
+        sync_start:
+        source.index("hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU", sync_start)
+    ]
+    main_source = sync_source[
+        sync_source.index("# Apply Flow Power PEA pricing"):
+        sync_source.index("elif flow_power_price_source in")
+    ]
+
+    for pricing_source in (display_source, main_source):
+        pricing_source = "".join(pricing_source.split())
+        assert (
+            "entry.options.get(CONF_PEA_ENABLED,"
+            "entry.data.get(CONF_PEA_ENABLED,True),)"
+        ) in pricing_source
+        assert (
+            "entry.options.get(CONF_FLOW_POWER_BASE_RATE,"
+            "entry.data.get(CONF_FLOW_POWER_BASE_RATE,"
+            "FLOW_POWER_DEFAULT_BASE_RATE,),)"
+        ) in pricing_source
+        assert (
+            "entry.options.get(CONF_PEA_CUSTOM_VALUE,"
+            "entry.data.get(CONF_PEA_CUSTOM_VALUE),)"
+        ) in pricing_source
 
 
 def test_flow_power_main_schedule_pea_ignores_raw_current_interval():
@@ -1009,3 +1589,30 @@ def test_network_tariff_dropdown_falls_back_to_legacy_tariffs_attr(monkeypatch):
     assert module.get_tariff_codes_for_network("United") == {
         "VICR_SINGLE": "VICR_SINGLE — Residential Single Rate",
     }
+
+
+def test_legacy_flow_power_portal_transport_is_removed_and_migrated():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    config_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+    sensor_source = (COMPONENT_ROOT / "sensor.py").read_text()
+
+    assert not (COMPONENT_ROOT / "flow_power_portal.py").exists()
+    for forbidden in (
+        "FlowPowerPortalClient",
+        "_pending_fp_client",
+        "flow_power_portal_client",
+        "b2clogin.com",
+        "/report/get",
+        "Account/KeepAlive",
+    ):
+        assert forbidden not in init_source
+        assert forbidden not in config_source
+
+    assert "if config_entry.version == 7:" in init_source
+    assert 'values.pop("flowpower_email", None)' in init_source
+    assert 'values.pop("flowpower_password", None)' in init_source
+    assert ".fp_session.{config_entry.entry_id}" in init_source
+    assert 'new_options[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"' in init_source
+    assert "flow_power_web_data_api_required" in init_source
+    assert "flow_power_account_data" in init_source
+    assert "FlowPowerAccountSensor" in sensor_source

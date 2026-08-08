@@ -13,7 +13,7 @@ import logging
 import statistics
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping
 from enum import Enum
 
@@ -38,6 +38,14 @@ from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
+)
+from .ev_vehicle_capacity import (
+    CAPACITY_SOURCE_CHARGER_FALLBACK,
+    CAPACITY_SOURCE_DEFAULT_ESTIMATE,
+    ResolvedEVBatteryCapacity,
+    resolve_ev_battery_capacity,
+    validate_ev_battery_capacity,
+    vehicle_ids_match,
 )
 
 
@@ -87,12 +95,174 @@ _LOGGER.addFilter(SensitiveDataFilter())
 MIN_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
+EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 
 
 def _format_price_log_value(price_cents: Optional[float]) -> str:
     if price_cents is None:
         return "unknown"
     return f"{price_cents:.1f}c"
+
+
+def _ha_local_now_naive() -> datetime:
+    """Return Home Assistant local time without tzinfo for schedule comparisons."""
+    try:
+        now = dt_util.now()
+        if now is not None:
+            return now.replace(tzinfo=None) if now.tzinfo is not None else now
+    except Exception:
+        pass
+    return datetime.now()
+
+
+def _as_ha_local_naive(value: datetime) -> datetime:
+    """Normalize a datetime to Home Assistant local time without tzinfo."""
+    if value.tzinfo is None:
+        return value
+    try:
+        return dt_util.as_local(value).replace(tzinfo=None)
+    except Exception:
+        try:
+            ha_now = dt_util.now()
+            if ha_now is not None and ha_now.tzinfo is not None:
+                return value.astimezone(ha_now.tzinfo).replace(tzinfo=None)
+        except Exception:
+            pass
+    return value.replace(tzinfo=None)
+
+
+def _schedule_window_for_comparison(
+    start_value: str,
+    end_value: str,
+    now_naive: Optional[datetime] = None,
+) -> tuple[datetime, datetime, datetime]:
+    """Parse a schedule window and return a comparable HA-local current time.
+
+    Most schedule windows are deliberately stored as naive HA-local timestamps.
+    Repeated DST hours retain their UTC offsets so the two occurrences remain
+    distinct.  This helper keeps the normal naive path unchanged while ensuring
+    an offset-bearing repeated-hour window is compared with an aware timestamp.
+    """
+    window_start = datetime.fromisoformat(start_value)
+    window_end = datetime.fromisoformat(end_value)
+    comparison_tz = window_start.tzinfo or window_end.tzinfo
+
+    if comparison_tz is None:
+        return (
+            window_start,
+            window_end,
+            now_naive if now_naive is not None else _ha_local_now_naive(),
+        )
+
+    try:
+        comparison_now = dt_util.now()
+    except Exception:
+        comparison_now = None
+    if comparison_now is None:
+        comparison_now = now_naive or _ha_local_now_naive()
+    if comparison_now.tzinfo is None:
+        comparison_now = comparison_now.replace(tzinfo=comparison_tz)
+    else:
+        comparison_now = comparison_now.astimezone(comparison_tz)
+
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=comparison_tz)
+    if window_end.tzinfo is None:
+        window_end = window_end.replace(tzinfo=comparison_tz)
+    return window_start, window_end, comparison_now
+
+
+def _parse_forecast_hour_local_naive(value: str) -> Optional[datetime]:
+    """Parse a forecast timestamp as Home Assistant local time without tzinfo."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _as_ha_local_naive(parsed)
+
+
+def _forecast_hour_key(value: str) -> Optional[str]:
+    """Return a normalized hour key without collapsing repeated DST hours."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _forecast_window_display_bounds(
+    value: str,
+    end_dt: datetime,
+    *,
+    start_dt: Optional[datetime] = None,
+    preserve_offset: bool = False,
+) -> tuple[str, str]:
+    """Return local display bounds while preserving repeated-hour offsets."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        fallback_start = start_dt or _parse_forecast_hour_local_naive(value)
+        if fallback_start is None:
+            return value, end_dt.isoformat()
+        return fallback_start.isoformat(), end_dt.isoformat()
+
+    local_start_naive = _as_ha_local_naive(parsed)
+    display_start_naive = start_dt or local_start_naive
+    if parsed.tzinfo is None or not preserve_offset:
+        return display_start_naive.isoformat(), end_dt.isoformat()
+
+    start_offset = max(timedelta(0), display_start_naive - local_start_naive)
+    end_offset = max(timedelta(0), end_dt - local_start_naive)
+    try:
+        local_start = dt_util.as_local(parsed + start_offset)
+        local_end = dt_util.as_local(parsed + end_offset)
+    except Exception:
+        local_start = (parsed + start_offset).astimezone()
+        local_end = (parsed + end_offset).astimezone()
+    return local_start.isoformat(), local_end.isoformat()
+
+
+def _repeated_forecast_local_hours(values: List[str]) -> set[str]:
+    """Return local hours represented by multiple absolute intervals."""
+    identities_by_local: dict[str, set[str]] = {}
+    for value in values:
+        local_dt = _parse_forecast_hour_local_naive(value)
+        identity = _forecast_hour_key(value)
+        if local_dt is None or identity is None:
+            continue
+        local_key = local_dt.replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        ).isoformat()
+        identities_by_local.setdefault(local_key, set()).add(identity)
+    return {
+        local_key
+        for local_key, identities in identities_by_local.items()
+        if len(identities) > 1
+    }
+
+
+def _usable_forecast_window(
+    hour_dt: datetime,
+    now: datetime,
+    target_time: Optional[datetime],
+) -> Optional[tuple[datetime, float]]:
+    """Return the bounded end and usable fraction for a forecast hour."""
+    if target_time is not None and hour_dt >= target_time:
+        return None
+    end_dt = hour_dt + timedelta(hours=1)
+    if target_time is not None and end_dt > target_time:
+        end_dt = target_time
+    usable_fraction = (
+        end_dt - max(hour_dt, now)
+    ).total_seconds() / 3600
+    usable_fraction = max(0.0, min(1.0, usable_fraction))
+    if usable_fraction < 0.1:
+        return None
+    return end_dt, usable_fraction
 
 
 def _configured_ble_prefixes(
@@ -347,6 +517,9 @@ class ChargingPlan:
     target_soc: int
     target_time: Optional[str]  # ISO format
     energy_needed_kwh: float
+    battery_capacity_kwh: Optional[float] = None
+    effective_battery_capacity_kwh: float = 60.0
+    battery_capacity_source: str = CAPACITY_SOURCE_DEFAULT_ESTIMATE
 
     # Planned windows
     windows: List[PlannedChargingWindow] = field(default_factory=list)
@@ -369,6 +542,11 @@ class ChargingPlan:
             "target_soc": self.target_soc,
             "target_time": self.target_time,
             "energy_needed_kwh": round(self.energy_needed_kwh, 2),
+            "battery_capacity_kwh": self.battery_capacity_kwh,
+            "effective_battery_capacity_kwh": round(
+                self.effective_battery_capacity_kwh, 2
+            ),
+            "battery_capacity_source": self.battery_capacity_source,
             "planned_windows": [
                 {
                     "start_time": w.start_time,
@@ -1193,8 +1371,9 @@ class LoadProfileEstimator:
                 try:
                     power_w = float(state.state)
                     power_kw = power_w / 1000
-                    hour = state.last_updated.hour
-                    is_weekend = state.last_updated.weekday() >= 5
+                    local_last_updated = dt_util.as_local(state.last_updated)
+                    hour = local_last_updated.hour
+                    is_weekend = local_last_updated.weekday() >= 5
 
                     if is_weekend:
                         weekend_hours[hour].append(power_kw)
@@ -1367,7 +1546,7 @@ class SolarForecaster:
                 return None
 
             result = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             # Solcast provides 30-minute intervals, so we need 2x entries for hourly data
             # Aggregate into hourly buckets
@@ -1420,7 +1599,7 @@ class SolarForecaster:
         Uses a bell curve centered on solar noon with seasonal adjustment.
         """
         result = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Get system size from current peak or estimate
         system_size_kw = await self._estimate_system_size()
@@ -1515,7 +1694,7 @@ class SurplusForecaster:
 
         # Build surplus forecast
         forecasts = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         for i, solar_data in enumerate(solar_forecast):
             hour_dt = now + timedelta(hours=i)
@@ -1622,7 +1801,7 @@ class PriceForecaster:
             # Parse Amber forecast into our format
             # Group by hour and separate import/export prices
             hourly_prices = {}
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for price_item in forecast_data:
                 # Parse the NEM time
@@ -1631,18 +1810,55 @@ class PriceForecaster:
                     continue
 
                 try:
-                    # Parse ISO format time
-                    if "T" in nem_time:
-                        hour_dt = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
-                        # Convert to local time
-                        hour_dt = hour_dt.replace(tzinfo=None)
-                    else:
+                    # Parse ISO format time. Keep an absolute grouping key for
+                    # aware timestamps so the repeated local hour at the end of
+                    # daylight saving is not collapsed.
+                    if "T" not in nem_time:
                         continue
 
-                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00")
+                    parsed_dt = datetime.fromisoformat(
+                        nem_time.replace("Z", "+00:00")
+                    )
+                    local_aware = None
+                    if parsed_dt.tzinfo is not None:
+                        try:
+                            local_aware = dt_util.as_local(parsed_dt)
+                        except Exception:
+                            local_aware = parsed_dt.astimezone()
+                    hour_dt = _as_ha_local_naive(parsed_dt).replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    )
+                    if parsed_dt.tzinfo is not None:
+                        absolute_hour = parsed_dt.astimezone(timezone.utc).replace(
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        )
+                        hour_key = absolute_hour.isoformat()
+                        sort_dt = absolute_hour.replace(tzinfo=None)
+                    else:
+                        hour_key = hour_dt.isoformat()
+                        sort_dt = hour_dt
 
                     if hour_key not in hourly_prices:
-                        hourly_prices[hour_key] = {"import": None, "export": None, "hour_dt": hour_dt}
+                        hourly_prices[hour_key] = {
+                            "import": None,
+                            "export": None,
+                            "hour_dt": hour_dt,
+                            "sort_dt": sort_dt,
+                            "aware_hour": (
+                                local_aware.replace(
+                                    minute=0,
+                                    second=0,
+                                    microsecond=0,
+                                )
+                                if local_aware is not None
+                                and local_aware.tzinfo is not None
+                                else None
+                            ),
+                        }
 
                     channel = price_item.get("channelType", "general")
                     per_kwh = price_item.get("perKwh", 0)
@@ -1661,7 +1877,19 @@ class PriceForecaster:
 
             # Convert to PriceForecast list, sorted by time
             forecasts = []
-            sorted_hours = sorted(hourly_prices.items(), key=lambda x: x[1]["hour_dt"])
+            sorted_hours = sorted(
+                (
+                    item
+                    for item in hourly_prices.items()
+                    if item[1]["hour_dt"] + timedelta(hours=1) > now
+                ),
+                key=lambda x: x[1]["sort_dt"],
+            )
+
+            local_hour_counts: dict[str, int] = {}
+            for _, prices in sorted_hours:
+                local_key = prices["hour_dt"].isoformat()
+                local_hour_counts[local_key] = local_hour_counts.get(local_key, 0) + 1
 
             for hour_key, prices in sorted_hours[:hours]:
                 import_cents = prices["import"] if prices["import"] is not None else 30
@@ -1676,8 +1904,17 @@ class PriceForecaster:
                 else:
                     period = "shoulder"
 
+                local_key = hour_dt.isoformat()
+                aware_hour = prices.get("aware_hour")
+                display_hour = (
+                    aware_hour.isoformat()
+                    if local_hour_counts.get(local_key, 0) > 1
+                    and aware_hour is not None
+                    else local_key
+                )
+
                 forecasts.append(PriceForecast(
-                    hour=hour_dt.isoformat(),
+                    hour=display_hour,
                     import_cents=import_cents,
                     export_cents=export_cents,
                     period=period,
@@ -1737,7 +1974,7 @@ class PriceForecaster:
             _LOGGER.debug(f"Tariff forecast using rates: {buy_rates}, TOU periods: {list(tou_periods.keys())}")
 
             forecasts = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
@@ -1855,7 +2092,7 @@ class PriceForecaster:
 
             # Generate hourly forecasts
             forecasts = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
@@ -1956,7 +2193,7 @@ class PriceForecaster:
         Uses common Australian TOU patterns.
         """
         forecasts = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Typical TOU rates (cents/kWh)
         OFFPEAK_RATE = 15
@@ -2007,15 +2244,6 @@ class ChargingPlanner:
     - Vehicle departure time
     - Battery capacity and efficiency
     """
-
-    # Typical EV battery sizes (kWh)
-    BATTERY_SIZES = {
-        "tesla_model_3_sr": 57.5,
-        "tesla_model_3_lr": 82,
-        "tesla_model_y_sr": 57.5,
-        "tesla_model_y_lr": 82,
-        "default": 60,
-    }
 
     # Charging efficiency (AC to DC)
     CHARGING_EFFICIENCY = 0.9
@@ -2163,8 +2391,8 @@ class ChargingPlanner:
         current_soc: int,
         target_soc: int,
         target_time: Optional[datetime],
+        resolved_capacity: ResolvedEVBatteryCapacity,
         charger_power_kw: float = 7.0,
-        battery_capacity_kwh: float = 60.0,
         priority: ChargingPriority = ChargingPriority.SOLAR_PREFERRED,
     ) -> ChargingPlan:
         """
@@ -2175,13 +2403,17 @@ class ChargingPlanner:
             current_soc: Current state of charge (%)
             target_soc: Target state of charge (%)
             target_time: Optional deadline (must be charged by this time)
+            resolved_capacity: Explicit shared capacity-resolution result
             charger_power_kw: Maximum charger power
-            battery_capacity_kwh: Vehicle battery capacity
             priority: Charging priority strategy
 
         Returns:
             ChargingPlan with optimal windows
         """
+        if not isinstance(resolved_capacity, ResolvedEVBatteryCapacity):
+            raise TypeError("resolved_capacity must be a ResolvedEVBatteryCapacity")
+        battery_capacity_kwh = resolved_capacity.effective_battery_capacity_kwh
+
         # Calculate energy needed
         soc_delta = target_soc - current_soc
         if soc_delta <= 0:
@@ -2191,6 +2423,7 @@ class ChargingPlanner:
                 target_soc=target_soc,
                 target_time=target_time.isoformat() if target_time else None,
                 energy_needed_kwh=0,
+                **resolved_capacity.to_dict(),
                 can_meet_target=True,
             )
 
@@ -2198,13 +2431,12 @@ class ChargingPlanner:
 
         # Calculate hours until deadline
         if target_time:
-            now = datetime.now()
+            now = _ha_local_now_naive()
             # Convert target_time to naive local time for comparison
             target_time_local = target_time
             if target_time.tzinfo is not None:
                 try:
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
+                    target_time_local = _as_ha_local_naive(target_time)
                 except Exception:
                     target_time_local = target_time.replace(tzinfo=None)
             # Exact hours available until departure — ceil to include the partial final hour
@@ -2257,6 +2489,11 @@ class ChargingPlanner:
                 battery_power_schedule=battery_power_schedule,
             )
 
+        plan.battery_capacity_kwh = resolved_capacity.battery_capacity_kwh
+        plan.effective_battery_capacity_kwh = (
+            resolved_capacity.effective_battery_capacity_kwh
+        )
+        plan.battery_capacity_source = resolved_capacity.battery_capacity_source
         return plan
 
     async def _plan_solar_only(
@@ -2275,13 +2512,28 @@ class ChargingPlanner:
         energy_allocated = 0
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
-
+        now = _ha_local_now_naive()
+        target_time_local = (
+            _as_ha_local_naive(target_time)
+            if target_time is not None and target_time.tzinfo is not None
+            else target_time
+        )
         for forecast in surplus_forecast:
             if energy_allocated >= energy_needed_kwh:
                 break
 
             if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
-                hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
+                if hour_dt is None:
+                    continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing: calculate available power for EV
@@ -2296,15 +2548,13 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
-                energy_this_hour = available_power  # kWh (1 hour)
+                energy_this_hour = available_power * usable_fraction
 
                 # Don't over-allocate
                 energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
-                end_dt = hour_dt + timedelta(hours=1)
-
                 windows.append(PlannedChargingWindow(
-                    start_time=forecast.hour,
+                    start_time=hour_dt.isoformat(),
                     end_time=end_dt.isoformat(),
                     source="solar_surplus",
                     estimated_power_kw=available_power,
@@ -2356,6 +2606,15 @@ class ChargingPlanner:
         total_cost = 0
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
+        now = _ha_local_now_naive()
+        target_time_local = (
+            _as_ha_local_naive(target_time)
+            if target_time is not None and target_time.tzinfo is not None
+            else target_time
+        )
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
 
         # First pass: allocate solar
         for forecast in surplus_forecast:
@@ -2363,7 +2622,17 @@ class ChargingPlanner:
                 break
 
             if forecast.surplus_kw >= 1.0:
-                hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
+                if hour_dt is None:
+                    continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing with battery
@@ -2377,11 +2646,13 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
-                energy_this_hour = min(available_power, energy_needed_kwh - solar_energy - grid_energy)
-                end_dt = hour_dt + timedelta(hours=1)
+                energy_this_hour = min(
+                    available_power * usable_fraction,
+                    energy_needed_kwh - solar_energy - grid_energy,
+                )
 
                 windows.append(PlannedChargingWindow(
-                    start_time=forecast.hour,
+                    start_time=hour_dt.isoformat(),
                     end_time=end_dt.isoformat(),
                     source="solar_surplus",
                     estimated_power_kw=available_power,
@@ -2407,12 +2678,24 @@ class ChargingPlanner:
 
                 # Check if this hour is already covered by solar
                 already_covered = any(
-                    w.start_time == price_data.hour for w in windows
+                    _forecast_hour_key(w.start_time)
+                    == _forecast_hour_key(price_data.hour)
+                    for w in windows
                 )
                 if already_covered:
                     continue
 
-                hour_dt = datetime.fromisoformat(price_data.hour)
+                hour_dt = _parse_forecast_hour_local_naive(price_data.hour)
+                if hour_dt is None:
+                    continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Skip hours that fall inside a demand window (unless override set)
@@ -2430,16 +2713,30 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue  # Not enough capacity, try next hour
 
-                energy_this_hour = min(available_power, remaining_energy - grid_energy)
-                end_dt = hour_dt + timedelta(hours=1)
+                energy_this_hour = min(
+                    available_power * usable_fraction,
+                    remaining_energy - grid_energy,
+                )
+                display_start, display_end = _forecast_window_display_bounds(
+                    price_data.hour,
+                    end_dt,
+                    preserve_offset=(
+                        hour_dt.replace(
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        ).isoformat()
+                        in repeated_price_hours
+                    ),
+                )
 
                 # Label source based on period type
                 source = f"grid_{price_data.period}" if price_data.period else "grid_cheap"
                 reason = "offpeak_rate" if price_data.period == "offpeak" else "cheap_rate"
 
                 windows.append(PlannedChargingWindow(
-                    start_time=price_data.hour,
-                    end_time=end_dt.isoformat(),
+                    start_time=display_start,
+                    end_time=display_end,
                     source=source,
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
@@ -2512,7 +2809,7 @@ class ChargingPlanner:
         - Arrive home 6pm at 58c/kWh, depart 6am with 15-20c overnight -> wait for cheap overnight
         - Battery charging at 5kW during cheap period -> EV charges at reduced rate
         """
-        now = datetime.now()
+        now = _ha_local_now_naive()
         battery_power_schedule = battery_power_schedule or {}
 
         # Convert target_time to naive local time for comparison
@@ -2520,15 +2817,7 @@ class ChargingPlanner:
         target_time_local = None
         if target_time:
             if target_time.tzinfo is not None:
-                # Convert UTC target_time to local time, then strip timezone
-                try:
-                    import zoneinfo
-                    # Try to get local timezone
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
-                except Exception:
-                    # Fallback: assume price hours are in same tz as target, strip both
-                    target_time_local = target_time.replace(tzinfo=None)
+                target_time_local = _as_ha_local_naive(target_time)
             else:
                 target_time_local = target_time
 
@@ -2539,14 +2828,21 @@ class ChargingPlanner:
 
         # Build charging options from price forecast (within deadline)
         charging_options = []
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
+        surplus_by_hour = {
+            key: forecast
+            for forecast in surplus_forecast
+            if (key := _forecast_hour_key(forecast.hour)) is not None
+        }
 
         for i, price in enumerate(price_forecast):
             try:
-                hour_dt = datetime.fromisoformat(price.hour)
-                # Price hours are naive local time - strip any timezone to ensure naive comparison
-                if hour_dt.tzinfo is not None:
-                    hour_dt = hour_dt.replace(tzinfo=None)
-            except:
+                hour_dt = _parse_forecast_hour_local_naive(price.hour)
+                if hour_dt is None:
+                    continue
+            except Exception:
                 continue
 
             # Skip if past departure time (compare naive local times)
@@ -2567,20 +2863,34 @@ class ChargingPlanner:
                 continue  # Less than 6 minutes usable — skip
 
             # Check for solar surplus at this hour
-            solar_available = 0
-            if i < len(surplus_forecast):
-                solar_available = surplus_forecast[i].surplus_kw
+            surplus = surplus_by_hour.get(_forecast_hour_key(price.hour))
+            solar_available = surplus.surplus_kw if surplus is not None else 0
+            display_start, display_end = _forecast_window_display_bounds(
+                price.hour,
+                hour_end,
+                preserve_offset=(
+                    hour_dt.replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    ).isoformat()
+                    in repeated_price_hours
+                ),
+            )
+            option_identity = _forecast_hour_key(price.hour) or display_start
 
             # Solar surplus is free
             if solar_available >= 1.0:
                 charging_options.append({
-                    "hour": price.hour,
+                    "hour": display_start,
                     "hour_dt": hour_dt,
+                    "end_time": display_end,
+                    "identity": option_identity,
                     "source": "solar_surplus",
                     "power_kw": min(solar_available, charger_power_kw),
                     "cost_cents": 0,  # Solar is free
                     "actual_price": price.import_cents,  # Store actual price for reference
-                    "confidence": surplus_forecast[i].confidence if i < len(surplus_forecast) else 0.5,
+                    "confidence": surplus.confidence if surplus is not None else 0.5,
                     "usable_fraction": usable_fraction,
                 })
 
@@ -2598,8 +2908,10 @@ class ChargingPlanner:
 
             if grid_power > 0.5 and not grid_blocked:  # At least 0.5kW from grid
                 charging_options.append({
-                    "hour": price.hour,
+                    "hour": display_start,
                     "hour_dt": hour_dt,
+                    "end_time": display_end,
+                    "identity": option_identity,
                     "source": f"grid_{price.period}",
                     "power_kw": grid_power,
                     "cost_cents": price.import_cents,
@@ -2670,18 +2982,18 @@ class ChargingPlanner:
                 break
 
             # Skip if already used this hour
-            hour_key = option["hour_dt"].strftime("%Y-%m-%dT%H")
+            hour_key = option["identity"]
             if hour_key in used_hours:
                 continue
 
             usable = option.get("usable_fraction", 1.0)
             energy_this_hour = min(option["power_kw"] * usable, energy_needed_kwh - energy_allocated)
             hour_dt = option["hour_dt"]
-            end_dt = hour_dt + timedelta(hours=1)
+            end_time = option["end_time"]
 
             windows.append(PlannedChargingWindow(
                 start_time=option["hour"],
-                end_time=end_dt.isoformat(),
+                end_time=end_time,
                 source=option["source"],
                 estimated_power_kw=option["power_kw"],
                 estimated_energy_kwh=energy_this_hour,
@@ -2760,17 +3072,13 @@ class ChargingPlanner:
 
         # Calculate minimum hours needed (0.85 efficiency: AC-DC losses, ramp-up, thermal)
         hours_needed = energy_needed_kwh / (charger_power_kw * 0.85)
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Convert target_time to naive local time for comparison
         # Price forecast hours are stored as naive local time strings
         target_time_local = target_time
         if target_time.tzinfo is not None:
-            try:
-                local_tz = datetime.now().astimezone().tzinfo
-                target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
-            except Exception:
-                target_time_local = target_time.replace(tzinfo=None)
+            target_time_local = _as_ha_local_naive(target_time)
 
         # Exact hours available until departure — no padding
         import math
@@ -2789,38 +3097,53 @@ class ChargingPlanner:
         grid_energy = 0
         total_cost = 0
 
-        # Reverse the forecasts to work backwards
-        combined = list(zip(surplus_forecast, price_forecast))
+        # Reverse matched forecast hours to work backwards. Amber price data can
+        # contain historical rows, so positional zipping can attach the wrong
+        # price to a future solar interval.
+        surplus_by_hour = {
+            key: surplus
+            for surplus in surplus_forecast
+            if (key := _forecast_hour_key(surplus.hour)) is not None
+        }
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
+        combined = [
+            (surplus_by_hour.get(_forecast_hour_key(price.hour)), price)
+            for price in price_forecast
+        ]
         combined.reverse()
 
         for surplus, price in combined:
             if energy_allocated >= energy_needed_kwh:
                 break
 
-            hour_dt = datetime.fromisoformat(surplus.hour)
-            # Price hours are naive local time - strip any timezone
-            if hour_dt.tzinfo is not None:
-                hour_dt = hour_dt.replace(tzinfo=None)
+            hour_dt = _parse_forecast_hour_local_naive(price.hour)
+            if hour_dt is None:
+                continue
 
             if target_time_local and hour_dt >= target_time_local:
                 continue  # Skip hours that start at or after deadline
 
-            # Calculate usable fraction of this hour (clamp end to departure)
-            end_dt = hour_dt + timedelta(hours=1)
-            if target_time_local and end_dt > target_time_local:
-                end_dt = target_time_local
-            usable_fraction = (end_dt - max(hour_dt, now)).total_seconds() / 3600
-            usable_fraction = max(0.0, min(1.0, usable_fraction))
-            if usable_fraction < 0.1:
+            # Bound this candidate by the planning instant and departure.
+            bounded_start = max(hour_dt, now)
+            bounded_end = hour_dt + timedelta(hours=1)
+            if target_time_local and bounded_end > target_time_local:
+                bounded_end = target_time_local
+            usable_hours = (
+                bounded_end - bounded_start
+            ).total_seconds() / 3600
+            usable_hours = max(0.0, min(1.0, usable_hours))
+            if usable_hours < 0.1:
                 continue  # Less than 6 minutes usable — skip
 
-            # Use whatever is available, scaled by usable fraction of the hour
-            if surplus.surplus_kw >= 1.0:
+            # Use one consistent power for capacity, timestamps, publication,
+            # and downstream optimizer demand.
+            if surplus is not None and surplus.surplus_kw >= 1.0:
                 # Prefer solar
-                energy_this_hour = min(surplus.surplus_kw, charger_power_kw) * usable_fraction
+                window_power_kw = min(surplus.surplus_kw, charger_power_kw)
                 source = "solar_surplus"
                 cost = 0
-                solar_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
             else:
                 # Skip grid hours that fall inside a demand window (unless override set).
                 # If this leaves the deadline unmet, the warning/can_meet_target fields
@@ -2828,28 +3151,59 @@ class ChargingPlanner:
                 if self._is_grid_charging_blocked_at(hour_dt):
                     continue
                 # Use grid
-                energy_this_hour = charger_power_kw * usable_fraction
+                window_power_kw = charger_power_kw
                 source = f"grid_{price.period}"
                 cost = price.import_cents
-                grid_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
-            energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
+            available_kwh = window_power_kw * usable_hours
+            remaining_kwh = energy_needed_kwh - energy_allocated
+            energy_this_hour = min(available_kwh, remaining_kwh)
+            if energy_this_hour <= 0:
+                continue
+
+            if energy_this_hour + 1e-9 < available_kwh:
+                planned_start = bounded_end - timedelta(
+                    hours=energy_this_hour / window_power_kw
+                )
+                planned_start = max(planned_start, bounded_start)
+            else:
+                planned_start = bounded_start
+
+            display_start, display_end = _forecast_window_display_bounds(
+                price.hour,
+                bounded_end,
+                start_dt=planned_start,
+                preserve_offset=(
+                    hour_dt.replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    ).isoformat()
+                    in repeated_price_hours
+                ),
+            )
 
             windows.append(PlannedChargingWindow(
-                start_time=surplus.hour,
-                end_time=end_dt.isoformat(),
+                start_time=display_start,
+                end_time=display_end,
                 source=source,
-                estimated_power_kw=charger_power_kw,
+                estimated_power_kw=window_power_kw,
                 estimated_energy_kwh=energy_this_hour,
                 price_cents_kwh=cost,
                 reason="target_deadline",
             ))
 
             energy_allocated += energy_this_hour
+            if source == "solar_surplus":
+                solar_energy += energy_this_hour
+            else:
+                grid_energy += energy_this_hour
             total_cost += energy_this_hour * cost
 
-        # Sort chronologically
-        windows.sort(key=lambda w: w.start_time)
+        # Candidates are traversed backwards from the deadline. Reverse the
+        # selected list rather than sorting ISO strings, which misorders the
+        # two offset-bearing occurrences of a repeated DST hour.
+        windows.reverse()
 
         plan = ChargingPlan(
             vehicle_id=vehicle_id,
@@ -2901,30 +3255,7 @@ class ChargingPlanner:
         Returns:
             Tuple of (should_charge, reason, source)
         """
-        now = datetime.now()
-
-        # For time_critical mode with a deadline, check if we need to charge NOW to meet target
-        if is_time_critical and plan.target_time and not plan.can_meet_target:
-            # We're behind schedule - charge immediately regardless of price/battery
-            return True, f"Must charge to meet deadline (behind schedule)", "grid_deadline"
-
-        if is_time_critical and plan.target_time:
-            # Check if we're in a critical window where we MUST charge to meet deadline
-            try:
-                target_dt = datetime.fromisoformat(plan.target_time)
-                if target_dt.tzinfo is not None:
-                    # Convert to local naive time
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_dt = target_dt.astimezone(local_tz).replace(tzinfo=None)
-
-                hours_remaining = (target_dt - now).total_seconds() / 3600
-                hours_needed = plan.energy_needed_kwh / 7.0  # Assume ~7kW charger
-
-                # If we need to charge continuously to meet target, do it now
-                if hours_remaining <= hours_needed * 1.2:  # 20% buffer
-                    return True, f"Critical: {hours_remaining:.1f}h left, need {hours_needed:.1f}h", "grid_deadline"
-            except Exception as e:
-                _LOGGER.debug(f"Error checking time_critical deadline: {e}")
+        now = _ha_local_now_naive()
 
         # Note: min_battery_soc is used to prevent battery DISCHARGE during surplus
         # calculation, but does NOT block charging from solar/grid.
@@ -2933,10 +3264,15 @@ class ChargingPlanner:
         # Check if we're in a planned window
         for window in plan.windows:
             try:
-                window_start = datetime.fromisoformat(window.start_time)
-                window_end = datetime.fromisoformat(window.end_time)
+                window_start, window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        now,
+                    )
+                )
 
-                if window_start <= now < window_end:
+                if window_start <= comparison_now < window_end:
                     _LOGGER.debug(
                         f"In planned window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
                         f"({window.source}, {window.price_cents_kwh:.1f}c/kWh)"
@@ -2945,6 +3281,42 @@ class ChargingPlanner:
             except Exception as e:
                 _LOGGER.debug(f"Error parsing window time: {e}")
                 continue
+
+        # A fresh time-critical plan already exhausts every permitted interval
+        # when the deadline is infeasible. Do not bypass its timestamps,
+        # demand-window exclusions, or configured power with a second duration
+        # calculation or opportunistic start.
+        if is_time_critical and plan.target_time:
+            for window in plan.windows:
+                try:
+                    window_start, _window_end, comparison_now = (
+                        _schedule_window_for_comparison(
+                            window.start_time,
+                            window.end_time,
+                            now,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if window_start > comparison_now:
+                    hours_until = (
+                        window_start - comparison_now
+                    ).total_seconds() / 3600
+                    return (
+                        False,
+                        f"Waiting for planned deadline window at "
+                        f"{window_start.strftime('%H:%M')} "
+                        f"({hours_until:.1f}h)",
+                        "waiting",
+                    )
+
+            if not plan.can_meet_target:
+                return (
+                    False,
+                    "Behind schedule; no permitted planned charging window now",
+                    "waiting",
+                )
+            return False, "No current deadline charging window", "waiting"
 
         # Check for opportunistic solar (always take free power)
         if current_surplus_kw >= 1.5:
@@ -2986,15 +3358,22 @@ class ChargingPlanner:
         next_window_start = None
         for window in sorted(plan.windows, key=lambda w: w.start_time):
             try:
-                window_start = datetime.fromisoformat(window.start_time)
-                if window_start > now:
+                window_start, _window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        now,
+                    )
+                )
+                if window_start > comparison_now:
                     next_window_start = window_start
+                    next_window_now = comparison_now
                     break
             except:
                 continue
 
         if next_window_start:
-            hours_until = (next_window_start - now).total_seconds() / 3600
+            hours_until = (next_window_start - next_window_now).total_seconds() / 3600
             return False, f"Waiting for {next_window_start.strftime('%H:%M')} ({hours_until:.1f}h, {min_planned_price:.0f}c)", "waiting"
 
         return False, f"Waiting for better rates (current: {current_price_cents:.0f}c)", "waiting"
@@ -3025,6 +3404,16 @@ class AutoScheduleSettings:
     enabled: bool = False
     vehicle_id: str = "_default"
     display_name: str = "EV"
+
+    # Usable EV battery capacity. The manual value is authoritative when set;
+    # effective/source are refreshed by the shared resolver before planning.
+    battery_capacity_kwh: Optional[float] = None
+    effective_battery_capacity_kwh: float = 60.0
+    battery_capacity_source: str = CAPACITY_SOURCE_DEFAULT_ESTIMATE
+    charger_fallback_battery_capacity_kwh: Optional[float] = None
+    provider_battery_capacity_kwh: Optional[float] = None
+    vehicle_model: Optional[str] = None
+    vehicle_trim: Optional[str] = None
 
     # Target settings
     target_soc: int = 80
@@ -3144,6 +3533,13 @@ class AutoScheduleSettings:
             "pre_charge_wake_off_service": "pre_charge_wake_off_service",
             "pre_charge_wake_on_service_data": "pre_charge_wake_on_service_data",
             "pre_charge_wake_off_service_data": "pre_charge_wake_off_service_data",
+            "battery_capacity_kwh": "battery_capacity_kwh",
+            "charger_fallback_battery_capacity_kwh": "charger_fallback_battery_capacity_kwh",
+            "provider_battery_capacity_kwh": "provider_battery_capacity_kwh",
+            "vehicle_model": "vehicle_model",
+            "model": "vehicle_model",
+            "vehicle_trim": "vehicle_trim",
+            "trim": "vehicle_trim",
         }
         for source_key, attr_name in field_map.items():
             if source_key in config:
@@ -3162,6 +3558,13 @@ class AutoScheduleSettings:
             "enabled": self.enabled,
             "vehicle_id": self.vehicle_id,
             "display_name": self.display_name,
+            "battery_capacity_kwh": self.battery_capacity_kwh,
+            "effective_battery_capacity_kwh": self.effective_battery_capacity_kwh,
+            "battery_capacity_source": self.battery_capacity_source,
+            "charger_fallback_battery_capacity_kwh": self.charger_fallback_battery_capacity_kwh,
+            "provider_battery_capacity_kwh": self.provider_battery_capacity_kwh,
+            "vehicle_model": self.vehicle_model,
+            "vehicle_trim": self.vehicle_trim,
             "target_soc": self.target_soc,
             "departure_time": legacy_departure_time,
             "departure_days": legacy_departure_days,
@@ -3287,6 +3690,21 @@ class AutoScheduleSettings:
             enabled=data.get("enabled", False),
             vehicle_id=data.get("vehicle_id", "_default"),
             display_name=data.get("display_name", "EV"),
+            battery_capacity_kwh=data.get("battery_capacity_kwh"),
+            effective_battery_capacity_kwh=data.get(
+                "effective_battery_capacity_kwh", 60.0
+            ),
+            battery_capacity_source=data.get(
+                "battery_capacity_source", CAPACITY_SOURCE_DEFAULT_ESTIMATE
+            ),
+            charger_fallback_battery_capacity_kwh=data.get(
+                "charger_fallback_battery_capacity_kwh"
+            ),
+            provider_battery_capacity_kwh=data.get(
+                "provider_battery_capacity_kwh"
+            ),
+            vehicle_model=data.get("vehicle_model", data.get("model")),
+            vehicle_trim=data.get("vehicle_trim", data.get("trim")),
             target_soc=data.get("target_soc", 80),
             departure_time=data.get("departure_time"),
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
@@ -3365,23 +3783,16 @@ class AutoScheduleState:
                 "estimated_solar_kwh": self.current_plan.estimated_solar_kwh if self.current_plan else 0,
                 "estimated_grid_kwh": self.current_plan.estimated_grid_kwh if self.current_plan else 0,
                 "estimated_cost_cents": self.current_plan.estimated_cost_cents if self.current_plan else 0,
+                "battery_capacity_kwh": self.current_plan.battery_capacity_kwh if self.current_plan else None,
+                "effective_battery_capacity_kwh": self.current_plan.effective_battery_capacity_kwh if self.current_plan else 60.0,
+                "battery_capacity_source": self.current_plan.battery_capacity_source if self.current_plan else CAPACITY_SOURCE_DEFAULT_ESTIMATE,
             } if self.current_plan else None,
         }
 
 
 def _vehicle_config_matches(vehicle_id: str | None, config_vehicle_id: str | None) -> bool:
     """Return True when a stored charger config belongs to this runtime vehicle."""
-    if not vehicle_id or not config_vehicle_id:
-        return False
-    if str(vehicle_id) == str(config_vehicle_id):
-        return True
-    vehicle_norm = str(vehicle_id)
-    config_norm = str(config_vehicle_id)
-    if vehicle_norm.startswith("ble_") and vehicle_norm[4:] == config_norm:
-        return True
-    if config_norm.startswith("ble_") and config_norm[4:] == vehicle_norm:
-        return True
-    return False
+    return vehicle_ids_match(vehicle_id, config_vehicle_id)
 
 
 def _vehicle_config_value(
@@ -3447,6 +3858,9 @@ class AutoScheduleExecutor:
         self._future_demand_preserve_reason = ""
         self._active_charging_preserve_vehicles: set[str] = set()
         self._active_charging_preserve_reasons: Dict[str, str] = {}
+        self._last_external_smart_schedule_stops: Dict[
+            str, Tuple[str, float]
+        ] = {}
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -3692,6 +4106,7 @@ class AutoScheduleExecutor:
             # Sync them immediately so restored plans do not fall back to 32A.
             for vehicle_id, settings in self._settings.items():
                 self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+                self.resolve_vehicle_capacity(vehicle_id, settings)
 
             # Load cached SoC values
             self._cached_soc = stored_data.get("cached_vehicle_soc", {})
@@ -3768,13 +4183,20 @@ class AutoScheduleExecutor:
         if vehicle_id not in self._settings:
             self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
-        return self._settings[vehicle_id]
+        settings = self._settings[vehicle_id]
+        self.resolve_vehicle_capacity(vehicle_id, settings)
+        return settings
 
     def update_settings(self, vehicle_id: str, updates: dict) -> AutoScheduleSettings:
         """Update settings for a vehicle."""
         settings = self.get_settings(vehicle_id)
 
         for key, value in updates.items():
+            if key in (
+                "battery_capacity_kwh",
+                "charger_fallback_battery_capacity_kwh",
+            ):
+                value = validate_ev_battery_capacity(value)
             if key == "priority" and isinstance(value, str):
                 try:
                     value = ChargingPriority(value)
@@ -3822,6 +4244,7 @@ class AutoScheduleExecutor:
                         if consume_level > 0:
                             settings.departure_preserve_home_battery[day] = False
 
+        self.resolve_vehicle_capacity(vehicle_id, settings)
         return settings
 
     def get_state(self, vehicle_id: str) -> AutoScheduleState:
@@ -4323,6 +4746,72 @@ class AutoScheduleExecutor:
         except Exception:
             pass
 
+    @staticmethod
+    def _is_anonymous_loadpoint(
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+    ) -> bool:
+        """Return whether a generic/OCPP ID represents a shared charger only."""
+        if settings.charger_type not in ("generic", "ocpp"):
+            return False
+        stable_id = str(vehicle_id or "").strip().lower()
+        if stable_id.startswith("ble_"):
+            return False
+        if len(stable_id) == 17 and stable_id.isalnum():
+            return False
+        if stable_id.startswith(("byd_", "vehicle_", "provider_")):
+            return False
+        return True
+
+    def resolve_vehicle_capacity(
+        self,
+        vehicle_id: str,
+        settings: Optional[AutoScheduleSettings] = None,
+    ) -> ResolvedEVBatteryCapacity:
+        """Resolve and publish one vehicle's usable planning capacity."""
+        settings = settings or self.get_settings(vehicle_id)
+        self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+
+        from ..const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+        config = {}
+        config_entry = getattr(self, "config_entry", None)
+        if config_entry:
+            config = {
+                **getattr(config_entry, "data", {}),
+                **getattr(config_entry, "options", {}),
+            }
+        anonymous_loadpoint = self._is_anonymous_loadpoint(vehicle_id, settings)
+        charger_fallback = settings.charger_fallback_battery_capacity_kwh
+        if charger_fallback is None:
+            charger_fallback = config.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+        resolved = resolve_ev_battery_capacity(
+            manual_capacity_kwh=(
+                None if anonymous_loadpoint else settings.battery_capacity_kwh
+            ),
+            charger_fallback_capacity_kwh=(
+                settings.battery_capacity_kwh
+                if anonymous_loadpoint and settings.battery_capacity_kwh is not None
+                else charger_fallback
+            ),
+            provider_capacity_kwh=settings.provider_battery_capacity_kwh,
+            model=settings.vehicle_model,
+            trim=settings.vehicle_trim,
+            anonymous_loadpoint=anonymous_loadpoint,
+        )
+        if anonymous_loadpoint:
+            settings.charger_fallback_battery_capacity_kwh = (
+                resolved.effective_battery_capacity_kwh
+                if resolved.battery_capacity_source == CAPACITY_SOURCE_CHARGER_FALLBACK
+                else None
+            )
+        settings.battery_capacity_kwh = resolved.battery_capacity_kwh
+        settings.effective_battery_capacity_kwh = (
+            resolved.effective_battery_capacity_kwh
+        )
+        settings.battery_capacity_source = resolved.battery_capacity_source
+        return resolved
+
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -4361,7 +4850,10 @@ class AutoScheduleExecutor:
             (
                 state.current_plan is None or
                 state.last_plan_update is None or
-                now - state.last_plan_update > self._plan_update_interval
+                # last_plan_update is stamped with HA-local time in
+                # _regenerate_plan(); read it back on the same clock (OB-31),
+                # not the OS-local `now` used elsewhere in this method.
+                _ha_local_now_naive() - state.last_plan_update > self._plan_update_interval
             )
         ):
             await self._regenerate_plan(vehicle_id, settings, state, current_soc=ev_soc)
@@ -4486,6 +4978,20 @@ class AutoScheduleExecutor:
                     # Clear tracked charge rate
                     self._current_charge_amps.pop(vehicle_id, None)
                     _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
+                elif await self._stop_external_charging_if_needed(
+                    vehicle_id,
+                    settings,
+                    state,
+                    reason,
+                ):
+                    state.last_decision = "stopped"
+                    state.last_decision_reason = reason
+                    self._sync_active_charging_preserve_intent(
+                        vehicle_id,
+                        effective_preserve_home_battery,
+                        state,
+                        reason,
+                    )
                 else:
                     state.last_decision = "waiting"
                     state.last_decision_reason = reason
@@ -4681,11 +5187,19 @@ class AutoScheduleExecutor:
         # Find current window (if in one)
         current_window = None
         for window in state.current_plan.windows:
-            window_start = datetime.fromisoformat(window.start_time)
-            window_end = datetime.fromisoformat(window.end_time)
-            if window_start <= now < window_end:
-                current_window = window
-                break
+            try:
+                window_start, window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        _ha_local_now_naive(),
+                    )
+                )
+                if window_start <= comparison_now < window_end:
+                    current_window = window
+                    break
+            except (TypeError, ValueError):
+                continue
 
         state.current_window = current_window
 
@@ -4710,13 +5224,23 @@ class AutoScheduleExecutor:
             )
             state.last_decision = "started"
             state.last_decision_reason = reason
-        elif not should_charge and state.is_charging:
-            # Restore backup reserve when stopping - we'll set it again when next window starts
-            await self._stop_charging(vehicle_id, settings, state)
-            state.last_decision = "stopped"
+        elif not should_charge:
+            if state.is_charging:
+                # Restore backup reserve when stopping - we'll set it again when next window starts
+                await self._stop_charging(vehicle_id, settings, state)
+                state.last_decision = "stopped"
+            elif await self._stop_external_charging_if_needed(
+                vehicle_id,
+                settings,
+                state,
+                reason,
+            ):
+                state.last_decision = "stopped"
+            else:
+                state.last_decision = "waiting"
             state.last_decision_reason = reason
         else:
-            state.last_decision = "charging" if state.is_charging else "waiting"
+            state.last_decision = "charging"
             state.last_decision_reason = reason
         self._sync_active_charging_preserve_intent(
             vehicle_id,
@@ -4733,7 +5257,14 @@ class AutoScheduleExecutor:
         current_soc: Optional[int] = None,
     ) -> None:
         """Regenerate the charging plan based on current forecasts."""
-        now = datetime.now()
+        # HA-local, not OS-local: on UTC-container installs with a non-UTC HA
+        # timezone, datetime.now() can disagree with the true local weekday
+        # for the whole UTC-offset window each day, picking the wrong day's
+        # departure_times entry/priority (OB-15). last_plan_update is also
+        # stamped from this same value below, so refresh_optimizer_forecast_plans()
+        # and _evaluate_vehicle() must read staleness against this same
+        # HA-local clock (OB-31) rather than a mismatched datetime.now().
+        now = _ha_local_now_naive()
 
         # Determine target time from per-day departure_times
         target_time = None
@@ -4774,6 +5305,7 @@ class AutoScheduleExecutor:
             current_soc = await self._get_vehicle_soc(vehicle_id)
 
         try:
+            resolved_capacity = self.resolve_vehicle_capacity(vehicle_id, settings)
             # Use per-day priority based on the target departure day
             effective_priority = settings.get_effective_priority(
                 target_time.weekday() if target_time else now.weekday()
@@ -4783,6 +5315,7 @@ class AutoScheduleExecutor:
                 current_soc=current_soc,
                 target_soc=settings.target_soc,
                 target_time=target_time,
+                resolved_capacity=resolved_capacity,
                 priority=effective_priority,
                 charger_power_kw=(settings.max_charge_amps * settings.voltage * settings.phases) / 1000,
             )
@@ -4806,7 +5339,7 @@ class AutoScheduleExecutor:
 
         now = dt_util.now()
         if not isinstance(now, datetime):
-            now = datetime.now()
+            now = _ha_local_now_naive()
         for window in plan.windows:
             try:
                 end = datetime.fromisoformat(window.end_time)
@@ -4967,7 +5500,7 @@ class AutoScheduleExecutor:
             try:
                 self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
                 state = self.get_state(vehicle_id)
-                now = datetime.now()
+                now = _ha_local_now_naive()
                 vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
 
                 ev_soc = await self._get_vehicle_soc(vehicle_id)
@@ -5035,7 +5568,20 @@ class AutoScheduleExecutor:
     def _sync_future_demand_preserve_intent(self) -> None:
         """Keep optimiser no-discharge intent aligned with unavailable EV demand."""
         unavailable_with_demand = []
+        now = dt_util.now()
+        weekday = (
+            now.weekday()
+            if hasattr(now, "weekday")
+            else _ha_local_now_naive().weekday()
+        )
         for vehicle_id, state in self._state.items():
+            settings = self._settings.get(vehicle_id)
+            if (
+                settings is None
+                or not settings.enabled
+                or not settings.get_effective_preserve_home_battery(weekday)
+            ):
+                continue
             if state.last_decision not in ("away", "unplugged"):
                 continue
             if self._has_future_plan_demand(state):
@@ -5692,12 +6238,123 @@ class AutoScheduleExecutor:
             if success:
                 state.is_charging = True
                 state.started_at = datetime.now()
+                stop_key = vehicle_vin or vehicle_id
+                self._last_external_smart_schedule_stops.pop(stop_key, None)
                 _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
             else:
                 _LOGGER.warning(f"Auto-schedule: Failed to start charging for {vehicle_id}")
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error starting charging for {vehicle_id}: {e}")
+
+    def _external_smart_schedule_stop_recent(
+        self,
+        vehicle_id: str,
+        reason: str,
+    ) -> bool:
+        """Return whether the same external Smart Schedule stop was just sent."""
+        last_stop = self._last_external_smart_schedule_stops.get(vehicle_id)
+        if not last_stop:
+            return False
+        last_reason, last_time = last_stop
+        if last_reason != reason:
+            return False
+        return (
+            time.monotonic() - last_time
+        ) < EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS
+
+    async def _stop_external_charging_if_needed(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+        reason: str,
+    ) -> bool:
+        """Stop verified untracked charging while Smart Schedule wants to wait."""
+        from ..const import DOMAIN
+        from .ev_ownership import owner_family
+
+        vehicle_vin = (
+            self._resolve_vehicle_vin(vehicle_id)
+            if vehicle_id != "_default"
+            else None
+        )
+        if vehicle_vin is None:
+            opts = {
+                **getattr(self.config_entry, "data", {}),
+                **getattr(self.config_entry, "options", {}),
+            }
+            if _effective_auto_schedule_charger_type(settings, opts) != "tesla":
+                return False
+            vehicle_vin = await _resolve_unspecified_tesla_start_vin(
+                self.hass,
+                self.config_entry,
+                None,
+            )
+            if vehicle_vin is None:
+                _LOGGER.debug(
+                    "Auto-schedule external stop skipped: no unique Tesla loadpoint"
+                )
+                return False
+        loadpoint_id = vehicle_vin or vehicle_id
+        active_mode = _get_active_dynamic_ev_mode(
+            self.hass,
+            self.config_entry,
+            loadpoint_id,
+        )
+        if active_mode and owner_family(active_mode) != owner_family("smart_schedule"):
+            _LOGGER.info(
+                "Auto-schedule leaving %s charging state alone: %s owns the loadpoint",
+                loadpoint_id,
+                active_mode,
+            )
+            return False
+
+        if self._external_smart_schedule_stop_recent(loadpoint_id, reason):
+            _LOGGER.debug(
+                "Auto-schedule external stop suppressed for %s: %s",
+                loadpoint_id,
+                reason,
+            )
+            return False
+
+        if not await is_ev_actively_charging(
+            self.hass,
+            self.config_entry,
+            vehicle_vin=vehicle_vin,
+        ):
+            return False
+
+        _LOGGER.info(
+            "Auto-schedule detected %s charging while waiting — sending stop: %s",
+            loadpoint_id,
+            reason,
+        )
+        stopped = await _stop_coordinated_charging(
+            self.hass,
+            DOMAIN,
+            self.config_entry,
+            expected_owner_mode="smart_schedule",
+            reason=reason,
+            vehicle_vin=loadpoint_id,
+            command="stop_smart_schedule_external",
+            stop_untracked=True,
+            log_prefix="Auto-schedule",
+        )
+        if stopped:
+            state.is_charging = False
+            state.started_at = None
+            state.current_window = None
+            await self._restore_curtailment(state)
+            _LOGGER.info(
+                "Auto-schedule: Stopped untracked charging for %s",
+                vehicle_id,
+            )
+            self._last_external_smart_schedule_stops[loadpoint_id] = (
+                reason,
+                time.monotonic(),
+            )
+        return stopped
 
     async def _stop_charging(
         self,
@@ -6804,7 +7461,10 @@ class PriceLevelChargingExecutor:
             vehicle_vin: Optional VIN to check specific vehicle. If None, returns
                          SoC of first vehicle found (backward compatible).
         """
-        from ..const import CONF_GENERIC_CHARGER_ENABLED
+        from ..const import (
+            CONF_GENERIC_CHARGER_ENABLED,
+            TESLA_BLE_SENSOR_CHARGE_LEVEL,
+        )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
 
@@ -6818,6 +7478,31 @@ class PriceLevelChargingExecutor:
                 if generic_soc is not None:
                     return int(generic_soc)
                 break
+
+        # ESPHome Tesla BLE bridges are not Tesla-domain devices in Home
+        # Assistant's registry, so a BLE vehicle id must be resolved directly
+        # to its configured charge-level entity before the registry searches.
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            ble_prefix = vehicle_vin[4:]
+            ble_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
+            ble_state = self.hass.states.get(ble_entity)
+            if ble_state and ble_state.state not in (
+                "unavailable",
+                "unknown",
+                "None",
+                None,
+            ):
+                try:
+                    level = float(ble_state.state)
+                    if 0 <= level <= 100:
+                        _LOGGER.debug(
+                            "Found Tesla BLE battery level from %s: %s%%",
+                            ble_entity,
+                            level,
+                        )
+                        return int(level)
+                except (ValueError, TypeError):
+                    pass
 
         # Method 1: Check tesla_vehicles in entry_data (legacy)
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
@@ -7521,16 +8206,49 @@ class PriceLevelChargingExecutor:
             await self.apply_preserve_home_battery(False, "No Tesla vehicles discovered")
             return results
 
+        has_vehicle_specific_tesla = any(
+            not vehicle["vin"].startswith("ble_") for vehicle in vehicles
+        )
+        shared_ble_alias_vin: Optional[str] = None
+        if has_vehicle_specific_tesla:
+            first_ble_prefix = _configured_ble_prefixes(self.config_entry)[0]
+            shared_ble_alias_vin = f"ble_{first_ble_prefix}"
+
         for vehicle in vehicles:
             vin = vehicle["vin"]
             name = vehicle.get("name", vin)
 
+            # A real VIN uses the first configured BLE prefix as its command
+            # fallback. The matching BLE discovery row is therefore a second
+            # identifier for the same charger, not an independent vehicle.
+            # Suppress it regardless of whether BLE SOC is available; allowing
+            # a known-SOC alias to act would reintroduce duplicate starts/stops.
+            if vin == shared_ble_alias_vin:
+                reason = (
+                    "Tesla BLE control path shares the configured charger with "
+                    "another Tesla vehicle; using the vehicle-specific decision"
+                )
+                results[vin] = (False, reason, "")
+                vehicle_state = self._get_or_create_vehicle_state(vin)
+                vehicle_state.is_charging = False
+                vehicle_state.charging_mode = ""
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                _LOGGER.debug(
+                    "Multi-vehicle decision for %s (%s): should_charge=False, reason=%s",
+                    name,
+                    vin,
+                    reason,
+                )
+                continue
+
             # Get charging decision for this vehicle
             decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
-            results[vin] = decision
 
             should_charge, reason, mode = decision
             vehicle_state = self._get_or_create_vehicle_state(vin)
+
+            results[vin] = decision
 
             _LOGGER.debug(
                 f"Multi-vehicle decision for {name} ({vin}): "
@@ -7812,6 +8530,11 @@ class ScheduledChargingExecutor:
     async def _start_charging(self, reason: str) -> bool:
         """Start EV charging."""
         await self.apply_preserve_home_battery(True, reason)
+        if _configured_charger_type({**self.config_entry.data, **self.config_entry.options}) == "tesla":
+            tesla_started = await self._start_scheduled_tesla_vehicles(reason)
+            if tesla_started is not None:
+                return tesla_started
+
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,
@@ -7830,6 +8553,103 @@ class ScheduledChargingExecutor:
         self._state.last_decision = "started"
         self._state.last_decision_reason = reason
         _LOGGER.info(f"Scheduled charging: Started - {reason}")
+        return True
+
+    async def _start_scheduled_tesla_vehicles(self, reason: str) -> Optional[bool]:
+        """Start every eligible Tesla in the scheduled window.
+
+        The legacy scheduled path used the default Tesla loadpoint. In multi-car
+        homes that can start the first matching Tesla and then mark the shared
+        scheduled mode as active, leaving another home/plugged car idle.
+        """
+        if (
+            _configured_charger_type({**self.config_entry.data, **self.config_entry.options})
+            != "tesla"
+        ):
+            return None
+
+        try:
+            vehicles = await discover_all_tesla_vehicles(self.hass, self.config_entry)
+        except Exception as err:
+            _LOGGER.debug("Scheduled charging Tesla discovery unavailable: %s", err)
+            return None
+
+        if not vehicles:
+            return None
+
+        eligible_vins: list[str] = []
+        missing_vins: list[str] = []
+        for vehicle in vehicles:
+            vin = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
+            if not vin:
+                continue
+            try:
+                location = await get_ev_location(self.hass, self.config_entry, vehicle_vin=vin)
+                if location not in ("home", "unknown"):
+                    continue
+                if not await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin=vin):
+                    continue
+                eligible_vins.append(vin)
+                if not await is_ev_actively_charging(
+                    self.hass,
+                    self.config_entry,
+                    vehicle_vin=vin,
+                ):
+                    missing_vins.append(vin)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Scheduled charging Tesla eligibility check failed for %s: %s",
+                    vin[:8],
+                    err,
+                )
+
+        if not eligible_vins:
+            return None
+
+        if not missing_vins:
+            self._state.is_charging = True
+            self._state.last_decision = "charging"
+            self._state.last_decision_reason = reason
+            _LOGGER.debug("Scheduled charging: all eligible Tesla vehicles already charging")
+            return True
+
+        started_any = False
+        failed_vins: list[str] = []
+        for vin in missing_vins:
+            success = await _start_coordinated_charging(
+                self.hass,
+                self._domain,
+                self.config_entry,
+                owner_mode="scheduled",
+                reason=reason,
+                vehicle_vin=vin,
+                no_grid_import=self._get_settings().get("no_grid_import", False),
+                allow_ownership_takeover=True,
+                log_prefix="Scheduled charging",
+            )
+            if success:
+                started_any = True
+            else:
+                failed_vins.append(vin)
+
+        if failed_vins:
+            _LOGGER.warning(
+                "Scheduled charging: Failed to start Tesla vehicle(s): %s",
+                ", ".join(vin[:8] for vin in failed_vins),
+            )
+
+        if not started_any:
+            _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
+            return False
+
+        self._state.is_charging = True
+        self._state.last_decision = "started"
+        self._state.last_decision_reason = reason
+        _LOGGER.info(
+            "Scheduled charging: Started %d Tesla vehicle(s) - %s",
+            len(missing_vins) - len(failed_vins),
+            reason,
+        )
         return True
 
     async def _stop_charging(self, reason: str) -> bool:
@@ -8289,6 +9109,8 @@ class EVChargingModeCoordinator:
             scheduled_wanting = [d for d in decisions if d.wants_charge]
             if scheduled_wanting and not self._is_charging:
                 await self._start_charging(active_modes, combined_reason)
+            elif scheduled_wanting and scheduled_exec:
+                await scheduled_exec._start_scheduled_tesla_vehicles(combined_reason)
 
             # Update executor states
             for d in decisions:

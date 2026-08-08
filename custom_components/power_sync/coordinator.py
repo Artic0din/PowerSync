@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 import logging
+import math
 import re
 import time
 from typing import Any, Optional
@@ -33,6 +34,7 @@ from .const import (
     TESLEMETRY_API_BASE_URL,
     FLEET_API_BASE_URL,
     POWERSYNC_API_BASE_URL,
+    POWERSYNC_AUTH_ME_URL,
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
     TESLA_PROVIDER_POWERSYNC,
@@ -46,6 +48,8 @@ from .const import (
     FLOW_POWER_MARKET_AVG,
     FLOW_POWER_KWATCH_REGIONS,
     CONF_FLEET_API_BASE_URL,
+    CONF_MONITORING_MODE,
+    CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -54,6 +58,7 @@ from .const import (
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from .sigenergy_model import sigenergy_home_load_kw
+from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -78,6 +83,27 @@ LIFETIME_TOTAL_KEYS = (
 )
 
 
+def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
+    """Normalize custom HA power telemetry to finite kW."""
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric_value):
+        return None
+
+    normalized_unit = str(unit or "").strip().lower()
+    if normalized_unit in ("w", "watt", "watts"):
+        return numeric_value / 1000.0
+    if normalized_unit in ("mw", "megawatt", "megawatts"):
+        return numeric_value * 1000.0
+    if normalized_unit in ("kw", "kilowatt", "kilowatts"):
+        return numeric_value
+    return numeric_value / 1000.0 if abs(numeric_value) > 100 else numeric_value
+
+
 def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> float:
     """Return the latest separately configured AC inverter output in kW."""
     attrs = (
@@ -93,6 +119,22 @@ def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> floa
         return max(0.0, float(power_w or 0) / 1000.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_night_for_solar_telemetry(hass: HomeAssistant) -> bool:
+    """Return whether real solar telemetry should be impossible or near-zero."""
+    try:
+        sun_state = getattr(hass, "states", None).get("sun.sun")
+        if sun_state is not None:
+            if sun_state.state == "below_horizon":
+                return True
+            if sun_state.state == "above_horizon":
+                return False
+    except Exception:
+        pass
+
+    local_hour = dt_util.now().hour
+    return local_hour >= 18 or local_hour < 6
 
 
 def _stored_battery_health_capacity_kwh(hass: HomeAssistant, entry_id: str) -> float | None:
@@ -367,7 +409,7 @@ def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
 def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
-    Priority: Amber coordinator → AEMO/Flow Power coordinator → tariff schedule.
+    Priority: Amber coordinator → AEMO/Flow Power KWatch coordinator → tariff schedule.
     Returns (buy_price_per_kwh, sell_price_per_kwh) or (None, None) on failure.
     """
     try:
@@ -393,8 +435,13 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 # Negate so sell_price is positive when earning, negative when paying
                 return (buy_dollar, -sell_dollar)
 
-        # Try AEMO sensor coordinator (Flow Power and AEMO users)
-        aemo_coordinator = entry_data.get("aemo_sensor_coordinator")
+        # Both Flow Power market-price sources publish the same Amber-compatible
+        # current-price shape. KWatch-only installs do not create the AEMO
+        # coordinator, so cost tracking must use their KWatch coordinator.
+        aemo_coordinator = (
+            entry_data.get("aemo_sensor_coordinator")
+            or entry_data.get("flow_power_kwatch_coordinator")
+        )
         if aemo_coordinator and aemo_coordinator.data:
             current_prices = aemo_coordinator.data.get("current", [])
             wholesale_cents = None
@@ -426,11 +473,21 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         config_entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
                     )
                     if provider == "flow_power":
-                        pea_enabled = config_entry.options.get(CONF_PEA_ENABLED, True)
-                        fp_base_rate = config_entry.options.get(
-                            CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
+                        pea_enabled = config_entry.options.get(
+                            CONF_PEA_ENABLED,
+                            config_entry.data.get(CONF_PEA_ENABLED, True),
                         )
-                        fp_custom_pea = config_entry.options.get(CONF_PEA_CUSTOM_VALUE)
+                        fp_base_rate = config_entry.options.get(
+                            CONF_FLOW_POWER_BASE_RATE,
+                            config_entry.data.get(
+                                CONF_FLOW_POWER_BASE_RATE,
+                                FLOW_POWER_DEFAULT_BASE_RATE,
+                            ),
+                        )
+                        fp_custom_pea = config_entry.options.get(
+                            CONF_PEA_CUSTOM_VALUE,
+                            config_entry.data.get(CONF_PEA_CUSTOM_VALUE),
+                        )
                         try:
                             fp_custom_pea_value = (
                                 float(fp_custom_pea)
@@ -806,6 +863,56 @@ async def _fetch_with_retry(
                 # them as transient stale-token failures instead.
                 if response.status == 401:
                     if raise_auth_failed:
+                        authorization = headers.get("Authorization", "")
+                        is_powersync_proxy = (
+                            url.startswith(f"{POWERSYNC_API_BASE_URL}/")
+                            and authorization.startswith("Bearer psync_")
+                        )
+                        if is_powersync_proxy:
+                            bearer_status: bool | None = None
+                            try:
+                                async with session.get(
+                                    POWERSYNC_AUTH_ME_URL,
+                                    headers={
+                                        "Authorization": authorization,
+                                        "User-Agent": headers.get(
+                                            "User-Agent", POWER_SYNC_USER_AGENT
+                                        ),
+                                    },
+                                    timeout=aiohttp.ClientTimeout(total=10),
+                                ) as auth_response:
+                                    if auth_response.status == 200:
+                                        bearer_status = True
+                                    elif auth_response.status == 401:
+                                        bearer_status = False
+                                    else:
+                                        _LOGGER.warning(
+                                            "PowerSync bearer confirmation returned %s; "
+                                            "treating proxy 401 as transient",
+                                            auth_response.status,
+                                        )
+                            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                                _LOGGER.warning(
+                                    "PowerSync bearer confirmation unavailable; "
+                                    "treating proxy 401 as transient: %s",
+                                    err,
+                                )
+
+                            if bearer_status is not False:
+                                detail = (
+                                    "bearer remains valid"
+                                    if bearer_status is True
+                                    else "bearer confirmation unavailable"
+                                )
+                                _LOGGER.warning(
+                                    "PowerSync proxy returned 401 but %s; retrying "
+                                    "without opening a reauthentication repair",
+                                    detail,
+                                )
+                                last_error = UpdateFailed(
+                                    f"Transient PowerSync authentication failure: {detail}"
+                                )
+                                continue
                         _LOGGER.warning(
                             "Authentication failed (401) — triggering reauth: %s",
                             error_text[:200],
@@ -880,6 +987,52 @@ def _merge_amber_forecasts(forecast_5min: list, forecast_30min: list) -> list:
                 filtered_30min.append(entry)  # keep if unparseable
 
     return list(forecast_5min) + filtered_30min
+
+
+def _merge_kwatch_forecasts(forecast_5min: list, forecast_30min: list) -> list:
+    """Use 5-minute coverage only before the first 30-minute interval.
+
+    KWatch's forecast endpoints can refresh at slightly different times.  A
+    non-empty 30-minute response may therefore begin after the already
+    available 5-minute forecast.  Keep those earlier high-resolution entries,
+    then let the 30-minute feed own its complete horizon and overlap boundary.
+    """
+    if not forecast_5min:
+        return forecast_30min or []
+    if not forecast_30min:
+        return forecast_5min or []
+
+    first_30min_start = None
+    for entry in forecast_30min:
+        nem_time = entry.get("nemTime")
+        if not nem_time:
+            continue
+        try:
+            interval_end = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+            interval_start = interval_end - timedelta(
+                minutes=float(entry.get("duration", 30))
+            )
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if first_30min_start is None or interval_start < first_30min_start:
+            first_30min_start = interval_start
+
+    if first_30min_start is None:
+        return forecast_30min
+
+    earlier_5min = []
+    for entry in forecast_5min:
+        nem_time = entry.get("nemTime")
+        if not nem_time:
+            continue
+        try:
+            interval_end = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if interval_end <= first_30min_start:
+            earlier_5min.append(entry)
+
+    return earlier_5min + list(forecast_30min)
 
 
 class AmberPriceCoordinator(DataUpdateCoordinator):
@@ -1243,6 +1396,14 @@ class AmberUsageCoordinator:
         """Return the last fetch time as ISO string."""
         return self._last_fetch.isoformat() if self._last_fetch else None
 
+    def is_fresh(self, max_age: timedelta = timedelta(hours=6)) -> bool:
+        """Return whether the usage snapshot is recent enough for live display."""
+        if self._last_fetch is None:
+            return False
+        return (dt_util.now().timestamp() - self._last_fetch.timestamp()) <= (
+            max_age.total_seconds()
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -1371,6 +1532,7 @@ class AmberUsageCoordinator:
 
         # Amber Usage API allows max 7-day range per request — batch accordingly
         total_updated = 0
+        successful_chunks = 0
         chunk_start = start_date
         url = f"{AMBER_API_BASE_URL}/sites/{self._site_id}/usage"
 
@@ -1391,6 +1553,7 @@ class AmberUsageCoordinator:
                     timeout_seconds=30,
                     params=params,
                 )
+                successful_chunks += 1
                 updated = self._process_intervals(intervals)
                 total_updated += updated
                 _LOGGER.debug(
@@ -1404,10 +1567,18 @@ class AmberUsageCoordinator:
 
             chunk_start = chunk_end + timedelta(days=1)
 
-        self._last_fetch = now
+        if successful_chunks:
+            self._last_fetch = now
         self._prune_old_days()
         self._save_store()
-        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", total_updated, start_date, end_date)
+        _LOGGER.info(
+            "Amber usage fetched: %d days updated across %d successful chunks "
+            "(range %s to %s)",
+            total_updated,
+            successful_chunks,
+            start_date,
+            end_date,
+        )
 
     def _process_intervals(self, intervals: list[dict]) -> int:
         """Aggregate 30-min intervals into daily DayUsage records.
@@ -1477,7 +1648,8 @@ class AmberUsageCoordinator:
 
             # Only overwrite if new data is same or better quality
             existing = self._days.get(day_key)
-            if existing:
+            is_partial_today = day_key == dt_util.now().date().isoformat()
+            if existing and not is_partial_today:
                 existing_rank = _QUALITY_RANK.get(existing.quality, 0)
                 new_rank = _QUALITY_RANK.get(quality, 0)
                 if new_rank < existing_rank:
@@ -1516,7 +1688,8 @@ class AmberUsageCoordinator:
     def get_summary(self, period: str) -> dict[str, Any]:
         """Get aggregated usage for a period.
 
-        period: 'yesterday', 'week' (last 7 complete days), 'month' (calendar month to yesterday), 'last_month'
+        period: 'today' (partial), 'yesterday', 'week' (last 7 complete days),
+        'month' (calendar month to yesterday), or 'last_month'.
         """
         days = self._get_days_for_period(period)
         return self._aggregate(days)
@@ -1565,6 +1738,9 @@ class AmberUsageCoordinator:
         today = dt_util.now().date()
         yesterday = today - timedelta(days=1)
 
+        if period == "today":
+            du = self._days.get(today.isoformat())
+            return [du] if du else []
         if period == "yesterday":
             key = yesterday.isoformat()
             du = self._days.get(key)
@@ -1790,7 +1966,27 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         solar_kw = _kw(getattr(snap, "solar_w", None))
         grid_kw = _kw(getattr(snap, "grid_w", None))
         battery_kw = _kw(getattr(snap, "battery_w", None))
-        load_kw = _kw(getattr(snap, "load_w", None))
+        raw_load_kw = _kw(getattr(snap, "load_w", None))
+
+        # The raw gateway load (snap.load_w) includes EV charging power (eg a
+        # Tesla Wall Connector), same as Tesla cloud's live_status.load_power
+        # above. The main cloud path subtracts ev_power_kw before it ever
+        # reaches the load estimator (see load_kw computation earlier in this
+        # method) — mirror that here using the same "observed EV power"
+        # signal PowerwallLocalCoordinator.snapshot_as_api() subtracts via
+        # its _observed_ev_power_w() (powerwall_local/coordinator.py), so a
+        # Tesla cloud outage with a car charging doesn't poison home_load's
+        # recorder history with EV draw. Defensive: EV power may be
+        # unavailable (older/duck-typed coordinator) — treat as 0 and never
+        # let load go negative.
+        observed_ev_power_w = getattr(local_coordinator, "_observed_ev_power_w", None)
+        ev_power_kw = 0.0
+        if callable(observed_ev_power_w):
+            try:
+                ev_power_kw = max(0.0, _kw(observed_ev_power_w()))
+            except Exception:
+                ev_power_kw = 0.0
+        load_kw = max(0.0, raw_load_kw - ev_power_kw)
 
         self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0)
 
@@ -1836,7 +2032,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             "load_power": load_kw,
             "battery_level": soc_pct,
             "grid_status": grid_status,
-            "ev_power": 0.0,
+            "ev_power": ev_power_kw,
             "last_update": dt_util.utcnow(),
             "energy_summary": self._energy_acc.as_dict(),
             "firmware": self._firmware,
@@ -1957,11 +2153,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         current_token = self._get_current_token()
         if not current_token:
             raise UpdateFailed("Tesla token temporarily unavailable — will retry next poll")
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             # Get live status from Tesla API with retry logic
@@ -2280,11 +2472,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return None
 
         current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             _LOGGER.info(f"Fetching site_info for site {self.site_id}")
@@ -2419,72 +2607,72 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
     async def set_grid_charging_enabled(self, enabled: bool) -> bool:
-        """
-        Enable or disable grid charging (imports) for the Powerwall.
-
-        Args:
-            enabled: True to allow grid charging, False to disallow
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Note: The API field is inverted - True means charging is DISALLOWED
-        disallow_value = not enabled
-
-        current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
-
+        """Set grid charging and return only after direct readback confirms it."""
+        _LOGGER.info(
+            "Setting grid charging %s for site %s",
+            "enabled" if enabled else "disabled",
+            self.site_id,
+        )
         try:
-            _LOGGER.info(f"Setting grid charging {'enabled' if enabled else 'disabled'} for site {self.site_id}")
-
-            url = f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/grid_import_export"
-            payload = {
-                "disallow_charge_from_grid_with_solar_installed": disallow_value
-            }
-
-            async with self.session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status not in [200, 201, 202]:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set grid charging: {response.status} - {text}")
-                    return False
-
-                data = await response.json()
-                _LOGGER.debug(f"Set grid charging response: {data}")
-
-                # Check for actual success in response body
-                response_data = data.get("response", data)
-                if isinstance(response_data, dict) and "result" in response_data:
-                    if not response_data["result"]:
-                        reason = response_data.get("reason", "Unknown reason")
-                        _LOGGER.error(f"Set grid charging failed: {reason}")
-                        return False
-
-                _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'} successfully for site {self.site_id}")
-                self.invalidate_site_info_cache()
-                return True
-
-        except asyncio.TimeoutError:
-            _LOGGER.error("Timeout setting grid charging")
-            return False
+            outcome = await async_set_tesla_grid_charging_confirmed(
+                self.session,
+                self.api_base_url,
+                str(self.site_id),
+                self._tesla_headers(self._get_current_token()),
+                enabled,
+            )
         except Exception as err:
-            _LOGGER.error(f"Error setting grid charging: {err}")
+            _LOGGER.error("Error setting grid charging: %s", err)
             return False
+        if outcome.applied:
+            self.invalidate_site_info_cache()
+            return True
+
+        _LOGGER.error(
+            "Grid charging %s did not verify for site %s (%s%s)",
+            "enable" if enabled else "disable",
+            self.site_id,
+            outcome.status.value,
+            f": {outcome.detail}" if outcome.detail else "",
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Unified Tesla Energy Site API helper
     # ------------------------------------------------------------------
 
-    def _tesla_headers(self) -> dict[str, str]:
+    def _tesla_headers(self, token: str | None = None) -> dict[str, str]:
         """Build authorization headers using the freshest token."""
-        return {
-            "Authorization": f"Bearer {self._get_current_token()}",
+        headers = {
+            "Authorization": f"Bearer {token or self._get_current_token()}",
             "Content-Type": "application/json",
             "User-Agent": POWER_SYNC_USER_AGENT,
         }
+        if self.api_provider == TESLA_PROVIDER_POWERSYNC:
+            monitoring_mode = False
+            if self._entry_id:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                if entry:
+                    monitoring_mode = bool(
+                        entry.options.get(
+                            CONF_MONITORING_MODE,
+                            entry.data.get(CONF_MONITORING_MODE, False),
+                        )
+                    )
+            headers["X-PowerSync-Client-Type"] = "home_assistant"
+            if self._entry_id:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                client_instance_id = (
+                    entry.data.get(CONF_POWERSYNC_CLIENT_INSTANCE_ID)
+                    if entry
+                    else None
+                ) or self._entry_id
+                headers["X-PowerSync-Client-Instance-Id"] = client_instance_id
+            headers["X-PowerSync-Control-Mode"] = (
+                "monitoring" if monitoring_mode else "actuating"
+            )
+            headers["X-PowerSync-Control-Observed-At"] = str(int(time.time() * 1000))
+        return headers
 
     async def _tesla_api_call(
         self,
@@ -2814,11 +3002,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             Calendar history data with time_series array, or None if fetch fails
         """
         current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             # Get site timezone from site_info
@@ -3433,6 +3617,12 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
         self.region = region
         self.api_region = FLOW_POWER_KWATCH_REGIONS.get(region, region.lower())
         self._client = FlowPowerAPIClient(api_key, session)
+        self._aemo_fallback = AEMOPriceCoordinator(hass, region, session)
+        self._using_fallback = False
+        self._fallback_reason: str | None = None
+        self._kwatch_last_attempt: datetime | None = None
+        self._kwatch_last_success: datetime | None = None
+        self._kwatch_consecutive_failures = 0
 
         super().__init__(
             hass,
@@ -3441,60 +3631,156 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=5),
         )
 
-    async def _async_update_data(self) -> dict[str, Any]:
+    @staticmethod
+    def _format_update_time(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.isoformat()
+
+    @staticmethod
+    def _fallback_reason_from_error(err: Exception) -> str | None:
+        reason = str(err) or type(err).__name__
+        if reason == "invalid_api_key":
+            return None
+        if reason.startswith("api_status_"):
+            try:
+                status = int(reason.rsplit("_", 1)[-1])
+            except ValueError:
+                return None
+            return reason if status >= 500 else None
+        if reason == "invalid_json":
+            return reason
+        if isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError)):
+            return type(err).__name__
+        if isinstance(err, UpdateFailed) and "KWatch" in reason:
+            return reason
+        return None
+
+    async def _fetch_kwatch_data(self) -> dict[str, Any]:
         """Fetch current and forecast prices from Flow Power's KWatch API."""
         from .flow_power_api import kwatch_prices_to_amber_format
 
-        try:
-            dispatch = await self._client.dispatch5mins(self.api_region, period=60)
-            # Keep the first upcoming half-hour slot; period=2 skips it.
-            forecast_30 = await self._client.predispatch30mins(self.api_region, period=1)
-            forecast_5 = await self._client.predispatch5mins(self.api_region, period=60)
+        dispatch = await self._client.dispatch5mins(self.api_region, period=60)
+        # Keep the first upcoming half-hour slot; period=2 skips it.
+        forecast_30 = await self._client.predispatch30mins(self.api_region, period=1)
+        forecast_5 = await self._client.predispatch5mins(self.api_region, period=60)
 
-            if not dispatch:
-                raise UpdateFailed(f"No KWatch dispatch prices returned for {self.region}")
+        if not dispatch:
+            raise UpdateFailed(f"No KWatch dispatch prices returned for {self.region}")
 
-            latest_dispatch = dispatch[-1:]
-            current_prices = kwatch_prices_to_amber_format(
-                latest_dispatch,
-                interval_type="CurrentInterval",
-                default_duration=5,
+        latest_dispatch = dispatch[-1:]
+        current_prices = kwatch_prices_to_amber_format(
+            latest_dispatch,
+            interval_type="CurrentInterval",
+            default_duration=5,
+        )
+        forecast = kwatch_prices_to_amber_format(
+            forecast_30,
+            interval_type="ForecastInterval",
+            default_duration=30,
+        )
+        forecast_5min = kwatch_prices_to_amber_format(
+            forecast_5,
+            interval_type="ForecastInterval",
+            default_duration=5,
+        )
+
+        forecast = _merge_kwatch_forecasts(forecast_5min, forecast)
+        if not forecast:
+            raise UpdateFailed(f"No KWatch forecast prices returned for {self.region}")
+
+        latest_cents = latest_dispatch[0]["perKwh"]
+        _LOGGER.info(
+            "Flow Power KWatch data for %s: current=%.2fc/kWh, forecast_periods=%d",
+            self.region,
+            latest_cents,
+            len(forecast) // 2,
+        )
+
+        return {
+            "current": current_prices,
+            "forecast": forecast,
+            "forecast_5min": forecast_5min,
+            "last_update": dt_util.utcnow(),
+            "source": "flow_power_kwatch",
+            "using_fallback": False,
+        }
+
+    async def _fetch_aemo_fallback_data(self, reason: str) -> dict[str, Any]:
+        """Fetch AEMO Direct prices when KWatch is temporarily unavailable."""
+        await self._aemo_fallback.async_request_refresh()
+        fallback_data = dict(self._aemo_fallback.data or {})
+        if not fallback_data.get("current") or not fallback_data.get("forecast"):
+            raise UpdateFailed(
+                f"Flow Power KWatch unavailable ({reason}); AEMO fallback unavailable"
             )
-            forecast = kwatch_prices_to_amber_format(
-                forecast_30,
-                interval_type="ForecastInterval",
-                default_duration=30,
-            )
-            forecast_5min = kwatch_prices_to_amber_format(
-                forecast_5 or dispatch,
-                interval_type="ForecastInterval",
-                default_duration=5,
-            )
 
-            if not forecast:
-                forecast = forecast_5min
-            if not forecast:
-                raise UpdateFailed(f"No KWatch forecast prices returned for {self.region}")
-
-            latest_cents = latest_dispatch[0]["perKwh"]
-            _LOGGER.info(
-                "Flow Power KWatch data for %s: current=%.2fc/kWh, forecast_periods=%d",
+        if not self._using_fallback or self._fallback_reason != reason:
+            _LOGGER.warning(
+                "Flow Power KWatch unavailable for %s (%s); using AEMO Direct fallback",
                 self.region,
-                latest_cents,
-                len(forecast) // 2,
+                reason,
             )
-
-            return {
-                "current": current_prices,
-                "forecast": forecast,
-                "forecast_5min": forecast_5min,
-                "last_update": dt_util.utcnow(),
-                "source": "flow_power_kwatch",
+        self._using_fallback = True
+        self._fallback_reason = reason
+        fallback_data.update(
+            {
+                "source": "flow_power_kwatch_fallback_aemo",
+                "primary_source": "flow_power_kwatch",
+                "fallback_source": "aemo_api",
+                "using_fallback": True,
+                "fallback_reason": reason,
+                "kwatch_consecutive_failures": self._kwatch_consecutive_failures,
+                "kwatch_last_attempt": self._format_update_time(
+                    self._kwatch_last_attempt
+                ),
+                "kwatch_last_success": self._format_update_time(
+                    self._kwatch_last_success
+                ),
+                "last_update": fallback_data.get("last_update") or dt_util.utcnow(),
             }
-        except UpdateFailed:
-            raise
+        )
+        return fallback_data
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch KWatch prices, falling back to AEMO during transient outages."""
+        self._kwatch_last_attempt = dt_util.utcnow()
+        try:
+            data = await self._fetch_kwatch_data()
         except Exception as err:
-            raise UpdateFailed(f"Error fetching Flow Power KWatch data: {err}") from err
+            self._kwatch_consecutive_failures += 1
+            reason = self._fallback_reason_from_error(err)
+            if reason is None:
+                raise
+            try:
+                return await self._fetch_aemo_fallback_data(reason)
+            except Exception as fallback_err:
+                raise UpdateFailed(
+                    f"Flow Power KWatch unavailable ({reason}); "
+                    f"AEMO fallback failed: {fallback_err}"
+                ) from fallback_err
+
+        self._kwatch_last_success = data.get("last_update")
+        self._kwatch_consecutive_failures = 0
+        if self._using_fallback:
+            _LOGGER.info(
+                "Flow Power KWatch recovered for %s; returning to primary pricing",
+                self.region,
+            )
+        self._using_fallback = False
+        self._fallback_reason = None
+        data.update(
+            {
+                "kwatch_consecutive_failures": 0,
+                "kwatch_last_attempt": self._format_update_time(
+                    self._kwatch_last_attempt
+                ),
+                "kwatch_last_success": self._format_update_time(
+                    self._kwatch_last_success
+                ),
+            }
+        )
+        return data
 
 
 class EPEXPriceCoordinator(DataUpdateCoordinator):
@@ -3535,6 +3821,9 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
         self._tax_percent = tax_percent
         self._export_rate = export_rate
         self._client = EPEXAPIClient(session)
+        # Tracks whether we've already logged the "no export rate configured"
+        # warning so it fires once per coordinator lifetime, not every poll.
+        self._warned_export_rate_unset = False
 
         super().__init__(
             hass,
@@ -3595,12 +3884,33 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                     "duration": 60,
                 }
 
-                # Export price: use fixed rate if configured, otherwise wholesale (no surcharge/tax)
+                # Export price: use fixed rate if configured. The EPEX
+                # Predictor API only returns "total" — the final consumer
+                # price with surcharge/tax already applied server-side
+                # (see class docstring) — it does not expose a separate
+                # wholesale/spot component we could use for export
+                # valuation. Previously this fell back to -total_ct, which
+                # valued exports at the *retail* import rate (surcharge +
+                # tax included) instead of wholesale, causing the optimizer
+                # to export midday energy it should have held for the
+                # evening peak. Default to 0 instead of guessing a price we
+                # don't actually have.
                 if self._export_rate > 0:
                     export_ct = -self._export_rate
                 else:
-                    # Use negative of import price (wholesale approximation)
-                    export_ct = -total_ct
+                    export_ct = 0.0
+                    if not self._warned_export_rate_unset:
+                        _LOGGER.warning(
+                            "EPEX export rate not configured for %s and no "
+                            "wholesale/spot price is available from the API "
+                            "(only the final consumer price is returned); "
+                            "valuing exports at 0 ct/kWh so PowerSync never "
+                            "assumes an export price it doesn't have. Set a "
+                            "Fixed Export Rate (or export price entity) to "
+                            "value exports correctly.",
+                            self.region,
+                        )
+                        self._warned_export_rate_unset = True
 
                 export_entry = {
                     "nemTime": ends_at.isoformat(),
@@ -3655,6 +3965,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         slave_id: int = 1,
         entry_id: str = "",
         max_export_limit_kw: Optional[float] = None,
+        configured_charge_rate_limit_kw: Optional[float] = None,
+        configured_discharge_rate_limit_kw: Optional[float] = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -3665,6 +3977,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             slave_id: Modbus slave ID (default: 1)
             entry_id: Config entry ID for price lookups
             max_export_limit_kw: User-configured DNSP export limit in kW
+            configured_charge_rate_limit_kw: User-configured normal charge cap in kW
+            configured_discharge_rate_limit_kw: User-configured normal discharge cap in kW
         """
         from .inverters.sigenergy import SigenergyController
 
@@ -3672,7 +3986,14 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
-        self._controller = SigenergyController(host, port, slave_id, max_export_limit_kw=max_export_limit_kw)
+        self._controller = SigenergyController(
+            host,
+            port,
+            slave_id,
+            max_export_limit_kw=max_export_limit_kw,
+            configured_charge_rate_limit_kw=configured_charge_rate_limit_kw,
+            configured_discharge_rate_limit_kw=configured_discharge_rate_limit_kw,
+        )
         self._energy_acc = EnergyAccumulator(hass, "sigenergy")
         # Rated charge/discharge power in kW — cached after first successful
         # read from input registers 30079/30081. Static hardware spec so it
@@ -3892,12 +4213,11 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
 
 class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
-    """Coordinator to fetch AlphaESS energy data via Modbus (primary) with
-    optional AlphaESS Cloud API fallback.
+    """Fetch AlphaESS data via Modbus/cloud fallback or cloud-only monitoring.
 
     AlphaESS hybrid inverter-battery systems (SMILE / Storion) expose a rich
-    Modbus TCP register map (slave ID 0x55 by default). Cloud is used only
-    when Modbus is unreachable.
+    Modbus TCP register map (slave ID 0x55 by default). Cloud can be a fallback
+    when Modbus is unreachable or the sole read-only telemetry source.
 
     Sign conventions (unlike Sigenergy):
       - Battery power (reg 0126H): NEGATIVE = charging, POSITIVE = discharging
@@ -3915,6 +4235,7 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         entry_id: str = "",
         max_export_limit_kw: Optional[float] = None,
         cloud_client: Optional[Any] = None,
+        connection_type: str = "modbus_cloud",
     ) -> None:
         """Initialize the coordinator.
 
@@ -3926,16 +4247,21 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             entry_id: Config entry ID for price lookups.
             max_export_limit_kw: User-configured DNSP export safety cap.
             cloud_client: Optional AlphaESSCloudClient for telemetry fallback.
+            connection_type: ``modbus_cloud`` or monitoring-only ``cloud_only``.
         """
-        from .inverters.alphaess import AlphaESSController
-
         self.host = host
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
-        self._controller = AlphaESSController(
-            host, port, slave_id, max_export_limit_kw=max_export_limit_kw
-        )
+        self.connection_type = connection_type
+        self.supports_dispatch = connection_type != "cloud_only" and bool(host)
+        self._controller = None
+        if self.supports_dispatch:
+            from .inverters.alphaess import AlphaESSController
+
+            self._controller = AlphaESSController(
+                host, port, slave_id, max_export_limit_kw=max_export_limit_kw
+            )
         self._energy_acc = EnergyAccumulator(hass, "alphaess")
         self._cloud = cloud_client
         self._modbus_failures = 0  # Consecutive failures → cloud fallback
@@ -3954,45 +4280,63 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         attrs: dict[str, Any] = {}
         is_curtailed = False
-        source = "modbus"
+        source = "modbus" if self._controller is not None else "cloud"
 
-        try:
-            status = await self._controller.get_status()
-            attrs = status.attributes or {}
-            is_curtailed = status.is_curtailed
+        if self._controller is None:
+            if self._cloud is None:
+                raise UpdateFailed("AlphaESS cloud-only mode has no cloud client")
+            try:
+                attrs = _normalize_alphaess_cloud_data(
+                    await self._cloud.get_last_power_data()
+                )
+                if "battery_soc" not in attrs:
+                    raise UpdateFailed("AlphaESS cloud returned no battery data")
+            except Exception as cloud_err:
+                if self.data:
+                    return self.data
+                raise UpdateFailed(
+                    f"AlphaESS cloud telemetry failed: {cloud_err}"
+                ) from cloud_err
+        else:
+            try:
+                status = await self._controller.get_status()
+                attrs = status.attributes or {}
+                is_curtailed = status.is_curtailed
 
-            if "battery_soc" not in attrs:
-                raise UpdateFailed("AlphaESS Modbus returned no battery data")
+                if "battery_soc" not in attrs:
+                    raise UpdateFailed("AlphaESS Modbus returned no battery data")
 
-            self._modbus_failures = 0
+                self._modbus_failures = 0
 
-        except Exception as modbus_err:
-            self._modbus_failures += 1
-            _LOGGER.warning(
-                "AlphaESS Modbus read failed (%d consecutive): %s",
-                self._modbus_failures,
-                modbus_err,
-            )
+            except Exception as modbus_err:
+                self._modbus_failures += 1
+                _LOGGER.warning(
+                    "AlphaESS Modbus read failed (%d consecutive): %s",
+                    self._modbus_failures,
+                    modbus_err,
+                )
 
-            # Try cloud fallback if configured
-            if self._cloud is not None:
-                try:
-                    cloud_data = await self._cloud.get_last_power_data()
-                    attrs = _normalize_alphaess_cloud_data(cloud_data)
-                    source = "cloud"
-                    _LOGGER.info("AlphaESS fell back to cloud telemetry")
-                except Exception as cloud_err:
-                    _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
+                # Try cloud fallback if configured
+                if self._cloud is not None:
+                    try:
+                        cloud_data = await self._cloud.get_last_power_data()
+                        attrs = _normalize_alphaess_cloud_data(cloud_data)
+                        source = "cloud"
+                        _LOGGER.info("AlphaESS fell back to cloud telemetry")
+                    except Exception as cloud_err:
+                        _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
+                        if self.data:
+                            return self.data
+                        raise UpdateFailed(
+                            f"AlphaESS Modbus and cloud both failed: "
+                            f"modbus={modbus_err}; cloud={cloud_err}"
+                        ) from modbus_err
+                else:
                     if self.data:
                         return self.data
                     raise UpdateFailed(
-                        f"AlphaESS Modbus and cloud both failed: "
-                        f"modbus={modbus_err}; cloud={cloud_err}"
+                        f"AlphaESS Modbus failed: {modbus_err}"
                     ) from modbus_err
-            else:
-                if self.data:
-                    return self.data
-                raise UpdateFailed(f"AlphaESS Modbus failed: {modbus_err}") from modbus_err
 
         solar_kw = attrs.get("pv_power_kw", 0) or 0
         grid_kw = attrs.get("grid_power_kw", 0) or 0  # + import, − export
@@ -4028,6 +4372,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             "is_curtailed": is_curtailed,
             "work_mode_raw": attrs.get("work_mode_raw"),
             "data_source": source,
+            "connection_type": self.connection_type,
+            "supports_dispatch": self.supports_dispatch,
             "last_update": dt_util.utcnow(),
             "energy_summary": self._energy_acc.as_dict(),
         }
@@ -4047,11 +4393,15 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_backup_mode(self) -> bool:
         """IDLE hold — release dispatch but write zero-power dispatch if needed."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         async with self._controller:
             return await self._controller.set_standby_mode()
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption after IDLE hold."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         async with self._controller:
             return await self._controller.restore_from_standby()
 
@@ -4105,6 +4455,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
                 to the BMS-reported max charge power, then to a 5 kW safety
                 default if the BMS reading isn't available yet.
         """
+        if not self.supports_dispatch or self._controller is None:
+            return False
         power_w = self._resolve_force_power_w(power_w, "charge")
         duration_seconds = max(60, int(duration_min) * 60)
         _LOGGER.info(
@@ -4122,6 +4474,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         Same fallback chain as force_charge — see its docstring.
         """
+        if not self.supports_dispatch or self._controller is None:
+            return False
         power_w = self._resolve_force_power_w(power_w, "discharge")
         duration_seconds = max(60, int(duration_min) * 60)
         _LOGGER.info(
@@ -4136,6 +4490,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_normal(self) -> bool:
         """Release dispatch and restore export limit to normal."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         _LOGGER.info("AlphaESS coordinator: restore_normal")
         async with self._controller:
             return await self._controller.restore_normal()
@@ -4148,11 +4504,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         connection (disconnect itself is intentionally pure — see the
         controller's disconnect() docstring for why).
         """
-        try:
-            await self._controller.release_dispatch()
-        except Exception as e:
-            _LOGGER.warning("AlphaESS release_dispatch on shutdown failed: %s", e)
-        await self._controller.disconnect()
+        if self._controller is not None:
+            try:
+                await self._controller.release_dispatch()
+            except Exception as e:
+                _LOGGER.warning("AlphaESS release_dispatch on shutdown failed: %s", e)
+            await self._controller.disconnect()
         if self._cloud is not None:
             try:
                 await self._cloud.close()
@@ -4203,6 +4560,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     power data (solar, battery, grid, load), battery SOC/SOH, and control settings.
     """
 
+    _TEMPORARY_DISCHARGE_CAP_MAX_KW = 0.1
+    _OPTIMIZATION_MAX_DISCHARGE_W_KEY = "optimization_max_discharge_w"
+    _BLOCKED_DISCHARGE_IMPORT_KW = 0.15
+    _BLOCKED_DISCHARGE_LOAD_KW = 0.15
+    _BLOCKED_DISCHARGE_GRID_LOAD_RATIO = 0.6
+    _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
+    _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
+    _EXPORT_CONTROL_STORAGE_VERSION = 1
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -4228,6 +4594,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._entry_id = entry_id
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
+        self._export_control_store = (
+            Store(
+                hass,
+                self._EXPORT_CONTROL_STORAGE_VERSION,
+                f"{DOMAIN}.sungrow_export_control.{entry_id}",
+            )
+            if entry_id
+            else None
+        )
         # Sungrow/WiNet Modbus is sensitive to overlapping TCP operations.
         # Keep each coordinator poll or control command as one serialized
         # transaction so a refresh cannot close/reopen the shared client in the
@@ -4241,6 +4616,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._baseline_date: str | None = None  # ISO date string
         self._pre_control_charge_limit_kw: float | None = None
         self._pre_control_discharge_limit_kw: float | None = None
+        self._pre_control_export_limit_w: int | None = None
+        self._pre_control_export_limit_captured = False
 
         super().__init__(
             hass,
@@ -4393,6 +4770,36 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 # Derive load from energy balance: Load = Solar + Grid_Import + Battery_Discharge
                 # (more reliable than the load register on some firmware)
                 calc_load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
+                no_pv_load_kw = max(0.0, grid_kw + battery_kw)
+                pv_tracks_battery_discharge = (
+                    _is_night_for_solar_telemetry(self.hass)
+                    and solar_kw > 0.05
+                    and battery_kw > 0.05
+                    and abs(solar_kw - battery_kw) <= max(0.1, battery_kw * 0.1)
+                )
+                if pv_tracks_battery_discharge:
+                    aliased_solar_kw = solar_kw
+                    _LOGGER.debug(
+                        "Sungrow SH PV register appears to be reporting battery discharge power "
+                        "at night (pv=%.2fkW battery=%.2fkW grid=%.2fkW load=%.2fkW); "
+                        "using zero solar and inferred home load %.2fkW",
+                        solar_kw,
+                        battery_kw,
+                        grid_kw,
+                        load_kw,
+                        no_pv_load_kw,
+                    )
+                    solar_kw = 0.0
+                    inflated_load_floor = no_pv_load_kw + max(
+                        0.1, aliased_solar_kw * 0.5
+                    )
+                    if (
+                        load_power_w is None
+                        or load_kw <= 0.01
+                        or load_kw > inflated_load_floor
+                    ):
+                        load_kw = no_pv_load_kw
+                    calc_load_kw = no_pv_load_kw
                 if abs(load_kw) > 100:
                     # Load register is garbage, use calculated value
                     load_kw = calc_load_kw
@@ -4445,6 +4852,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "backup_reserve": data.get("backup_reserve"),
                 "charge_rate_limit_kw": data.get("charge_rate_limit_kw"),
                 "discharge_rate_limit_kw": data.get("discharge_rate_limit_kw"),
+                "bms_max_discharge_current_a": data.get(
+                    "bms_max_discharge_current_a"
+                ),
+                "discharge_rate_limit_source": data.get(
+                    "discharge_rate_limit_source"
+                ),
                 "export_limit_w": data.get("export_limit_w"),
                 "export_limit_enabled": data.get("export_limit_enabled"),
                 "meter_power": meter_power_w,
@@ -4537,24 +4950,49 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             normal_limit_kw = await self._resolve_normal_discharge_limit_kw()
             if normal_limit_kw is None or normal_limit_kw <= 0:
                 normal_limit_kw = max(target_export_w / 1000.0, 5.0)
+            configured_limit_kw = self._configured_optimization_discharge_limit_kw()
+            if (
+                configured_limit_kw is not None
+                and configured_limit_kw > 0
+                and normal_limit_kw > configured_limit_kw
+            ):
+                _LOGGER.info(
+                    "Sungrow spread export: clamping discharge headroom from %.2fkW "
+                    "to configured max %.2fkW",
+                    normal_limit_kw,
+                    configured_limit_kw,
+                )
+                normal_limit_kw = configured_limit_kw
+
+            if not await self._persist_export_control_state(target_export_w):
+                return False
 
             forced_power_w = int(round(normal_limit_kw * 1000))
             limit_changed = False
             export_limit_changed = False
             try:
-                limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
-                if not limit_changed:
-                    if getattr(self._controller, "rate_limit_writable", None) is False:
-                        _LOGGER.warning(
-                            "Sungrow spread export: discharge limit register is not writable; "
-                            "continuing with grid export limit only"
-                        )
-                    else:
-                        _LOGGER.warning(
-                            "Sungrow spread export: failed to set discharge limit to %.2fkW",
-                            normal_limit_kw,
-                        )
-                        return False
+                if getattr(self._controller, "rate_limit_writable", None) is False:
+                    self._pre_control_discharge_limit_kw = None
+                    _LOGGER.debug(
+                        "Sungrow spread export: discharge limit register already known "
+                        "not writable; continuing with grid export limit only"
+                    )
+                else:
+                    limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
+                    if not limit_changed:
+                        if getattr(self._controller, "rate_limit_writable", None) is False:
+                            self._pre_control_discharge_limit_kw = None
+                            _LOGGER.warning(
+                                "Sungrow spread export: discharge limit register is not writable; "
+                                "continuing with grid export limit only"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Sungrow spread export: failed to set discharge limit to %.2fkW",
+                                normal_limit_kw,
+                            )
+                            await self._restore_captured_export_limit()
+                            return False
 
                 export_limit_changed = await self._controller.set_export_limit(target_export_w)
                 if not export_limit_changed:
@@ -4562,13 +5000,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                         "Sungrow spread export: failed to set grid export limit to %dW",
                         target_export_w,
                     )
+                    await self._restore_captured_export_limit()
                     await self._restore_captured_discharge_limit()
                     return False
 
                 result = await self._controller.force_discharge(power_w=forced_power_w)
             except Exception:
-                if export_limit_changed:
-                    await self._restore_captured_export_limit()
+                await self._restore_captured_export_limit()
                 if limit_changed:
                     await self._restore_captured_discharge_limit()
                 raise
@@ -4697,6 +5135,94 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         )
         self._pre_control_export_limit_captured = True
 
+    async def _persist_export_control_state(self, target_export_w: int) -> bool:
+        """Persist temporary Sungrow export ownership before changing registers."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        baseline_limit_w = getattr(self, "_pre_control_export_limit_w", None)
+        state = {
+            "active": True,
+            "baseline_enabled": baseline_limit_w is not None,
+            "baseline_limit_w": baseline_limit_w,
+            "target_export_w": int(target_export_w),
+        }
+        try:
+            await store.async_save(state)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not persist Sungrow temporary export state; refusing control write: %s",
+                err,
+            )
+            return False
+        return True
+
+    async def _clear_persisted_export_control_state(self) -> bool:
+        """Clear temporary Sungrow export ownership after registers are restored."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        try:
+            await store.async_save({"active": False})
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not clear persisted Sungrow temporary export state: %s",
+                err,
+            )
+            return False
+        return True
+
+    async def async_restore_persisted_export_control(self) -> bool:
+        """Recover an optimizer-owned Sungrow export limit after a reload."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        try:
+            state = await store.async_load()
+        except Exception as err:
+            _LOGGER.warning("Could not load persisted Sungrow export state: %s", err)
+            return False
+
+        if not isinstance(state, dict) or not state.get("active"):
+            return True
+
+        baseline_limit_w: int | None = None
+        if state.get("baseline_enabled"):
+            try:
+                baseline_limit_w = int(round(float(state.get("baseline_limit_w"))))
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "Persisted Sungrow export state has an invalid enabled baseline; "
+                    "leaving it intact for recovery"
+                )
+                return False
+            if baseline_limit_w < 0:
+                _LOGGER.warning(
+                    "Persisted Sungrow export state has a negative baseline; "
+                    "leaving it intact for recovery"
+                )
+                return False
+
+        self._pre_control_export_limit_w = baseline_limit_w
+        self._pre_control_export_limit_captured = True
+        _LOGGER.warning(
+            "Recovering interrupted Sungrow temporary export control (target=%sW, baseline=%s)",
+            state.get("target_export_w"),
+            f"{baseline_limit_w}W" if baseline_limit_w is not None else "disabled",
+        )
+        try:
+            return await self.restore_normal()
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not restore interrupted Sungrow temporary export control; "
+                "the persisted recovery state was retained: %s",
+                err,
+            )
+            return False
+
     async def _resolve_normal_discharge_limit_kw(self) -> float | None:
         """Resolve the Sungrow discharge cap to restore for self-consumption.
 
@@ -4712,7 +5238,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 parsed = float(value)
             except (TypeError, ValueError):
                 return
-            if parsed > 0:
+            if parsed > self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
                 candidates.append(parsed)
 
         def add_w(value: Any) -> None:
@@ -4720,7 +5246,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 parsed = float(value)
             except (TypeError, ValueError):
                 return
-            if parsed > 0:
+            if parsed / 1000.0 > self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
                 candidates.append(parsed / 1000.0)
 
         coord_data = getattr(self, "data", None) or {}
@@ -4730,6 +5256,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         add_kw(coord_data.get("battery_max_charge_power"))
         add_w(coord_data.get("battery_max_charge_power_w"))
         add_kw(coord_data.get("charge_rate_limit_kw"))
+        add_kw(self._configured_optimization_discharge_limit_kw())
 
         try:
             live_data = await self._controller.get_battery_data()
@@ -4779,24 +5306,228 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """Restore a Sungrow discharge limit saved before temporary control."""
         captured_limit_kw = getattr(self, "_pre_control_discharge_limit_kw", None)
         if captured_limit_kw is None:
-            return True
+            return await self._restore_stale_low_discharge_limit()
 
         if getattr(self._controller, "rate_limit_writable", None) is False:
-            self._pre_control_discharge_limit_kw = None
-            return True
+            _LOGGER.debug(
+                "Retrying Sungrow discharge limit restore despite a previous failed write"
+            )
 
         restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
         if restore_limit_kw is None:
             restore_limit_kw = captured_limit_kw
         else:
             restore_limit_kw = max(restore_limit_kw, captured_limit_kw)
+        restore_limit_kw = self._clamp_discharge_restore_limit_kw(restore_limit_kw)
         if restore_limit_kw is None or restore_limit_kw <= 0:
             return True
 
         limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
         if limit_ok:
             self._pre_control_discharge_limit_kw = None
+        else:
+            _LOGGER.warning(
+                "Sungrow discharge limit restore to %.2fkW failed; keeping restore target for retry",
+                restore_limit_kw,
+            )
         return bool(limit_ok)
+
+    async def _restore_stale_low_discharge_limit(self) -> bool:
+        """Repair a stale near-zero Sungrow discharge cap after reload/restart."""
+        current_limit_kw = await self._read_current_discharge_limit_kw()
+        blocked_without_cap_read = (
+            current_limit_kw is None and self._discharge_appears_blocked_after_restore()
+        )
+        if (
+            (current_limit_kw is None and not blocked_without_cap_read)
+            or (current_limit_kw is not None and current_limit_kw <= 0)
+            or (
+                current_limit_kw is not None
+                and current_limit_kw > self._TEMPORARY_DISCHARGE_CAP_MAX_KW
+            )
+        ):
+            return True
+
+        restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
+        current_limit_label = (
+            f"{current_limit_kw:.2f}kW"
+            if current_limit_kw is not None
+            else "unknown"
+        )
+        restore_source_label = (
+            current_limit_label
+            if current_limit_kw is not None
+            else "from blocked telemetry"
+        )
+        if restore_limit_kw is None or restore_limit_kw <= self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
+            _LOGGER.warning(
+                "Sungrow discharge limit is still %s after restore, "
+                "but no safe normal discharge limit could be resolved",
+                current_limit_label,
+            )
+            return True
+        restore_limit_kw = self._clamp_discharge_restore_limit_kw(restore_limit_kw)
+        if restore_limit_kw is None or restore_limit_kw <= self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
+            return True
+
+        _LOGGER.info(
+            "Restoring stale Sungrow discharge cap %s to %.2fkW",
+            restore_source_label,
+            restore_limit_kw,
+        )
+        self._pre_control_discharge_limit_kw = restore_limit_kw
+        limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
+        if limit_ok:
+            self._pre_control_discharge_limit_kw = None
+        else:
+            _LOGGER.warning(
+                "Sungrow stale discharge cap repair to %.2fkW failed; keeping restore target for retry",
+                restore_limit_kw,
+            )
+        return bool(limit_ok)
+
+    def _clamp_discharge_restore_limit_kw(self, limit_kw: float | None) -> float | None:
+        """Apply the configured Sungrow optimizer max to restore targets."""
+        if limit_kw is None or limit_kw <= 0:
+            return limit_kw
+
+        configured_limit_kw = self._configured_optimization_discharge_limit_kw()
+        if (
+            configured_limit_kw is not None
+            and configured_limit_kw > 0
+            and limit_kw > configured_limit_kw
+        ):
+            _LOGGER.info(
+                "Sungrow discharge limit restore: clamping target from %.2fkW "
+                "to configured max %.2fkW",
+                limit_kw,
+                configured_limit_kw,
+            )
+            return configured_limit_kw
+        return limit_kw
+
+    def _discharge_appears_blocked_after_restore(self) -> bool:
+        """Return True when self-consumption telemetry looks discharge-capped.
+
+        Some SH10RS/SBH firmware does not expose the writable max-discharge
+        register, so we cannot always read the stale 10 W cap directly.
+        """
+        coord_data = getattr(self, "data", None) or {}
+
+        def read_float(*keys: str) -> float | None:
+            for key in keys:
+                try:
+                    value = coord_data.get(key)
+                    if value is None:
+                        continue
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        battery_kw = read_float("battery_power", "battery_power_kw")
+        grid_kw = read_float("grid_power", "grid_power_kw")
+        load_kw = read_float("load_power", "home_load")
+        soc = read_float("battery_level", "battery_soc")
+        reserve = read_float("backup_reserve", "min_soc")
+        bms_max_discharge_current_a = read_float("bms_max_discharge_current_a")
+
+        if battery_kw is None or grid_kw is None or soc is None:
+            return False
+        if soc <= 0:
+            return False
+        configured_reserve = None
+        if reserve is None:
+            try:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                raw_reserve = entry.options.get(
+                    "hardware_backup_reserve",
+                    entry.data.get("hardware_backup_reserve"),
+                )
+                configured_reserve = float(raw_reserve)
+                if 0 <= configured_reserve <= 1:
+                    configured_reserve *= 100
+            except (AttributeError, TypeError, ValueError):
+                configured_reserve = None
+
+        effective_reserve = reserve if reserve is not None else configured_reserve
+        if (
+            effective_reserve is not None
+            and soc <= effective_reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN
+        ):
+            return False
+
+        # A zero BMS discharge-current allowance is positive evidence that the
+        # inverter is protecting the battery.  Do not infer the same thing from
+        # SOC alone: some Sungrow installations normally expose and discharge
+        # through a displayed 5% SOC before reaching their configured 0% floor.
+        if (
+            bms_max_discharge_current_a is not None
+            and bms_max_discharge_current_a <= 0
+        ):
+            return False
+
+        if abs(battery_kw) > self._BLOCKED_DISCHARGE_BATTERY_KW:
+            return False
+        if grid_kw < self._BLOCKED_DISCHARGE_IMPORT_KW:
+            return False
+        if load_kw is None:
+            return True
+
+        return (
+            load_kw >= self._BLOCKED_DISCHARGE_LOAD_KW
+            and grid_kw >= load_kw * self._BLOCKED_DISCHARGE_GRID_LOAD_RATIO
+        )
+
+    async def _read_current_discharge_limit_kw(self) -> float | None:
+        """Return the current Sungrow discharge cap from coordinator or live data."""
+        coord_data = getattr(self, "data", None) or {}
+        for value in (
+            coord_data.get("discharge_rate_limit_kw"),
+            coord_data.get("battery_max_discharge_power"),
+        ):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+
+        try:
+            live_data = await self._controller.get_battery_data()
+        except Exception as err:
+            _LOGGER.debug("Could not read live Sungrow discharge cap for restore: %s", err)
+            return None
+
+        try:
+            parsed = float(live_data.get("discharge_rate_limit_kw"))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _configured_optimization_discharge_limit_kw(self) -> float | None:
+        """Return configured optimiser max discharge limit, if available."""
+        hass = getattr(self, "hass", None)
+        entry_id = getattr(self, "_entry_id", None)
+        if not hass or not entry_id:
+            return None
+
+        try:
+            entry = hass.config_entries.async_get_entry(entry_id)
+        except Exception:
+            return None
+        if not entry:
+            return None
+
+        value = entry.options.get(
+            self._OPTIMIZATION_MAX_DISCHARGE_W_KEY,
+            entry.data.get(self._OPTIMIZATION_MAX_DISCHARGE_W_KEY),
+        )
+        try:
+            watts = float(value)
+        except (TypeError, ValueError):
+            return None
+        return watts / 1000.0 if watts > 0 else None
 
     async def _restore_captured_export_limit(self) -> bool:
         """Restore a Sungrow export limit saved before temporary control."""
@@ -4809,10 +5540,18 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         else:
             limit_ok = await self._controller.set_export_limit(int(restore_limit_w))
 
+        persisted_ok = False
         if limit_ok:
+            persisted_ok = await self._clear_persisted_export_control_state()
+        if limit_ok and persisted_ok:
+            coord_data = getattr(self, "data", None)
+            if isinstance(coord_data, dict):
+                coord_data["export_limit_enabled"] = restore_limit_w is not None
+                if restore_limit_w is not None:
+                    coord_data["export_limit_w"] = int(restore_limit_w)
             self._pre_control_export_limit_w = None
             self._pre_control_export_limit_captured = False
-        return bool(limit_ok)
+        return bool(limit_ok and persisted_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode and discharge limit after IDLE."""
@@ -4859,8 +5598,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return await self._controller.set_export_limit(watts)
 
     async def async_shutdown(self) -> None:
-        """Disconnect from Sungrow system on shutdown."""
-        await self._controller.disconnect()
+        """Stop polling and disconnect from Sungrow after active Modbus work."""
+        self.update_interval = None
+        async with self._modbus_lock:
+            await self._controller.disconnect()
 
 
 class DualSungrowCoordinator(DataUpdateCoordinator):
@@ -5496,6 +6237,118 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
+    """Expose custom external-controller telemetry through standard sensors."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        source_entities: dict[str, str],
+        entry_id: str,
+    ) -> None:
+        self._entry_id = entry_id
+        self._source_entities = {
+            key: str(entity_id or "").strip()
+            for key, entity_id in source_entities.items()
+        }
+        self._energy_acc = EnergyAccumulator(hass, f"custom_{entry_id}")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_custom_entity_energy",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    def _read_numeric_state(self, key: str) -> tuple[float | None, str]:
+        """Return one selected entity's numeric value and unit."""
+        entity_id = self._source_entities.get(key, "")
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is None or state.state in (None, "", "unknown", "unavailable"):
+            return None, entity_id
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return None, entity_id
+        if not math.isfinite(value):
+            return None, entity_id
+        unit = str((state.attributes or {}).get("unit_of_measurement") or "")
+        return value, unit
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Read and normalize the five configured custom telemetry entities."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        raw_values: dict[str, float] = {}
+        units: dict[str, str] = {}
+        missing: list[str] = []
+        for key in (
+            "battery_level",
+            "battery_power",
+            "grid_power",
+            "solar_power",
+            "load_power",
+        ):
+            value, unit_or_entity = self._read_numeric_state(key)
+            if value is None:
+                missing.append(unit_or_entity or key)
+                continue
+            raw_values[key] = value
+            units[key] = unit_or_entity
+
+        if missing:
+            raise UpdateFailed("custom_missing_entities:" + ",".join(missing))
+
+        solar_kw = normalize_custom_power_kw(
+            raw_values["solar_power"], units["solar_power"]
+        )
+        grid_kw = normalize_custom_power_kw(
+            raw_values["grid_power"], units["grid_power"]
+        )
+        battery_kw = normalize_custom_power_kw(
+            raw_values["battery_power"], units["battery_power"]
+        )
+        load_kw = normalize_custom_power_kw(
+            raw_values["load_power"], units["load_power"]
+        )
+        if None in (solar_kw, grid_kw, battery_kw, load_kw):
+            raise UpdateFailed("custom_invalid_power_value")
+        solar_kw = max(0.0, solar_kw)
+        load_kw = max(0.0, load_kw)
+        battery_level = max(0.0, min(100.0, raw_values["battery_level"]))
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(
+            solar_kw,
+            grid_kw,
+            battery_kw,
+            load_kw,
+            buy,
+            sell,
+        )
+        data = {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": battery_level,
+            "source_entities": dict(self._source_entities),
+            "energy_summary": self._energy_acc.as_dict(),
+            "last_update": dt_util.utcnow(),
+        }
+        _LOGGER.debug(
+            "Custom entity data: solar=%.2f kW, grid=%.2f kW, "
+            "battery=%.2f kW (%.0f%%), load=%.2f kW",
+            solar_kw,
+            grid_kw,
+            battery_kw,
+            battery_level,
+            load_kw,
+        )
+        return data
+
+
 class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):
     """Bridge coordinator for FoxESS via nathanmarlor/foxess_modbus entities."""
 
@@ -6033,6 +6886,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             )
         self._connected = False
         self._telemetry_validated = False
+        self._entity_telemetry_rated_power_w: int | None = None
+        self._entity_telemetry_rated_power_probe_attempted = False
         self._energy_acc = EnergyAccumulator(hass, "goodwe")
         self._discharge_floor_pct: int = 10  # updated by set_backup_reserve
 
@@ -6042,6 +6897,37 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             name="GoodWe Energy",
             update_interval=timedelta(seconds=30),
         )
+
+    async def _probe_entity_telemetry_rated_power(self) -> int | None:
+        """Best-effort one-time direct probe for GoodWe nameplate power."""
+        if self._entity_telemetry_rated_power_probe_attempted:
+            return self._entity_telemetry_rated_power_w
+
+        self._entity_telemetry_rated_power_probe_attempted = True
+        try:
+            await asyncio.wait_for(self._controller.connect(), timeout=5.0)
+            direct_data = await asyncio.wait_for(
+                self._controller.get_runtime_data(),
+                timeout=5.0,
+            )
+            rated_power_w = direct_data.get("rated_power_w")
+            value = int(round(float(rated_power_w)))
+            if value <= 0:
+                raise ValueError("rated_power_w missing")
+        except Exception as exc:
+            _LOGGER.debug(
+                "GoodWe entity telemetry rated-power probe failed; "
+                "continuing without direct physical discharge limit: %s",
+                exc,
+            )
+            return None
+
+        self._entity_telemetry_rated_power_w = value
+        _LOGGER.info(
+            "GoodWe entity telemetry cached rated_power_w=%dW from one-time direct capability probe",
+            value,
+        )
+        return value
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from GoodWe inverter."""
@@ -6053,6 +6939,10 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
                     await self._telemetry_controller.connect()
                     self._telemetry_validated = True
                 data = self._telemetry_controller.get_runtime_data()
+                if not data.get("rated_power_w"):
+                    rated_power_w = await self._probe_entity_telemetry_rated_power()
+                    if rated_power_w:
+                        data["rated_power_w"] = rated_power_w
             else:
                 if not self._connected:
                     await self._controller.connect()
@@ -6341,6 +7231,16 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         pct = min(100, max(10, int((power_w / rated) * 100))) if power_w > 0 else 100
         return await self._controller.force_discharge(power_pct=pct, soc_floor=self._discharge_floor_pct)
 
+    async def set_backup_mode(self) -> bool:
+        """Hold on-grid discharge through the verified GoodWe EMS path."""
+        if self._ems_prefix:
+            return await self._ems_set_mode("conserve", 0)
+        _LOGGER.warning(
+            "GoodWe Hold SoC requires EMS entity control; direct UDP hold semantics "
+            "are not verified"
+        )
+        return False
+
     async def restore_normal(self) -> bool:
         """Restore GoodWe to normal operation."""
         if self._ems_prefix:
@@ -6472,6 +7372,14 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_normal(self) -> bool:
         return await self._controller.restore_normal()
+
+    def get_force_restore_state(self) -> dict[str, str]:
+        """Return SolaX pre-force values for integration-state persistence."""
+        return self._controller.get_force_restore_state()
+
+    def set_force_restore_state(self, state: dict[str, Any] | None) -> None:
+        """Restore SolaX pre-force values before a post-restart reissue."""
+        self._controller.set_force_restore_state(state)
 
     async def set_backup_reserve(self, percent: int) -> bool:
         return await self._controller.set_backup_reserve(percent)
@@ -9502,9 +10410,18 @@ class FlowPowerTWAPTracker:
     Fallback: PEA = wholesale - 8.0 - 1.7 when < 12 samples available
     """
 
-    def __init__(self, hass: HomeAssistant, region: str, entry_id: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        region: str,
+        entry_id: str,
+        billing_day: int = 1,
+    ) -> None:
         self.hass = hass
         self.region = region
+        # Day-of-month the billing period resets on. Clamped to 1-28 so the
+        # anchor is valid in every month (short Februaries included).
+        self.billing_day = max(1, min(int(billing_day or 1), 28))
         self._price_history: list[dict] = []
         self._store = Store(hass, 1, f"power_sync.flow_power_twap.{entry_id}")
         self._last_store_save: float | None = None
@@ -9519,11 +10436,16 @@ class FlowPowerTWAPTracker:
             self._prune_history()
             self._twap = self._calculate_twap()
             _LOGGER.info(
-                "Loaded TWAP history: %d samples over %.1f days, TWAP=%.2f c/kWh%s",
+                "Loaded TWAP history: %d samples over %.1f days, TWAP=%.2f c/kWh%s "
+                "(billing-anchored day %d: mtd=%s, trailing=%s, progress=%.0f%%)",
                 len(self._price_history),
                 self.twap_days,
                 self._twap if self._twap is not None else FLOW_POWER_MARKET_AVG,
                 " (fallback)" if self.using_fallback else "",
+                self.billing_day,
+                f"{self.mtd_twap:.2f}" if self.mtd_twap is not None else "n/a",
+                f"{self.trailing_twap:.2f}" if self.trailing_twap is not None else "n/a",
+                self.period_progress * 100,
             )
         self._loaded = True
 
@@ -9541,19 +10463,79 @@ class FlowPowerTWAPTracker:
             self.hass.async_create_task(self._async_save())
             self._last_store_save = now
 
+    def _billing_period_start_ts(self, now_ts: float | None = None) -> float:
+        """Epoch of the current billing period's local-midnight start.
+
+        The period starts on ``billing_day`` each month; if we're earlier in the
+        month than that day, the current period began last month.
+        """
+        now = (
+            dt_util.now()
+            if now_ts is None
+            else dt_util.as_local(dt_util.utc_from_timestamp(now_ts))
+        )
+        day = min(self.billing_day, 28)
+        if now.day >= day:
+            start = now.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            prev_month_last = first - timedelta(days=1)
+            start = prev_month_last.replace(
+                day=day, hour=0, minute=0, second=0, microsecond=0
+            )
+        return start.timestamp()
+
+    def _mean_since(self, cutoff_ts: float) -> tuple[float | None, int]:
+        """Mean price (c/kWh) and sample count for samples at/after ``cutoff_ts``."""
+        prices = [e["price"] for e in self._price_history if e["ts"] >= cutoff_ts]
+        if not prices:
+            return None, 0
+        return round(sum(prices) / len(prices), 2), len(prices)
+
     def _prune_history(self) -> None:
-        """Remove entries older than the TWAP window."""
-        cutoff = time.time() - (DEFAULT_TWAP_WINDOW_DAYS * 86400)
+        """Drop samples we no longer need.
+
+        Retain the whole billing-period-to-date plus a trailing window (the
+        forward proxy for the remainder of the period), capped to bound storage.
+        """
+        now_ts = time.time()
+        period_elapsed_days = (now_ts - self._billing_period_start_ts(now_ts)) / 86400
+        retain_days = min(max(DEFAULT_TWAP_WINDOW_DAYS, period_elapsed_days) + 5, 45)
+        cutoff = now_ts - retain_days * 86400
         self._price_history = [
             entry for entry in self._price_history if entry["ts"] > cutoff
         ]
 
     def _calculate_twap(self) -> float | None:
-        """Calculate TWAP from price history. Returns None if insufficient data."""
+        """Billing-period-anchored TWAP reference.
+
+        Flow Power settles PEA against the time-weighted average price over the
+        billing period, not a flat trailing window. We blend billing-period-to-
+        date actuals with the trailing-window mean (a zero-dependency proxy for
+        the remainder of the period) weighted by how far through the period we
+        are. Early in the period this ~= the old trailing-30d behaviour (no
+        regression, stable); near period end it converges to the actual
+        billing-period TWAP the customer is billed on. Returns None when there is
+        not yet enough data to be meaningful.
+
+        (Future: swap the trailing-mean forward proxy for the live KWatch/
+        predispatch forecast mean over the remaining period.)
+        """
         if len(self._price_history) < MIN_TWAP_SAMPLES:
             return None
-        total = sum(entry["price"] for entry in self._price_history)
-        return round(total / len(self._price_history), 2)
+        now_ts = time.time()
+        period_start = self._billing_period_start_ts(now_ts)
+        trailing_mean, _ = self._mean_since(0.0)
+        if trailing_mean is None:
+            return None
+        mtd_mean, mtd_n = self._mean_since(period_start)
+        if mtd_mean is None or mtd_n < MIN_TWAP_SAMPLES:
+            # Too little billing-period data yet — lean on the trailing mean.
+            return trailing_mean
+        # Progress through the period, normalised to a nominal 30-day cycle.
+        elapsed = max(now_ts - period_start, 0.0)
+        w = min(elapsed / (DEFAULT_TWAP_WINDOW_DAYS * 86400), 1.0)
+        return round(w * mtd_mean + (1.0 - w) * trailing_mean, 2)
 
     async def _async_save(self) -> None:
         """Save price history to persistent storage."""
@@ -9591,3 +10573,21 @@ class FlowPowerTWAPTracker:
     def using_fallback(self) -> bool:
         """Return True if we're using the hardcoded fallback instead of dynamic TWAP."""
         return self._twap is None
+
+    @property
+    def mtd_twap(self) -> float | None:
+        """Billing-period-to-date time-weighted average price (c/kWh)."""
+        mean, _ = self._mean_since(self._billing_period_start_ts())
+        return mean
+
+    @property
+    def trailing_twap(self) -> float | None:
+        """Trailing-window mean price (c/kWh) — the forward proxy / fallback."""
+        mean, _ = self._mean_since(0.0)
+        return mean
+
+    @property
+    def period_progress(self) -> float:
+        """Fraction (0-1) through the current billing period, 30-day nominal."""
+        elapsed = max(time.time() - self._billing_period_start_ts(), 0.0)
+        return round(min(elapsed / (DEFAULT_TWAP_WINDOW_DAYS * 86400), 1.0), 3)

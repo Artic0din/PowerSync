@@ -20,6 +20,7 @@
 // Native responsive chart card for history, forecast, and TOU schedule data.
 
 const OPTIMIZER_POWER_AXIS_EXPONENT = 0.7;
+const BATTERY_WINDOW_MERGE_GAP_MINUTES = 15;
 
 class PowerSyncChart extends HTMLElement {
   constructor() {
@@ -341,7 +342,7 @@ class PowerSyncChart extends HTMLElement {
 
       svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="${series.strokeWidth || 2.25}" stroke-linejoin="round" stroke-linecap="round"/>`;
 
-      const marker = mode === 'tou'
+      const marker = mode === 'tou' || mode === 'forecast'
         ? this._pointAt(series.data, Date.now())
         : series.data[series.data.length - 1];
       if (marker) {
@@ -663,7 +664,7 @@ class PowerSyncChart extends HTMLElement {
   }
 
   _legendItem(series, yMultiplier, config) {
-    const rawValue = config.mode === 'tou'
+    const rawValue = config.mode === 'tou' || config.mode === 'forecast'
       ? this._currentValue(series.data)
       : this._lastValue(series.data);
     const value = rawValue === null ? '' : this._formatValue(rawValue * yMultiplier, config.yUnit, config.yUnitCompact);
@@ -1178,6 +1179,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
     const sourceLabel = this._sourceLabel(source);
     const scanLabel = this._dateLabel(attrs.last_scan);
     const packs = this._packRows(attrs);
+    const reportedPackCount = this._validatedPackCount(attrs.battery_count);
+    const displayedPackCount = Number.isFinite(reportedPackCount) ? reportedPackCount : packs.length;
     const hasCapacity = Number.isFinite(current) && Number.isFinite(original);
     const calculatedHealth = hasCapacity && original > 0 ? (current / original) * 100 : NaN;
     const displayHealth = Number.isFinite(health) ? health : (Number.isFinite(soh) ? soh : calculatedHealth);
@@ -1408,7 +1411,7 @@ class PowerSyncBatteryHealth extends HTMLElement {
           <div class="header">
             <div>
               <div class="title">Battery Health</div>
-              <div class="subtitle">${this._escHtml(this._subtitle(source, packs.length))}</div>
+              <div class="subtitle">${this._escHtml(this._subtitle(source, displayedPackCount))}</div>
             </div>
             <ha-icon icon="mdi:battery-heart-variant"></ha-icon>
           </div>
@@ -1426,11 +1429,12 @@ class PowerSyncBatteryHealth extends HTMLElement {
                 <div class="meta">
                   ${sourceLabel ? `<div class="pill">Source: ${this._escHtml(sourceLabel)}</div>` : ''}
                   ${scanLabel ? `<div class="pill">Last scan: ${this._escHtml(scanLabel)}</div>` : ''}
-                  ${packs.length ? `<div class="pill">${packs.length} ${packs.length === 1 ? 'pack' : 'packs'}</div>` : ''}
+                  ${displayedPackCount ? `<div class="pill">${displayedPackCount} ${displayedPackCount === 1 ? 'pack' : 'packs'}</div>` : ''}
                 </div>
               </div>
             </div>
             ${packs.length ? `<div class="packs">${packs.map(pack => this._renderPack(pack)).join('')}</div>` : ''}
+            ${hasCapacity && displayedPackCount > packs.length ? `<div class="note">${packs.length} of ${displayedPackCount} packs reported individually; aggregate capacity includes all ${displayedPackCount}.</div>` : ''}
             ${hasFollower ? '<div class="note">Follower capacity is inferred from aggregate gateway data.</div>' : ''}
           ` : '<div class="empty">No battery health data available yet.</div>'}
         </div>
@@ -1439,7 +1443,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
   }
 
   _packRows(attrs) {
-    const count = Math.min(Number(attrs.battery_count || 0) || 8, 8);
+    const reportedCount = this._validatedPackCount(attrs.battery_count);
+    const count = Number.isFinite(reportedCount) ? reportedCount : 8;
     const rows = [];
     for (let index = 1; index <= count; index++) {
       const health = this._number(attrs[`battery_${index}_health_percent`]);
@@ -1457,6 +1462,11 @@ class PowerSyncBatteryHealth extends HTMLElement {
       });
     }
     return rows;
+  }
+
+  _validatedPackCount(value) {
+    const count = this._number(value);
+    return Number.isInteger(count) && count > 0 && count <= 64 ? count : NaN;
   }
 
   _fallbackPackLabel(index, role, isFollower, isExpansion) {
@@ -2022,12 +2032,28 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           font-weight: 650;
           line-height: 1.2;
         }
+        .window-impact {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 3px 7px;
+          margin-top: 4px;
+          color: var(--primary-text-color);
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1.2;
+        }
+        .window-impact-value {
+          white-space: nowrap;
+        }
+        .window-impact-money {
+          color: var(--secondary-text-color);
+          white-space: nowrap;
+        }
         .actions {
           display: grid;
           gap: 8px;
           max-height: min(58vh, 620px);
           overflow-y: auto;
-          overscroll-behavior: contain;
           padding-right: 2px;
           scrollbar-gutter: stable;
         }
@@ -2188,6 +2214,15 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
     const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
     const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
+    const gridExportLimit = Array.isArray(schedule.grid_export_limit_w)
+      ? schedule.grid_export_limit_w
+      : [];
+    const hasGridExportLimit = gridExportLimit.some(value => (
+      value !== null
+      && value !== undefined
+      && value !== ''
+      && Number.isFinite(Number(value))
+    ));
     const intervalMinutes = this._intervalMinutes(timestamps);
     const count = Math.min(
       Math.round(24 * 60 / intervalMinutes),
@@ -2209,6 +2244,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         evKw: this._kw(ev[i]),
         importPrice: this._minorPrice(importPrice[i]),
         exportPrice: this._minorPrice(exportPrice[i]),
+        gridExportLimitKw: this._kw(gridExportLimit[i]),
       });
     }
 
@@ -2227,6 +2263,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     if (hasEv) {
       powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
     }
+    if (hasGridExportLimit) {
+      powerSeries.push({
+        key: 'gridExportLimitKw',
+        label: 'Network export limit',
+        color: '#EC407A',
+      });
+    }
     const reserve = this._optimizerReserve(data);
     const idleHold = this._idleHoldReserve(data);
 
@@ -2240,6 +2283,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       exportReserveCalculated: reserve.exportCalculated,
       idleHoldActive: idleHold.active,
       idleHoldReservePercent: idleHold.percent,
+      detailedSchedule: detailed,
       powerSeries,
       priceSeries: hasPrices
         ? [
@@ -2540,8 +2584,11 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
     return `<div class="battery-windows">${windows.slice(0, 8).map(window => {
       const info = this._actionInfo(window.action);
+      const durationLabel = window.spanDurationMinutes > window.durationMinutes
+        ? `${this._formatDuration(window.durationMinutes)} active / ${this._formatDuration(window.spanDurationMinutes)} span`
+        : this._formatDuration(window.durationMinutes);
       const meta = [
-        this._formatDuration(window.durationMinutes),
+        durationLabel,
         window.socLabel,
         window.power_w > 0 ? this._formatPower(window.power_w) : '',
       ].filter(Boolean).join(' - ');
@@ -2551,6 +2598,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           <div class="window-main">
             <div class="window-time">${this._escHtml(this._timeRange(window.timestamp, window.end_time))}</div>
             ${meta ? `<div class="window-meta">${this._escHtml(meta)}</div>` : ''}
+            ${this._renderWindowImpact(window.energyValue, window.action, priceMeta)}
           </div>
           ${this._renderActionPriceStats(window.priceStats, window.action, priceMeta)}
         </div>
@@ -2604,21 +2652,29 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
   _priceStatsForAction(action, model) {
     if (!action?.timestamp || !model?.points?.length) return null;
-    const start = Date.parse(action.timestamp);
-    const end = Date.parse(action.end_time || action.timestamp);
-    if (!Number.isFinite(start)) return null;
-    const safeEnd = Number.isFinite(end) && end > start
-      ? end
-      : start + (model.intervalMinutes || 5) * 60000;
-    const useExport = action.action === 'discharge' || action.action === 'export';
+    return this._priceStatsForSegments([action], action.action, model);
+  }
+
+  _priceStatsForSegments(segments, action, model) {
+    if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
+    const useExport = action === 'discharge' || action === 'export';
     const key = useExport ? 'exportPrice' : 'importPrice';
-    const values = model.points
-      .filter(point => {
-        const ts = Date.parse(point.timestamp);
-        return Number.isFinite(ts) && ts >= start && ts < safeEnd;
-      })
-      .map(point => point[key])
-      .filter(value => Number.isFinite(value));
+    const values = [];
+    for (const segment of segments) {
+      const start = Date.parse(segment?.timestamp);
+      const end = Date.parse(segment?.end_time || segment?.timestamp);
+      if (!Number.isFinite(start)) continue;
+      const safeEnd = Number.isFinite(end) && end > start
+        ? end
+        : start + (model.intervalMinutes || 5) * 60000;
+      values.push(...model.points
+        .filter(point => {
+          const ts = Date.parse(point.timestamp);
+          return Number.isFinite(ts) && ts >= start && ts < safeEnd;
+        })
+        .map(point => point[key])
+        .filter(value => Number.isFinite(value)));
+    }
     if (!values.length) return null;
     return {
       kind: useExport ? 'export' : 'import',
@@ -2626,6 +2682,59 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       max: Math.max(...values),
       avg: values.reduce((sum, value) => sum + value, 0) / values.length,
     };
+  }
+
+  _renderWindowImpact(stats, action, priceMeta) {
+    if (!stats || !Number.isFinite(stats.energyKwh) || stats.energyKwh <= 0) return '';
+    const valueLabel = action === 'charge' ? 'Est. cost' : 'Est. earnings';
+    const money = Number.isFinite(stats.value)
+      ? `<span class="window-impact-money">${this._escHtml(`${valueLabel} ${this._formatMoney(stats.value, priceMeta.currency)}`)}</span>`
+      : '';
+    return `
+      <div class="window-impact">
+        <span class="window-impact-value">${this._escHtml(this._formatEnergy(stats.energyKwh))}</span>
+        ${money}
+      </div>
+    `;
+  }
+
+  _energyValueForSegments(segments, action, model) {
+    if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
+    const powerKey = action === 'charge'
+      ? 'chargeKw'
+      : (model.detailedSchedule ? 'exportKw' : 'dischargeKw');
+    const priceKey = action === 'charge' ? 'importPrice' : 'exportPrice';
+    const intervalMs = Math.max(1, Number(model.intervalMinutes) || 5) * 60000;
+    const ranges = segments.map(segment => {
+      const start = Date.parse(segment?.timestamp);
+      const parsedEnd = Date.parse(segment?.end_time || segment?.timestamp);
+      const end = Number.isFinite(parsedEnd) && parsedEnd > start ? parsedEnd : start + intervalMs;
+      return { start, end };
+    }).filter(range => Number.isFinite(range.start) && Number.isFinite(range.end));
+    if (!ranges.length) return null;
+
+    let energyKwh = 0;
+    let value = 0;
+    let hasPrice = false;
+    for (const point of model.points) {
+      const pointStart = Date.parse(point.timestamp);
+      if (!Number.isFinite(pointStart)) continue;
+      const pointEnd = pointStart + intervalMs;
+      const overlapMs = Math.min(intervalMs, ranges.reduce((total, range) => (
+        total + Math.max(0, Math.min(pointEnd, range.end) - Math.max(pointStart, range.start))
+      ), 0));
+      if (overlapMs <= 0) continue;
+      const powerKw = Math.max(0, Number(point[powerKey]) || 0);
+      const intervalEnergyKwh = powerKw * overlapMs / 3600000;
+      energyKwh += intervalEnergyKwh;
+      const minorPrice = Number(point[priceKey]);
+      if (Number.isFinite(minorPrice)) {
+        value += intervalEnergyKwh * minorPrice / 100;
+        hasPrice = true;
+      }
+    }
+    if (energyKwh <= 0) return null;
+    return { energyKwh, value: hasPrice ? value : NaN };
   }
 
   _actionRangesFromApi() {
@@ -2659,18 +2768,61 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   }
 
   _batteryWindowsFromActions(actions, model) {
-    return (actions || [])
+    const windows = (actions || [])
       .filter(action => this._isBatteryWindowAction(action?.action))
       .map(action => ({
         ...action,
         durationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
+        spanDurationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
         socLabel: this._socRangeForAction(action, model),
         priceStats: this._priceStatsForAction(action, model),
+        energyValue: this._energyValueForSegments([action], action.action, model),
       }));
+    return this._mergeBatteryWindowRanges(windows, model);
   }
 
   _isBatteryWindowAction(action) {
     return action === 'charge' || action === 'discharge' || action === 'export';
+  }
+
+  _mergeBatteryWindowRanges(windows, model) {
+    const merged = [];
+    for (const window of windows || []) {
+      const start = Date.parse(window.timestamp);
+      const duration = this._durationMinutes(window.timestamp, window.end_time, model.intervalMinutes);
+      const segment = { timestamp: window.timestamp, end_time: window.end_time || window.timestamp };
+      const previous = merged[merged.length - 1];
+      const previousEnd = Date.parse(previous?.end_time || '');
+      const gapMinutes = Number.isFinite(start) && Number.isFinite(previousEnd)
+        ? (start - previousEnd) / 60000
+        : Infinity;
+      if (
+        previous
+        && previous.action === window.action
+        && gapMinutes >= 0
+        && gapMinutes <= BATTERY_WINDOW_MERGE_GAP_MINUTES
+      ) {
+        previous.end_time = window.end_time;
+        previous.soc = window.soc;
+        previous.power_w = Math.max(Number(previous.power_w || 0), Number(window.power_w || 0));
+        previous.durationMinutes += duration;
+        previous.spanDurationMinutes = this._durationMinutes(previous.timestamp, previous.end_time, model.intervalMinutes);
+        previous.segments.push(segment);
+        previous.socLabel = this._socRangeForAction(previous, model);
+        previous.priceStats = this._priceStatsForSegments(previous.segments, previous.action, model);
+        previous.energyValue = this._energyValueForSegments(previous.segments, previous.action, model);
+      } else {
+        merged.push({
+          ...window,
+          durationMinutes: duration,
+          spanDurationMinutes: duration,
+          segments: [segment],
+          priceStats: this._priceStatsForSegments([segment], window.action, model) || window.priceStats,
+          energyValue: this._energyValueForSegments([segment], window.action, model) || window.energyValue,
+        });
+      }
+    }
+    return merged;
   }
 
   _durationMinutes(startValue, endValue, fallbackMinutes = 5) {
@@ -2856,6 +3008,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return `${Math.round(Math.abs(value))} W`;
   }
 
+  _formatEnergy(kwh) {
+    const value = Number(kwh);
+    if (!Number.isFinite(value)) return '';
+    const decimals = Math.abs(value) >= 10 ? 1 : 2;
+    return `${value.toFixed(decimals)} kWh`;
+  }
+
   _formatDuration(minutes) {
     const value = Number(minutes || 0);
     if (!Number.isFinite(value) || value <= 0) return '';
@@ -2954,6 +3113,7 @@ const EV_PANEL_PATHS = {
   scheduled: 'power_sync/ev/scheduled_charging/settings',
   autoStatus: 'power_sync/ev/auto_schedule/status',
   autoToggle: 'power_sync/ev/auto_schedule/toggle',
+  vehicleConfig: 'power_sync/ev/vehicle_config',
   boost: 'power_sync/ev/boost',
 };
 
@@ -3113,11 +3273,12 @@ class PowerSyncEVPanel extends HTMLElement {
       throw new Error(status.error || 'EV status API unavailable');
     }
 
-    const [solar, price, scheduled, autoStatus] = await Promise.allSettled([
+    const [solar, price, scheduled, autoStatus, vehicleConfig] = await Promise.allSettled([
       this._hass.callApi('GET', EV_PANEL_PATHS.solar),
       this._hass.callApi('GET', EV_PANEL_PATHS.price),
       this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
       this._hass.callApi('GET', EV_PANEL_PATHS.autoStatus),
+      this._hass.callApi('GET', EV_PANEL_PATHS.vehicleConfig),
     ]);
 
     const modeErrors = [];
@@ -3148,6 +3309,7 @@ class PowerSyncEVPanel extends HTMLElement {
       priceSettings: unwrap(price, 'settings', {}),
       scheduledSettings: unwrap(scheduled, 'settings', {}),
       autoStatus: autoScheduleStatus,
+      vehicleConfigs: unwrap(vehicleConfig, 'configs', []),
       modeErrors,
       fetchedAt: new Date().toISOString(),
     };
@@ -3576,6 +3738,35 @@ class PowerSyncEVPanel extends HTMLElement {
           font-weight: 600;
           line-height: 1.25;
         }
+        .capacity-editor {
+          display: flex;
+          align-items: end;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 7px;
+        }
+        .capacity-editor label {
+          display: grid;
+          gap: 3px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .capacity-editor input {
+          box-sizing: border-box;
+          width: 92px;
+          min-height: 32px;
+          padding: 5px 7px;
+          border: 1px solid var(--divider-color);
+          border-radius: 7px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+        }
+        .capacity-editor .command {
+          min-height: 32px;
+          padding: 5px 8px;
+          font-size: 11px;
+        }
         @media (max-width: 560px) {
           .status,
           .control-row,
@@ -3791,17 +3982,32 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _smartScheduleCard() {
     const settings = this._data?.autoStatus?.settings || {};
+    const vehicleConfigs = this._data?.vehicleConfigs || [];
     const entries = Object.entries(settings);
     const rows = entries.length ? entries.map(([vehicleId, vehicle], index) => {
       const enabled = !!vehicle.enabled;
       const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
       const name = loadpoint ? this._loadpointLabel(loadpoint) : `Vehicle ${index + 1}`;
       const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
+      const config = vehicleConfigs.find((item) => item.vehicle_id === vehicleId) || {};
+      const effectiveCapacity = config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh;
+      const capacitySource = config.battery_capacity_source || vehicle.battery_capacity_source || 'default_estimate';
+      const manualCapacity = config.battery_capacity_kwh
+        ?? (capacitySource === 'charger_fallback' ? effectiveCapacity : '');
+      const sourceLabel = capacitySource === 'manual' ? 'configured' : this._title(capacitySource);
       return `
         <div class="smart-row">
           <div>
             <div class="smart-name">${this._escHtml(name)}</div>
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
+            <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sourceLabel)}</div>
+            <div class="capacity-editor">
+              <label>Capacity override (kWh)
+                <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
+              </label>
+              <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
+              <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
+            </div>
           </div>
           <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
             <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
@@ -3847,6 +4053,12 @@ class PowerSyncEVPanel extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll('[data-smart-toggle]').forEach((button) => {
       button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true'));
+    });
+    this.shadowRoot.querySelectorAll('[data-capacity-save]').forEach((button) => {
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacitySave, false));
+    });
+    this.shadowRoot.querySelectorAll('[data-capacity-clear]').forEach((button) => {
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacityClear, true));
     });
   }
 
@@ -3914,6 +4126,22 @@ class PowerSyncEVPanel extends HTMLElement {
       EV_PANEL_PATHS.autoToggle,
       { vehicle_id: vehicleId, enabled },
       'Smart schedule updated',
+    );
+  }
+
+  async _saveVehicleCapacity(vehicleId, clear) {
+    const input = this.shadowRoot.querySelector(`[data-capacity-input="${CSS.escape(vehicleId)}"]`);
+    const value = clear ? null : Number(input?.value);
+    if (!clear && (!Number.isFinite(value) || value < 1 || value > 250)) {
+      this._notice = { type: 'error', message: 'Capacity must be between 1 and 250 kWh' };
+      this._scheduleRender();
+      return;
+    }
+    await this._runCommand(
+      `capacity:${vehicleId}`,
+      EV_PANEL_PATHS.vehicleConfig,
+      { vehicle_id: vehicleId, battery_capacity_kwh: value },
+      clear ? 'Capacity override cleared' : 'Capacity updated',
     );
   }
 
@@ -4063,6 +4291,7 @@ class PowerSyncLayout extends HTMLElement {
     this._appliedLayoutSignature = '';
     this._lastLayoutWidth = 0;
     this._lastLayoutColumnCount = 0;
+    this._maxObservedHeight = 0;
   }
 
   setConfig(config) {
@@ -4075,11 +4304,44 @@ class PowerSyncLayout extends HTMLElement {
     for (const c of this._cards) c.hass = hass;
   }
 
+  connectedCallback() {
+    if (!this._built) return;
+    this._resetHeightLock();
+    this._observeLayout();
+    this._scheduleLayout();
+  }
+
   disconnectedCallback() {
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
     }
+  }
+
+  _observeLayout() {
+    if (this._resizeObserver || !('ResizeObserver' in window)) return;
+    this._resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries?.[0];
+      const geometryChanged = this._scheduleLayoutForResize(entry);
+      if (!geometryChanged) {
+        this._updateHeightLock(entry?.contentRect?.height);
+      } else {
+        requestAnimationFrame(() => this._updateHeightLock(this.getBoundingClientRect().height));
+      }
+    });
+    this._resizeObserver.observe(this);
+  }
+
+  _updateHeightLock(height) {
+    const nextHeight = Math.ceil(Number(height) || 0);
+    if (nextHeight <= 1 || nextHeight <= this._maxObservedHeight + 1) return;
+    this._maxObservedHeight = nextHeight;
+    this.style.minHeight = `${nextHeight}px`;
+  }
+
+  _resetHeightLock() {
+    this._maxObservedHeight = 0;
+    this.style.minHeight = '';
   }
 
   _scheduleLayout() {
@@ -4108,16 +4370,26 @@ class PowerSyncLayout extends HTMLElement {
       ? entry.contentBoxSize[0]
       : entry?.contentBoxSize;
     const width = box?.inlineSize || entry?.contentRect?.width || this.getBoundingClientRect().width || window.innerWidth || 0;
-    const columnCount = this._columnCountForWidth(width);
+    const columnCount = Math.min(
+      this._columnCountForWidth(width),
+      Math.max(1, this._layoutItems().length),
+    );
     const widthDelta = Math.abs(width - this._lastLayoutWidth);
+    const geometryChanged = Boolean(
+      this._lastLayoutColumnCount && (
+        columnCount !== this._lastLayoutColumnCount || widthDelta >= 80
+      )
+    );
+    if (geometryChanged) this._resetHeightLock();
     if (
       this._lastLayoutColumnCount &&
       columnCount === this._lastLayoutColumnCount &&
       widthDelta < 80
     ) {
-      return;
+      return false;
     }
     this._scheduleLayout();
+    return geometryChanged;
   }
 
   _flattenCards() {
@@ -4266,6 +4538,7 @@ class PowerSyncLayout extends HTMLElement {
     this._customizing = enabled;
     if (!enabled) {
       this._showingHidden = false;
+      if (wasShowingHidden) this._resetHeightLock();
       for (const item of this._hiddenItems()) item.remove();
       if (wasShowingHidden) this._appliedLayoutSignature = '';
     }
@@ -4282,6 +4555,7 @@ class PowerSyncLayout extends HTMLElement {
 
   _resetOrder() {
     this._cancelActiveDrag();
+    this._resetHeightLock();
     try { localStorage.removeItem(this._storageKey); } catch (_) {}
     this._saveHiddenKeys([]);
     for (const item of this._items) item.dataset.hidden = 'false';
@@ -4297,6 +4571,7 @@ class PowerSyncLayout extends HTMLElement {
   _hideItem(item) {
     if (item.dataset.hidden === 'true' || this._visibleItems().length <= 1) return;
     this._cancelActiveDrag();
+    this._resetHeightLock();
     item.dataset.hidden = 'true';
     if (!this._showingHidden) item.remove();
     this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
@@ -4308,6 +4583,7 @@ class PowerSyncLayout extends HTMLElement {
   _showHiddenItems() {
     this._cancelActiveDrag();
     if (this._hiddenItems().length === 0) return;
+    this._resetHeightLock();
     this._showingHidden = !this._showingHidden;
     if (this._showingHidden) this._customizing = true;
     if (!this._showingHidden) {
@@ -4325,6 +4601,7 @@ class PowerSyncLayout extends HTMLElement {
   _unhideItem(item) {
     if (item.dataset.hidden !== 'true') return;
     this._cancelActiveDrag();
+    this._resetHeightLock();
     item.dataset.hidden = 'false';
     this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
     this._appliedLayoutSignature = '';
@@ -4445,6 +4722,7 @@ class PowerSyncLayout extends HTMLElement {
     this._dragPlaceholder = null;
     this._clearDragStyles(item);
     this._dragItem = null;
+    this._resetHeightLock();
     this._saveOrder();
   }
 
@@ -4838,10 +5116,7 @@ class PowerSyncLayout extends HTMLElement {
     grid.className = 'grid';
     root.appendChild(grid);
 
-    if ('ResizeObserver' in window) {
-      this._resizeObserver = new ResizeObserver((entries) => this._scheduleLayoutForResize(entries?.[0]));
-      this._resizeObserver.observe(this);
-    }
+    this._observeLayout();
 
     let helpers;
     try { helpers = await window.loadCardHelpers(); } catch (_) {}
@@ -5231,8 +5506,8 @@ class PowerSyncStrategy {
     // --- Center Column: EV Dashboard Panel ---
     center.push(_evPanel());
 
-    // --- Right Column: Price Chart ---
-    if (hasE('current_import_price')) {
+    // --- Right Column: Price History (fallback when no tariff schedule exists) ---
+    if (hasE('current_import_price') && !hasE('tariff_schedule')) {
       right.push(_priceChart(e, hass));
     }
 
@@ -5342,10 +5617,14 @@ class PowerSyncStrategy {
     }
 
     // --- Center Column: Daily Cost Tracking ---
-    if (hasE('daily_import_cost')) {
-      const costEntities = [
-        { entity: e('daily_import_cost'), name: 'Import Cost Today', icon: 'mdi:cash-minus' },
-      ];
+    if (hasE('daily_import_cost') || hasE('amber_usage_today_cost')) {
+      const costEntities = [];
+      if (hasE('amber_usage_today_cost')) {
+        costEntities.push({ entity: e('amber_usage_today_cost'), name: 'Amber Metered Cost Today (Partial)', icon: 'mdi:cash-check' });
+      }
+      if (hasE('daily_import_cost')) {
+        costEntities.push({ entity: e('daily_import_cost'), name: 'Estimated Import Cost Today', icon: 'mdi:cash-minus' });
+      }
       if (hasE('daily_export_earnings')) {
         costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
       }
@@ -5390,6 +5669,16 @@ class PowerSyncStrategy {
     if (hasProviderSensor('globird', ['latest_data_status', 'latest_day_cost', 'balance'])) {
       const globirdCard = _globirdProvider(findProviderSensor);
       if (globirdCard) left.push(globirdCard);
+    }
+    if (hasProviderSensor('covau', ['plan', 'free_import_remaining', 'premium_export_remaining'])) {
+      const covauCard = _covauProvider(findProviderSensor);
+      if (covauCard) left.push(covauCard);
+    }
+
+    // Read-only operating envelope from certified site equipment.  This card
+    // deliberately exposes no limit override or bypass control.
+    if (hasE('network_export_limit')) {
+      left.push(_networkExportEnvelope(e('network_export_limit')));
     }
 
     // --- Left Column: Missing dependency warnings ---
@@ -5489,7 +5778,17 @@ function _evPanel() {
   };
 }
 
-function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
+function _svgArcGaugeCard({
+  entityId,
+  label,
+  unit,
+  min,
+  max,
+  thresholds,
+  multiplier = 1,
+  decimals = 1,
+  showPriceSource = false,
+}) {
   // thresholds: { green, yellow, red } in display units (after multiplier).
   // Color picked is the one whose threshold is the highest <= displayed value.
   return {
@@ -5518,6 +5817,37 @@ function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multipl
         const fill = pct * circ;
         const decimals = ${decimals};
         const display = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(decimals);
+        let sourceLabel = '';
+        if (${showPriceSource ? 'true' : 'false'}) {
+          const attrs = entity?.attributes || {};
+          const sourceKey = String(attrs.price_source || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+          const sourceLabels = {
+            kwatch: 'KWatch',
+            flow_power_kwatch: 'KWatch',
+            flow_power_kwatch_fallback_aemo: 'AEMO fallback',
+            aemo: 'AEMO',
+            aemo_api: 'AEMO',
+            aemo_sensor: 'AEMO',
+            amber: 'Amber',
+            amber_api: 'Amber',
+            amber_stored: 'Amber',
+            tariff_schedule: 'Tariff schedule',
+          };
+          sourceLabel = sourceLabels[sourceKey] || sourceKey
+            .split('_')
+            .filter(Boolean)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+          if (attrs.using_price_fallback && sourceLabel && !sourceLabel.toLowerCase().includes('fallback')) {
+            sourceLabel += ' fallback';
+          }
+        }
+        const sourceHtml = sourceLabel
+          ? '<div style="font-size:0.68em;color:var(--secondary-text-color);margin-top:-7px;">' + sourceLabel + '</div>'
+          : '';
         return \`
           <div style="display:flex;flex-direction:column;align-items:center;">
             <div style="font-size:0.85em;color:var(--secondary-text-color);margin-bottom:2px;">${label}</div>
@@ -5527,6 +5857,7 @@ function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multipl
               <text x="60" y="54" text-anchor="middle" font-size="20" font-weight="600" fill="var(--primary-text-color)">\${display}</text>
               <text x="60" y="68" text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">${unit}</text>
             </svg>
+            \${sourceHtml}
           </div>
         \`;
       ]]]`,
@@ -5564,6 +5895,7 @@ function _priceGauges(e, hass) {
         max: 60,
         thresholds: { green: 0, yellow: 25, red: 40 },
         multiplier: 100,
+        showPriceSource: true,
       }),
       _svgArcGaugeCard({
         entityId: e('current_export_price'),
@@ -5589,12 +5921,18 @@ function _priceGauges(e, hass) {
 
 function _batteryControls(hass) {
   const batteryModeEntity = 'sensor.power_sync_battery_mode';
-  const activeModeName = (mode, label) => `[[[
+  const activeModeName = (mode, label, durationEntity = null, durationFallback = '30') => `[[[
     const modeState = states['${batteryModeEntity}'];
-    if (!modeState || modeState.state !== '${mode}') return '${label}';
+    if (!modeState || modeState.state !== '${mode}') {
+      ${durationEntity ? `const selected = states['${durationEntity}']?.state ?? '${durationFallback}'; return '${label} ' + selected + ' min';` : `return '${label}';`}
+    }
     const remaining = Number(modeState.attributes?.remaining_minutes);
     if (Number.isFinite(remaining)) return '${label} ' + Math.max(0, Math.ceil(remaining)) + ' min';
     return '${label} active';
+  ]]]`;
+  const durationName = (entity, label, fallback = '30') => `[[[
+    const selected = states['${entity}']?.state ?? '${fallback}';
+    return '${label} ' + selected + ' min';
   ]]]`;
   const modeAwareChipStyle = (base, mode, colorName, fallbackRgb) => ({
     ...base,
@@ -5638,10 +5976,21 @@ function _batteryControls(hass) {
   const blueChip = chipStyle('rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)');
   const orangeChip = chipStyle('rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)');
   const greenChip = chipStyle('rgba(var(--rgb-green-color, 76, 175, 80), 0.1)');
+  const compactDurationChip = (base) => ({
+    ...base,
+    name: [
+      ...base.name,
+      { 'font-size': '12px' },
+      { 'line-height': '14px' },
+      { 'white-space': 'normal' },
+    ],
+  });
   const forceChargeChip = modeAwareChipStyle(blueChip, 'force_charge', 'blue', '33, 150, 243');
   const forceDischargeChip = modeAwareChipStyle(orangeChip, 'force_discharge', 'orange', '255, 152, 0');
   const holdSocChip = modeAwareChipStyle(blueChip, 'hold_soc', 'blue', '33, 150, 243');
   const selfConsumptionChip = modeAwareChipStyle(greenChip, 'self_consumption', 'green', '76, 175, 80');
+  const chargeDurationChip = compactDurationChip(blueChip);
+  const sharedDischargeDurationChip = compactDurationChip(orangeChip);
 
   const hasForcePower = !!(hass && hass.states['number.power_sync_force_power_kw']);
 
@@ -5672,7 +6021,7 @@ function _batteryControls(hass) {
       {
         square: false,
         type: 'grid',
-        columns: 4,
+        columns: 2,
         cards: [
           {
             type: 'custom:button-card',
@@ -5680,8 +6029,8 @@ function _batteryControls(hass) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30') + ' min' ]]]",
-            styles: blueChip,
+            name: durationName('select.power_sync_force_charge_duration', 'Charge timer'),
+            styles: chargeDurationChip,
             tap_action: { action: 'more-info' },
           },
           {
@@ -5709,8 +6058,8 @@ function _batteryControls(hass) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30') + ' min' ]]]",
-            styles: orangeChip,
+            name: durationName('select.power_sync_force_discharge_duration', 'Discharge/Hold/Self'),
+            styles: sharedDischargeDurationChip,
             tap_action: { action: 'more-info' },
           },
           {
@@ -5746,7 +6095,7 @@ function _batteryControls(hass) {
         type: 'custom:button-card',
         entity: batteryModeEntity,
         triggers_update: [batteryModeEntity],
-        name: 'Self Consumption',
+        name: activeModeName('self_consumption', 'Self Consumption', 'select.power_sync_force_discharge_duration'),
         icon: 'mdi:home-battery',
         styles: {
           ...selfConsumptionChip,
@@ -5778,7 +6127,12 @@ function _batteryControls(hass) {
         tap_action: {
           action: 'call-service',
           service: 'power_sync.set_self_consumption',
-          confirmation: { text: 'Set battery to self-consumption mode?' },
+          data: {
+            duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
+          },
+          confirmation: {
+            text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Set battery to self-consumption mode for ' + dur + ' min?'; ]]]",
+          },
         },
       },
       {
@@ -5790,7 +6144,7 @@ function _batteryControls(hass) {
             type: 'custom:button-card',
             entity: batteryModeEntity,
             triggers_update: [batteryModeEntity],
-            name: activeModeName('hold_soc', 'Hold SoC'),
+            name: activeModeName('hold_soc', 'Hold SoC', 'select.power_sync_force_discharge_duration'),
             icon: 'mdi:battery-lock',
             styles: {
               ...holdSocChip,
@@ -5822,10 +6176,10 @@ function _batteryControls(hass) {
               action: 'call-service',
               service: 'power_sync.hold_battery_soc',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '60'); ]]]",
+                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
               },
               confirmation: {
-                text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '60'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
+                text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
               },
             },
           },
@@ -6345,6 +6699,13 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
   };
 }
 
+function _loadIncludesGenericEv(evPowerAttrs = {}) {
+  return (
+    evPowerAttrs.vehicle_id === 'generic_ev' ||
+    evPowerAttrs.charger_type === 'generic'
+  );
+}
+
 function _teslaStyleFlow(e, hass, findSensor) {
   // Auto-detect weather entity — try common patterns
   let weatherEntity = null;
@@ -6402,6 +6763,11 @@ function _teslaStyleFlow(e, hass, findSensor) {
       config.entities.ev_battery = evBattery;
     }
     const evPowerAttrs = hass.states[evPower]?.attributes || {};
+    if (_loadIncludesGenericEv(evPowerAttrs)) {
+      // Inverter/site load normally includes a generic charger's draw. The
+      // flow card renders EV as its own branch, so remove that draw from Home.
+      config.load_includes_ev = true;
+    }
     if (
       !config.entities.ev_presence &&
       (Object.prototype.hasOwnProperty.call(evPowerAttrs, 'is_connected') ||
@@ -6540,7 +6906,7 @@ function _priceChart(e, hass) {
   const importMeta = _priceMeta(hass, e('current_import_price'));
   return {
     type: 'custom:power-sync-chart',
-    title: 'Electricity Prices - 24 Hours',
+    title: 'Current Price History - Today',
     mode: 'history',
     historyHours: 24,
     historyRange: 'today',
@@ -6645,7 +7011,8 @@ function _lpBatteryPowerChart(e) {
     yUnit: 'kW',
     series: [
       { entity: e('lp_battery_power_forecast'), attribute: 'charge_values_kw', name: 'Charge', color: '#2196F3', fill: true },
-      { entity: e('lp_battery_power_forecast'), attribute: 'discharge_values_kw', name: 'Discharge', color: '#4CAF50', fill: true },
+      { entity: e('lp_battery_power_forecast'), attribute: 'home_consumption_values_kw', name: 'Powering Home', color: '#FF9800', fill: true },
+      { entity: e('lp_battery_power_forecast'), attribute: 'export_values_kw', name: 'Export', color: '#4CAF50', fill: true },
     ],
   };
 }
@@ -7050,6 +7417,34 @@ function _powerwallLocalControl(e, hasE) {
       icon: 'mdi:alert-circle',
     });
   }
+  if (hasE && hasE('pw_v1r_device')) {
+    statusEntities.push({
+      entity: e('pw_v1r_device'),
+      name: 'v1r Device',
+      icon: 'mdi:developer-board',
+    });
+  }
+  if (hasE && hasE('pw_v1r_firmware')) {
+    statusEntities.push({
+      entity: e('pw_v1r_firmware'),
+      name: 'v1r Firmware',
+      icon: 'mdi:chip',
+    });
+  }
+  if (hasE && hasE('pw_v1r_network')) {
+    statusEntities.push({
+      entity: e('pw_v1r_network'),
+      name: 'v1r Network',
+      icon: 'mdi:router-network',
+    });
+  }
+  if (hasE && hasE('pw_v1r_internet')) {
+    statusEntities.push({
+      entity: e('pw_v1r_internet'),
+      name: 'v1r Internet',
+      icon: 'mdi:web-check',
+    });
+  }
   if (hasE && hasE('pw_critical_alert')) {
     statusEntities.push({
       entity: e('pw_critical_alert'),
@@ -7202,6 +7597,44 @@ function _globirdProvider(findProviderSensor) {
     title: 'GloBird Pricing',
     show_header_toggle: false,
     entities,
+  };
+}
+
+function _covauProvider(findProviderSensor) {
+  const candidates = [
+    ['plan', 'SolarMax Plan'],
+    ['free_import_remaining', 'Free Import Remaining'],
+    ['premium_export_remaining', 'Premium Export Remaining'],
+  ];
+  const entities = candidates
+    .map(([suffix, name]) => {
+      const entity = findProviderSensor('covau', suffix);
+      return entity ? { entity, name } : null;
+    })
+    .filter(Boolean);
+  if (entities.length === 0) return null;
+  return {
+    type: 'entities',
+    title: 'CovaU SolarMax',
+    show_header_toggle: false,
+    entities,
+  };
+}
+
+function _networkExportEnvelope(entity) {
+  return {
+    type: 'entities',
+    title: 'Grid Connection / Flexible Exports',
+    show_header_toggle: false,
+    entities: [
+      { entity, name: 'Current Export Limit', icon: 'mdi:transmission-tower-export' },
+      { type: 'attribute', entity, attribute: 'mode', name: 'Mode' },
+      { type: 'attribute', entity, attribute: 'source_status', name: 'Source' },
+      { type: 'attribute', entity, attribute: 'fallback_limit_w', name: 'Approved Fallback', suffix: ' W' },
+      { type: 'attribute', entity, attribute: 'next_limit_w', name: 'Next Limit', suffix: ' W' },
+      { type: 'attribute', entity, attribute: 'next_change_at', name: 'Next Change' },
+      { type: 'attribute', entity, attribute: 'reason', name: 'Status' },
+    ],
   };
 }
 

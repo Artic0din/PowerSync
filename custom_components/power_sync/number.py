@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from typing import Any
 
 from homeassistant.components.number import (
@@ -18,6 +19,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     DOMAIN,
     CONF_TESLA_ENERGY_SITE_ID,
+    CONF_POWERWALL_LOCAL_PAIRED,
     CONF_FOXESS_HOST,
     CONF_FOXESS_SERIAL_PORT,
     CONF_FOXESS_CLOUD_API_KEY,
@@ -46,6 +48,7 @@ from .const import (
     SENSOR_FAMILY_EV_CHARGING,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +68,25 @@ FORCE_POWER_COORDINATOR_KEYS = (
     "neovolt_coordinator",
     "anker_solix_coordinator",
 )
+
+
+def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:
+    """Return fresh local Powerwall data when paired, otherwise None."""
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+    coordinator = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("powerwall_local", {})
+        .get("coordinator")
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
+    if data is None or last_success_monotonic is None:
+        return None
+    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 def _positive_float(value: Any) -> float | None:
@@ -204,6 +226,11 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
 
     @property
     def native_value(self) -> float | None:
+        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_reserve = getattr(local_snap, "backup_reserve_percent", None)
+        if local_reserve is not None:
+            return float(local_reserve)
+
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if site_info and "backup_reserve_percent" in site_info:

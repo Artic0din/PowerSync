@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -43,6 +44,18 @@ _LOGGER = logging.getLogger(__name__)
 # setup, so wrap every fetch in an explicit ceiling well under the per-request
 # budget's worst case but far below the runaway.
 POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
+POWERWALL_LOCAL_DIAGNOSTICS_INTERVAL = 300.0
+POWERWALL_LOCAL_DIAGNOSTICS_TIMEOUT = 15.0
+_BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
+_BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
+_CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
+
+
+def _reserve_matches(left: Any, right: Any) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= 0.5
+    except (TypeError, ValueError):
+        return False
 
 
 class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None]):
@@ -80,10 +93,22 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._entry_id = entry.entry_id
         self._consecutive_failures = 0
         self._last_success_ts: float | None = None
+        self._last_success_monotonic: float | None = None
         # Flips True when the gateway rejects our RSA signature — ie the
         # user revoked the key from the Tesla app or did a factory reset.
         # Surfaces via the app banner and a re-pair push notification.
         self._needs_repair = False
+        self._v1r_diagnostics: dict[str, Any] = {
+            "available": False,
+            "last_attempt_ts": None,
+            "last_success_ts": None,
+            "error": None,
+            "system_info": None,
+            "networking": None,
+            "internet": None,
+        }
+        self._v1r_diagnostics_last_attempt_monotonic: float | None = None
+        self._v1r_diagnostics_task: asyncio.Task[None] | None = None
 
         # DataUpdateCoordinator pauses its periodic schedule when it has zero
         # listeners (HA 2023.x+ optimisation). Entity listeners attach in
@@ -111,6 +136,10 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
     @property
     def last_success_ts(self) -> float | None:
         return self._last_success_ts
+
+    @property
+    def last_success_monotonic(self) -> float | None:
+        return self._last_success_monotonic
 
     @property
     def reachable(self) -> bool:
@@ -165,12 +194,86 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             self._consecutive_failures += 1
             raise UpdateFailed(f"Powerwall local error: {err}") from err
 
-        import time as _time
-
-        self._last_success_ts = _time.time()
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        cloud_fallback_pending = isinstance(entry_data, dict) and entry_data.pop(
+            _CLOUD_FALLBACK_PENDING_KEY, False
+        )
+        if not cloud_fallback_pending:
+            self._last_success_ts = time.time()
+            self._last_success_monotonic = time.monotonic()
         self._consecutive_failures = 0
         self._update_backup_reserve_offset(snap)
+        self._schedule_v1r_diagnostics_if_due()
         return snap
+
+    def _schedule_v1r_diagnostics_if_due(self) -> None:
+        """Refresh slow Common API diagnostics without delaying live telemetry."""
+        if not callable(getattr(self._client, "get_v1r_diagnostics", None)):
+            return
+        now = time.monotonic()
+        last_attempt = getattr(
+            self, "_v1r_diagnostics_last_attempt_monotonic", None
+        )
+        task = getattr(self, "_v1r_diagnostics_task", None)
+        if task is not None and not task.done():
+            return
+        if (
+            last_attempt is not None
+            and now - last_attempt < POWERWALL_LOCAL_DIAGNOSTICS_INTERVAL
+        ):
+            return
+        self._v1r_diagnostics_last_attempt_monotonic = now
+        self._v1r_diagnostics_task = self.hass.async_create_task(
+            self._async_refresh_v1r_diagnostics(),
+            f"powerwall_v1r_diagnostics_{self._entry_id}",
+        )
+
+    async def _async_refresh_v1r_diagnostics(self) -> None:
+        """Fetch and publish the credential-free Common API diagnostic set."""
+        attempted_at = time.time()
+        previous = getattr(self, "_v1r_diagnostics", {})
+        try:
+            diagnostics = await asyncio.wait_for(
+                self._client.get_v1r_diagnostics(),
+                timeout=POWERWALL_LOCAL_DIAGNOSTICS_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            self._v1r_diagnostics = {
+                **previous,
+                "available": False,
+                "last_attempt_ts": attempted_at,
+                "error": str(err),
+            }
+            _LOGGER.debug("Powerwall v1r diagnostics unavailable: %s", err)
+        else:
+            available = any(diagnostics.get(key) is not None for key in (
+                "system_info",
+                "networking",
+                "internet",
+            ))
+            self._v1r_diagnostics = {
+                **diagnostics,
+                "available": available,
+                "last_attempt_ts": attempted_at,
+                "last_success_ts": attempted_at if available else previous.get(
+                    "last_success_ts"
+                ),
+                "error": None if available else "No supported Common API response",
+            }
+        self.async_update_listeners()
+
+    async def async_shutdown(self) -> None:
+        """Cancel any in-flight background diagnostics during entry unload."""
+        task = getattr(self, "_v1r_diagnostics_task", None)
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _update_backup_reserve_offset(self, snap: PowerwallSnapshot) -> None:
         """Detect the local reserve offset by comparing local and cloud readbacks."""
@@ -188,8 +291,52 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             if isinstance(cloud_site_info, dict)
             else None
         )
+
+        pending_local_write = entry_data.get(_BACKUP_RESERVE_WRITE_LOCAL_KEY)
+        pending_user_reserve = entry_data.get(_BACKUP_RESERVE_WRITE_USER_KEY)
+        pending_offset = detect_local_backup_reserve_offset(
+            pending_local_write,
+            pending_user_reserve,
+        )
+        if (
+            pending_offset is not None
+            and _reserve_matches(local_reserve, pending_local_write)
+        ):
+            previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
+            entry_data["powerwall_local_low_soe_reserve_pct"] = pending_offset
+            normalized = normalize_local_backup_reserve_percent(
+                local_reserve,
+                pending_offset,
+            )
+            if normalized is not None:
+                snap.backup_reserve_percent = normalized
+            if _reserve_matches(cloud_reserve, pending_user_reserve):
+                entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
+                entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
+            if previous != pending_offset:
+                _LOGGER.info(
+                    "Using Powerwall local backup reserve write offset: %.1f%% "
+                    "(local=%s%%, requested=%s%%, Tesla site_info=%s%%)",
+                    pending_offset,
+                    local_reserve,
+                    pending_user_reserve,
+                    cloud_reserve,
+                )
+            return
+        if pending_local_write is not None or pending_user_reserve is not None:
+            entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
+            entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
+
         detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
         if detected is None:
+            persisted = entry_data.get("powerwall_local_low_soe_reserve_pct")
+            if persisted is not None:
+                normalized = normalize_local_backup_reserve_percent(
+                    local_reserve,
+                    persisted,
+                )
+                if normalized is not None:
+                    snap.backup_reserve_percent = normalized
             return
 
         previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
@@ -254,6 +401,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "snapshot_available": False,
                 "last_success_ts": self._last_success_ts,
                 "needs_repair": self._needs_repair,
+                "v1r_diagnostics": getattr(self, "_v1r_diagnostics", None),
             }
         ev_power_w = self._observed_ev_power_w()
         load_w = snap.load_w
@@ -277,9 +425,12 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "grid_status": snap.grid_status,
             "operation_mode": snap.operation_mode,
             "backup_reserve_percent": snap.backup_reserve_percent,
+            "grid_charging_enabled": snap.grid_charging_enabled,
+            "grid_export_rule": snap.grid_export_rule,
             "gateway_host": self._client.host,
             "gateway_din": self._client.din,
             "version": self._client.version.value,
+            "v1r_diagnostics": getattr(self, "_v1r_diagnostics", None),
         }
 
     def _observed_ev_power_w(self) -> float:

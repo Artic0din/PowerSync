@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import textwrap
 from pathlib import Path
 
 
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 CONST_PATH = ROOT / "custom_components" / "power_sync" / "const.py"
+SENSOR_PATH = ROOT / "custom_components" / "power_sync" / "sensor.py"
 STRINGS_PATH = ROOT / "custom_components" / "power_sync" / "strings.json"
 TRANSLATIONS_PATH = ROOT / "custom_components" / "power_sync" / "translations" / "en.json"
 
@@ -56,9 +58,6 @@ CONFIG_OPTION_TEXT_STEP_PAIRS = (
     ("flow_power_setup", "flow_power_options"),
     ("flow_power_site", "flow_power_site_options"),
     ("flow_power_tariff", "flow_power_options"),
-    ("flow_power_portal", "flow_power_options"),
-    ("flow_power_portal_login", "flow_power_portal_reauth"),
-    ("flow_power_portal_mfa", "flow_power_portal_mfa_options"),
     ("amber", "flow_power_amber_token"),
     ("localvolts", "localvolts_options"),
     ("epex", "epex_options"),
@@ -102,13 +101,22 @@ def _config_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     raise AssertionError(f"PowerSyncConfigFlow.{name} not found")
 
 
-def _options_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+def _options_flow_method(
+    name: str, *, implementation: bool = True
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    # Existing optimizer regression checks target the implementation body; the
+    # public handler is now a four-section menu/dispatcher.
+    lookup_name = (
+        "_async_step_optimization"
+        if implementation and name == "async_step_optimization"
+        else name
+    )
     for node in _module_tree().body:
         if isinstance(node, ast.ClassDef) and node.name == "PowerSyncOptionsFlow":
             for item in node.body:
                 if (
                     isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and item.name == name
+                    and item.name == lookup_name
                 ):
                     return item
     raise AssertionError(f"PowerSyncOptionsFlow.{name} not found")
@@ -357,6 +365,47 @@ def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     assert "final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2]" in method_source
 
 
+def test_ev_charging_generic_capacity_round_trip_and_clear():
+    """Anonymous chargers expose one optional, clearable capacity fallback."""
+    source = CONFIG_FLOW_PATH.read_text()
+    form = ast.get_source_segment(source, _options_flow_method("async_step_ev_charging"))
+    save = ast.get_source_segment(source, _options_flow_method("_save_ev_options"))
+
+    assert form is not None
+    assert save is not None
+    assert "CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH" in form
+    assert "min=1.0" in form
+    assert "max=250.0" in form
+    assert "step=0.1" in form
+    assert "final_data.pop(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None)" in save
+    assert "float(\n                generic_capacity\n            )" in save
+
+
+def test_ev_charging_generic_capacity_has_no_null_selector_default():
+    """Optional number selectors must omit absent values instead of validating None."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_ev_charging")
+    capacity_marker = next(
+        node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "vol"
+        and node.func.attr == "Optional"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH"
+    )
+
+    assert all(keyword.arg != "default" for keyword in capacity_marker.keywords)
+    assert any(keyword.arg == "description" for keyword in capacity_marker.keywords)
+    marker_source = ast.get_source_segment(source, capacity_marker)
+    assert marker_source is not None
+    assert '"suggested_value": current_generic_capacity' in marker_source
+    assert "current_generic_capacity is not None" in marker_source
+
+
 def test_ev_charging_save_allows_clearing_generic_charger_entities():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("_save_ev_options")
@@ -383,6 +432,39 @@ def test_ev_charging_save_allows_clearing_generic_charger_entities():
         assert stale_guard not in method_source
 
 
+def test_ev_charging_generic_entity_fields_are_clearable_in_form_schema():
+    """Saved optional entities must be suggestions, not injected defaults."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_ev_charging")
+    entity_keys = {
+        "CONF_GENERIC_CHARGER_SWITCH_ENTITY",
+        "CONF_GENERIC_CHARGER_AMPS_ENTITY",
+        "CONF_GENERIC_CHARGER_STATUS_ENTITY",
+        "CONF_GENERIC_CHARGER_POWER_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY_2",
+    }
+    markers = {
+        node.args[0].id: node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "vol"
+        and node.func.attr == "Optional"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in entity_keys
+    }
+
+    assert markers.keys() == entity_keys
+    for key, marker in markers.items():
+        assert all(keyword.arg != "default" for keyword in marker.keywords), key
+        marker_source = ast.get_source_segment(source, marker)
+        assert marker_source is not None
+        assert '"suggested_value"' in marker_source, key
+
+
 def test_ev_charging_fallback_generic_soc_sensor_is_translated():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
@@ -405,6 +487,13 @@ def test_ev_charging_fallback_generic_soc_sensor_is_translated():
             ]
             assert "primary SoC sensor" in step["data_description"][
                 "generic_charger_soc_entity_2"
+            ]
+            assert (
+                step["data"]["generic_charger_battery_capacity_kwh"]
+                == "Usable EV battery capacity"
+            )
+            assert "estimated 60 kWh" in step["data_description"][
+                "generic_charger_battery_capacity_kwh"
             ]
 
 
@@ -594,6 +683,108 @@ def test_other_custom_tou_initial_setup_routes_directly_to_custom_tariff():
     assert 'title = "PowerSync Custom TOU"' in create_entry
 
 
+def test_custom_tou_tariff_periods_support_weekend_only_ranges():
+    source = CONFIG_FLOW_PATH.read_text()
+    initial_period_step = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_tariff_period"),
+    )
+    options_period_step = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_tariff_period_options"),
+    )
+    builder_source = ast.get_source_segment(
+        source,
+        _config_flow_method("_build_tariff_from_periods"),
+    )
+
+    assert initial_period_step is not None
+    assert options_period_step is not None
+    assert builder_source is not None
+    assert '"weekends": "Weekends only (Sat-Sun)"' in initial_period_step
+    assert '"weekends": "Weekends only (Sat-Sun)"' in options_period_step
+
+    namespace = {
+        "normalize_currency": lambda value, fallback: value or fallback,
+        "currency_for_provider": lambda provider, hass: "AUD",
+    }
+    exec(textwrap.dedent(builder_source), namespace)
+
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "_tariff_offpeak_rate": 0.15,
+            "_tariff_fit_rate": 0.05,
+            "_tariff_plan_name": "Red Energy TOU",
+            "_selected_electricity_provider": "other",
+            "_tariff_currency": None,
+            "hass": None,
+        },
+    )()
+
+    tariff = namespace["_build_tariff_from_periods"](
+        ctx,
+        [
+            {
+                "name": "PEAK",
+                "start": 14,
+                "end": 20,
+                "days": "weekdays",
+                "import_rate": 0.48,
+                "export_rate": 0.04,
+            },
+            {
+                "name": "SHOULDER",
+                "start": 7,
+                "end": 22,
+                "days": "weekends",
+                "import_rate": 0.28,
+                "export_rate": 0.04,
+            },
+        ],
+    )
+
+    tou_periods = tariff["seasons"]["All Year"]["tou_periods"]
+
+    assert {
+        "fromDayOfWeek": 0,
+        "toDayOfWeek": 0,
+        "fromHour": 7,
+        "toHour": 22,
+    } in tou_periods["SHOULDER"]
+    assert {
+        "fromDayOfWeek": 6,
+        "toDayOfWeek": 6,
+        "fromHour": 7,
+        "toHour": 22,
+    } in tou_periods["SHOULDER"]
+    assert {
+        "fromDayOfWeek": 1,
+        "toDayOfWeek": 5,
+        "fromHour": 0,
+        "toHour": 14,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 1,
+        "toDayOfWeek": 5,
+        "fromHour": 20,
+        "toHour": 24,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 0,
+        "toDayOfWeek": 0,
+        "fromHour": 22,
+        "toHour": 24,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 6,
+        "toDayOfWeek": 6,
+        "fromHour": 0,
+        "toHour": 7,
+    } in tou_periods["OFF_PEAK"]
+
+
 def test_globird_plan_strings_are_available_in_setup_and_options():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
@@ -647,7 +838,7 @@ def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
     )
 
 
-def test_provider_portal_login_has_dedicated_options_sections():
+def test_provider_portal_login_is_globird_only():
     source = CONFIG_FLOW_PATH.read_text()
     init_options = ast.get_source_segment(
         source, _options_flow_method("async_step_init")
@@ -667,7 +858,7 @@ def test_provider_portal_login_has_dedicated_options_sections():
     assert flow_options is not None
     assert globird_options is not None
     assert "provider_portal" in init_options
-    assert "async_step_flow_power_portal_options()" in provider_portal
+    assert "async_step_flow_power_portal_options()" not in provider_portal
     assert "async_step_globird_portal_options()" in provider_portal
     assert "configure_flow_power_portal" not in flow_options
     assert "CONF_FLOWPOWER_EMAIL" not in flow_options
@@ -684,15 +875,12 @@ def test_provider_portal_login_has_dedicated_options_sections():
         assert menu_options["provider_portal"] == "Provider portal login"
 
         flow_step = options_steps["flow_power_options"]
-        assert "Provider portal login page" in flow_step["description"]
+        assert "More > Web Data Access" in flow_step["description"]
         assert "configure_flow_power_portal" not in flow_step["data"]
         assert "flowpower_email" not in flow_step["data"]
         assert "flowpower_password" not in flow_step["data"]
 
-        flow_portal = options_steps["flow_power_portal_options"]
-        assert flow_portal["title"] == "Flow Power portal account"
-        assert "separate from the tariff formula settings" in flow_portal["description"]
-        assert "connect_portal" in flow_portal["data_description"]
+        assert "flow_power_portal_options" not in options_steps
 
         globird_step = options_steps["globird_options"]
         assert "Provider portal login page" in globird_step["description"]
@@ -743,6 +931,10 @@ def test_flow_power_api_key_setup_validates_and_routes_sites():
 
 def test_flow_power_options_collects_kwatch_key_before_network_options():
     source = CONFIG_FLOW_PATH.read_text()
+    route_source = ast.get_source_segment(
+        source,
+        _top_level_function("_should_collect_flow_power_api_key"),
+    )
     options_source = ast.get_source_segment(
         source,
         _options_flow_method("async_step_flow_power_options"),
@@ -755,18 +947,54 @@ def test_flow_power_options_collects_kwatch_key_before_network_options():
         source,
         _options_flow_method("async_step_flow_power_site_options"),
     )
+    post_key_route_source = ast.get_source_segment(
+        source,
+        _options_flow_method("_async_route_after_flow_power_api_key"),
+    )
 
+    assert route_source is not None
     assert options_source is not None
     assert api_source is not None
     assert site_source is not None
-    assert 'price_source == "kwatch"' in options_source
+    assert post_key_route_source is not None
+    namespace: dict[str, object] = {}
+    exec(compile(route_source, "<flow-power-api-key-route>", "exec"), namespace)
+    should_collect = namespace["_should_collect_flow_power_api_key"]
+    assert should_collect("kwatch", False, None) is True
+    assert should_collect("kwatch", False, "stored-key") is False
+    assert should_collect("kwatch", True, "stored-key") is True
+    assert should_collect("aemo", True, "stored-key") is True
+    assert should_collect("aemo", False, None) is False
+
+    assert 'user_input.pop("update_flow_power_api_key", False)' in options_source
+    assert "_should_collect_flow_power_api_key(" in options_source
     assert "async_step_flow_power_api_key_options()" in options_source
+    assert options_source.index("_should_collect_flow_power_api_key(") < (
+        options_source.index('price_source == "amber"')
+    )
+    assert '"update_flow_power_api_key"' in options_source
     assert "validate_flow_power_api_key" in api_source
     assert "CONF_FLOWPOWER_API_KEY" in api_source
+    assert "_remove_legacy_data_keys((CONF_FLOWPOWER_API_KEY,))" in api_source
     assert 'self._get_option(CONF_FLOW_POWER_STATE, "NSW1")' in api_source
     assert "async_step_flow_power_site_options()" in api_source
-    assert "async_step_flow_power_network_options()" in api_source
+    assert "_async_route_after_flow_power_api_key()" in api_source
     assert "CONF_FLOWPOWER_NMI" in site_source
+    assert "_async_route_after_flow_power_api_key()" in site_source
+    assert 'price_source == "amber"' in post_key_route_source
+    assert "async_step_flow_power_amber_token()" in post_key_route_source
+    assert "async_step_flow_power_network_options()" in post_key_route_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        flow_step = json.loads(path.read_text())["options"]["step"][
+            "flow_power_options"
+        ]
+        assert flow_step["data"]["update_flow_power_api_key"] == (
+            "Enter or replace Flow Power API key"
+        )
+        assert "keep the currently stored key unchanged" in flow_step[
+            "data_description"
+        ]["update_flow_power_api_key"]
 
 
 def test_flow_power_network_tariff_prefill_preserves_manual_selection():
@@ -781,13 +1009,11 @@ def test_flow_power_network_tariff_prefill_preserves_manual_selection():
     assert "get_tariff_codes_for_network" in helper
 
 
-def test_provider_portal_login_errors_are_translated_for_setup_and_options():
+def test_globird_portal_login_errors_are_translated_for_setup_and_options():
     provider_error_keys = {
         "cannot_connect",
         "invalid_globird_auth",
         "captcha_required",
-        "invalid_credentials",
-        "invalid_mfa_code",
         "unknown",
     }
 
@@ -845,9 +1071,11 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "planned_ev_load_entity" in method_source
     assert "CONF_MONITORING_MODE" in method_source
     assert "new_options[CONF_MONITORING_MODE] = monitoring_mode" in method_source
-    assert "battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode" in method_source
-    assert "SERVICE_RESTORE_NORMAL" in method_source
-    assert '{"source": "manual", "_native_control": True}' in method_source
+    assert "monitoring_handoff = monitoring_mode and not previous_monitoring_mode" in method_source
+    assert "await async_prepare_monitoring_handoff(" in method_source
+    assert '"_monitoring_enable_restore_pending"' not in method_source
+    assert "battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode" not in method_source
+    assert "SERVICE_RESTORE_NORMAL" not in method_source
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
     assert "new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve" in method_source
     assert 'new_options.pop("_user_backup_reserve", None)' in method_source
@@ -870,8 +1098,7 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled" in method_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
     assert "new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle" in method_source
-    assert "supports_no_idle_mode_provider(current_provider)" in method_source
-    assert "if supports_no_idle_mode:" in method_source
+    assert "supports_no_idle_mode_provider" not in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled" in method_source
     assert "new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled" in method_source
@@ -888,11 +1115,11 @@ def test_optimization_options_exposes_enabled_toggle():
             step["data"]["optimization_auto_apply_reserve"]
             == "Auto-apply optimizer reserve"
         )
-        assert "hardware backup reserve stays user controlled" in step[
+        assert "Natural self-consumption may continue" in step[
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
-        assert "supported TOU plans" in step["data_description"][
+        assert "any electricity provider" in step["data_description"][
             "optimization_disable_idle"
         ]
 
@@ -959,6 +1186,28 @@ def test_optimization_options_schedules_reload_after_flow_response():
     )
 
 
+def test_optimization_options_skip_reload_flag_is_gated_on_persisted_change():
+    """OB-21: resubmitting the options flow with unchanged data/options must
+    not set _skip_reload, or a later genuine structural change's update
+    listener pops the stale flag and its reload is silently swallowed."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    persisted_changed_index = method_source.index("persisted_changed = (")
+    skip_reload_index = method_source.index('entry_data["_skip_reload"] = True')
+    update_entry_index = method_source.index(
+        "self.hass.config_entries.async_update_entry"
+    )
+
+    assert persisted_changed_index < skip_reload_index < update_entry_index
+    guard_source = method_source[persisted_changed_index:skip_reload_index]
+    assert "new_data != dict(self.config_entry.data)" in guard_source
+    assert "new_options != dict(self.config_entry.options)" in guard_source
+    assert "and persisted_changed" in guard_source
+
+
 def test_optimization_options_apply_tunables_in_place_without_reload():
     """Pure optimiser tunables apply live (no reload); structural keys reload."""
     source = CONFIG_FLOW_PATH.read_text()
@@ -989,6 +1238,26 @@ def test_optimization_options_apply_tunables_in_place_without_reload():
     assert "await coordinator._run_optimization()" not in method_source
 
 
+def test_optimization_options_reconciles_unchanged_no_idle_runtime_state():
+    """An unchanged saved No Idle value must still reach the coordinator.
+
+    This repairs runtime/config divergence after an update without requiring
+    the user to save off and then on merely to force a structural reload.
+    """
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    live_settings_start = method_source.index("live_settings = {")
+    live_settings_end = method_source.index(
+        "await coordinator.set_settings(live_settings)"
+    )
+    live_settings_source = method_source[live_settings_start:live_settings_end]
+
+    assert '"disable_idle_enabled": disable_idle' in live_settings_source
+
+
 def test_optimization_settings_api_exposes_planned_ev_load_entity():
     source = INIT_PATH.read_text()
     get_method = _init_class_method("OptimizationSettingsView", "get")
@@ -1010,6 +1279,26 @@ def test_optimization_settings_api_exposes_planned_ev_load_entity():
     assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" in get_source
     assert '"max_grid_export_w"' in post_source
     assert "Cleared max_grid_export_w" in post_source
+
+
+def test_optimization_settings_api_treats_omitted_fields_as_unchanged():
+    source = INIT_PATH.read_text()
+    post_method = _init_class_method("OptimizationSettingsView", "post")
+    post_source = ast.get_source_segment(source, post_method)
+
+    assert post_source is not None
+    for key in (
+        "allow_grid_charge",
+        "max_grid_charge_price",
+        "grid_charge_soc_cap",
+        "max_grid_export_w",
+        "spread_export_enabled",
+        "spread_import_enabled",
+        "disable_idle_enabled",
+    ):
+        assert f'if "{key}" in settings:' in post_source
+
+    assert "new_options.update(settings)" not in post_source
 
 
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
@@ -1067,8 +1356,7 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)" in method_source
-    assert "supports_no_idle_mode_provider(" in method_source
-    assert "if supports_no_idle_mode:" in method_source
+    assert "supports_no_idle_mode_provider" not in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "user_input.get(CONF_PROFIT_MAX_ENABLED, False)" in method_source
     assert "CONF_CHARGE_BY_TIME_ENABLED" in method_source
@@ -1085,11 +1373,11 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
             step["data"]["optimization_auto_apply_reserve"]
             == "Auto-apply optimizer reserve"
         )
-        assert "hardware backup reserve stays user controlled" in step[
+        assert "Natural self-consumption may continue" in step[
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
-        assert "supported TOU plans" in step["data_description"][
+        assert "any electricity provider" in step["data_description"][
             "optimization_disable_idle"
         ]
 
@@ -1112,7 +1400,7 @@ def test_initial_smart_optimization_saves_charge_by_time_aliases_to_ml_options()
     ) in method_source
 
 
-def test_no_idle_option_is_provider_scoped():
+def test_no_idle_option_is_available_for_every_provider():
     source = CONFIG_FLOW_PATH.read_text()
     initial_method = _config_flow_method("async_step_ml_options")
     initial_source = ast.get_source_segment(source, initial_method)
@@ -1121,13 +1409,11 @@ def test_no_idle_option_is_provider_scoped():
 
     assert initial_source is not None
     assert options_source is not None
-    assert "supports_no_idle_mode_provider(" in initial_source
-    assert "supports_no_idle_mode_provider(current_provider)" in options_source
-
     for method_source in (initial_source, options_source):
         assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
-        assert "if supports_no_idle_mode:" in method_source
-        assert "else False" in method_source
+        assert "supports_no_idle_mode_provider" not in method_source
+        assert "if supports_no_idle_mode:" not in method_source
+        assert "BooleanSelector()" in method_source
 
 
 def test_powerwall_smart_optimization_hides_spread_options():
@@ -1177,6 +1463,85 @@ def test_options_menu_exposes_editable_battery_system_section():
     assert 'menu_options.append("alphaess_connection")' in method_source
     assert 'menu_options.append("anker_solix")' in method_source
     assert 'menu_options.append("custom_battery")' in method_source
+
+
+def test_options_menu_keeps_specialist_sections_under_advanced():
+    source = CONFIG_FLOW_PATH.read_text()
+    init_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_init")
+    )
+    advanced_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_advanced")
+    )
+
+    assert init_source is not None
+    assert advanced_source is not None
+    assert (
+        'menu_options.extend(["optimization", "ev_charging", "advanced"])'
+        in init_source
+    )
+    for specialist_section in (
+        '"network_export"',
+        '"inverter"',
+        '"curtailment"',
+        '"demand_charges"',
+        '"weather"',
+        '"auto_update"',
+        '"cloud_flow"',
+    ):
+        assert specialist_section not in init_source
+        assert specialist_section in advanced_source
+
+    assert "BATTERY_SYSTEM_SUNGROW" in advanced_source
+    assert 'menu_options.append("history_relink")' in advanced_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        steps = json.loads(path.read_text())["options"]["step"]
+        assert steps["init"]["menu_options"]["advanced"] == "Advanced settings"
+        assert "network_export" not in steps["init"]["menu_options"]
+        assert "network_export" in steps["advanced"]["menu_options"]
+        assert "safely leave these alone" in steps["advanced"]["description"]
+
+
+def test_optimization_options_are_split_without_resetting_hidden_sections():
+    source = CONFIG_FLOW_PATH.read_text()
+    menu = _options_flow_method("async_step_optimization", implementation=False)
+    implementation = _options_flow_method("_async_step_optimization")
+    menu_source = ast.get_source_segment(source, menu)
+    implementation_source = ast.get_source_segment(source, implementation)
+
+    assert menu_source is not None
+    assert implementation_source is not None
+    for section in (
+        "optimization_core",
+        "optimization_behaviour",
+        "optimization_system",
+        "optimization_advanced",
+    ):
+        assert f'"{section}"' in menu_source
+        assert f"async_step_{section}" in source
+
+    refresh_index = menu_source.index("await self._async_step_optimization(None)")
+    merge_index = menu_source.index("merge_optimization_section_input(")
+    assert refresh_index < merge_index
+    assert "current_form_values: dict[str, Any]" in implementation_source
+    assert '"core": {' in implementation_source
+    assert '"behaviour": {' in implementation_source
+    assert '"system": {' in implementation_source
+    assert '"advanced": {' in implementation_source
+    assert "if marker.schema in allowed_fields" in implementation_source
+    assert "self._optimization_visible_fields = allowed_fields" in implementation_source
+    assert "all_live_settings = {" in implementation_source
+    assert "live_settings = submitted_live_settings(" in implementation_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        step = json.loads(path.read_text())["options"]["step"]["optimization"]
+        assert step["menu_options"] == {
+            "optimization_core": "Core goals",
+            "optimization_behaviour": "Behaviour",
+            "optimization_system": "Battery & limits",
+            "optimization_advanced": "Advanced optimizer controls",
+        }
 
 
 def test_options_battery_system_selector_persists_and_routes_selection():
@@ -1731,7 +2096,7 @@ def test_direct_ac_inverter_menu_enables_runtime_polling():
     assert "True" in menu_block
 
 
-def test_sungrow_hybrid_model_can_share_battery_modbus_endpoint():
+def test_sungrow_hybrid_model_cannot_share_battery_modbus_endpoint():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_inverter_config")
     method_source = ast.get_source_segment(source, method)
@@ -1741,7 +2106,18 @@ def test_sungrow_hybrid_model_can_share_battery_modbus_endpoint():
     conflict_block = method_source[conflict_index - 350 : conflict_index + 80]
 
     assert "inverter_model = user_input.get(CONF_INVERTER_MODEL)" in method_source
-    assert 'not str(inverter_model or "").lower().startswith("sh")' in conflict_block
+    assert 'not str(inverter_model or "").lower().startswith("sh")' not in conflict_block
+    assert "inverter_host == sungrow_host" in conflict_block
+    assert "inverter_port == sungrow_port" in conflict_block
+    assert "inverter_slave_id == sungrow_slave_id" in conflict_block
+
+
+def test_sungrow_same_endpoint_ac_inverter_poller_is_skipped():
+    source = SENSOR_PATH.read_text()
+
+    assert "def _sungrow_ac_inverter_matches_battery" in source
+    assert "if inverter_enabled and not _sungrow_ac_inverter_matches_battery(entry)" in source
+    assert "Skipping AC inverter status poller" in source
 
 
 def test_sungrow_ac_inverter_models_include_three_phase_sg_rt():
@@ -1754,14 +2130,20 @@ def test_sungrow_ac_inverter_models_include_three_phase_sg_rt():
     assert '"sg10rt": "sg10rs"' in inverter_source
 
 
-def test_smart_optimization_setup_and_options_text_match():
+def test_smart_optimization_setup_and_sectioned_options_labels_match():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
         config_step = data["config"]["step"]["ml_options"]
         options_step = data["options"]["step"]["optimization"]
 
         assert config_step["title"] == options_step["title"]
-        assert config_step["description"] == options_step["description"]
+        assert "Choose the part" in options_step["description"]
+        assert set(options_step["menu_options"]) == {
+            "optimization_core",
+            "optimization_behaviour",
+            "optimization_system",
+            "optimization_advanced",
+        }
         assert config_step["data"] == options_step["data"]
         assert config_step["data_description"] == options_step["data_description"]
 

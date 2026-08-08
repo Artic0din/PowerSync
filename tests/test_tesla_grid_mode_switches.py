@@ -133,6 +133,7 @@ _ps_const.SENSOR_FAMILY_LP_OPTIMIZER = "lp_optimizer"
 _ps_const.SENSOR_FAMILY_BATTERY = "battery"
 _ps_const.SENSOR_FAMILY_CONTROLS = "controls"
 _ps_const.TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 30
+_ps_const.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 _ps_const.TESLA_CAPABILITY_WAIT_SECONDS = 30.0
 _ps_const.POWERWALL_LOCAL_POLL_INTERVAL = 2
 _ps_const.family_device_info = lambda entry_id, family: {
@@ -243,6 +244,29 @@ def test_on_grid_command_reconnects_and_shares_pending_state():
     assert off_grid.is_on is False
 
 
+def test_grid_charging_switch_prefers_fresh_local_readback():
+    hass = _Hass("SystemGridConnected")
+    coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
+    coord.data.grid_charging_enabled = False
+    coord.last_success_monotonic = switch.time.monotonic()
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
+        _site_info_cache={
+            "components": {
+                "disallow_charge_from_grid_with_solar_installed": False
+            }
+        }
+    )
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"powerwall_local_paired": True},
+        options={},
+    )
+
+    entity = switch.GridChargingSwitch(hass, entry)
+
+    assert entity.is_on is False
+
+
 def test_force_switches_are_added_for_non_tesla_batteries():
     hass = _Hass("SystemGridConnected")
     entry = types.SimpleNamespace(
@@ -285,7 +309,7 @@ def test_monitoring_switch_reads_updated_config_entry_options():
     assert monitoring_switch.write_count == 1
 
 
-def test_monitoring_switch_restores_sigenergy_native_control_when_enabled():
+def test_monitoring_switch_restores_sigenergy_without_native_handoff_when_enabled():
     hass = _Hass("SystemGridConnected")
     entry = types.SimpleNamespace(
         entry_id="entry-1",
@@ -308,10 +332,33 @@ def test_monitoring_switch_restores_sigenergy_native_control_when_enabled():
         (
             "power_sync",
             "restore_normal",
-            {"source": "manual", "_force_restore": True, "_native_control": True},
+            {"source": "manual", "_force_restore": True},
             True,
         ),
     ]
+
+
+def test_monitoring_switch_already_enabled_is_write_free():
+    """Re-submitting monitoring=true must not issue cleanup hardware writes."""
+    hass = _Hass("SystemGridConnected")
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"monitoring_mode": True},
+        options={"monitoring_mode": True},
+    )
+    monitoring_switch = switch.MonitoringModeSwitch(
+        hass,
+        entry,
+        types.SimpleNamespace(
+            key="monitoring_mode",
+            name="Monitoring mode",
+        ),
+    )
+
+    asyncio.run(monitoring_switch.async_turn_on())
+
+    assert entry.options["monitoring_mode"] is True
+    assert hass.services.calls == []
 
 
 def test_force_discharge_switch_uses_selected_duration_and_force_power():
@@ -335,7 +382,12 @@ def test_force_discharge_switch_uses_selected_duration_and_force_power():
     asyncio.run(force_switch.async_turn_on())
 
     assert hass.services.calls == [
-        ("power_sync", "force_discharge", {"duration": 90, "power_w": 5500}, True),
+        (
+            "power_sync",
+            "force_discharge",
+            {"duration": 90, "power_w": 5500, "source": "user"},
+            True,
+        ),
     ]
 
 
@@ -360,7 +412,32 @@ def test_force_charge_switch_uses_selected_duration_and_force_power():
     asyncio.run(force_switch.async_turn_on())
 
     assert hass.services.calls == [
-        ("power_sync", "force_charge", {"duration": 120, "power_w": 4000}, True),
+        (
+            "power_sync",
+            "force_charge",
+            {"duration": 120, "power_w": 4000, "source": "user"},
+            True,
+        ),
+    ]
+
+
+def test_force_switch_stop_is_user_sourced_for_monitoring_mode():
+    hass = _Hass("SystemGridConnected")
+    entry = _entry()
+    force_switch = switch.ForceDischargeSwitch(
+        hass,
+        entry,
+        _SwitchEntityDescription(
+            key="force_discharge",
+            name="Force Discharge",
+            icon="mdi:battery-arrow-up",
+        ),
+    )
+
+    asyncio.run(force_switch.async_turn_off())
+
+    assert hass.services.calls == [
+        ("power_sync", "restore_normal", {"source": "user"}, True),
     ]
 
 

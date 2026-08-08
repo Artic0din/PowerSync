@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -34,10 +35,17 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_statistic_suffixes",
         "_find_calendar_statistic_entity_ids",
         "_calendar_residual_entry",
+        "_calendar_reconcile_current_day_rows",
         "_calendar_range_includes_today",
         "_calendar_statistics_end_dt",
         "_calendar_history_bucket_timestamp",
         "_calendar_time_series_from_state_history_rows",
+        "_calendar_time_series_from_state_history",
+        "_calendar_time_series_totals_kwh",
+        "_calculate_cost_from_tariff",
+        "_find_season_for_month",
+        "_weighted_avg_rates",
+        "_calendar_result_from_energy_summary",
     }
     body: list[ast.stmt] = []
     for node in tree.body:
@@ -59,7 +67,10 @@ def _calendar_namespace() -> dict[str, Any]:
             )
         ):
             body.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in wanted_functions
+        ):
             body.append(node)
 
     module = ast.Module(body=body, type_ignores=[])
@@ -73,6 +84,12 @@ def _calendar_namespace() -> dict[str, Any]:
         "dt_util": SimpleNamespace(
             now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
             as_local=lambda value: value,
+        ),
+        "_LOGGER": SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
         ),
     }
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
@@ -128,6 +145,38 @@ def _fake_entity_registry(entities: dict[str, Any]):
             ("homeassistant.helpers", previous_helpers),
             ("homeassistant.helpers.entity_registry", previous_registry),
         ):
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+
+
+@contextmanager
+def _fake_recorder_history(get_significant_states):
+    class _Recorder:
+        async def async_add_executor_job(self, target, *args):
+            return target(*args)
+
+    recorder = SimpleNamespace(get_instance=lambda hass: _Recorder())
+    history = SimpleNamespace(get_significant_states=get_significant_states)
+    components = SimpleNamespace(recorder=recorder)
+    previous_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "homeassistant",
+            "homeassistant.components",
+            "homeassistant.components.recorder",
+            "homeassistant.components.recorder.history",
+        )
+    }
+    sys.modules["homeassistant"] = SimpleNamespace(components=components)
+    sys.modules["homeassistant.components"] = components
+    sys.modules["homeassistant.components.recorder"] = recorder
+    sys.modules["homeassistant.components.recorder.history"] = history
+    try:
+        yield
+    finally:
+        for module_name, previous in previous_modules.items():
             if previous is None:
                 sys.modules.pop(module_name, None)
             else:
@@ -221,6 +270,189 @@ def test_calendar_residual_entry_subtracts_existing_hourly_rows():
     assert residual["home_consumption"] == 7000
     assert residual["solar_energy_exported"] == 4000
     assert residual["consumer_energy_imported"] == 7000
+
+
+def test_current_day_rows_fall_back_to_live_totals_when_statistics_are_stale():
+    """A reset-skewed recorder row must not mix yesterday into today's summary."""
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T20:28:38+10:00",
+        "solar_generation": 40_381,
+        "battery_discharge": 18_350,
+        "battery_charge": 38_680,
+        "grid_import": 13_060,
+        "grid_export": 13_440,
+        "home_consumption": 20_260,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T00:00:00+10:00",
+            "solar_generation": 23_440,
+            "battery_discharge": 41_922,
+            "battery_charge": 38_754,
+            "grid_import": 31_592,
+            "grid_export": 28_468,
+            "home_consumption": 36_044,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 40_381
+    assert rows[0]["battery_discharge"] == 18_350
+    assert rows[0]["battery_charge"] == 38_680
+    assert rows[0]["grid_import"] == 13_060
+    assert rows[0]["grid_export"] == 13_440
+    assert rows[0]["home_consumption"] == 20_260
+    assert rows[0]["grid_energy_imported"] == 13_060
+    assert rows[0]["grid_energy_exported"] == 13_440
+
+
+def test_current_day_rows_keep_hourly_shape_when_statistics_match_live_totals():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T20:28:38+10:00",
+        "solar_generation": 10_000,
+        "battery_discharge": 4_000,
+        "battery_charge": 6_000,
+        "grid_import": 12_000,
+        "grid_export": 3_000,
+        "home_consumption": 15_000,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T08:00:00+10:00",
+            "solar_generation": 6_000,
+            "battery_discharge": 2_000,
+            "battery_charge": 3_000,
+            "grid_import": 6_000,
+            "grid_export": 500,
+            "home_consumption": 8_000,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["timestamp"] == "2026-07-20T08:00:00+10:00"
+    assert sum(row["grid_import"] for row in rows) == 12_000
+    assert sum(row["grid_export"] for row in rows) == 3_000
+    assert sum(row["solar_generation"] for row in rows) == 10_000
+
+
+def test_current_day_rows_treat_an_authoritative_zero_as_current():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T08:00:00+10:00",
+        "solar_generation": 10_000,
+        "battery_discharge": 0,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T07:00:00+10:00",
+            "solar_generation": 8_000,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 700,
+            "grid_export": 600,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 10_000
+    assert rows[0]["grid_export"] == 0
+
+
+def test_current_day_rows_drop_single_stale_solar_carryover():
+    """One yesterday-valued field must not survive beside progressed live totals."""
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-22T06:39:00+10:00",
+        "solar_generation": 0,
+        "battery_discharge": 4_060,
+        "battery_charge": 0,
+        "grid_import": 23,
+        "grid_export": 24,
+        "home_consumption": 4_060,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-22T00:00:00+10:00",
+            "solar_generation": 42_600,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 0,
+            "grid_export": 0,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 0
+    assert rows[0]["battery_discharge"] == 4_060
+    assert rows[0]["grid_import"] == 23
+    assert rows[0]["grid_export"] == 24
+    assert rows[0]["home_consumption"] == 4_060
+    assert rows[0]["solar_energy_exported"] == 0
+    assert rows[0]["battery_energy_exported"] == 4_060
+    assert rows[0]["grid_energy_imported"] == 23
+    assert rows[0]["grid_energy_exported"] == 24
+    assert rows[0]["consumer_energy_imported"] == 4_060
+
+
+def test_current_day_rows_keep_recorder_history_for_a_fresh_accumulator():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T08:00:00+10:00",
+        "solar_generation": 2_000,
+        "battery_discharge": 1_000,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T07:00:00+10:00",
+            "solar_generation": 12_000,
+            "battery_discharge": 5_000,
+            "battery_charge": 0,
+            "grid_import": 0,
+            "grid_export": 0,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert sum(row["solar_generation"] for row in rows) == 12_000
+    assert sum(row["battery_discharge"] for row in rows) == 5_000
 
 
 def test_calendar_state_history_rows_convert_daily_totals_to_hourly_deltas():
@@ -352,6 +584,52 @@ def test_calendar_state_history_rows_allow_next_day_reset():
     )
 
     assert [row["solar_generation"] for row in rows] == [8000, 3000]
+
+
+def test_calendar_state_history_excludes_pre_midnight_start_state():
+    namespace = _calendar_namespace()
+    start = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 20, 6, 26, tzinfo=timezone.utc)
+    captured: dict[str, bool] = {}
+
+    def get_significant_states(
+        hass,
+        start_time,
+        end_time,
+        entity_ids,
+        filters=None,
+        include_start_time_state=True,
+    ):
+        captured["include_start_time_state"] = include_start_time_state
+        states = []
+        if include_start_time_state:
+            # Home Assistant normally injects the pre-range state at start_time.
+            states.append(_history_state("13.2", start_time))
+        states.extend(
+            [
+                _history_state("0", start_time + timedelta(minutes=1)),
+                _history_state("0.03", end_time - timedelta(minutes=1)),
+            ]
+        )
+        return {entity_ids[0]: states}
+
+    async def async_add_executor_job(target, *args):
+        return target(*args)
+
+    hass = SimpleNamespace(async_add_executor_job=async_add_executor_job)
+    with _fake_recorder_history(get_significant_states):
+        rows = asyncio.run(
+            namespace["_calendar_time_series_from_state_history"](
+                hass,
+                "day",
+                start,
+                end,
+                {"grid_import": "sensor.power_sync_daily_grid_import"},
+            )
+        )
+
+    assert captured["include_start_time_state"] is False
+    assert sum(row["grid_import"] for row in rows) == 30
 
 
 def test_calendar_statistic_finder_accepts_foxess_daily_battery_aliases():
@@ -519,3 +797,63 @@ def test_current_calendar_entry_does_not_invent_solar_or_battery_export_splits()
     assert entry["grid_energy_exported"] == 33730
     assert "grid_energy_exported_from_solar" not in entry
     assert "grid_energy_exported_from_battery" not in entry
+
+
+def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
+    namespace = _calendar_namespace()
+
+    async def fake_statistics(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "timestamp": "2026-07-01T00:00:00+10:00",
+                "grid_import": 100_000,
+                "grid_export": 20_000,
+                "home_consumption": 90_000,
+                "solar_generation": 10_000,
+                "battery_discharge": 5_000,
+                "battery_charge": 6_000,
+            },
+            {
+                "timestamp": "2026-07-02T00:00:00+10:00",
+                "grid_import": 50_000,
+                "grid_export": 5_000,
+                "home_consumption": 45_000,
+                "solar_generation": 8_000,
+                "battery_discharge": 4_000,
+                "battery_charge": 3_000,
+            },
+        ]
+
+    async def reset_skewed_costs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "import_cost": 1.62,
+            "export_earnings": 0.88,
+            "net_cost": 0.74,
+            "estimated": False,
+        }
+
+    namespace["_calendar_time_series_from_statistics"] = fake_statistics
+    namespace["_calculate_cost_from_statistics"] = reset_skewed_costs
+
+    tariff_schedule = {
+        "buy_rates": {"ALL": 0.40},
+        "sell_rates": {"ALL": 0.10},
+        "seasons": {},
+        "tou_periods": {},
+    }
+
+    result = namespace["_calendar_result_from_energy_summary"](
+        SimpleNamespace(),
+        "month",
+        None,
+        SimpleNamespace(),
+        "entry-1",
+        tariff_schedule,
+        "Sigenergy",
+    )
+    result = asyncio.run(result)
+
+    assert result["cost_summary"]["estimated"] is True
+    assert result["cost_summary"]["import_cost"] == 60.0
+    assert result["cost_summary"]["export_earnings"] == 2.5
+    assert result["cost_summary"]["net_cost"] == 57.5

@@ -16,9 +16,23 @@ saved Smart Optimization settings but does not own battery dispatch.
 
 ### Minimum discharge level
 
-The optimizer reserve floor. Smart Optimization will not intentionally discharge
-below this level. This is separate from the battery hardware backup reserve used
-for grid outages.
+The software boundary for intentional battery-to-grid export. Natural
+self-consumption may continue below this level to the separate hardware backup
+reserve. Merely allowing export in a slot does not turn this value into a global
+SOC hold or recharge target.
+
+### Auto-apply optimizer reserve
+
+When enabled, the selected minimum discharge level becomes the buffer that the
+forecast should retain until the next charging opportunity. For each planned
+export window, PowerSync adds the forecast net household load between the end of
+the full eligible export window and the next grid or solar charge. The resulting
+Calculated Reserve stops intentional export early enough for forecast
+self-consumption to finish at the selected buffer.
+
+Auto-Apply never lowers the Calculated Reserve below the selected minimum. It
+does not change the hardware backup reserve or force the battery to recharge;
+actual unforecast load can still consume the software buffer.
 
 ### Hardware backup reserve
 
@@ -43,6 +57,61 @@ custom tariff. ZeroHero Super Export is modeled separately as a capped export
 top-up, and ZeroCharge is modeled separately as a capped free-import window.
 For Jul 2026 terms this means a 12:00-15:00 free-import window with a 50 kWh
 daily cap, plus the 18:00-21:00 Super Export/no-import window.
+
+### CovaU SolarMax
+
+CovaU is configured as an electricity provider. PowerSync supports the current,
+fixture-backed SolarMax products for Ausgrid, Endeavour Energy, Essential
+Energy, Energex and SA Power Networks. Postcode filters the candidates; setup
+still requires confirmation of the exact distributor and AER plan ID.
+
+The selected public AER/CDR plan response and normalized tariff are cached as an
+immutable snapshot. A withdrawn plan is never silently replaced with a
+successor. If a public plan is unavailable or account-specific, setup provides a
+validated manual stepped-tariff fallback.
+
+SolarMax allowances are settled from measured PCC energy, not from the
+optimizer schedule. Select cumulative `total_increasing` import and export
+energy sensors where possible. Power-integrated estimates are accepted only
+while telemetry remains continuous. A telemetry gap or a first setup without a
+valid tariff-day baseline marks quota confidence unknown and disables quota
+bonus optimization until the next reset.
+
+The tariff's `AEST` token means fixed UTC+10. It does not follow Home Assistant
+timezone settings or Adelaide daylight-saving time. Current price sensors show
+the effective marginal price, and the CovaU sensors/API expose cap, settled,
+remaining and planned quota values explicitly in kWh.
+
+## Network export limits / Flexible Exports
+
+Flexible Exports is a separate network constraint, not an electricity provider.
+PowerSync reads a limit exposed by already-certified site equipment through Home
+Assistant. It does not implement IEEE 2030.5, certificates, NEPKI registration,
+SAPN onboarding or DERControl writes, and it must not be described as a
+CSIP-AUS-certified client.
+
+The default mode is **Off**, which preserves existing behavior. **Monitoring**
+shows the envelope and suppresses intentional PowerSync export. This release is
+monitoring-only while the required seven-day SAPN site soak and staged
+fallback/recovery replay are completed. The tested **Active** implementation is
+held behind a runtime release gate and cannot be selected or armed.
+
+When Active is enabled in a later release, it will remain an explicit opt-in and
+will arm only after a fresh post-subscription update, trusted non-template
+entity provenance, a site-approved fallback, fresh PCC telemetry, whole-site
+DER coverage attestation, and a safe site phase/scope combination.
+
+Active enforcement uses the lower of the existing static export cap and the
+valid live envelope. Invalid or missing live data uses the approved fallback; a
+missing fallback fails closed to 0 W. The runtime guard also reserves at least
+250 W or 5% of the effective limit and accounts for unmanaged PCC export before
+allowing a battery export command. A source fault, stale PCC value, overshoot or
+failed stop command disables intentional export and remains visible in Home
+Assistant and the mobile app.
+
+There is no writable network-limit, override or bypass endpoint. The certified
+controller remains authoritative and must continue enforcing the connection
+agreement when Home Assistant or PowerSync is offline.
 
 ## Advanced optimizer controls
 
@@ -74,8 +143,8 @@ battery above the cap, and it does not change the battery's outage reserve.
 
 The maximum grid import/export, spread import/export, No Idle, and auto-applied
 reserve controls are also advanced settings because they change solver limits or
-post-processing behavior. They are grouped with the grid-charge price and SOC cap
-in the mobile app.
+the final physical trajectory. They are grouped with the grid-charge price and SOC
+cap in the mobile app.
 
 ## Profit Max
 
@@ -85,6 +154,17 @@ value assigned to ending the forecast horizon with a high battery SOC.
 
 Profit Max does not, by itself, force the battery to be full by a deadline. Use
 Charge By Time for that behavior.
+
+Profit Max uses the same reserve model as normal Smart Optimization: intentional
+export stops at the active optimizer reserve, while later household
+self-consumption may continue to the hardware reserve. Profit Max by itself does
+not add a hidden home-load bridge or require an overnight top-up. When Auto-Apply
+Optimizer Reserve is enabled, its explicit forecast bridge raises only the
+intentional-export floor. Grid charging is scheduled only when the modeled tariff
+value, efficiency, limits, and future load/export value make it worthwhile.
+Provider priority is permission, not a synthetic subsidy: export below the
+modeled acquisition cost is allowed only when an actual, reachable quantity of
+cheaper future recharge is paired with it.
 
 For Flow Power users, Profit Max still unlocks the Flow Power Happy Hour export
 window behavior: battery export is allowed during the configured Happy Hour
@@ -123,10 +203,12 @@ same-price import windows instead of using maximum charge power immediately.
 
 ## No Idle mode
 
-For supported TOU plans, No Idle mode replaces optimizer idle hold actions with
-self-consumption. If Charge By Time is active and the battery is below the target
-SOC before the target time, PowerSync preserves the hold behavior needed to meet
-the deadline.
+For every electricity provider, No Idle mode replaces optimizer idle hold actions
+with self-consumption. If Charge By Time is active and the battery is below the
+target SOC before the target time, PowerSync preserves the hold behavior needed to
+meet the deadline. The 24-hour Action Plan and battery-power graph show the final
+modeled behavior: ordinary No Idle periods appear as self-consumption and
+battery-to-home power, while an explicit Charge By Time hold remains IDLE.
 
 ## App and API fields
 

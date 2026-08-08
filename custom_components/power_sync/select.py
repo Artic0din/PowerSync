@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -11,17 +13,39 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
+    CONF_POWERWALL_LOCAL_PAIRED,
     DEFAULT_DISCHARGE_DURATION,
     DISCHARGE_DURATIONS,
     family_device_info,
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_GRID_HOME,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:
+    """Return fresh local Powerwall data when paired, otherwise None."""
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+    coordinator = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("powerwall_local", {})
+        .get("coordinator")
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
+    if data is None or last_success_monotonic is None:
+        return None
+    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 async def async_setup_entry(
@@ -224,6 +248,11 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 
     @property
     def current_option(self) -> str | None:
+        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_mode = getattr(local_snap, "operation_mode", None)
+        if local_mode in self._OPTIONS:
+            return local_mode
+
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:
@@ -260,15 +289,30 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     @property
     def current_option(self) -> str | None:
+        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_rule = getattr(local_snap, "grid_export_rule", None)
+        if local_rule in self._OPTIONS:
+            return local_rule
+
         # Prefer the cached value written when the user last set the rule
         # via a service call — this survives even when the Tesla API's
         # site_info response omits customer_preferred_export_rule (which
         # happens on VPP / non-export-configured sites). Without this
         # fallback, the select used to show as "unknown" for any such site.
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        cached = entry_data.get("cached_export_rule")
-        if cached in self._OPTIONS:
-            return cached
+        # Only trust the cache while curtailment is actively managing the
+        # rule (mirrors PowerwallSettingsView's gating in __init__.py) — a
+        # manual set_grid_export call otherwise pins this cache forever, so
+        # once curtailment is off the entity must fall through to the live
+        # site_info value instead of a permanently stale rule.
+        solar_curtailment_enabled = self._entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        )
+        if solar_curtailment_enabled:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+            cached = entry_data.get("cached_export_rule")
+            if cached in self._OPTIONS:
+                return cached
 
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None

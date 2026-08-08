@@ -6,9 +6,10 @@ import asyncio
 import ast
 import importlib
 import inspect
+import math
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.util.dt",
     "power_sync",
     "power_sync.const",
+    "power_sync.coordinator",
     "power_sync.flow_power_pricing",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
@@ -108,6 +110,8 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
+    const_module.CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
@@ -131,6 +135,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_LOAD_ENTITY = "optimization_load_entity"
     const_module.CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
+    const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.DEFAULT_SOLAR_FORECAST_PROVIDER = "solcast"
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
     const_module.SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
@@ -151,6 +156,27 @@ def _install_power_sync_stubs() -> None:
     const_module.FLOW_POWER_MARKET_AVG = 8.0
     const_module.NETWORK_API_NAME = {"Ausgrid": "ausgrid"}
     sys.modules["power_sync.const"] = const_module
+
+    coordinator_module = types.ModuleType("power_sync.coordinator")
+
+    def _normalize_custom_power_kw(value, unit=""):
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(normalized):
+            return None
+        normalized_unit = str(unit or "").strip().lower()
+        if normalized_unit in {"w", "watt", "watts"}:
+            return normalized / 1000.0
+        if normalized_unit in {"mw", "megawatt", "megawatts"}:
+            return normalized * 1000.0
+        if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
+            return normalized
+        return normalized / 1000.0 if abs(normalized) > 100 else normalized
+
+    coordinator_module.normalize_custom_power_kw = _normalize_custom_power_kw
+    sys.modules["power_sync.coordinator"] = coordinator_module
 
     ev_module = types.ModuleType("power_sync.optimization.ev_coordinator")
     ev_module.EVCoordinator = type("EVCoordinator", (), {})
@@ -631,6 +657,62 @@ def _coordinator_with_epex_provider(
     return coordinator
 
 
+def _coordinator_with_dynamic_price_provider(
+    opt_coordinator,
+    provider: str,
+    forecast: list[dict],
+    current: list[dict] | None = None,
+    amber_forecast_type: str | None = None,
+    horizon_hours: float = 1,
+):
+    options = {"electricity_provider": provider}
+    if amber_forecast_type is not None:
+        options["amber_forecast_type"] = amber_forecast_type
+
+    coordinator = object.__new__(opt_coordinator.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator.entry_id = "entry-1"
+    coordinator._entry = SimpleNamespace(entry_id="entry-1", data={}, options=options)
+    coordinator._config = opt_coordinator.OptimizationConfig(horizon_hours=horizon_hours)
+    coordinator.price_coordinator = SimpleNamespace(
+        data={"current": current or [], "forecast": forecast}
+    )
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._apply_export_boost = lambda export, import_prices=None: (export, [])
+    coordinator._apply_saving_session_prices = lambda imports, exports: (imports, exports)
+    coordinator._apply_chip_mode = lambda exports, *args: exports
+    coordinator._apply_demand_charge_penalty = lambda imports: imports
+    coordinator._apply_confidence_decay = lambda imports, exports, **kwargs: (
+        imports,
+        exports,
+    )
+    return coordinator
+
+
+def _dynamic_price_entry(
+    start: datetime,
+    import_cents: float,
+    channel: str,
+    *,
+    interval_type: str = "ForecastInterval",
+    advanced_price: dict | float | None = None,
+) -> dict:
+    end = start + timedelta(minutes=30)
+    entry = {
+        "valid_from": start.isoformat(),
+        "valid_to": end.isoformat(),
+        "nemTime": end.isoformat(),
+        "duration": 30,
+        "perKwh": -import_cents if channel == "feedIn" else import_cents,
+        "channelType": channel,
+        "type": interval_type,
+    }
+    if advanced_price is not None:
+        entry["advancedPrice"] = advanced_price
+    return entry
+
+
 def test_ev_integration_defaults_to_initial_config_data(opt_module):
     entry = SimpleNamespace(
         data={"optimization_ev_integration": True},
@@ -646,6 +728,48 @@ def test_ev_integration_defaults_to_initial_config_data(opt_module):
     )
 
     assert coordinator._ev_integration_enabled is True
+
+
+def test_ev_load_subtraction_uses_monitoring_only_generic_charger_entity(opt_module):
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "optimization_ev_integration": True,
+            "generic_charger_power_entity": "sensor.tesla_wall_connector_load",
+        },
+    )
+
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(),
+        entry_id="entry-1",
+        battery_system="sungrow",
+        battery_controller=SimpleNamespace(),
+        entry=entry,
+    )
+
+    assert coordinator._ev_load_subtraction_entities() == [
+        "sensor.tesla_wall_connector_load"
+    ]
+
+
+def test_ev_load_subtraction_entry_fallback_respects_battery_skip_guard(opt_module):
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "optimization_ev_integration": True,
+            "generic_charger_power_entity": "sensor.tesla_wall_connector_load",
+        },
+    )
+
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(),
+        entry_id="entry-1",
+        battery_system="tesla",
+        battery_controller=SimpleNamespace(),
+        entry=entry,
+    )
+
+    assert coordinator._ev_load_subtraction_entities() == []
 
 
 def test_load_sensor_auto_discovery_skips_generated_forecast_sensor(opt_module):
@@ -1002,6 +1126,248 @@ def test_epex_export_price_sensor_is_ignored_for_other_providers(opt_module):
     assert coordinator._last_display_export_prices == [0.08] * 12
 
 
+def test_amber_dynamic_import_forecast_uses_advanced_price_predicted(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, per_kwh, predicted in (
+        (0, 33.0, 194.0),
+        (30, 44.0, 244.0),
+    ):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                per_kwh,
+                "general",
+                advanced_price={"predicted": predicted, "low": 150.0, "high": 280.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices[:6] == pytest.approx([1.94] * 6)
+    assert import_prices[6:] == pytest.approx([2.44] * 6)
+    assert coordinator._last_display_import_prices == pytest.approx(import_prices)
+
+
+def test_amber_dynamic_import_forecast_honors_configured_forecast_type(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "general",
+                advanced_price={"predicted": 30.0, "low": 18.0, "high": 65.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        amber_forecast_type="high",
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.65] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([0.65] * 12)
+
+
+def test_amber_dynamic_import_missing_retail_price_does_not_use_wholesale(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(
+            start,
+            4.0,
+            "general",
+            interval_type="CurrentInterval",
+        ),
+        _dynamic_price_entry(start, 8.0, "feedIn", interval_type="CurrentInterval"),
+    ]
+    forecast = [
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            33.0,
+            "general",
+            advanced_price={"predicted": 30.0, "low": 20.0, "high": 40.0},
+        ),
+        _dynamic_price_entry(start + timedelta(minutes=30), 8.0, "feedIn"),
+        _dynamic_price_entry(start + timedelta(minutes=60), 5.0, "general"),
+        _dynamic_price_entry(start + timedelta(minutes=60), 8.0, "feedIn"),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        current=current,
+        horizon_hours=1.5,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.30] * 18)
+    assert coordinator._last_display_import_prices == pytest.approx([0.30] * 18)
+
+
+def test_amber_dynamic_export_forecast_uses_advanced_price_predicted(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, per_kwh, predicted in (
+        (0, 33.0, -194.0),
+        (30, 44.0, -244.0),
+    ):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                30.0,
+                "general",
+                advanced_price={"predicted": 30.0},
+            )
+        )
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                per_kwh,
+                "feedIn",
+                advanced_price={"predicted": predicted, "low": -150.0, "high": -280.0},
+            )
+        )
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices[:6] == pytest.approx([1.94] * 6)
+    assert export_prices[6:] == pytest.approx([2.44] * 6)
+    assert coordinator._last_display_export_prices == pytest.approx(export_prices)
+
+
+def test_amber_dynamic_export_forecast_honors_configured_forecast_type(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                30.0,
+                "general",
+                advanced_price={"predicted": 30.0, "high": 30.0},
+            )
+        )
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "feedIn",
+                advanced_price={"predicted": -30.0, "low": -18.0, "high": -65.0},
+            )
+        )
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        amber_forecast_type="high",
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == pytest.approx([0.65] * 12)
+    assert coordinator._last_display_export_prices == pytest.approx([0.65] * 12)
+
+
+def test_amber_dynamic_export_missing_retail_price_does_not_use_wholesale(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(
+            start,
+            30.0,
+            "general",
+            interval_type="CurrentInterval",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start,
+            4.0,
+            "feedIn",
+            interval_type="CurrentInterval",
+        ),
+    ]
+    forecast = [
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            33.0,
+            "feedIn",
+            advanced_price={"predicted": -30.0, "low": -20.0, "high": -40.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=60),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(start + timedelta(minutes=60), 5.0, "feedIn"),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        current=current,
+        horizon_hours=1.5,
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == pytest.approx([0.30] * 18)
+    assert coordinator._last_display_export_prices == pytest.approx([0.30] * 18)
+
+
+def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "general",
+                advanced_price={"predicted": 99.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "octopus",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.12] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([0.12] * 12)
+
+
 def test_static_tou_provider_does_not_attach_dynamic_aemo_listener(opt_module):
     coordinator = _coordinator_with_static_tou_provider(opt_module)
 
@@ -1163,7 +1529,7 @@ def test_flow_power_optimizer_uses_base_rate_from_entry_data(opt_module, monkeyp
     assert coordinator._last_display_import_prices[0] == pytest.approx(0.5443)
 
 
-def test_flow_power_optimizer_uses_raw_twap_with_portal_pricing_inputs(opt_module, monkeypatch):
+def test_flow_power_optimizer_uses_raw_twap_with_account_pricing_inputs(opt_module, monkeypatch):
     async def _executor(fn, *args):
         return fn(*args)
 
@@ -1175,7 +1541,7 @@ def test_flow_power_optimizer_uses_raw_twap_with_portal_pricing_inputs(opt_modul
                 "entry-1": {
                     "fp_avg_daily_tariff": 5.0,
                     "flow_power_twap_tracker": SimpleNamespace(twap=8.0),
-                    "flow_power_portal_data": {
+                    "flow_power_account_data": {
                         "twap": 10.0,
                         "bpea": 2.0,
                         "gst_multiplier": 1.2,
@@ -1252,7 +1618,7 @@ def test_flow_power_optimizer_uses_current_interval_for_active_tariff_slot(
             "power_sync": {
                 "entry-1": {
                     "fp_avg_daily_tariff": 5.0,
-                    "flow_power_portal_data": {
+                    "flow_power_account_data": {
                         "twap": 10.0,
                         "bpea": 2.0,
                         "gst_multiplier": 1.2,
@@ -1401,6 +1767,300 @@ def test_flow_power_decays_far_future_import_spikes_but_keeps_happy_hour_export(
     assert export_prices[happy_hour_slot] == pytest.approx(0.45)
 
 
+def test_flow_power_export_price_gate_keeps_forecast_origin_across_boundary(
+    opt_module,
+    monkeypatch,
+):
+    solve_time = datetime(2026, 5, 3, 17, 25, tzinfo=timezone.utc)
+    clock = {"now": solve_time}
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: clock["now"],
+    )
+
+    forecast = []
+    for offset in (0, 30):
+        slot_start = solve_time + timedelta(minutes=offset)
+        forecast.append(_dynamic_price_entry(slot_start, 20.0, "general"))
+        forecast.append(_dynamic_price_entry(slot_start, 1.0, "feedIn"))
+
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "flow_power",
+        forecast,
+    )
+    coordinator._entry.options["flow_power_state"] = "NSW1"
+    stale_origin = solve_time - timedelta(hours=1)
+    stale_timestamps = [
+        stale_origin + timedelta(minutes=5 * idx)
+        for idx in range(12)
+    ]
+    coordinator._last_price_timestamps = stale_timestamps
+
+    import_prices, export_prices = asyncio.run(
+        coordinator._get_price_forecast()
+    )
+
+    boundary = solve_time + timedelta(minutes=5)
+    assert export_prices[:2] == pytest.approx([0.0, 0.45])
+    assert coordinator._last_price_timestamps == stale_timestamps
+    assert coordinator._pending_price_timestamps[:2] == [solve_time, boundary]
+
+    coordinator._commit_price_forecast_cache(import_prices, export_prices)
+
+    assert coordinator._last_price_timestamps[:2] == [solve_time, boundary]
+
+    action = opt_module.ScheduleAction(
+        timestamp=boundary,
+        action="export",
+        power_w=4200.0,
+    )
+    clock["now"] = boundary
+
+    assert (
+        coordinator._current_export_price_for_action(export_prices, action)
+        == pytest.approx(0.45)
+    )
+
+
+def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
+    opt_module,
+):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    accepted_origin = datetime(2026, 5, 3, 17, 20, tzinfo=timezone.utc)
+    accepted_timestamps = [
+        accepted_origin + timedelta(minutes=5 * idx)
+        for idx in range(3)
+    ]
+    accepted_import_prices = [0.30, 0.31, 0.32]
+    accepted_export_prices = [0.0, 0.0, 0.45]
+    staged_timestamps = [
+        accepted_origin + timedelta(minutes=5 * (idx + 1))
+        for idx in range(3)
+    ]
+
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._battery_specs_source = "config"
+    coordinator._ev_integration_enabled = False
+    coordinator._last_price_timestamps = accepted_timestamps
+    coordinator._last_import_prices = accepted_import_prices
+    coordinator._last_export_prices = accepted_export_prices
+    coordinator._pending_price_timestamps = None
+
+    async def no_restart_restore_pending():
+        return False
+
+    async def stage_new_prices():
+        coordinator._pending_price_timestamps = staged_timestamps
+        assert coordinator._price_timestamps(3) == staged_timestamps
+        assert coordinator._last_price_timestamps == accepted_timestamps
+        assert coordinator._last_export_prices == accepted_export_prices
+        return [0.33, 0.34, 0.35], [0.0, 0.45, 0.45]
+
+    async def fail_after_price_forecast():
+        raise RuntimeError("downstream forecast failure")
+
+    coordinator._wait_for_restart_force_restore = no_restart_restore_pending
+    coordinator._get_price_forecast = stage_new_prices
+    coordinator._get_solar_forecast = fail_after_price_forecast
+
+    asyncio.run(coordinator._run_optimization())
+
+    assert coordinator._last_price_timestamps == accepted_timestamps
+    assert coordinator._last_import_prices == accepted_import_prices
+    assert coordinator._last_export_prices == accepted_export_prices
+    assert coordinator._pending_price_timestamps is None
+
+
+def test_optional_second_pass_failure_keeps_first_published_schedule_price_pair(
+    opt_module,
+):
+    method_source = inspect.getsource(
+        opt_module.OptimizationCoordinator._run_optimization
+    )
+    first_schedule_publish = method_source.index(
+        "self._current_schedule = result.schedule"
+    )
+    first_result_publish = method_source.index(
+        "self._last_optimizer_result = result",
+        first_schedule_publish,
+    )
+    price_cache_commit = method_source.index(
+        "self._commit_price_forecast_cache(import_prices, export_prices)",
+        first_result_publish,
+    )
+    optional_second_pass = method_source.index(
+        "reserve_changed = self._apply_auto_reserve_recommendation(result)",
+        price_cache_commit,
+    )
+    assert (
+        first_schedule_publish
+        < first_result_publish
+        < price_cache_commit
+        < optional_second_pass
+    )
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    old_origin = datetime(2026, 5, 3, 17, 20, tzinfo=timezone.utc)
+    new_origin = old_origin + timedelta(minutes=5)
+    old_schedule = SimpleNamespace(name="old")
+    first_schedule = SimpleNamespace(name="first-pass")
+    old_import_prices = [0.30, 0.31]
+    old_export_prices = [0.0, 0.45]
+    new_import_prices = [0.32, 0.33]
+    new_export_prices = [0.45, 0.45]
+    new_timestamps = [new_origin, new_origin + timedelta(minutes=5)]
+    coordinator._current_schedule = old_schedule
+    coordinator._last_import_prices = old_import_prices
+    coordinator._last_export_prices = old_export_prices
+    coordinator._last_price_timestamps = [
+        old_origin,
+        old_origin + timedelta(minutes=5),
+    ]
+    coordinator._pending_price_timestamps = new_timestamps
+
+    try:
+        coordinator._current_schedule = first_schedule
+        coordinator._commit_price_forecast_cache(
+            new_import_prices,
+            new_export_prices,
+        )
+        raise RuntimeError("optional auto-reserve re-solve failed")
+    except RuntimeError:
+        pass
+
+    assert coordinator._current_schedule is first_schedule
+    assert coordinator._last_import_prices == new_import_prices
+    assert coordinator._last_export_prices == new_export_prices
+    assert coordinator._last_price_timestamps == new_timestamps
+    assert coordinator._pending_price_timestamps is None
+
+
+def test_dynamic_to_static_failed_replan_keeps_dynamic_price_timestamp_pair(
+    opt_module,
+    monkeypatch,
+):
+    static_origin = datetime(2026, 5, 3, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: static_origin,
+    )
+    coordinator = _coordinator_with_static_tou_provider(opt_module)
+    dynamic_origin = static_origin - timedelta(minutes=5)
+    dynamic_timestamps = [
+        dynamic_origin + timedelta(minutes=5 * idx)
+        for idx in range(12)
+    ]
+    dynamic_import_prices = [0.40] * 12
+    dynamic_export_prices = [0.0] + [0.45] * 11
+
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._battery_specs_source = "config"
+    coordinator._ev_integration_enabled = False
+    coordinator._last_price_timestamps = dynamic_timestamps
+    coordinator._last_import_prices = dynamic_import_prices
+    coordinator._last_export_prices = dynamic_export_prices
+    coordinator._pending_price_timestamps = None
+
+    async def no_restart_restore_pending():
+        return False
+
+    async def fail_after_static_price_forecast():
+        assert coordinator._price_timestamps(12)[0] == static_origin
+        assert coordinator._last_price_timestamps == dynamic_timestamps
+        assert coordinator._last_export_prices == dynamic_export_prices
+        raise RuntimeError("downstream forecast failure")
+
+    coordinator._wait_for_restart_force_restore = no_restart_restore_pending
+    coordinator._get_solar_forecast = fail_after_static_price_forecast
+
+    asyncio.run(coordinator._run_optimization())
+
+    assert coordinator._last_price_timestamps == dynamic_timestamps
+    assert coordinator._last_import_prices == dynamic_import_prices
+    assert coordinator._last_export_prices == dynamic_export_prices
+    assert coordinator._pending_price_timestamps is None
+
+
+def test_flow_power_grid_charge_cap_uses_display_import_before_lp_decay(
+    opt_module,
+    monkeypatch,
+):
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda *args, **kwargs: now)
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator._entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "electricity_provider": "flow_power",
+            "flow_power_state": "NSW1",
+        },
+    )
+    coordinator._config = opt_module.OptimizationConfig(
+        horizon_hours=24,
+        interval_minutes=5,
+        profit_max_enabled=True,
+        max_grid_charge_price=0.30,
+    )
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._last_grid_charge_cap_import_prices = None
+    coordinator._apply_export_boost = lambda export, import_prices=None: (export, [])
+    coordinator._apply_saving_session_prices = lambda imports, exports: (imports, exports)
+    coordinator._apply_chip_mode = lambda exports, *args: exports
+    coordinator._apply_demand_charge_penalty = lambda imports: imports
+
+    def price_entry(start: datetime, import_cents: float, channel: str) -> dict:
+        end = start + opt_module.timedelta(minutes=30)
+        return {
+            "valid_from": start.isoformat(),
+            "valid_to": end.isoformat(),
+            "nemTime": end.isoformat(),
+            "duration": 30,
+            "perKwh": -1.0 if channel == "feedIn" else import_cents,
+            "channelType": channel,
+            "type": "ForecastInterval",
+        }
+
+    forecast = []
+    spike_start = now + opt_module.timedelta(hours=23)
+    for slot in range(48):
+        start = now + opt_module.timedelta(minutes=30 * slot)
+        import_cents = 20.0 if start == spike_start else 0.0
+        forecast.append(price_entry(start, import_cents, "general"))
+        forecast.append(price_entry(start, import_cents, "feedIn"))
+
+    coordinator.price_coordinator = SimpleNamespace(
+        data={"current": [], "forecast": forecast}
+    )
+
+    import_prices, _ = asyncio.run(coordinator._get_price_forecast())
+    spike_slot = int((spike_start - now).total_seconds() // (5 * 60))
+    cap_prices = coordinator._grid_charge_cap_import_prices(import_prices)
+    allowed = coordinator._grid_charge_allowed_slots(
+        cap_prices,
+        solar_forecast=[0.0] * len(import_prices),
+        load_forecast=[0.0] * len(import_prices),
+        current_soc=0.20,
+    )
+
+    assert coordinator._last_display_import_prices[spike_slot] > 0.30
+    assert import_prices[spike_slot] < 0.30
+    assert cap_prices[spike_slot] == pytest.approx(
+        coordinator._last_display_import_prices[spike_slot]
+    )
+    assert allowed[spike_slot] is False
+
+
 def test_dynamic_price_forecast_preserves_boundaries_after_leading_gap(
     opt_module,
     monkeypatch,
@@ -1502,10 +2162,52 @@ def test_schedule_polling_executes_cached_action_before_reoptimizing(opt_module)
     source = inspect.getsource(opt_module.OptimizationCoordinator._schedule_polling_loop)
 
     cached_action_call = "await self._execute_cached_current_action_if_changed()"
-    optimization_call = "await self._run_optimization()"
+    status_publish_call = "self.async_set_updated_data(self.get_api_data())"
+    optimization_call = 'await self._run_optimization(execution_trigger="poll")'
 
     assert cached_action_call in source
-    assert source.index(cached_action_call) < source.index(optimization_call)
+    assert status_publish_call in source
+    assert (
+        source.index(cached_action_call)
+        < source.index(status_publish_call)
+        < source.index(optimization_call)
+    )
+
+
+def test_optimization_publishes_status_after_current_action_execution(opt_module):
+    """The status sensor must include the hardware target just applied by a solve."""
+    source = inspect.getsource(opt_module.OptimizationCoordinator._run_optimization)
+
+    execute_and_publish_call = "await self._execute_current_action_and_publish("
+
+    assert execute_and_publish_call in source
+
+
+def test_current_action_execution_failure_still_publishes_new_plan(opt_module):
+    """A hardware failure must not hide a successfully computed schedule."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._enabled = True
+    coordinator._executor = object()
+    coordinator._execute_lock = asyncio.Lock()
+    published = []
+
+    async def fail_execution(*args, **kwargs):
+        raise RuntimeError("hardware write failed")
+
+    coordinator._execute_optimizer_action = fail_execution
+    coordinator.get_api_data = lambda: {"planned_current_power_w": 8347}
+    coordinator.async_set_updated_data = published.append
+    action = SimpleNamespace(action="charge", power_w=8347)
+
+    with pytest.raises(RuntimeError, match="hardware write failed"):
+        asyncio.run(
+            coordinator._execute_current_action_and_publish(
+                action,
+                execution_trigger="poll",
+            )
+        )
+
+    assert published == [{"planned_current_power_w": 8347}]
 
 
 def test_flow_power_aemo_price_source_is_provider_gated():
@@ -1533,3 +2235,28 @@ def test_flow_power_kwatch_price_source_is_provider_gated():
     assert "FlowPowerKWatchPriceCoordinator" in source
     assert '"flow_power_kwatch_coordinator": flow_power_kwatch_coordinator' in source
     assert "or flow_power_kwatch_coordinator" in source
+
+
+def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 0.35
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._get_energy_data = lambda: {"solar_power": 0}
+
+    # Overnight: forecast is all zeros, so forecast_now_kw stays under the
+    # 0.5 kW noise floor for every cycle.
+    solar_forecast = [0.0] * 12
+
+    coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
+    # A derate learned before sunset must not freeze through the zero-
+    # forecast night — it should recover toward 1.0 each cycle, matching the
+    # existing `ratio >= 0.9` recovery step, rather than only resuming once
+    # the morning forecast crosses 0.5 kW again.
+    assert coordinator._solar_nowcast_derate > 0.35
+
+    for _ in range(20):
+        coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
+
+    assert coordinator._solar_nowcast_derate == pytest.approx(1.0)

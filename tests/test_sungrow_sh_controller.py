@@ -10,6 +10,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -47,6 +49,7 @@ def _install_const_stub() -> None:
     const.FLOW_POWER_MARKET_AVG = "market_avg"
     const.FLOW_POWER_KWATCH_REGIONS = {}
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
+    const.CONF_MONITORING_MODE = "monitoring_mode"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
     const.CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"
@@ -289,6 +292,35 @@ def test_force_discharge_clamps_below_practical_minimum():
     ]
 
 
+def test_set_export_limit_clamps_enabled_zero_limit_to_winet_floor():
+    async def run_set_export_limit():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.set_export_limit(0)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_set_export_limit())
+
+    assert result
+    assert writes == [
+        (controller.REG_EXPORT_LIMIT_SETTING, controller.MIN_ENABLED_EXPORT_LIMIT_W),
+        (controller.REG_EXPORT_LIMIT_ENABLED, controller.EXPORT_LIMIT_ENABLE),
+    ]
+
+
+def test_set_export_limit_none_disables_without_floor_write():
+    async def run_set_export_limit():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.set_export_limit(None)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_set_export_limit())
+
+    assert result
+    assert writes == [
+        (controller.REG_EXPORT_LIMIT_ENABLED, controller.EXPORT_LIMIT_DISABLE),
+    ]
+
+
 def test_setup_battery_data_reads_only_core_battery_block():
     async def run_read():
         controller = SungrowSHController("192.0.2.10")
@@ -315,6 +347,46 @@ def test_setup_battery_data_reads_only_core_battery_block():
     assert data["battery_current"] == 5.9
     assert data["battery_power"] == 3398
     assert data["battery_temp"] == 20.8
+
+
+def test_battery_data_aborts_poll_when_core_block_times_out():
+    async def run_read():
+        controller = SungrowSHController("192.0.2.10")
+        input_reads: list[tuple[int, int]] = []
+        holding_reads: list[tuple[int, int]] = []
+        disconnect_calls = 0
+
+        async def connect() -> bool:
+            return True
+
+        async def read_input_register(address: int, count: int = 1):
+            input_reads.append((address, count))
+            return None
+
+        async def read_register(address: int, count: int = 1):
+            holding_reads.append((address, count))
+            return None
+
+        async def disconnect() -> None:
+            nonlocal disconnect_calls
+            disconnect_calls += 1
+
+        controller.connect = connect
+        controller._read_input_register = read_input_register
+        controller._read_register = read_register
+        controller.disconnect = disconnect
+
+        data = await controller.get_battery_data()
+        return data, input_reads, holding_reads, disconnect_calls, controller
+
+    data, input_reads, holding_reads, disconnect_calls, controller = asyncio.run(
+        run_read()
+    )
+
+    assert data == {}
+    assert input_reads == [(controller.REG_BATTERY_VOLTAGE, 7)]
+    assert holding_reads == []
+    assert disconnect_calls == 1
 
 
 def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
@@ -374,6 +446,8 @@ def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
     assert data["meter_power"] == 1500
     assert data["charge_rate_limit_kw"] == 12.0
     assert data["discharge_rate_limit_kw"] == 15.0
+    assert data["discharge_rate_limit_source"] == "configured_power"
+    assert "bms_max_discharge_current_a" not in data
     assert data["export_limit_enabled"] is True
     assert data["backup_reserve"] == 30
     assert (controller.REG_MAX_CHARGE_POWER, 1) in holding_reads
@@ -381,6 +455,41 @@ def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
     assert (controller.REG_BMS_MAX_CHARGE_CURRENT, 1) not in input_reads
     assert (13065, 1) not in holding_reads
     assert (13066, 1) not in holding_reads
+
+
+def test_battery_data_marks_zero_bms_discharge_capability():
+    async def run_read():
+        controller = SungrowSHController("192.0.2.10")
+
+        async def connect() -> bool:
+            return True
+
+        async def read_input_register(address: int, count: int = 1):
+            values = {
+                controller.REG_BATTERY_VOLTAGE: [5751, 0, 0, 49, 980, 208, 298],
+                controller.REG_BATTERY_POWER_S32: [0, 0],
+                controller.REG_BATTERY_CURRENT_PRECISE: [0],
+                controller.REG_INVERTER_TEMP: [312],
+                controller.REG_METER_ACTIVE_POWER: [8540, 0],
+                controller.REG_BMS_MAX_CHARGE_CURRENT: [40],
+                controller.REG_BMS_MAX_DISCHARGE_CURRENT: [0],
+            }
+            return values.get(address)
+
+        async def read_register(address: int, count: int = 1):
+            return None
+
+        controller.connect = connect
+        controller._read_input_register = read_input_register
+        controller._read_register = read_register
+        return await controller.get_battery_data()
+
+    data = asyncio.run(run_read())
+
+    assert data["battery_soc"] == 4.9
+    assert data["bms_max_discharge_current_a"] == 0
+    assert data["discharge_rate_limit_kw"] == 0.0
+    assert data["discharge_rate_limit_source"] == "bms_current"
 
 
 def test_sungrow_rate_limits_use_mkaiser_power_registers():
@@ -462,8 +571,14 @@ class _FakeSungrowController:
         }
         self.fail_zero_discharge_limit = False
         self.fail_discharge_limit = False
+        self.fail_discharge_limit_count = 0
         self._rate_limit_writable: bool | None = None
         self.force_discharge_result = True
+        self.disconnect_calls = 0
+
+    @property
+    def rate_limit_writable(self) -> bool | None:
+        return self._rate_limit_writable
 
     async def __aenter__(self):
         return self
@@ -477,6 +592,10 @@ class _FakeSungrowController:
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
         self.discharge_rate_limits.append(kw)
+        if self.fail_discharge_limit_count > 0:
+            self.fail_discharge_limit_count -= 1
+            self._rate_limit_writable = False
+            return False
         if self.fail_discharge_limit or (kw == 0 and self.fail_zero_discharge_limit):
             self._rate_limit_writable = False
             return False
@@ -510,9 +629,28 @@ class _FakeSungrowController:
     async def get_battery_data(self) -> dict:
         return self.battery_data
 
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+
     @property
     def rate_limit_writable(self) -> bool | None:
         return self._rate_limit_writable
+
+
+class _FakeStore:
+    def __init__(self, initial=None, *, fail_save=False):
+        self.data = initial
+        self.saved: list[dict] = []
+        self.fail_save = fail_save
+
+    async def async_load(self):
+        return self.data
+
+    async def async_save(self, data):
+        if self.fail_save:
+            raise OSError("storage unavailable")
+        self.data = dict(data)
+        self.saved.append(dict(data))
 
 
 class _FakeEnergyAccumulator:
@@ -573,7 +711,9 @@ def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
             }
 
     async def run_update():
-        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, FakeController())
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
         coordinator.hass = types.SimpleNamespace(
             data={
                 "power_sync": {
@@ -617,7 +757,9 @@ def test_sungrow_coordinator_derives_zero_load_register_from_energy_balance():
             }
 
     async def run_update():
-        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, FakeController())
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
         coordinator.hass = types.SimpleNamespace(
             data={"power_sync": {"entry-1": {}}},
         )
@@ -636,6 +778,93 @@ def test_sungrow_coordinator_derives_zero_load_register_from_energy_balance():
     assert data["battery_power"] == 0
     assert round(data["load_power"], 3) == 0.216
     assert round(energy_acc.updates[-1][3], 3) == 0.216
+
+
+def test_sungrow_coordinator_filters_forced_discharge_pv_alias_at_night():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 93.0,
+                "battery_power": 9955,
+                "meter_power": -9504,
+                "load_power": 10265,
+                "pv_power": 9814,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}},
+            states=types.SimpleNamespace(
+                get=lambda entity_id: types.SimpleNamespace(state="below_horizon")
+                if entity_id == "sun.sun"
+                else None,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        data = await coordinator._async_update_data()
+        return data, coordinator._energy_acc
+
+    try:
+        data, energy_acc = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["solar_power"] == 0
+    assert data["grid_power"] == -9.504
+    assert data["battery_power"] == 9.955
+    assert round(data["load_power"], 3) == 0.451
+    assert energy_acc.updates[-1][0] == 0
+    assert round(energy_acc.updates[-1][3], 3) == 0.451
+
+
+def test_sungrow_coordinator_filters_low_power_self_consumption_pv_alias_at_night():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 67.0,
+                "battery_power": 819,
+                "meter_power": 0,
+                "load_power": 1638,
+                "pv_power": 819,
+                "ems_mode_name": "Normal",
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator, FakeController()
+        )
+        coordinator.hass = types.SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}},
+            states=types.SimpleNamespace(
+                get=lambda entity_id: types.SimpleNamespace(state="below_horizon")
+                if entity_id == "sun.sun"
+                else None,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        data = await coordinator._async_update_data()
+        return data, coordinator._energy_acc
+
+    try:
+        data, energy_acc = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["solar_power"] == 0
+    assert data["grid_power"] == 0
+    assert data["battery_power"] == pytest.approx(0.819)
+    assert data["load_power"] == pytest.approx(0.819)
+    assert energy_acc.updates[-1][0] == 0
+    assert energy_acc.updates[-1][3] == pytest.approx(0.819)
 
 
 def test_sungrow_coordinator_passes_requested_discharge_power_to_controller():
@@ -749,6 +978,419 @@ def test_sungrow_no_discharge_falls_back_to_ten_watts_when_zero_rejected():
     assert fake_controller.discharge_rate_limits == [0, 0.01, 15.0]
 
 
+def test_sungrow_restore_repairs_stale_ten_watt_discharge_cap_without_capture():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_charge_power": 10.6,
+            "battery_max_discharge_power": 0.01,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_uses_configured_limit_for_stale_discharge_cap():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 17.54,
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 17.54,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_charge_power": 17.54,
+            "battery_max_discharge_power": 0.01,
+        }
+        entry = types.SimpleNamespace(
+            data={"optimization_max_discharge_w": 9200},
+            options={},
+        )
+        coordinator.hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [9.2]
+
+
+def test_sungrow_captured_restore_clamps_to_configured_discharge_limit():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 17.54,
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 17.54,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_charge_power": 17.54,
+            "battery_max_discharge_power": 0.01,
+        }
+        coordinator._pre_control_discharge_limit_kw = 10.6
+        entry = types.SimpleNamespace(
+            data={"optimization_max_discharge_w": 10600},
+            options={},
+        )
+        coordinator.hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_repairs_blocked_discharge_when_cap_unreadable():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 2.4,
+            "battery_level": 98.0,
+            "backup_reserve": 20.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_repairs_low_soc_when_floor_and_bms_limit_are_unreadable():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 8.54,
+            "load_power": 8.48,
+            "battery_level": 4.9,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_does_not_repair_when_bms_blocks_discharge():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 8.54,
+            "load_power": 8.48,
+            "battery_level": 4.9,
+            "bms_max_discharge_current_a": 0.0,
+            "discharge_rate_limit_kw": 0.0,
+            "discharge_rate_limit_source": "bms_current",
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == []
+
+
+def test_sungrow_restore_does_not_repair_at_readable_reserve_floor():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 2.4,
+            "load_power": 2.35,
+            "battery_level": 5.0,
+            "backup_reserve": 5.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == []
+
+
+def test_sungrow_restore_uses_configured_reserve_when_readback_is_unavailable():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 2.4,
+            "load_power": 2.35,
+            "battery_level": 10.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+        entry = types.SimpleNamespace(
+            data={},
+            options={"hardware_backup_reserve": 0.10},
+        )
+        coordinator.hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == []
+
+
+def test_sungrow_restore_repairs_low_load_blocked_discharge_when_cap_unreadable():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 0.232,
+            "load_power": 0.227,
+            "battery_level": 15.0,
+            "backup_reserve": 5.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_does_not_repair_when_low_import_is_not_serving_load():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 0.16,
+            "load_power": 0.5,
+            "battery_level": 15.0,
+            "backup_reserve": 5.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == []
+
+
+def test_sungrow_restore_retries_failed_stale_cap_repair():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_discharge_limit_count = 1
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_charge_power": 10.6,
+            "battery_max_discharge_power": 0.01,
+        }
+
+        first_restore = await coordinator.restore_normal()
+
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 10.6,
+        }
+        coordinator.data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+            "battery_max_discharge_power": 10.6,
+        }
+        second_restore = await coordinator.restore_normal()
+        return first_restore, second_restore, fake_controller
+
+    try:
+        first_restore, second_restore, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert not first_restore
+    assert second_restore
+    assert fake_controller.restore_normal_calls == 2
+    assert fake_controller.discharge_rate_limits == [10.6, 10.6]
+
+
+def test_sungrow_restore_retries_failed_captured_discharge_limit():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_discharge_limit_count = 1
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 15.0}
+        coordinator._pre_control_discharge_limit_kw = 15.0
+
+        first_restore = await coordinator.restore_normal()
+        second_restore = await coordinator.restore_normal()
+        return first_restore, second_restore, fake_controller
+
+    try:
+        first_restore, second_restore, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert not first_restore
+    assert second_restore
+    assert fake_controller.restore_normal_calls == 2
+    assert fake_controller.discharge_rate_limits == [15.0, 15.0]
+
+
 def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
@@ -851,6 +1493,192 @@ def test_sungrow_spread_export_uses_export_limit_not_discharge_cap():
     assert fake_controller.export_limits == [4400, 5000]
 
 
+@pytest.mark.parametrize(
+    ("baseline_enabled", "baseline_limit_w", "expected_restore_limit"),
+    (
+        (False, 0, None),
+        (True, 5000, 5000),
+    ),
+)
+def test_sungrow_spread_export_restores_persisted_baseline_after_restart(
+    baseline_enabled,
+    baseline_limit_w,
+    expected_restore_limit,
+):
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restart_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 7.9,
+            "discharge_rate_limit_kw": 7.9,
+            "export_limit_enabled": baseline_enabled,
+            "export_limit_w": baseline_limit_w,
+        }
+        store = _FakeStore()
+
+        first_coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        first_coordinator._export_control_store = store
+        first_coordinator.data = dict(fake_controller.battery_data)
+        force_result = await first_coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=2580,
+        )
+        active_state = dict(store.data)
+
+        restarted_coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        restarted_coordinator._export_control_store = store
+        restore_result = (
+            await restarted_coordinator.async_restore_persisted_export_control()
+        )
+        return force_result, restore_result, active_state, store, fake_controller
+
+    try:
+        force_result, restore_result, active_state, store, fake_controller = asyncio.run(
+            run_restart_cycle()
+        )
+    finally:
+        restore()
+
+    assert force_result
+    assert restore_result
+    assert active_state == {
+        "active": True,
+        "baseline_enabled": baseline_enabled,
+        "baseline_limit_w": expected_restore_limit,
+        "target_export_w": 2580,
+    }
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.export_limits == [2580, expected_restore_limit]
+    assert store.data == {"active": False}
+
+
+@pytest.mark.parametrize(
+    ("baseline_enabled", "baseline_limit_w", "expected_restore_limit"),
+    (
+        (False, None, None),
+        (True, 5000, 5000),
+    ),
+)
+def test_sungrow_recovery_does_not_recapture_stale_export_target(
+    baseline_enabled,
+    baseline_limit_w,
+    expected_restore_limit,
+):
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_recovered_export_cycle():
+        old_target_w = 2580
+        new_target_w = 4400
+        fake_controller = _FakeSungrowController()
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": baseline_enabled,
+                "baseline_limit_w": baseline_limit_w,
+                "target_export_w": old_target_w,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator._export_control_store = store
+        coordinator.data = {
+            "battery_max_charge_power": 7.9,
+            "battery_max_charge_power_w": 7900,
+            "battery_max_discharge_power": 7.9,
+            "battery_max_discharge_power_w": 7900,
+            "charge_rate_limit_kw": 7.9,
+            "discharge_rate_limit_kw": 7.9,
+            # A coordinator sample taken while the interrupted temporary
+            # export target was still active.
+            "export_limit_enabled": True,
+            "export_limit_w": old_target_w,
+        }
+
+        recovery_result = await coordinator.async_restore_persisted_export_control()
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=new_target_w,
+        )
+        active_state = dict(store.data)
+        restore_result = await coordinator.restore_normal()
+        return (
+            recovery_result,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+            coordinator,
+        )
+
+    try:
+        (
+            recovery_result,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+            coordinator,
+        ) = asyncio.run(run_recovered_export_cycle())
+    finally:
+        restore()
+
+    assert recovery_result
+    assert force_result
+    assert restore_result
+    assert active_state == {
+        "active": True,
+        "baseline_enabled": baseline_enabled,
+        "baseline_limit_w": expected_restore_limit,
+        "target_export_w": 4400,
+    }
+    assert fake_controller.export_limits == [
+        expected_restore_limit,
+        4400,
+        expected_restore_limit,
+    ]
+    assert store.data == {"active": False}
+    assert not coordinator._pre_control_export_limit_captured
+
+
+def test_sungrow_spread_export_refuses_hardware_write_when_state_cannot_persist():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_failed_persistence():
+        fake_controller = _FakeSungrowController()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator._export_control_store = _FakeStore(fail_save=True)
+        coordinator.data = dict(fake_controller.battery_data)
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=2580,
+        )
+        return force_result, fake_controller
+
+    try:
+        force_result, fake_controller = asyncio.run(run_failed_persistence())
+    finally:
+        restore()
+
+    assert not force_result
+    assert fake_controller.discharge_rate_limits == []
+    assert fake_controller.export_limits == []
+    assert fake_controller.force_discharge_power_w == []
+
+
 def test_sungrow_spread_export_continues_when_discharge_limit_unsupported():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
@@ -932,6 +1760,83 @@ def test_sungrow_spread_export_failure_restores_export_limit_and_discharge_cap()
     assert fake_controller.export_limits == [4400, 5000]
 
 
+def test_sungrow_spread_export_clamps_headroom_to_configured_discharge_limit():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_force_export_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 23.8,
+            "discharge_rate_limit_kw": 0.01,
+            "export_limit_enabled": False,
+            "export_limit_w": 0,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 23.8,
+            "battery_max_charge_power": 23.8,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_discharge_power": 0.01,
+        }
+        entry = types.SimpleNamespace(
+            data={"optimization_max_discharge_w": 20000},
+            options={},
+        )
+        coordinator.hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=1150,
+        )
+        return force_result, fake_controller
+
+    try:
+        force_result, fake_controller = asyncio.run(run_force_export_cycle())
+    finally:
+        restore()
+
+    assert force_result
+    assert fake_controller.discharge_rate_limits == [20.0]
+    assert fake_controller.force_discharge_power_w == [20000]
+    assert fake_controller.export_limits == [1150]
+
+
+def test_sungrow_spread_export_skips_known_unwritable_discharge_limit_register():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_force_export_cycles():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_discharge_limit_count = 1
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 15.0}
+
+        first_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=4400,
+        )
+        second_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=4500,
+        )
+        return first_result, second_result, fake_controller
+
+    try:
+        first_result, second_result, fake_controller = asyncio.run(run_force_export_cycles())
+    finally:
+        restore()
+
+    assert first_result
+    assert second_result
+    assert fake_controller.discharge_rate_limits == [15.0]
+    assert fake_controller.force_discharge_power_w == [15000, 15000]
+    assert fake_controller.export_limits == [4400, 4500]
+
+
 def test_sungrow_force_discharge_failure_restores_previous_discharge_limit():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
@@ -1003,3 +1908,28 @@ def test_sungrow_coordinator_serializes_force_charge_with_modbus_lock():
     assert result
     assert fake_controller.charge_rate_limits == []
     assert fake_controller.force_charge_power_w == [12000]
+
+
+def test_sungrow_coordinator_shutdown_waits_for_modbus_lock():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_shutdown_while_locked():
+        fake_controller = _FakeSungrowController()
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.update_interval = object()
+
+        async with coordinator._modbus_lock:
+            task = asyncio.create_task(coordinator.async_shutdown())
+            await asyncio.sleep(0)
+            assert fake_controller.disconnect_calls == 0
+            assert coordinator.update_interval is None
+
+        await task
+        return fake_controller
+
+    try:
+        fake_controller = asyncio.run(run_shutdown_while_locked())
+    finally:
+        restore()
+
+    assert fake_controller.disconnect_calls == 1

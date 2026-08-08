@@ -6,10 +6,11 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -84,6 +85,10 @@ _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
 
+_optimization = types.ModuleType("power_sync.optimization")
+_optimization.__path__ = [str(ROOT / "optimization")]
+sys.modules["power_sync.optimization"] = _optimization
+
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
@@ -100,6 +105,841 @@ VIN = "LRWYHCEK3PC907290"
 def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(None) == "unknown"
     assert ev_planner._format_price_log_value(12) == "12.0c"
+
+
+def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 3, 19, 20, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={
+            "forecast": [
+                {
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "general",
+                    "perKwh": 18.0,
+                },
+                {
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            ]
+        }
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecaster = ev_planner.PriceForecaster(hass, config_entry)
+
+    forecast = asyncio.run(forecaster._get_amber_forecast(1))
+
+    assert forecast is not None
+    assert forecast[0].hour == "2026-07-03T20:00:00"
+    assert forecast[0].import_cents == 18.0
+    assert forecast[0].export_cents == 5.0
+
+
+def test_amber_forecast_drops_past_hours_before_horizon_limit(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(
+            2026, 7, 16, 18, 10, tzinfo=brisbane_tz
+        ),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    forecast_rows = []
+    for hour, price in (
+        ("2026-07-15T22:00:00Z", 12.0),
+        ("2026-07-15T23:00:00Z", 13.0),
+        ("2026-07-16T08:00:00Z", 37.0),
+        ("2026-07-16T09:00:00Z", 20.0),
+        ("2026-07-16T10:00:00Z", 8.0),
+    ):
+        forecast_rows.extend(
+            (
+                {
+                    "startTime": hour,
+                    "channelType": "general",
+                    "perKwh": price,
+                },
+                {
+                    "startTime": hour,
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            )
+        )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={"forecast": forecast_rows}
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, config_entry)._get_amber_forecast(2)
+    )
+
+    assert forecast is not None
+    assert [row.hour for row in forecast] == [
+        "2026-07-16T18:00:00",
+        "2026-07-16T19:00:00",
+    ]
+    assert [row.import_cents for row in forecast] == [37.0, 20.0]
+
+
+def test_solar_preferred_excludes_past_and_post_deadline_windows(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 7, 16, 18, 10, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=hour,
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        )
+        for hour in (
+            "2026-07-16T12:00:00",
+            "2026-07-17T11:00:00",
+            "2026-07-17T16:00:00",
+        )
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour=hour,
+            import_cents=price,
+            export_cents=5.0,
+            period="shoulder",
+        )
+        for hour, price in (
+            ("2026-07-16T12:00:00", 1.0),
+            ("2026-07-17T13:00:00", 10.0),
+            ("2026-07-17T15:00:00", -5.0),
+        )
+    ]
+
+    plan = asyncio.run(
+        planner._plan_solar_preferred(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 17, 15, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=8.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert [window.start_time for window in plan.windows] == [
+        "2026-07-17T11:00:00",
+        "2026-07-17T13:00:00",
+    ]
+    assert plan.estimated_solar_kwh == pytest.approx(7.36)
+    assert plan.estimated_grid_kwh == pytest.approx(0.64)
+    assert plan.can_meet_target is True
+
+
+def test_cost_optimized_matches_solar_to_price_by_local_hour(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:10:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        ),
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T18:10:00",
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=70,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=3.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert len(plan.windows) == 1
+    assert plan.windows[0].start_time == "2026-07-16T19:00:00"
+    assert plan.windows[0].source == "solar_surplus"
+    assert plan.estimated_solar_kwh == pytest.approx(3.0)
+
+
+def test_time_critical_matches_grid_price_to_surplus_hour(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T18:10:00",
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        ),
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:10:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        ),
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    grid_windows = [window for window in plan.windows if window.source.startswith("grid")]
+    assert len(grid_windows) == 1
+    assert grid_windows[0].start_time == "2026-07-16T18:00:00"
+    assert grid_windows[0].price_cents_kwh == pytest.approx(5.0)
+
+
+def test_time_critical_keeps_priced_grid_hours_when_solar_horizon_is_short(
+    monkeypatch,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:00:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        )
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert [window.start_time for window in plan.windows] == [
+        "2026-07-16T18:02:56.086957",
+        "2026-07-16T19:00:00",
+    ]
+    assert plan.estimated_grid_kwh == pytest.approx(7.0)
+    assert plan.estimated_solar_kwh == pytest.approx(3.0)
+    assert plan.can_meet_target is True
+
+
+def _live_time_critical_plan(monkeypatch):
+    """Build the reported 75 kWh / 57% -> 80% deadline scenario."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 24, 1, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[])
+    planner.price_forecaster.get_price_forecast = AsyncMock(
+        return_value=[
+            ev_planner.PriceForecast(
+                hour=f"2026-07-24T{hour:02d}:00:00",
+                import_cents=50.0,
+                export_cents=0.0,
+                period="offpeak",
+            )
+            for hour in (2, 3, 4)
+        ]
+    )
+
+    plan = asyncio.run(
+        planner.plan_charging(
+            vehicle_id=VIN,
+            current_soc=57,
+            target_soc=80,
+            target_time=datetime(2026, 7, 24, 5, 0),
+            resolved_capacity=ev_planner.resolve_ev_battery_capacity(
+                manual_capacity_kwh=75
+            ),
+            charger_power_kw=7.36,
+            priority=ev_planner.ChargingPriority.TIME_CRITICAL,
+        )
+    )
+    return planner, plan, brisbane_tz
+
+
+def test_time_critical_trims_partial_first_window_for_live_75kwh_case(
+    monkeypatch,
+):
+    _planner, plan, _brisbane_tz = _live_time_critical_plan(monkeypatch)
+
+    assert plan.energy_needed_kwh == pytest.approx(19.1666666667)
+    assert [(window.start_time, window.end_time) for window in plan.windows] == [
+        ("2026-07-24T02:23:45", "2026-07-24T03:00:00"),
+        ("2026-07-24T03:00:00", "2026-07-24T04:00:00"),
+        ("2026-07-24T04:00:00", "2026-07-24T05:00:00"),
+    ]
+    assert sum(window.estimated_energy_kwh for window in plan.windows) == (
+        pytest.approx(plan.energy_needed_kwh)
+    )
+    for window in plan.windows:
+        start = datetime.fromisoformat(window.start_time)
+        end = datetime.fromisoformat(window.end_time)
+        duration_hours = (end - start).total_seconds() / 3600
+        assert window.estimated_energy_kwh == pytest.approx(
+            window.estimated_power_kw * duration_hours
+        )
+    assert (
+        plan.to_dict()["planned_windows"][0]["start_time"]
+        == "2026-07-24T02:23:45"
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_time", "expected_should_charge"),
+    (
+        (datetime(2026, 7, 24, 1, 57), False),
+        (datetime(2026, 7, 24, 2, 23, 44), False),
+        (datetime(2026, 7, 24, 2, 23, 45), True),
+        (datetime(2026, 7, 24, 2, 23, 46), True),
+    ),
+)
+def test_time_critical_execution_uses_trimmed_window_boundary(
+    monkeypatch,
+    current_time,
+    expected_should_charge,
+):
+    planner, plan, brisbane_tz = _live_time_critical_plan(monkeypatch)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: current_time.replace(tzinfo=brisbane_tz),
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert should_charge is expected_should_charge
+    assert source == ("grid_offpeak" if expected_should_charge else "waiting")
+
+
+@pytest.mark.parametrize(
+    ("demand_blocked", "expected_should_charge"),
+    ((False, True), (True, False)),
+)
+def test_time_critical_impossible_plan_only_charges_in_permitted_current_window(
+    monkeypatch,
+    demand_blocked,
+    expected_should_charge,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 7, 24, 4, 0, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    monkeypatch.setattr(
+        planner,
+        "_is_grid_charging_blocked_at",
+        lambda _when: demand_blocked,
+    )
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=20,
+            target_soc=80,
+            target_time=datetime(2026, 7, 24, 5, 0),
+            energy_needed_kwh=20.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=[
+                ev_planner.PriceForecast(
+                    hour="2026-07-24T04:00:00",
+                    import_cents=50.0,
+                    export_cents=0.0,
+                    period="offpeak",
+                )
+            ],
+        )
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert plan.can_meet_target is False
+    assert should_charge is expected_should_charge
+    assert source == ("grid_offpeak" if expected_should_charge else "waiting")
+
+
+def test_forecast_hour_key_preserves_repeated_dst_hours():
+    first = ev_planner._forecast_hour_key("2026-11-01T01:00:00-04:00")
+    second = ev_planner._forecast_hour_key("2026-11-01T01:00:00-05:00")
+
+    assert first == "2026-11-01T05:00:00+00:00"
+    assert second == "2026-11-01T06:00:00+00:00"
+    assert first != second
+
+
+def test_amber_forecast_preserves_repeated_dst_hours(monkeypatch):
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 11, 1, 0, 0, tzinfo=new_york),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(new_york),
+        raising=False,
+    )
+    rows = []
+    for hour, price in (
+        ("2026-11-01T01:00:00-04:00", 10.0),
+        ("2026-11-01T01:00:00-05:00", 20.0),
+    ):
+        rows.extend(
+            (
+                {
+                    "startTime": hour,
+                    "channelType": "general",
+                    "perKwh": price,
+                },
+                {
+                    "startTime": hour,
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            )
+        )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={"forecast": rows}
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, config_entry)._get_amber_forecast(2)
+    )
+
+    assert forecast is not None
+    assert [row.hour for row in forecast] == [
+        "2026-11-01T01:00:00-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
+    assert [row.import_cents for row in forecast] == [10.0, 20.0]
+
+
+def test_ev_planners_keep_repeated_dst_hours_distinct(monkeypatch):
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 11, 1, 0, 0, tzinfo=new_york),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(new_york),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour=hour,
+            import_cents=price,
+            export_cents=0.0,
+            period="offpeak",
+        )
+        for hour, price in (
+            ("2026-11-01T01:00:00-04:00", 10.0),
+            ("2026-11-01T01:00:00-05:00", 20.0),
+        )
+    ]
+    target = datetime(2026, 11, 1, 3, 0, tzinfo=new_york)
+
+    cheapest = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=target,
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=price_forecast,
+        )
+    )
+    deadline = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=target,
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert [window.start_time for window in cheapest.windows] == [
+        "2026-11-01T01:00:00-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
+    assert [window.start_time for window in deadline.windows] == [
+        "2026-11-01T01:38:28.695652-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
+    assert cheapest.can_meet_target is True
+    assert deadline.can_meet_target is True
+
+
+@pytest.mark.parametrize(
+    ("current_time", "expected_source"),
+    (
+        (datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=-4))), "first"),
+        (datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=-5))), "second"),
+    ),
+)
+def test_should_charge_now_activates_each_repeated_dst_window(
+    monkeypatch,
+    current_time,
+    expected_source,
+):
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: current_time)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=60,
+        target_soc=80,
+        target_time="2026-11-01T03:00:00-05:00",
+        energy_needed_kwh=10.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-11-01T01:00:00-04:00",
+                end_time="2026-11-01T01:00:00-05:00",
+                source="first",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=7.36,
+                price_cents_kwh=10.0,
+                reason="offpeak_rate",
+            ),
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-11-01T01:00:00-05:00",
+                end_time="2026-11-01T02:00:00-05:00",
+                source="second",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=2.64,
+                price_cents_kwh=20.0,
+                reason="offpeak_rate",
+            ),
+        ],
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+        )
+    )
+
+    assert should_charge is True
+    assert source == expected_source
+
+
+def test_cost_optimized_uses_ha_local_clock_for_window_filtering(monkeypatch):
+    real_datetime = datetime
+    brisbane_tz = timezone(timedelta(hours=10))
+
+    class HostClockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            wrong_host_now = real_datetime(2026, 7, 4, 8, 20)
+            if tz is not None:
+                return wrong_host_now.replace(tzinfo=timezone.utc).astimezone(tz)
+            return wrong_host_now
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return real_datetime.fromisoformat(value)
+
+    monkeypatch.setattr(ev_planner, "datetime", HostClockDatetime)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: real_datetime(2026, 7, 3, 19, 20, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-03T20:00:00",
+            import_cents=12.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-03T21:00:00",
+            import_cents=14.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=price.hour,
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        )
+        for price in price_forecast
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=50,
+            target_soc=60,
+            target_time=real_datetime(2026, 7, 4, 7, 30, tzinfo=brisbane_tz),
+            energy_needed_kwh=8.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert plan.windows
+    assert plan.estimated_grid_kwh > 0
+
+
+def test_cost_optimized_converts_utc_forecast_rows_before_filtering(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 3, 21, 19, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-03T12:00:00+00:00",
+            import_cents=16.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-03T13:00:00+00:00",
+            import_cents=12.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=price.hour,
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        )
+        for price in price_forecast
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=68,
+            target_soc=90,
+            target_time=datetime(2026, 7, 4, 7, 30, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert len(plan.windows) == 2
+    assert plan.windows[0].start_time == "2026-07-03T22:00:00"
+    assert plan.windows[1].start_time == "2026-07-03T23:00:00"
+    assert plan.windows[1].price_cents_kwh == 12.0
+    assert plan.estimated_grid_kwh > 0
 
 
 class _FakeConfigEntry:
@@ -806,6 +1646,97 @@ def test_scheduled_tesla_start_targets_single_plugged_home_vehicle(
     result = asyncio.run(executor._start_charging("Scheduled window"))
 
     assert result is True
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == second_vin
+    assert params["vehicle_vin"] == second_vin
+
+
+def test_scheduled_tesla_start_targets_all_plugged_home_vehicles(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+
+    executor = ev_planner.ScheduledChargingExecutor(_FakeHass(), _FakeConfigEntry())
+    result = asyncio.run(executor._start_charging("Scheduled window"))
+
+    assert result is True
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 2
+    started_vins = {
+        call.args[2]["vehicle_vin"]
+        for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
+    }
+    assert started_vins == {first_vin, second_vin}
+
+
+def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "11:00",
+        "end_time": "14:00",
+        "max_price_cents": 50,
+    }
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    async def active_state(_hass, _entry, vehicle_vin=None):
+        return vehicle_vin == first_vin
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", active_state)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 5, 27, 11, 30, tzinfo=timezone.utc),
+    )
+
+    previous_executor = ev_planner.get_scheduled_charging_executor()
+    previous_price_executor = ev_planner.get_price_level_executor()
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
+    coordinator._is_charging = True
+
+    try:
+        ev_planner.set_scheduled_charging_executor(scheduled)
+        ev_planner.set_price_level_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 0))
+    finally:
+        ev_planner.set_scheduled_charging_executor(previous_executor)
+        ev_planner.set_price_level_executor(previous_price_executor)
+
     fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
     _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
     assert params["vehicle_id"] == second_vin
@@ -1583,7 +2514,16 @@ def test_auto_schedule_start_allows_solar_surplus_takeover(monkeypatch, fake_act
     assert params["allow_ownership_takeover"] is True
 
 
-def test_auto_schedule_keeps_future_plan_when_vehicle_away(monkeypatch, fake_actions):
+@pytest.mark.parametrize(
+    ("preserve_home_battery", "expect_preserve"),
+    [(False, False), (True, True)],
+)
+def test_auto_schedule_keeps_future_plan_when_vehicle_away(
+    monkeypatch,
+    fake_actions,
+    preserve_home_battery,
+    expect_preserve,
+):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
     start = now.replace(hour=23)
@@ -1647,6 +2587,7 @@ def test_auto_schedule_keeps_future_plan_when_vehicle_away(monkeypatch, fake_act
         display_name="Model 3",
         target_soc=80,
         departure_time="07:00",
+        preserve_home_battery=preserve_home_battery,
     )
 
     asyncio.run(
@@ -1669,9 +2610,283 @@ def test_auto_schedule_keeps_future_plan_when_vehicle_away(monkeypatch, fake_act
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
 
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
-    assert preserve_state["active"] is True
+    assert preserve_state.get("active", False) is expect_preserve
+    if expect_preserve:
+        assert preserve_state["source"] == "smart_schedule"
+        assert "future EV demand" in preserve_state["reason"]
+
+
+def test_auto_schedule_clears_future_preserve_when_effective_setting_turns_off(
+    monkeypatch,
+):
+    now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
+
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id=VIN,
+        preserve_home_battery=True,
+    )
+    executor._settings[VIN] = settings
+    state = executor.get_state(VIN)
+    state.last_decision = "away"
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=40,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=12.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=now.replace(hour=23).isoformat(),
+                end_time=now.replace(hour=23, minute=30).isoformat(),
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=3.5,
+                price_cents_kwh=10.0,
+                reason="target_deadline",
+            )
+        ],
+    )
+
+    executor._sync_future_demand_preserve_intent()
+    assert hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"][
+        "active"
+    ] is True
+
+    settings.preserve_home_battery = False
+    executor._sync_future_demand_preserve_intent()
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is False
     assert preserve_state["source"] == "smart_schedule"
-    assert "future EV demand" in preserve_state["reason"]
+
+
+def test_auto_schedule_stops_untracked_tesla_while_waiting(monkeypatch, fake_actions):
+    now = datetime.now()
+    ha_now = now.replace(tzinfo=timezone.utc)
+    stop_reason = "Cheapest charging window starts later"
+    physical_probe = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def vehicle_soc(self, vehicle_id):
+        return 55
+
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", physical_probe)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: ha_now)
+
+    hass = _FakeHass()
+    planner = SimpleNamespace(
+        should_charge_now=AsyncMock(
+            return_value=(False, stop_reason, "grid_offpeak")
+        )
+    )
+    executor = ev_planner.AutoScheduleExecutor(hass, _FakeConfigEntry(), planner)
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id=VIN,
+        target_soc=80,
+    )
+    executor._settings[VIN] = settings
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=55,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=10.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=(now + timedelta(hours=1)).isoformat(),
+                end_time=(now + timedelta(hours=2)).isoformat(),
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=7.0,
+                price_cents_kwh=0.0,
+                reason="cheapest_window",
+            )
+        ],
+    )
+    state.last_plan_update = now
+
+    asyncio.run(
+        executor.evaluate(
+            {
+                "battery_soc": 100,
+                "solar_power": 0,
+                "load_power": 10000,
+                "grid_power": 10000,
+            },
+            current_price_cents=47.3,
+        )
+    )
+
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_stop_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == VIN
+    assert params["vehicle_vin"] == VIN
+    assert params["stop_untracked"] is True
+    assert params["stop_reason"] == stop_reason
+    assert state.last_decision == "stopped"
+    physical_probe.assert_awaited_once_with(
+        hass,
+        executor.config_entry,
+        vehicle_vin=VIN,
+    )
+
+
+@pytest.mark.parametrize(
+    ("owner_mode", "physical_charging", "expect_stop", "expect_probe"),
+    [
+        ("smart_schedule_grid_offpeak", True, True, True),
+        ("manual", True, False, False),
+        ("solar_surplus", True, False, False),
+        (None, False, False, True),
+    ],
+)
+def test_auto_schedule_external_stop_respects_owner_and_physical_state(
+    monkeypatch,
+    fake_actions,
+    owner_mode,
+    physical_charging,
+    expect_stop,
+    expect_probe,
+):
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    if owner_mode is not None:
+        ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode=owner_mode)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    physical_probe = AsyncMock(return_value=physical_charging)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", physical_probe)
+
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, SimpleNamespace())
+    stopped = asyncio.run(
+        executor._stop_external_charging_if_needed(
+            VIN,
+            ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN),
+            executor.get_state(VIN),
+            "Waiting for planned window",
+        )
+    )
+
+    assert stopped is expect_stop
+    assert physical_probe.await_count == int(expect_probe)
+    assert fake_actions._action_stop_ev_charging_dynamic.await_count == int(expect_stop)
+    if not expect_stop:
+        assert executor._last_external_smart_schedule_stops == {}
+
+
+def test_auto_schedule_external_stop_requires_specific_tesla_loadpoint(
+    monkeypatch,
+    fake_actions,
+):
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    physical_probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", physical_probe)
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id="_default",
+        charger_type="generic",
+    )
+
+    stopped = asyncio.run(
+        executor._stop_external_charging_if_needed(
+            "_default",
+            settings,
+            executor.get_state("_default"),
+            "Waiting for planned window",
+        )
+    )
+
+    assert stopped is False
+    physical_probe.assert_not_awaited()
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+
+def test_auto_schedule_external_stop_suppression_is_per_vehicle(
+    monkeypatch,
+    fake_actions,
+):
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+    physical_probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", physical_probe)
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        SimpleNamespace(),
+    )
+    reason = "Waiting for planned window"
+
+    async def run_stops():
+        for vehicle_id in (VIN, VIN, second_vin):
+            await executor._stop_external_charging_if_needed(
+                vehicle_id,
+                ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=vehicle_id),
+                executor.get_state(vehicle_id),
+                reason,
+            )
+
+    asyncio.run(run_stops())
+
+    assert fake_actions._action_stop_ev_charging_dynamic.await_count == 2
+    assert physical_probe.await_count == 2
+    stopped_ids = [
+        call.args[2]["vehicle_id"]
+        for call in fake_actions._action_stop_ev_charging_dynamic.await_args_list
+    ]
+    assert stopped_ids == [VIN, second_vin]
+
+
+def test_auto_schedule_failed_external_stop_is_not_suppressed(
+    monkeypatch,
+    fake_actions,
+):
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=False)
+    physical_probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", physical_probe)
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN)
+    state = executor.get_state(VIN)
+
+    async def run_stops():
+        return [
+            await executor._stop_external_charging_if_needed(
+                VIN,
+                settings,
+                state,
+                "Waiting for planned window",
+            )
+            for _ in range(2)
+        ]
+
+    assert asyncio.run(run_stops()) == [False, False]
+    assert fake_actions._action_stop_ev_charging_dynamic.await_count == 2
+    assert physical_probe.await_count == 2
+    assert executor._last_external_smart_schedule_stops == {}
 
 
 def test_auto_schedule_clears_stale_plan_when_away_vehicle_reaches_target(
@@ -2765,6 +3980,332 @@ def test_unknown_vehicle_soc_uses_recovery_price_fallback(monkeypatch):
     assert state.last_decision == "wants_charge"
 
 
+def _mixed_ble_config_entry():
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+
+
+def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 59
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 5,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _mixed_ble_config_entry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(7.8))
+
+    assert results[VIN] == (False, "EV 59% >= 30%, price 7.8c > 5c", "")
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+
+
+def test_mixed_tesla_ble_unknown_soc_uses_duplicate_guard_above_recovery_price(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 49
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 5,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _mixed_ble_config_entry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(34.3))
+
+    assert results[VIN] == (False, "EV 49% >= 30%, price 34.3c > 5c", "")
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+
+
+def test_mixed_tesla_ble_unknown_soc_does_not_opportunity_start_duplicate(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 59
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 5,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _mixed_ble_config_entry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(4.0))
+
+    assert results[VIN] == (
+        True,
+        "Opportunity: EV 59%, price 4.0c <= 5c",
+        "price_level_opportunity",
+    )
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_vin"] == VIN
+
+
+def test_mixed_tesla_ble_unknown_soc_does_not_stop_real_vehicle_after_start(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 20
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(
+        ev_planner,
+        "is_ev_actively_charging",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 10,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _mixed_ble_config_entry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(10.7))
+
+    assert results[VIN] == (
+        True,
+        "Recovery: EV 20% < 30%, price 10.7c <= 30c",
+        "price_level_recovery",
+    )
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_vin"] == VIN
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    ev_planner.is_ev_actively_charging.assert_not_awaited()
+
+
 def test_full_vehicle_soc_blocks_price_level_opportunity(monkeypatch):
     async def at_home(*args, **kwargs):
         return "home"
@@ -2836,3 +4377,171 @@ def test_price_level_generic_soc_uses_fallback_sensor():
     )
 
     assert asyncio.run(executor._get_ev_soc()) == 68
+
+
+def test_price_level_ble_soc_uses_vehicle_specific_charge_level_sensor():
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            states={"sensor.garage_garage_ble_gateway_charge_level": "20"},
+            entries=[entry],
+        ),
+        entry,
+    )
+
+    assert asyncio.run(executor._get_ev_soc(ble_vin)) == 20
+
+
+def test_mixed_tesla_ble_known_soc_does_not_start_shared_alias(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+                "ble_prefix": "garage_garage_ble_gateway",
+            },
+        ]
+
+    async def known_low_soc_decision(self, vehicle_vin, current_price_cents):
+        return (
+            True,
+            "Recovery: EV 20% < 30%, price 10.7c <= 30c",
+            "price_level_recovery",
+        )
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        known_low_soc_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(10.7))
+
+    assert results[VIN][0] is True
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_vin"] == VIN
+
+
+def test_mixed_tesla_ble_known_high_soc_does_not_stop_shared_session(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = _mixed_ble_config_entry()
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {"vin": ble_vin, "name": "Shared BLE", "source": "tesla_ble"},
+        ]
+
+    async def divergent_known_soc_decision(self, vehicle_vin, current_price_cents):
+        if vehicle_vin == VIN:
+            return (
+                True,
+                "Recovery: EV 20% < 30%, price 10.7c <= 30c",
+                "price_level_recovery",
+            )
+        return False, "EV 80% >= 30%, price 10.7c > 5c", ""
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        divergent_known_soc_decision,
+    )
+    monkeypatch.setattr(
+        ev_planner,
+        "is_ev_actively_charging",
+        AsyncMock(return_value=True),
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(10.7))
+
+    assert results[VIN][0] is True
+    assert results[ble_vin][0] is False
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    ev_planner.is_ev_actively_charging.assert_not_awaited()
+
+
+def test_mixed_tesla_ble_keeps_second_configured_vehicle_actionable(
+    monkeypatch,
+    fake_actions,
+):
+    shared_ble_vin = "ble_garage_gateway"
+    second_ble_vin = "ble_driveway_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_gateway,driveway_gateway",
+        },
+    )
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {"vin": shared_ble_vin, "name": "Shared BLE", "source": "tesla_ble"},
+            {"vin": second_ble_vin, "name": "Second BLE", "source": "tesla_ble"},
+        ]
+
+    async def charge_decision(self, vehicle_vin, current_price_cents):
+        return True, "Opportunity: EV 20%, price 4.0c <= 5c", "price_level_opportunity"
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        charge_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(4.0))
+
+    assert results[shared_ble_vin][0] is False
+    assert results[VIN][0] is True
+    assert results[second_ble_vin][0] is True
+    started_vins = {
+        call.args[2]["vehicle_vin"]
+        for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
+    }
+    assert started_vins == {VIN, second_ble_vin}

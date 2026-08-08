@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 
 
 STRATEGY_PATH = (
@@ -54,6 +56,89 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_lp_battery_power_chart_splits_home_consumption_from_export():
+    """LP battery forecast should show where discharge is going."""
+    source = STRATEGY_PATH.read_text()
+    chart_source = source[
+        source.index("function _lpBatteryPowerChart"):
+        source.index("function _curtailmentStatus")
+    ]
+
+    assert "attribute: 'charge_values_kw'" in chart_source
+    assert "attribute: 'home_consumption_values_kw'" in chart_source
+    assert "name: 'Powering Home'" in chart_source
+    assert "attribute: 'export_values_kw'" in chart_source
+    assert "name: 'Export'" in chart_source
+    assert "attribute: 'discharge_values_kw'" not in chart_source
+
+
+def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
+    """Dynamic tariffs should not show a current-state history chart beside the schedule."""
+    source = STRATEGY_PATH.read_text()
+    price_layout = source[
+        source.index("    // --- Right Column: Price History"):
+        source.index("    // --- Center Column: LP Forecast Summary")
+    ]
+
+    assert "if (hasE('current_import_price') && !hasE('tariff_schedule'))" in price_layout
+    assert "right.push(_priceChart(e, hass));" in price_layout
+    assert "if (hasE('tariff_schedule'))" in price_layout
+    assert "right.push(_touSchedule(e, hass));" in price_layout
+    assert "title: 'Current Price History - Today'" in source
+    assert "title: 'Electricity Prices - 24 Hours'" not in source
+
+
+def test_daily_cost_card_distinguishes_amber_metered_cost_from_estimate():
+    """Today's partial Amber bill data should not replace the live estimate."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "hasE('daily_import_cost') || hasE('amber_usage_today_cost')" in source
+    assert "Amber Metered Cost Today (Partial)" in source
+    assert "Estimated Import Cost Today" in source
+
+
+def test_import_price_gauge_shows_effective_price_source():
+    """The live import gauge should identify KWatch and fallback sources."""
+    source = STRATEGY_PATH.read_text()
+    gauge_source = source[
+        source.index("function _svgArcGaugeCard"):
+        source.index("function _batteryControls")
+    ]
+
+    assert "attrs.price_source" in gauge_source
+    assert "flow_power_kwatch: 'KWatch'" in gauge_source
+    assert "flow_power_kwatch_fallback_aemo: 'AEMO fallback'" in gauge_source
+    assert "attrs.using_price_fallback" in gauge_source
+    assert gauge_source.count("showPriceSource: true") == 1
+
+
+def test_dashboard_summarizes_short_gap_battery_windows():
+    """Planned battery windows should not list every tiny LP charge island."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "BATTERY_WINDOW_MERGE_GAP_MINUTES = 15" in source
+    assert "return this._mergeBatteryWindowRanges(windows, model);" in source
+    assert "previous.action === window.action" in source
+    assert "gapMinutes <= BATTERY_WINDOW_MERGE_GAP_MINUTES" in source
+    assert "active / ${this._formatDuration(window.spanDurationMinutes)} span" in source
+    assert "_priceStatsForSegments(previous.segments, previous.action, model)" in source
+
+
+def test_optimizer_battery_windows_show_integrated_energy_and_value():
+    """Window energy/value should use active interval data, not peak power times span."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "_energyValueForSegments(segments, action, model)" in source
+    assert "model.detailedSchedule ? 'exportKw' : 'dischargeKw'" in source
+    assert "Math.min(intervalMs, ranges.reduce" in source
+    assert "intervalEnergyKwh = powerKw * overlapMs / 3600000" in source
+    assert "value += intervalEnergyKwh * minorPrice / 100" in source
+    assert "this._energyValueForSegments(previous.segments, previous.action, model)" in source
+    assert "this._renderWindowImpact(window.energyValue, window.action, priceMeta)" in source
+    assert "action === 'charge' ? 'Est. cost' : 'Est. earnings'" in source
+    assert "window.power_w * window.durationMinutes" not in source
+
+
 def test_optimizer_action_plan_renders_full_scrollable_list():
     """The 24-hour action plan should expose every action instead of hiding overflow."""
     source = STRATEGY_PATH.read_text()
@@ -65,6 +150,7 @@ def test_optimizer_action_plan_renders_full_scrollable_list():
     assert "overflow-y: auto;" in actions_css
     assert "max-height: min(58vh, 620px);" in actions_css
     assert "scrollbar-gutter: stable;" in actions_css
+    assert "overscroll-behavior: contain;" not in actions_css
     assert "actions.map(action =>" in source
     assert "actions.slice(0, 10)" not in source
     assert "more actions" not in source
@@ -138,12 +224,25 @@ def test_dashboard_ev_panel_is_registered_and_api_cached():
     assert "power_sync/ev/scheduled_charging/settings" in source
     assert "power_sync/ev/auto_schedule/status" in source
     assert "power_sync/ev/auto_schedule/toggle" in source
+    assert "power_sync/ev/vehicle_config" in source
     assert "power_sync/ev/boost" in source
     assert "start_policy_charging" in source
     assert "this._scheduleRenderIfChanged();" in hass_setter
     assert "this._scheduleRender();" not in hass_setter
     assert "data: this._data" in render_signature
     assert "policy: this._policy" in render_signature
+
+
+def test_dashboard_ev_capacity_editor_uses_vehicle_config_api():
+    """Each Smart Schedule row should expose effective capacity and a clearable override."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh" in source
+    assert "data-capacity-input" in source
+    assert "data-capacity-save" in source
+    assert "data-capacity-clear" in source
+    assert "battery_capacity_kwh: value" in source
+    assert "value < 1 || value > 250" in source
 
 
 def test_ev_panel_hides_zero_amps_while_charging_without_amp_telemetry():
@@ -248,10 +347,16 @@ def test_dashboard_battery_controls_include_self_consumption_action():
         source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
     ]
 
-    assert "name: 'Self Consumption'" in battery_controls
+    assert (
+        "name: activeModeName('self_consumption', 'Self Consumption', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
     assert "icon: 'mdi:home-battery'" in battery_controls
     assert "service: 'power_sync.set_self_consumption'" in battery_controls
-    assert "Set battery to self-consumption mode?" in battery_controls
+    assert "Set battery to self-consumption mode for ' + dur + ' min?'" in battery_controls
+    assert "select.power_sync_force_discharge_duration" in battery_controls
+    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge/Hold/Self')" in battery_controls
+    assert "durationName('select.power_sync_force_charge_duration', 'Charge timer')" in battery_controls
 
 
 def test_dashboard_manual_battery_controls_show_active_mode_countdown():
@@ -279,13 +384,36 @@ def test_dashboard_manual_battery_controls_show_active_mode_countdown():
 
     assert "name: activeModeName('force_charge', 'Charge')" in battery_controls
     assert "name: activeModeName('force_discharge', 'Discharge')" in battery_controls
-    assert "name: activeModeName('hold_soc', 'Hold SoC')" in battery_controls
+    assert (
+        "name: activeModeName('hold_soc', 'Hold SoC', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
+    assert (
+        "name: activeModeName('self_consumption', 'Self Consumption', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
     self_consumption = battery_controls[
-        battery_controls.index("name: 'Self Consumption'"):
+        battery_controls.index("name: activeModeName('self_consumption', 'Self Consumption'"):
         battery_controls.index("service: 'power_sync.set_self_consumption'")
     ]
-    assert "activeModeName('self_consumption'" not in self_consumption
     assert "states['${batteryModeEntity}']?.state === 'self_consumption'" in self_consumption
+
+
+def test_dashboard_hold_and_self_consumption_share_discharge_duration_label():
+    """Manual hold/self-consumption controls should visibly use the discharge timer."""
+    source = STRATEGY_PATH.read_text()
+    battery_controls = source[
+        source.index("function _batteryControls(hass)"):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+    ]
+
+    assert "const durationName = (entity, label, fallback = '30')" in battery_controls
+    assert "columns: 2" in battery_controls
+    assert "Discharge/Hold/Self" in battery_controls
+    assert "Self Consumption', 'select.power_sync_force_discharge_duration'" in battery_controls
+    assert "Hold SoC', 'select.power_sync_force_discharge_duration'" in battery_controls
+    assert "states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'" in battery_controls
+    assert "?? '60'" not in battery_controls
 
 
 def test_dashboard_setup_preserves_user_managed_lovelace_layout():
@@ -306,6 +434,33 @@ def test_dashboard_uses_power_sync_ev_power_attributes_for_presence():
     assert "const evPowerAttrs = hass.states[evPower]?.attributes || {};" in source
     assert "Object.prototype.hasOwnProperty.call(evPowerAttrs, 'is_connected')" in source
     assert "config.entities.ev_presence = evPower;" in source
+
+
+def test_dashboard_marks_generic_charger_load_as_including_ev_draw():
+    """Only generic-charger flows need EV draw removed from raw site load."""
+    source = STRATEGY_PATH.read_text()
+    helper = re.search(
+        r"function _loadIncludesGenericEv\([^)]*\) \{.*?\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+    assert "config.load_includes_ev = true;" in source
+
+    checks = """
+      const cases = [
+        [{ vehicle_id: 'generic_ev' }, true],
+        [{ charger_type: 'generic' }, true],
+        [{ vehicle_id: 'tesla_5YJ3', charger_type: 'tesla' }, false],
+        [{ charger_type: 'teslemetry' }, false],
+        [{}, false],
+      ];
+      for (const [attrs, expected] of cases) {
+        const actual = _loadIncludesGenericEv(attrs);
+        if (actual !== expected) throw new Error(`${JSON.stringify(attrs)}: ${actual}`);
+      }
+    """
+    subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
 
 
 def test_dashboard_layout_storage_reconciles_card_changes():
@@ -359,7 +514,7 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
     hass_setter = source[
         source.index("  set hass(hass) {", source.index("class PowerSyncLayout extends HTMLElement {")):
         source.index(
-            "  disconnectedCallback()",
+            "  connectedCallback()",
             source.index("  set hass(hass) {", source.index("class PowerSyncLayout extends HTMLElement {")),
         )
     ]
@@ -370,7 +525,8 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
 
     assert "for (const c of this._cards) c.hass = hass;" in hass_setter
     assert "this._scheduleLayout();" not in hass_setter
-    assert "_scheduleLayoutForResize(entries?.[0])" in source
+    assert "const entry = entries?.[0];" in source
+    assert "this._scheduleLayoutForResize(entry)" in source
     assert "widthDelta < 80" in resize_scheduler
     assert "columnCount === this._lastLayoutColumnCount" in resize_scheduler
     assert "_toggleItemHidden(item)" in source
@@ -388,6 +544,139 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
     assert "const visibleItems = this._layoutItems();" in source
 
 
+def test_dashboard_layout_locks_stable_height_across_card_refreshes():
+    """Transient card rerenders must not collapse the iOS dashboard scroll range."""
+    source = STRATEGY_PATH.read_text()
+    layout_source = source[source.index("class PowerSyncLayout extends HTMLElement {"):]
+
+    assert "this._maxObservedHeight = 0;" in layout_source
+    assert "_updateHeightLock(height)" in layout_source
+    assert "this.style.minHeight = `${nextHeight}px`;" in layout_source
+    assert "_resetHeightLock()" in layout_source
+    assert "this.style.minHeight = '';" in layout_source
+    assert "this._updateHeightLock(entry?.contentRect?.height)" in layout_source
+    assert "connectedCallback()" in layout_source
+    assert "this._observeLayout();" in layout_source
+
+    resize_scheduler = layout_source[
+        layout_source.index("  _scheduleLayoutForResize(entry) {"):
+        layout_source.index("  _flattenCards()", layout_source.index("  _scheduleLayoutForResize(entry) {"))
+    ]
+    assert "Math.max(1, this._layoutItems().length)" in resize_scheduler
+    assert "columnCount !== this._lastLayoutColumnCount || widthDelta >= 80" in resize_scheduler
+    assert "this._resetHeightLock();" in resize_scheduler
+
+    for method_name in (
+        "_resetOrder",
+        "_hideItem",
+        "_showHiddenItems",
+        "_unhideItem",
+        "_dropPointerReorder",
+    ):
+        method_start = layout_source.index(f"  {method_name}(")
+        method_end = layout_source.index("\n  }", method_start)
+        assert "this._resetHeightLock();" in layout_source[method_start:method_end]
+
+    set_customizing_start = layout_source.index("  _setCustomizing(")
+    set_customizing_end = layout_source.index("\n  }", set_customizing_start)
+    set_customizing_source = layout_source[set_customizing_start:set_customizing_end]
+    assert "if (wasShowingHidden) this._resetHeightLock();" in set_customizing_source
+
+
+def test_dashboard_height_lock_runtime_lifecycle_and_geometry_changes():
+    """The height lock should survive refreshes and reset on real geometry changes."""
+    source = STRATEGY_PATH.read_text()
+    class_start = source.index("class PowerSyncLayout extends HTMLElement {")
+    class_end = source.index("\nif (!customElements.get('power-sync-layout'))", class_start)
+    class_source = source[class_start:class_end]
+    prelude = """
+      let observerCount = 0;
+      let disconnectCount = 0;
+      class FakeResizeObserver {
+        constructor(callback) { this.callback = callback; observerCount += 1; }
+        observe(target) { this.target = target; }
+        disconnect() { disconnectCount += 1; }
+      }
+      global.HTMLElement = class {
+        constructor() {
+          this.style = { minHeight: '' };
+          this._rect = { width: 390, height: 1200 };
+        }
+        attachShadow() { return {}; }
+        getBoundingClientRect() { return this._rect; }
+      };
+      global.ResizeObserver = FakeResizeObserver;
+      global.window = {
+        innerWidth: 390,
+        ResizeObserver: FakeResizeObserver,
+        matchMedia: () => ({ matches: true }),
+      };
+      global.requestAnimationFrame = () => 1;
+    """
+    checks = """
+      const assert = (condition, message) => { if (!condition) throw new Error(message); };
+
+      const layout = new PowerSyncLayout();
+      layout._built = true;
+      layout._updateHeightLock(1200);
+      layout._updateHeightLock(0);
+      assert(layout.style.minHeight === '1200px', 'transient collapse lowered the lock');
+      layout._observeLayout();
+      assert(observerCount === 1, 'initial observer was not created');
+      layout.disconnectedCallback();
+      assert(disconnectCount === 1 && layout._resizeObserver === null, 'observer did not disconnect');
+      layout.connectedCallback();
+      assert(observerCount === 2, 'observer was not recreated after reconnect');
+      assert(layout.style.minHeight === '', 'reconnect kept stale geometry');
+
+      const limited = new PowerSyncLayout();
+      limited._built = true;
+      limited._items = [
+        { dataset: { hidden: 'false' } },
+        { dataset: { hidden: 'false' } },
+      ];
+      limited._lastLayoutColumnCount = 2;
+      limited._lastLayoutWidth = 1400;
+      limited._updateHeightLock(900);
+      const falseChange = limited._scheduleLayoutForResize({ contentRect: { width: 1400, height: 900 } });
+      assert(falseChange === false, 'raw breakpoint count overrode the effective lane count');
+      assert(limited.style.minHeight === '900px', 'unchanged geometry cleared the lock');
+
+      const resized = new PowerSyncLayout();
+      resized._built = true;
+      resized._items = [{ dataset: { hidden: 'false' } }];
+      resized._lastLayoutColumnCount = 1;
+      resized._lastLayoutWidth = 390;
+      resized._updateHeightLock(900);
+      const trueChange = resized._scheduleLayoutForResize({ contentRect: { width: 500, height: 900 } });
+      assert(trueChange === true, 'material same-column resize was not treated as geometry change');
+      assert(resized.style.minHeight === '', 'material resize retained stale height');
+
+      const customized = new PowerSyncLayout();
+      customized._built = true;
+      customized._showingHidden = true;
+      customized._items = [];
+      customized._updateHeightLock(1100);
+      customized._hiddenItems = () => [];
+      customized._updateToolbarState = () => {};
+      customized._scheduleLayout = () => {};
+      customized._setCustomizing(false);
+      assert(customized.style.minHeight === '', 'leaving hidden-card preview retained stale height');
+
+      const reordered = new PowerSyncLayout();
+      reordered._built = true;
+      reordered._updateHeightLock(1000);
+      const parent = { insertBefore: () => {} };
+      reordered._dragPlaceholder = { parentElement: parent, remove: () => {} };
+      reordered._clearDragStyles = () => {};
+      reordered._saveOrder = () => {};
+      reordered._dropPointerReorder({});
+      assert(reordered.style.minHeight === '', 'completed card reorder retained stale height');
+    """
+
+    subprocess.run(["node", "-e", prelude + class_source + checks], check=True)
+
+
 def test_battery_health_uses_native_dashboard_card():
     """Battery health should render with the native compact health card."""
     source = STRATEGY_PATH.read_text()
@@ -401,6 +690,106 @@ def test_battery_health_uses_native_dashboard_card():
     assert "battery_${index}_original_kwh" in source
     assert "state_attr('${healthEntity}'" not in source
     assert "healthGauge('Overall'" not in source
+
+
+def test_battery_health_uses_authoritative_count_when_relay_omits_pack_row():
+    """The aggregate pack count must not shrink with partial relay detail."""
+    source = STRATEGY_PATH.read_text()
+    class_start = source.index("class PowerSyncBatteryHealth extends HTMLElement")
+    class_end = source.index("if (!customElements.get('power-sync-battery-health'))")
+    class_source = source[class_start:class_end]
+    prelude = """
+      class HTMLElement {
+        attachShadow() { this.shadowRoot = { innerHTML: '' }; }
+      }
+    """
+    checks = """
+      const card = new PowerSyncBatteryHealth();
+      card.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      card.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '106.6',
+        attributes: {
+          source: 'ha_fleet_api_relay',
+          battery_count: 5,
+          original_capacity_kwh: 67.5,
+          current_capacity_kwh: 72.0,
+          battery_1_health_percent: 106.8,
+          battery_1_original_kwh: 14.4,
+          battery_2_health_percent: 106.8,
+          battery_2_original_kwh: 14.4,
+          battery_3_health_percent: 106.2,
+          battery_3_original_kwh: 14.3,
+          battery_4_health_percent: 107.2,
+          battery_4_original_kwh: 14.5,
+        },
+      } } };
+      const html = card.shadowRoot.innerHTML;
+      if (!html.includes('<div class="pill">5 packs</div>')) {
+        throw new Error('authoritative five-pack count was not rendered');
+      }
+      if (!html.includes('4 of 5 packs reported individually; aggregate capacity includes all 5.')) {
+        throw new Error('partial relay detail was not explained');
+      }
+      const renderedRows = (html.match(/class="pack"/g) || []).length;
+      if (renderedRows !== 4) {
+        throw new Error(`partial relay data fabricated rows: ${renderedRows}`);
+      }
+
+      const fallbackCard = new PowerSyncBatteryHealth();
+      fallbackCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      fallbackCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '100',
+        attributes: {
+          battery_count: -2,
+          battery_1_health_percent: 100,
+        },
+      } } };
+      if (!fallbackCard.shadowRoot.innerHTML.includes('<div class="pill">1 pack</div>')) {
+        throw new Error('invalid aggregate count did not fall back to detailed rows');
+      }
+
+      const aggregateOnlyCard = new PowerSyncBatteryHealth();
+      aggregateOnlyCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      aggregateOnlyCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '106.6',
+        attributes: {
+          battery_count: 5,
+          original_capacity_kwh: 67.5,
+          current_capacity_kwh: 72.0,
+        },
+      } } };
+      const aggregateOnlyHtml = aggregateOnlyCard.shadowRoot.innerHTML;
+      if (!aggregateOnlyHtml.includes('<div class="pill">5 packs</div>')) {
+        throw new Error('aggregate-only authoritative count was not rendered');
+      }
+      if ((aggregateOnlyHtml.match(/class="pack"/g) || []).length !== 0) {
+        throw new Error('aggregate-only data fabricated a detailed row');
+      }
+
+      const ninePackCard = new PowerSyncBatteryHealth();
+      ninePackCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      const ninePackAttributes = {
+        battery_count: 9,
+        original_capacity_kwh: 121.5,
+        current_capacity_kwh: 121.5,
+      };
+      for (let index = 1; index <= 9; index++) {
+        ninePackAttributes[`battery_${index}_health_percent`] = 100;
+      }
+      ninePackCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '100',
+        attributes: ninePackAttributes,
+      } } };
+      const ninePackHtml = ninePackCard.shadowRoot.innerHTML;
+      if ((ninePackHtml.match(/class="pack"/g) || []).length !== 9) {
+        throw new Error('valid authoritative count was truncated to eight rows');
+      }
+      if (ninePackHtml.includes('reported individually')) {
+        throw new Error('fully reported nine-pack site was labelled partial');
+      }
+    """
+
+    subprocess.run(["node", "-e", prelude + class_source + checks], check=True)
 
 
 def test_optimizer_plan_charts_have_tooltips():

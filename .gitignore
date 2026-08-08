@@ -1,5 +1,6 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -19,6 +20,7 @@ app.db
 # IDE
 .vscode/
 .idea/
+.agents/
 .claude/
 *.swp
 *.swo
@@ -51,3 +53,9 @@ temp/
 
 # Build artifacts
 VERSION
+
+# Local Cloudflare tooling state
+.wrangler/
+
+# Local agent workflow artifacts
+pro-project-approach-review-guidance*.txt

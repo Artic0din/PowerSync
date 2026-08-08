@@ -13,7 +13,20 @@ PowerSync supports GoodWe ET/EH/BT/BH and ES/EM/BP hybrid inverter-battery syste
 | BT / BH | Three-phase battery inverter systems |
 | ES / EM / BP | Single-phase hybrid or battery inverter systems |
 
-Non-hybrid GoodWe solar-only models such as DT/MS/XS do not support PowerSync battery control.
+Non-hybrid GoodWe solar-only models such as DT/MS/XS do not support PowerSync battery control. A standalone MS inverter can nevertheless be added under **AC-coupled inverter curtailment** through GoodWe Experimental entities.
+
+## Standalone MS AC inverter
+
+For an AC-coupled GoodWe MS that is separate from the site's battery inverter:
+
+1. Configure the inverter in the GoodWe Experimental Home Assistant integration.
+2. In PowerSync, open **AC-coupled inverter curtailment**, choose **GoodWe (Home Assistant entities)** and enter the common entity prefix. For `sensor.goodwe_pv_power`, enter `goodwe`.
+3. PowerSync validates these writable controls before saving:
+   - `number.<prefix>_grid_export_limit`
+   - `switch.<prefix>_grid_export_limit_switch`
+4. PowerSync reads `sensor.<prefix>_pv_power`, optional `pv1_power` through `pv3_power`, and `today_s_pv_generation` for status and daily production.
+
+Curtailment saves the exact prior number and switch values, sets the export allowance to 0 W, verifies both entity states, and rolls back if either write fails. Restore reapplies the saved values; the snapshot is persisted so an interrupted Home Assistant restart can also recover it.
 
 ## Connection modes
 
@@ -58,11 +71,13 @@ When the prefix is set, PowerSync routes force charge/discharge through those Ho
 
 - Force charge prefers EMS mode `charge_pv`, which keeps PV contributing first and uses grid power for the shortfall; if unavailable, PowerSync falls back to `charge_battery`
 - Force discharge prefers EMS mode `discharge_battery`, which targets battery discharge power directly
+- Hold SoC uses EMS mode `conserve`, which blocks on-grid battery discharge but still allows excess solar to charge the battery
 - If the GoodWe HA integration does not expose the preferred EMS modes, PowerSync falls back to the older supported modes where available
 - Restore normal sets EMS mode to `auto`
 - Requested power is sent to the EMS power limit entity
 
 Telemetry, backup reserve, and export-limit operations still use PowerSync's GoodWe connection.
+Hold SoC requires the EMS entity path; PowerSync does not issue an unverified direct-UDP hold command.
 
 ## Setup checklist
 

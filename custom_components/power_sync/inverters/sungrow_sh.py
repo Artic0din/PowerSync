@@ -121,6 +121,7 @@ class SungrowSHController(InverterController):
     # Export Control (holding registers, FC 0x03)
     REG_EXPORT_LIMIT_SETTING = 13073   # 13074 - Export power limit setting (W)
     REG_EXPORT_LIMIT_ENABLED = 13086   # 13087 - Export limit (0xAA=enable, 0x55=disable)
+    MIN_ENABLED_EXPORT_LIMIT_W = 50     # WiNet-S can reject/crash on enabled 0W export limit
 
     # Backup Reserve
     REG_BACKUP_RESERVE = 13099         # 13100 - Reserved SOC for backup (%)
@@ -571,8 +572,14 @@ class SungrowSHController(InverterController):
         Returns:
             True if curtailment successful
         """
-        export_limit_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
-        mode_str = f"load-following: {export_limit_w}W" if export_limit_w > 0 else "zero export"
+        requested_export_limit_w = (
+            int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+        )
+        export_limit_w = self._enabled_export_limit_w(requested_export_limit_w)
+        if requested_export_limit_w > 0:
+            mode_str = f"load-following: {export_limit_w}W"
+        else:
+            mode_str = f"zero export ({export_limit_w}W WiNet-S floor)"
         _LOGGER.info(f"Curtailing Sungrow SH inverter at {self.host} ({mode_str})")
 
         try:
@@ -1132,8 +1139,14 @@ class SungrowSHController(InverterController):
                 success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_DISABLE)
             else:
                 # Set and enable export limit (0xAA)
-                _LOGGER.info(f"Setting Sungrow SH at {self.host} export limit to {watts} W")
-                success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, watts)
+                safe_watts = self._enabled_export_limit_w(watts)
+                _LOGGER.info(
+                    "Setting Sungrow SH at %s export limit to %d W%s",
+                    self.host,
+                    safe_watts,
+                    f" (requested {watts} W)" if safe_watts != watts else "",
+                )
+                success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, safe_watts)
                 if success:
                     success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_ENABLE)
 
@@ -1142,6 +1155,11 @@ class SungrowSHController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting export limit: {e}")
             return False
+
+    @classmethod
+    def _enabled_export_limit_w(cls, watts: int | float) -> int:
+        """Return a safe non-zero export limit before enabling export limiting."""
+        return max(cls.MIN_ENABLED_EXPORT_LIMIT_W, int(round(watts or 0)))
 
     async def get_battery_data(self) -> dict:
         """Read all battery-related registers for coordinator use.
@@ -1157,18 +1175,25 @@ class SungrowSHController(InverterController):
 
             # Read battery state registers (doc 13020-13026) via FC 0x04
             battery_regs = await self._read_input_register(self.REG_BATTERY_VOLTAGE, 7)
-            if battery_regs and len(battery_regs) >= 7:
-                voltage = round(battery_regs[0] * 0.1, 1)
-                data["battery_voltage"] = voltage
-                if voltage > 0:
-                    self._battery_voltage = voltage
-                data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
-                # Prefer the S32 register (5214-5215) which is always signed; fall back to S16 (13022)
-                data["battery_power"] = self._to_signed16(battery_regs[2])
-                data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
-                data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
-                data["battery_temp"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
-                data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
+            if not battery_regs or len(battery_regs) < 7:
+                _LOGGER.warning(
+                    "Sungrow core battery register read failed — aborting this poll "
+                    "and resetting the Modbus connection"
+                )
+                await self.disconnect()
+                return data
+
+            voltage = round(battery_regs[0] * 0.1, 1)
+            data["battery_voltage"] = voltage
+            if voltage > 0:
+                self._battery_voltage = voltage
+            data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
+            # Prefer the S32 register (5214-5215) which is always signed; fall back to S16 (13022)
+            data["battery_power"] = self._to_signed16(battery_regs[2])
+            data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
+            data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
+            data["battery_temp"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
+            data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
 
             # Override battery_power with the S32 signed register (5214-5215).
             # Register 13022 can report unsigned on some SH-series firmware, making
@@ -1301,11 +1326,14 @@ class SungrowSHController(InverterController):
             max_discharge_power = await self._read_register(self.REG_MAX_DISCHARGE_POWER, 1)
             if max_discharge_power and self._valid_u16(max_discharge_power[0]):
                 data["discharge_rate_limit_kw"] = round(max_discharge_power[0] * 10 / 1000, 2)
+                data["discharge_rate_limit_source"] = "configured_power"
             else:
                 max_discharge_current = await self._read_input_register(self.REG_BMS_MAX_DISCHARGE_CURRENT, 1)
                 if max_discharge_current and self._valid_u16(max_discharge_current[0]):
                     amps = max_discharge_current[0]
+                    data["bms_max_discharge_current_a"] = amps
                     data["discharge_rate_limit_kw"] = round(amps * self._battery_voltage / 1000, 2)
+                    data["discharge_rate_limit_source"] = "bms_current"
 
             data["rate_limit_writable"] = self._rate_limit_writable or False
 

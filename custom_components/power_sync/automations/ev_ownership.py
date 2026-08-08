@@ -203,6 +203,9 @@ def restore_ev_runtime_state(
         }
 
     recovered: dict[str, dict[str, Any]] = {}
+    resumable_manual_sessions: dict[str, dict[str, Any]] = {}
+    expired_manual_sessions: dict[str, dict[str, Any]] = {}
+    now = datetime.now(timezone.utc)
     if isinstance(stored_ownership, dict):
         for vehicle_id, lease in stored_ownership.items():
             if not isinstance(lease, Mapping):
@@ -210,6 +213,19 @@ def restore_ev_runtime_state(
             vid = normalize_vehicle_id(vehicle_id)
             owner_mode = str(lease.get("owner_mode") or "dynamic")
             recovered[vid] = dict(lease)
+            if owner_mode == "manual" and lease.get("quick_control"):
+                try:
+                    expires_at = datetime.fromisoformat(str(lease.get("expires_at")))
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    target = (
+                        resumable_manual_sessions
+                        if expires_at > now
+                        else expired_manual_sessions
+                    )
+                    target[vid] = dict(lease)
+                except (TypeError, ValueError):
+                    pass
             get_ev_last_commands(hass, config_entry)[vid] = {
                 "command": "ha_restart_recovery",
                 "at": _now_iso(),
@@ -229,6 +245,8 @@ def restore_ev_runtime_state(
     return {
         "restored_ownership": len(recovered),
         "restored_commands": len(stored_commands) if isinstance(stored_commands, dict) else 0,
+        "resumable_manual_sessions": resumable_manual_sessions,
+        "expired_manual_sessions": expired_manual_sessions,
     }
 
 
@@ -387,6 +405,9 @@ def release_ev_ownership(
     vid = normalize_vehicle_id(vehicle_id)
     leases = get_ev_ownerships(hass, config_entry)
     previous = leases.pop(vid, None)
+    if vid != DEFAULT_VEHICLE_ID:
+        default_previous = leases.pop(DEFAULT_VEHICLE_ID, None)
+        previous = previous if previous is not None else default_previous
     now = _now_iso()
     last_command = {
         "command": command,
@@ -412,7 +433,10 @@ def clear_ev_ownerships(
         _schedule_runtime_save(hass, config_entry)
         return
     for vehicle_id in vehicle_ids:
-        leases.pop(normalize_vehicle_id(vehicle_id), None)
+        vid = normalize_vehicle_id(vehicle_id)
+        leases.pop(vid, None)
+        if vid != DEFAULT_VEHICLE_ID:
+            leases.pop(DEFAULT_VEHICLE_ID, None)
     _schedule_runtime_save(hass, config_entry)
 
 

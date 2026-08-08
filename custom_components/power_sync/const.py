@@ -2,6 +2,7 @@
 from datetime import timedelta
 import json
 from pathlib import Path
+from urllib.parse import urlencode
 
 # Integration domain
 DOMAIN = "power_sync"
@@ -16,7 +17,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "44"
+DASHBOARD_JS_VERSION = "45"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -30,6 +31,7 @@ AMBER_WEBSOCKET_START_TIMEOUT_SECONDS = 15.0
 CONF_AMBER_API_TOKEN = "amber_api_token"
 CONF_AMBER_SITE_ID = "amber_site_id"
 CONF_TESLEMETRY_API_TOKEN = "teslemetry_api_token"
+CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
 CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 CONF_AUTO_SYNC_ENABLED = "auto_sync_enabled"
 CONF_AUTO_UPDATE_ENABLED = "auto_update_enabled"
@@ -145,6 +147,7 @@ CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
 CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY_2 = "generic_charger_soc_entity_2"
+CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH = "generic_charger_battery_capacity_kwh"
 
 # Sigenergy EV Charger configuration
 CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
@@ -451,6 +454,8 @@ CONF_SIGENERGY_DC_CURTAILMENT_ENABLED = "sigenergy_dc_curtailment_enabled"
 CONF_SIGENERGY_MODBUS_HOST = "sigenergy_modbus_host"
 CONF_SIGENERGY_MODBUS_PORT = "sigenergy_modbus_port"
 CONF_SIGENERGY_MODBUS_SLAVE_ID = "sigenergy_modbus_slave_id"
+CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW = "sigenergy_charge_rate_limit_kw"
+CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW = "sigenergy_discharge_rate_limit_kw"
 CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
 DEFAULT_SIGENERGY_MODBUS_PORT = 502
 DEFAULT_SIGENERGY_MODBUS_SLAVE_ID = 247  # Sigenergy uses unit ID 247 (or 0)
@@ -473,6 +478,9 @@ CONF_ALPHAESS_CLOUD_ENABLED = "alphaess_cloud_enabled"
 CONF_ALPHAESS_CLOUD_APP_ID = "alphaess_cloud_app_id"
 CONF_ALPHAESS_CLOUD_APP_SECRET = "alphaess_cloud_app_secret"
 CONF_ALPHAESS_CLOUD_SERIAL = "alphaess_cloud_serial"
+CONF_ALPHAESS_CONNECTION_TYPE = "alphaess_connection_type"
+ALPHAESS_CONNECTION_MODBUS_CLOUD = "modbus_cloud"
+ALPHAESS_CONNECTION_CLOUD_ONLY = "cloud_only"
 ALPHAESS_CLOUD_BASE_URL = "https://openapi.alphaess.com/api"
 
 # ESY Sunhome battery system — bridges via upstream esy_sunhome companion integration
@@ -632,6 +640,7 @@ ELECTRICITY_PROVIDERS = {
     "localvolts": "Localvolts — 5-minute NEM wholesale pricing (AU)",
     "flow_power": "Flow Power — wholesale with Happy Hour exports (AU)",
     "globird": "Globird — static tariff with AEMO spike export (AU)",
+    "covau": "CovaU SolarMax — quota-aware free import and premium export (AU)",
     "aemo_vpp": "AEMO VPP — spike detection for VPP plans (AGL, Engie, etc.)",
     "octopus": "Octopus Energy — dynamic Agile/Go/Flux pricing (UK)",
     "epex": "EPEX Day-Ahead — European day-ahead market pricing (EU)",
@@ -639,19 +648,17 @@ ELECTRICITY_PROVIDERS = {
     "other": "Other / Custom TOU — enter your own rates manually",
 }
 
-NO_IDLE_MODE_PROVIDERS = frozenset({
+# Historical availability only. Runtime No Idle support is provider-independent;
+# this set exists solely to prevent hidden v8 values activating during migration.
+LEGACY_NO_IDLE_MODE_PROVIDERS_V8 = frozenset({
     "flow_power",
     "globird",
+    "covau",
     "aemo_vpp",
     "other",
     "tou_only",
     "nz",
 })
-
-
-def supports_no_idle_mode_provider(provider: str | None) -> bool:
-    """Return whether a provider can replace optimizer idle holds."""
-    return str(provider or "") in NO_IDLE_MODE_PROVIDERS
 
 
 # GloBird ZeroHero plan configuration
@@ -679,6 +686,31 @@ CONF_GLOBIRD_ZEROCHARGE_END = "globird_zerocharge_end"
 CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH = "globird_zerocharge_import_cap_kwh"
 CONF_GLOBIRD_EMAIL = "globird_email"
 CONF_GLOBIRD_PASSWORD = "globird_password"
+
+# CovaU SolarMax public AER/CDR plan and measured quota settlement.
+CONF_COVAU_POSTCODE = "covau_postcode"
+CONF_COVAU_PLAN_ID = "covau_plan_id"
+CONF_COVAU_DISTRIBUTOR = "covau_distributor"
+CONF_COVAU_PLAN_RAW = "covau_plan_raw"
+CONF_COVAU_PLAN_SNAPSHOT = "covau_plan_snapshot"
+CONF_COVAU_IMPORT_ENERGY_ENTITY = "covau_import_energy_entity"
+CONF_COVAU_EXPORT_ENERGY_ENTITY = "covau_export_energy_entity"
+CONF_COVAU_MANUAL_TARIFF = "covau_manual_tariff"
+
+# Read-only network export envelope sourced from certified site equipment.
+CONF_NETWORK_EXPORT_MODE = "network_export_mode"
+CONF_NETWORK_EXPORT_LIMIT_ENTITY = "network_export_limit_entity"
+CONF_NETWORK_EXPORT_STATUS_ENTITY = "network_export_status_entity"
+CONF_NETWORK_EXPORT_EXPIRY_ENTITY = "network_export_expiry_entity"
+CONF_NETWORK_EXPORT_SCHEDULE_ENTITY = "network_export_schedule_entity"
+CONF_NETWORK_EXPORT_PCC_POWER_ENTITY = "network_export_pcc_power_entity"
+CONF_NETWORK_EXPORT_SCOPE = "network_export_scope"
+CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W = "network_export_fallback_limit_w"
+CONF_NETWORK_EXPORT_SAFETY_MARGIN_W = "network_export_safety_margin_w"
+CONF_NETWORK_EXPORT_ALL_DER_ATTESTED = "network_export_all_der_attested"
+CONF_NETWORK_EXPORT_SITE_PHASE_COUNT = "network_export_site_phase_count"
+CONF_NETWORK_EXPORT_SOURCE_MAX_AGE_SECONDS = "network_export_source_max_age_seconds"
+CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS = "network_export_pcc_max_age_seconds"
 GLOBIRD_BASE_URL = "https://myaccount.globirdenergy.com.au"
 GLOBIRD_DEFAULT_USAGE_DAYS = 31
 GLOBIRD_ACCOUNT_UPDATE_INTERVAL_SECONDS = 1800
@@ -1087,6 +1119,7 @@ CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
 CONF_FP_NETWORK = "fp_network"                # DNSP display name (e.g. "SAPN")
 CONF_FP_TARIFF_CODE = "fp_tariff_code"        # Tariff code (e.g. "RESELE")
 CONF_FP_TWAP_OVERRIDE = "fp_twap_override"    # Manual TWAP override (c/kWh)
+CONF_FP_BILLING_DAY = "fp_billing_day"        # Billing-period start day-of-month (1-28) for TWAP anchoring
 CONF_FP_AMBER_MARKUP = "fp_amber_markup"      # Amber comparison markup (c/kWh)
 
 # PEA Constants
@@ -1096,28 +1129,26 @@ FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
-# Flow Power Portal configuration
-CONF_FLOWPOWER_EMAIL = "flowpower_email"
-CONF_FLOWPOWER_PASSWORD = "flowpower_password"
+# Flow Power Web Data API configuration
 CONF_FLOWPOWER_API_KEY = "flowpower_api_key"
 CONF_FLOWPOWER_NMI = "flowpower_nmi"
 CONF_FLOWPOWER_NETWORK_TARIFF = "flowpower_network_tariff"
 UPDATE_INTERVAL_FLOWPOWER = 1800  # 30 minutes
 
-# Portal account sensors — (sensor_type, name, data_key, unit, icon, source_label)
-FLOW_POWER_PORTAL_SENSORS = [
-    ("fp_account_pea", "Flow Power PEA (Actual)", "pea_actual", "c/kWh", "mdi:account-cash", "portal"),
-    ("fp_account_pea_30d", "Flow Power PEA 30-Day", "pea_30_days", "c/kWh", "mdi:calendar-month", "portal"),
-    ("fp_account_bpea", "Flow Power BPEA (Benchmark)", "bpea", "c/kWh", "mdi:target", "portal"),
+# API account sensors — (sensor_type, name, data_key, unit, icon, source_label)
+FLOW_POWER_ACCOUNT_SENSORS = [
+    ("fp_account_pea", "Flow Power PEA (Actual)", "pea_actual", "c/kWh", "mdi:account-cash", "api"),
+    ("fp_account_pea_30d", "Flow Power PEA 30-Day", "pea_30_days", "c/kWh", "mdi:calendar-month", "api"),
+    ("fp_account_bpea", "Flow Power BPEA (Benchmark)", "bpea", "c/kWh", "mdi:target", "api"),
     ("fp_account_cpea", "Flow Power CPEA (Customer)", "cpea", "c/kWh", "mdi:account-arrow-right", "calculated"),
-    ("fp_account_pea_import", "Flow Power PEA Import", "pea_actual_import", "c/kWh", "mdi:import", "portal"),
-    ("fp_account_lwap", "Flow Power LWAP", "lwap", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_lwap_actual", "Flow Power LWAP (Actual)", "lwap_actual", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_twap", "Flow Power TWAP (Portal)", "twap", "c/kWh", "mdi:chart-timeline-variant", "portal"),
-    ("fp_account_avg_rrp", "Flow Power Avg Spot Price", "avg_rrp", "c/kWh", "mdi:lightning-bolt", "portal"),
-    ("fp_account_dlf", "Flow Power DLF (Site Losses)", "site_losses_dlf", None, "mdi:transmission-tower", "portal"),
-    ("fp_account_avg_usage", "Flow Power Avg Demand", "avg_usage_kw", "kW", "mdi:flash-outline", "portal"),
-    ("fp_account_max_usage", "Flow Power Max Demand", "max_usage_kw", "kW", "mdi:flash-alert", "portal"),
+    ("fp_account_pea_import", "Flow Power PEA Import", "pea_actual_import", "c/kWh", "mdi:import", "api"),
+    ("fp_account_lwap", "Flow Power LWAP", "lwap", "c/kWh", "mdi:scale-balance", "api"),
+    ("fp_account_lwap_actual", "Flow Power LWAP (Actual)", "lwap_actual", "c/kWh", "mdi:scale-balance", "api"),
+    ("fp_account_twap", "Flow Power TWAP (Account)", "twap", "c/kWh", "mdi:chart-timeline-variant", "api"),
+    ("fp_account_avg_rrp", "Flow Power Avg Spot Price", "avg_rrp", "c/kWh", "mdi:lightning-bolt", "api"),
+    ("fp_account_dlf", "Flow Power DLF (Site Losses)", "site_losses_dlf", None, "mdi:transmission-tower", "api"),
+    ("fp_account_avg_usage", "Flow Power Avg Demand", "avg_usage_kw", "kW", "mdi:flash-outline", "api"),
+    ("fp_account_max_usage", "Flow Power Max Demand", "max_usage_kw", "kW", "mdi:flash-alert", "api"),
 ]
 
 # Default Amber comparison markup by region (c/kWh)
@@ -1181,6 +1212,10 @@ UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(seconds=15)  # Tesla energy data every 15 seconds
 TESLA_SITE_INFO_CACHE_TTL_SECONDS = 6 * 60 * 60
 TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 60
+# How recently the local Powerwall coordinator must have ticked for its data
+# to be trusted by number.py/select.py/sensor.py's local-prefer overrides and
+# optimization/battery_controller.py's local snapshot lookup.
+TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 
 # Amber API
 AMBER_API_BASE_URL = "https://api.amber.com.au/v1"
@@ -1194,11 +1229,42 @@ FLEET_API_AUTH_URL = "https://auth.tesla.com/oauth2/v3"
 FLEET_API_TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
 
 # PowerSync.cc cloud proxy — free OAuth + Tesla Fleet API proxy
-# Users authenticate via Sign in with Tesla on https://api.powersync.cc/auth/start
-# and get a psync_xxx token. Coordinator hits the proxy at /api/proxy/api/1/...
+# The copy/paste OAuth flow has no redirect URI, so identify it explicitly as
+# Home Assistant. Runtime proxy headers immediately refine the effective mode
+# to monitoring or actuating from the config entry. The coordinator uses the
+# resulting psync_xxx token against the proxy at /api/proxy/api/1/...
 POWERSYNC_API_BASE_URL = "https://api.powersync.cc/api/proxy"
-POWERSYNC_AUTH_START_URL = "https://api.powersync.cc/auth/start"
+POWERSYNC_AUTH_START_BASE_URL = "https://api.powersync.cc/auth/start"
+
+
+def powersync_auth_start_url(client_instance_id: str | None = None) -> str:
+    """Build the copy/paste OAuth URL for one stable HA config entry."""
+    params = {
+        "client_type": "home_assistant",
+        "control_mode": "actuating",
+    }
+    if client_instance_id:
+        params["client_instance_id"] = client_instance_id
+    return f"{POWERSYNC_AUTH_START_BASE_URL}?{urlencode(params)}"
+
+
+POWERSYNC_AUTH_START_URL = powersync_auth_start_url()
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
+
+# PowerSync Cloud energy-flow reporter (opt-in) — pushes local grid/solar/
+# battery/load telemetry to /v1/flow every DEFAULT_CLOUD_FLOW_INTERVAL
+# seconds in a ChargeHQ-compatible shape, so the cloud can drive
+# charge-on-solar decisions for battery-less / non-Tesla-energy-site
+# accounts. NOT under /api/proxy — uses the same psync_ bearer token.
+POWERSYNC_FLOW_API_URL = "https://api.powersync.cc/v1/flow"
+CONF_CLOUD_FLOW_REPORT = "cloud_flow_report"
+CONF_CLOUD_FLOW_GRID_ENTITY = "cloud_flow_grid_entity"
+CONF_CLOUD_FLOW_SOLAR_ENTITY = "cloud_flow_solar_entity"
+CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY = "cloud_flow_battery_power_entity"
+CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY = "cloud_flow_battery_soc_entity"
+CONF_CLOUD_FLOW_LOAD_ENTITY = "cloud_flow_load_entity"
+CONF_CLOUD_FLOW_INVERT_GRID = "cloud_flow_invert_grid"
+DEFAULT_CLOUD_FLOW_INTERVAL = 30
 
 
 def get_tesla_api_base_url(
@@ -1493,6 +1559,7 @@ CONF_INVERTER_PORT = "inverter_port"
 CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
 CONF_INVERTER_RATED_POWER_W = "inverter_rated_power_w"
+CONF_INVERTER_ENTITY_PREFIX = "inverter_entity_prefix"
 CONF_ENPHASE_USERNAME = "enphase_username"  # Enlighten username/email for auto token refresh
 CONF_ENPHASE_PASSWORD = "enphase_password"  # Enlighten password for auto token refresh
 CONF_ENPHASE_SERIAL = "enphase_serial"  # Envoy serial number (optional, auto-detected)
@@ -1511,6 +1578,7 @@ INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
     "goodwe": "GoodWe",
+    "goodwe_entity": "GoodWe (Home Assistant entities)",
     "huawei": "Huawei",
     "enphase": "Enphase",
     "zeversolar": "Zeversolar",
@@ -1537,6 +1605,10 @@ GOODWE_MODELS = {
     "bh": "BH Series (Hybrid)",
     "es": "ES Series (Hybrid)",
     "em": "EM Series (Hybrid)",
+}
+
+GOODWE_ENTITY_MODELS = {
+    "ms": "MS Series (GoodWe Experimental entities)",
 }
 
 # Huawei SUN2000 series (via Smart Dongle Modbus TCP)
@@ -1762,6 +1834,7 @@ def get_models_for_brand(brand: str, battery_system: str = None) -> dict[str, st
         "sungrow": SUNGROW_MODELS,
         "fronius": FRONIUS_MODELS,
         "goodwe": GOODWE_MODELS,
+        "goodwe_entity": GOODWE_ENTITY_MODELS,
         "huawei": HUAWEI_MODELS,
         "enphase": ENPHASE_MODELS,
         "zeversolar": ZEVERSOLAR_MODELS,
@@ -1785,6 +1858,7 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
         "sungrow": {"port": 502, "slave_id": 1},
         "fronius": {"port": 502, "slave_id": 1},
         "goodwe": {"port": 502, "slave_id": 247},
+        "goodwe_entity": {"port": 0, "slave_id": 1},
         "huawei": {"port": 502, "slave_id": 1},
         "enphase": {"port": 443, "slave_id": 1},
         "zeversolar": {"port": 80, "slave_id": 1},
@@ -2028,6 +2102,7 @@ SENSOR_TYPE_PV_DC_POWER = "pv_dc_power"
 SENSOR_TYPE_PV_AC_POWER = "pv_ac_power"
 
 # Amber Usage API sensors (actual metered cost data)
+SENSOR_TYPE_AMBER_USAGE_TODAY_COST = "amber_usage_today_cost"
 SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST = "amber_usage_yesterday_cost"
 SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS = "amber_usage_yesterday_savings"
 SENSOR_TYPE_AMBER_USAGE_MONTH_COST = "amber_usage_month_cost"
@@ -2143,6 +2218,7 @@ SENSOR_KEY_TO_FAMILY: dict[str, str] = {
     "monthly_supply_charge": SENSOR_FAMILY_PRICING,
     "total_monthly_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_yesterday_cost": SENSOR_FAMILY_PRICING,
+    "amber_usage_today_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_yesterday_savings": SENSOR_FAMILY_PRICING,
     "amber_usage_month_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_month_savings": SENSOR_FAMILY_PRICING,

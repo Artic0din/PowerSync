@@ -17,6 +17,7 @@ self-consumption behavior.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -27,6 +28,19 @@ from homeassistant.util import dt as dt_util
 from .schedule_reader import ScheduleAction, OptimizationSchedule
 
 _LOGGER = logging.getLogger(__name__)
+
+BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
+PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC = 0.005
+PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
+# Most horizons stabilize in two passes. A realistic two-day provider window
+# can need six as the natural self-use boundary advances across adjacent base
+# slots, so keep a small bounded allowance before using the projected plan.
+MODE_PROJECTION_MAX_ITERATIONS = 8
+MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
+# Coarse-period floor projection can move less than 20 Wh per contiguous
+# self-use run between otherwise identical command-mode passes. Keep the bound
+# fixed rather than allowing it to grow with battery capacity or run length.
+MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.02
 
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
@@ -96,15 +110,20 @@ class _HighsResult:
         self.fun = fun
 
 
-def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+def _solve_lp_highs(
+    c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit, integer_indices=None
+):
     """Solve a standard-form LP with HiGHS and return a linprog-like result.
 
     minimize  c·x   s.t.   A_ub·x <= b_ub,  A_eq·x == b_eq,  bounds[j] on x[j].
 
-    Mirrors ``scipy.optimize.linprog(method="highs")``: only an optimal solve
-    sets ``success=True``; infeasible/time-limit/unbounded report success=False
-    with a message string (``"infeasible"`` substring preserved so the caller's
-    self-consumption fallback still triggers).
+    Mirrors ``scipy.optimize.linprog(method="highs")``: an optimal solve sets
+    ``success=True``, and so does a time/iteration-limited solve that still
+    holds a feasible incumbent (that incumbent is returned instead of being
+    discarded); infeasible/unbounded — and limited solves with no feasible
+    incumbent — report success=False with a message string (``"infeasible"``
+    substring preserved so the caller's self-consumption fallback still
+    triggers).
     """
     inf = highspy.kHighsInf
     h = highspy.Highs()
@@ -119,6 +138,8 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
         lo = -inf if lo is None else float(lo)
         hi = inf if hi is None else float(hi)
         h.addCol(float(c[j]), lo, hi, 0, [], [])
+    for index in integer_indices or ():
+        h.setInteger(int(index))
 
     # Equality rows: lower == upper == b_eq[i].
     for i, idx, val in A_eq.iter_rows():
@@ -134,7 +155,23 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
     model_status = h.getModelStatus()
     message = h.modelStatusToString(model_status)
     optimal = model_status == highspy.HighsModelStatus.kOptimal
-    if optimal:
+
+    # A time/iteration-limited solve can still hold a usable feasible
+    # incumbent — use it instead of discarding it and forcing the caller's
+    # greedy fallback.
+    usable_incumbent = False
+    if not optimal and model_status in (
+        highspy.HighsModelStatus.kTimeLimit,
+        highspy.HighsModelStatus.kIterationLimit,
+    ):
+        info = h.getInfo()
+        usable_incumbent = (
+            getattr(info, "primal_solution_status", None)
+            == highspy.kSolutionStatusFeasible
+        )
+
+    success = optimal or usable_incumbent
+    if success:
         x = list(h.getSolution().col_value)
         fun = float(h.getObjectiveValue())
     else:
@@ -142,7 +179,7 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
         fun = None
     return _HighsResult(
         x=x,
-        success=optimal,
+        success=success,
         message=message,
         status=int(model_status),
         fun=fun,
@@ -200,6 +237,9 @@ class _LpPeriod:
     allow_battery_export: bool
     block_battery_charge: bool
     grid_charge_allowed: bool
+    priority_export: bool
+    mode: str | None = None
+    required_self_use_kw: float = 0.0
 
     @property
     def slot_count(self) -> int:
@@ -219,6 +259,9 @@ class OptimizerResult:
     grid_export_w: list[float] = field(default_factory=list)
     lp_stats: dict[str, Any] = field(default_factory=dict)
     reserve_recommendation: dict[str, Any] = field(default_factory=dict)
+    modeled_backup_reserve: float | None = None
+    modeled_export_reserve_floor: float | None = None
+    modeled_export_reserve_floor_slots: list[float] | None = None
 
 
 class BatteryOptimizer:
@@ -240,6 +283,7 @@ class BatteryOptimizer:
         efficiency: float = DEFAULT_EFFICIENCY,
         backup_reserve: float = 0.20,
         hardware_reserve: float | None = None,
+        grid_charge_soc_cap: float = 1.0,
         interval_minutes: int = 5,
         horizon_hours: int = 48,
         terminal_weight: float = 1.0,
@@ -249,11 +293,17 @@ class BatteryOptimizer:
         self.max_discharge_w = max_discharge_w
         self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
         self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
-        self.max_battery_export_w = max_battery_export_w
+        self.max_battery_export_w = self._normalize_optional_export_power_w(
+            max_battery_export_w
+        )
         self.efficiency = efficiency
         self.backup_reserve = backup_reserve
         self.hardware_reserve = max(0.0, min(1.0, float(hardware_reserve or 0.0)))
         self.hardware_reserve_known = hardware_reserve is not None
+        self.grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(grid_charge_soc_cap if grid_charge_soc_cap is not None else 1.0)),
+        )
         self.interval_minutes = interval_minutes
         self.horizon_hours = horizon_hours
         self.terminal_weight = terminal_weight
@@ -264,6 +314,16 @@ class BatteryOptimizer:
         self._below_reserve_recovery_target: float | None = None
         self.export_reserve_floor: float = 0.0
         self.export_reserve_floor_slots: list[float] | None = None
+        self._active_grid_export_limits_w: list[float | None] | None = None
+        # Reconciliation runs after ``optimize`` has restored solve-local state.
+        # Retain only the most recent normalized slot caps so post-solve schedule
+        # spreading cannot escape the network envelope.
+        self._last_grid_export_limits_w: list[float | None] | None = None
+        self._prevent_simultaneous_grid_flow = False
+        self._quota_import_group_ids: list[str | None] | None = None
+        self._quota_export_group_ids: list[str | None] | None = None
+        self._quota_import_caps_by_group: dict[str, float] = {}
+        self._quota_export_caps_by_group: dict[str, float] = {}
 
         # Pre-window SOC floor: enforce soc[pre_window_slot - 1] >= target.
         # Used by the coordinator to guarantee the battery is filled before
@@ -300,8 +360,8 @@ class BatteryOptimizer:
             else None
         )
         self.max_battery_export_kw = (
-            max_battery_export_w / 1000.0
-            if max_battery_export_w is not None
+            self.max_battery_export_w / 1000.0
+            if self.max_battery_export_w is not None
             else None
         )
         self.dt_hours = interval_minutes / 60.0  # time step in hours
@@ -316,6 +376,7 @@ class BatteryOptimizer:
         max_battery_export_w: float | None | object = _UNSET,
         efficiency: float | None = None,
         backup_reserve: float | None = None,
+        grid_charge_soc_cap: float | None = None,
         horizon_hours: int | None = None,
     ) -> None:
         """Update optimizer configuration."""
@@ -338,16 +399,23 @@ class BatteryOptimizer:
         if max_grid_export_w is not _UNSET:
             self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
         if max_battery_export_w is not _UNSET:
-            self.max_battery_export_w = max_battery_export_w
+            self.max_battery_export_w = self._normalize_optional_export_power_w(
+                max_battery_export_w
+            )
             self.max_battery_export_kw = (
-                max_battery_export_w / 1000.0
-                if max_battery_export_w is not None
+                self.max_battery_export_w / 1000.0
+                if self.max_battery_export_w is not None
                 else None
             )
         if efficiency is not None:
             self.efficiency = efficiency
         if backup_reserve is not None:
             self.backup_reserve = backup_reserve
+        if grid_charge_soc_cap is not None:
+            self.grid_charge_soc_cap = max(
+                0.0,
+                min(1.0, float(grid_charge_soc_cap)),
+            )
         if horizon_hours is not None:
             try:
                 parsed_horizon = int(float(horizon_hours))
@@ -355,6 +423,30 @@ class BatteryOptimizer:
                 parsed_horizon = None
             if parsed_horizon is not None and parsed_horizon > 0:
                 self.horizon_hours = parsed_horizon
+
+    def set_quota_bonus_groups(
+        self,
+        *,
+        import_group_ids: list[str | None] | None,
+        import_caps_by_group: dict[str, float] | None,
+        export_group_ids: list[str | None] | None,
+        export_caps_by_group: dict[str, float] | None,
+    ) -> None:
+        """Set per-tariff-day marginal buckets for the next solve/reconcile."""
+        self._quota_import_group_ids = (
+            list(import_group_ids) if import_group_ids is not None else None
+        )
+        self._quota_export_group_ids = (
+            list(export_group_ids) if export_group_ids is not None else None
+        )
+        self._quota_import_caps_by_group = {
+            str(key): max(0.0, float(value))
+            for key, value in (import_caps_by_group or {}).items()
+        }
+        self._quota_export_caps_by_group = {
+            str(key): max(0.0, float(value))
+            for key, value in (export_caps_by_group or {}).items()
+        }
 
     @staticmethod
     def _normalize_optional_power_w(value: float | None | object) -> float | None:
@@ -397,9 +489,12 @@ class BatteryOptimizer:
     def _natural_self_consumption_floor(self, soc_0: float) -> float:
         """SOC floor for displayed natural home-load battery use."""
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
-        if not getattr(self, "hardware_reserve_known", False):
-            return optimizer_reserve
         current_soc = max(0.0, min(1.0, float(soc_0)))
+        if not getattr(self, "hardware_reserve_known", False):
+            # Do not invent energy when telemetry is already below the
+            # conservative fallback floor. Hold at the observed SOC until an
+            # economically selected recovery charge can raise it.
+            return min(current_soc, optimizer_reserve)
         hardware_reserve = max(0.0, min(1.0, self.hardware_reserve))
         return min(current_soc, hardware_reserve)
 
@@ -445,6 +540,11 @@ class BatteryOptimizer:
         import_bonus_cap_kwh: float | None = None,
         export_reserve_floor: float | list[float] | None = None,
         schedule_timestamps: list[datetime] | None = None,
+        priority_export_slots: bool | list[bool] | None = None,
+        priority_export_enabled: bool = False,
+        disable_idle: bool = False,
+        grid_export_limits_w: list[float | None] | None = None,
+        prevent_simultaneous_grid_flow: bool = False,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -472,6 +572,19 @@ class BatteryOptimizer:
             import_bonus_cap_kwh: Optional kWh cap for import bonuses.
             schedule_timestamps: Optional per-slot timestamps aligned with the
                 price forecast.
+            priority_export_slots: Optional per-step export-priority mask.
+                When omitted and priority_export_enabled is true, uses
+                allow_battery_export.
+            priority_export_enabled: Mark provider settlement windows where
+                modeled export bonuses may make battery export economic.
+            disable_idle: Require ordinary non-forced slots to use the battery
+                naturally rather than holding SOC for a later opportunity.
+            grid_export_limits_w: Optional per-slot site export caps. A numeric
+                zero is a valid no-export limit; None falls back to the scalar
+                configured cap for that slot.
+            prevent_simultaneous_grid_flow: Add a HiGHS grid-direction binary.
+                Enabled only for tariffs whose marginal prices can otherwise
+                reward import/export passthrough.
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -507,8 +620,37 @@ class BatteryOptimizer:
         grid_charge_allowed = self._normalize_grid_charge_allowed(
             grid_charge_allowed, n_steps
         )
+        effective_priority_export_prices = [
+            export_prices[idx] + export_bonus_prices[idx]
+            for idx in range(n_steps)
+        ]
+        priority_export_slots = self._normalize_priority_export_slots(
+            priority_export_slots,
+            allow_battery_export,
+            n_steps,
+            priority_export_enabled,
+            import_prices,
+            effective_priority_export_prices,
+            grid_charge_allowed,
+        )
+        # Priority/provider windows affect export permissions and settlement
+        # value only. They must not manufacture a home-load bridge floor: that
+        # hidden floor forced recovery charging even when direct future imports
+        # were cheaper. Explicit caller-supplied export floors remain supported
+        # as forced-export boundaries.
         previous_export_floor = self.export_reserve_floor
         previous_export_floor_slots = self.export_reserve_floor_slots
+        previous_grid_export_limits = self._active_grid_export_limits_w
+        previous_direction_guard = self._prevent_simultaneous_grid_flow
+        self._active_grid_export_limits_w = self._normalize_grid_export_limits(
+            grid_export_limits_w, n_steps
+        )
+        self._last_grid_export_limits_w = (
+            list(self._active_grid_export_limits_w)
+            if self._active_grid_export_limits_w is not None
+            else None
+        )
+        self._prevent_simultaneous_grid_flow = bool(prevent_simultaneous_grid_flow)
         if export_reserve_floor is not None:
             if isinstance(export_reserve_floor, list):
                 floors = [
@@ -525,6 +667,17 @@ class BatteryOptimizer:
                     min(1.0, float(export_reserve_floor)),
                 )
                 self.export_reserve_floor_slots = None
+
+        modeled_backup_reserve = max(0.0, min(1.0, self.backup_reserve))
+        modeled_export_reserve_floor = max(
+            0.0,
+            min(1.0, float(self.export_reserve_floor or 0.0)),
+        )
+        modeled_export_reserve_floor_slots = (
+            list(self.export_reserve_floor_slots)
+            if self.export_reserve_floor_slots is not None
+            else None
+        )
 
         try:
             if HIGHS_AVAILABLE:
@@ -547,8 +700,15 @@ class BatteryOptimizer:
                         import_bonus_prices,
                         import_bonus_cap_kwh,
                         schedule_timestamps,
+                        priority_export_slots,
+                        disable_idle,
                     )
                     result.solve_time_s = time.monotonic() - start_time
+                    result.modeled_backup_reserve = modeled_backup_reserve
+                    result.modeled_export_reserve_floor = modeled_export_reserve_floor
+                    result.modeled_export_reserve_floor_slots = (
+                        modeled_export_reserve_floor_slots
+                    )
                     return result
                 except Exception as e:
                     _LOGGER.error(f"LP solver failed, falling back to greedy: {e}")
@@ -572,13 +732,22 @@ class BatteryOptimizer:
                 import_bonus_prices,
                 import_bonus_cap_kwh,
                 schedule_timestamps,
+                priority_export_slots,
+                disable_idle,
             )
             result.solve_time_s = time.monotonic() - start_time
+            result.modeled_backup_reserve = modeled_backup_reserve
+            result.modeled_export_reserve_floor = modeled_export_reserve_floor
+            result.modeled_export_reserve_floor_slots = (
+                modeled_export_reserve_floor_slots
+            )
             return result
         finally:
             if export_reserve_floor is not None:
                 self.export_reserve_floor = previous_export_floor
                 self.export_reserve_floor_slots = previous_export_floor_slots
+            self._active_grid_export_limits_w = previous_grid_export_limits
+            self._prevent_simultaneous_grid_flow = previous_direction_guard
 
     def _align_forecasts(
         self,
@@ -607,9 +776,8 @@ class BatteryOptimizer:
             return [default] * target_len
         if len(arr) >= target_len:
             return arr[:target_len]
-        # Pad with last known value
-        pad_value = arr[-1] if arr else default
-        return arr + [pad_value] * (target_len - len(arr))
+        # Pad with the caller-supplied default
+        return arr + [default] * (target_len - len(arr))
 
     def _normalize_battery_export_flags(
         self,
@@ -654,6 +822,213 @@ class BatteryOptimizer:
         if len(flags) < target_len:
             flags.extend([True] * (target_len - len(flags)))
         return flags
+
+    def _normalize_grid_export_limits(
+        self,
+        values: list[float | None] | None,
+        target_len: int,
+    ) -> list[float | None] | None:
+        if values is None:
+            return None
+        normalized: list[float | None] = []
+        scalar = self.max_grid_export_w
+        for value in values[:target_len]:
+            try:
+                parsed = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None:
+                parsed = max(0.0, parsed)
+                if scalar is not None:
+                    parsed = min(parsed, scalar)
+            else:
+                parsed = scalar
+            normalized.append(parsed)
+        while len(normalized) < target_len:
+            normalized.append(scalar)
+        return normalized
+
+    def _grid_export_limit_kw_for_range(
+        self,
+        start: int,
+        end: int,
+        *,
+        default_kw: float | None = None,
+    ) -> float | None:
+        limits = getattr(self, "_active_grid_export_limits_w", None)
+        if limits is None:
+            limits = getattr(self, "_last_grid_export_limits_w", None)
+        active: list[float] = []
+        if limits:
+            active = [
+                max(0.0, float(value)) / 1000.0
+                for value in limits[max(0, start):max(0, end)]
+                if value is not None
+            ]
+        if active:
+            limit = min(active)
+        elif self.max_grid_export_w is not None:
+            limit = max(0.0, self.max_grid_export_w / 1000.0)
+        else:
+            limit = default_kw
+        return limit
+
+    def _normalize_priority_export_slots(
+        self,
+        priority_export_slots: bool | list[bool] | None,
+        allow_battery_export: list[bool],
+        target_len: int,
+        enabled: bool,
+        import_prices: list[float],
+        export_prices: list[float],
+        grid_charge_allowed: list[bool],
+    ) -> list[bool]:
+        """Return export-priority slots that should prefer surplus export."""
+        if not enabled:
+            return [False] * target_len
+
+        if priority_export_slots is None:
+            raw = list(allow_battery_export[:target_len])
+        elif isinstance(priority_export_slots, bool):
+            raw = [priority_export_slots] * target_len
+        else:
+            raw = [bool(v) for v in priority_export_slots[:target_len]]
+            if len(raw) < target_len:
+                raw.extend([False] * (target_len - len(raw)))
+
+        flags: list[bool] = []
+        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        for idx in range(target_len):
+            if not raw[idx] or not allow_battery_export[idx]:
+                flags.append(False)
+                continue
+            try:
+                export_price = float(export_prices[idx] or 0.0)
+                import_price = float(import_prices[idx] or 0.0)
+            except (TypeError, ValueError):
+                flags.append(False)
+                continue
+            if export_price <= 0.001:
+                flags.append(False)
+                continue
+            # If this slot is already cheap enough to refill the battery after
+            # efficiency losses, leave it available for charging. Priority
+            # export is for high-price sell windows where the excess can be
+            # replenished later, not for cheap import windows.
+            if grid_charge_allowed[idx] and import_price <= export_price * round_trip_eff:
+                flags.append(False)
+                continue
+            flags.append(True)
+        return flags
+
+    def _priority_export_reserve_floor_slots(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        priority_export_slots: list[bool],
+        block_battery_charge: list[bool],
+        allow_grid_charge: bool,
+        grid_charge_allowed: list[bool],
+        import_bonus_prices: list[float] | None = None,
+    ) -> list[float] | None:
+        """Build per-slot export floors that bridge home load to next recharge."""
+        if not any(priority_export_slots):
+            return None
+        if self.capacity_kwh <= 0:
+            return None
+
+        n = len(priority_export_slots)
+        import_bonus_prices = import_bonus_prices or [0.0] * n
+        floors = [0.0] * n
+        base_floor = max(
+            0.0,
+            min(1.0, self.backup_reserve),
+            min(1.0, self.hardware_reserve),
+        )
+        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        threshold_kw = ACTION_THRESHOLD_W / 1000.0
+        idx = 0
+
+        def _forecast_kw(values: list[float], pos: int) -> float:
+            if pos >= len(values):
+                return 0.0
+            try:
+                return max(0.0, float(values[pos] or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        while idx < n:
+            if not priority_export_slots[idx]:
+                idx += 1
+                continue
+
+            start = idx
+            while idx < n and priority_export_slots[idx]:
+                idx += 1
+            end = idx
+            reference_export = max(
+                max(0.0, float(price or 0.0))
+                for price in export_prices[start:end]
+            )
+            cheap_recharge_price = reference_export * round_trip_eff
+            bridge_kwh = 0.0
+
+            for scan_idx in range(end, n):
+                solar_kw = _forecast_kw(solar, scan_idx)
+                load_kw = _forecast_kw(load, scan_idx)
+                if solar_kw - load_kw > threshold_kw:
+                    break
+                effective_import_price = import_prices[scan_idx] - (
+                    import_bonus_prices[scan_idx]
+                    if scan_idx < len(import_bonus_prices)
+                    else 0.0
+                )
+                if (
+                    allow_grid_charge
+                    and scan_idx < len(grid_charge_allowed)
+                    and grid_charge_allowed[scan_idx]
+                    and not block_battery_charge[scan_idx]
+                    and effective_import_price <= cheap_recharge_price
+                    and self._charge_limit_kw(load_kw, solar_kw, True) > threshold_kw
+                ):
+                    break
+                bridge_kwh += max(0.0, load_kw - solar_kw) * self.dt_hours
+
+            bridge_soc = bridge_kwh / max(self.capacity_kwh * self.efficiency, 0.001)
+            floor = max(base_floor, min(1.0, base_floor + bridge_soc))
+            for floor_idx in range(start, end):
+                floors[floor_idx] = floor
+
+        return floors if any(value > 0 for value in floors) else None
+
+    @staticmethod
+    def _merge_export_reserve_floor(
+        explicit_floor: float | list[float] | None,
+        priority_floor: list[float] | None,
+        target_len: int,
+    ) -> float | list[float] | None:
+        """Merge user/auto export floors with priority-export bridge floors."""
+        if priority_floor is None:
+            return explicit_floor
+        if explicit_floor is None:
+            return priority_floor
+
+        if isinstance(explicit_floor, list):
+            explicit = [
+                max(0.0, min(1.0, float(value or 0.0)))
+                for value in explicit_floor[:target_len]
+            ]
+            if len(explicit) < target_len:
+                explicit.extend([0.0] * (target_len - len(explicit)))
+        else:
+            explicit_value = max(0.0, min(1.0, float(explicit_floor or 0.0)))
+            explicit = [explicit_value] * target_len
+        return [
+            max(explicit[idx], priority_floor[idx] if idx < len(priority_floor) else 0.0)
+            for idx in range(target_len)
+        ]
 
     def _has_future_self_consumption_value(
         self,
@@ -745,11 +1120,10 @@ class BatteryOptimizer:
 
         # Some tariffs fill the battery cheaply before a lower-FIT export
         # window. The current import price is still relevant to self-consumption,
-        # but it should not completely block exporting surplus charged at the
-        # earlier cheap/free rate.
+        # but it should not completely block exporting energy that was acquired
+        # below the export rate.
         return (
             acquisition_cost_kwh > 0
-            and effective_acquisition_cost_kwh < acquisition_cost_kwh
             and export_price >= effective_acquisition_cost_kwh
         )
 
@@ -765,6 +1139,9 @@ class BatteryOptimizer:
         grid_charge_allowed: list[bool] | None = None,
         export_bonus_prices: list[float] | None = None,
         import_bonus_prices: list[float] | None = None,
+        priority_export_slots: list[bool] | None = None,
+        mode_slots: list[str | None] | None = None,
+        required_self_use_kw: list[float] | None = None,
     ) -> list[_LpPeriod]:
         """Aggregate base 5-minute slots into internal LP periods."""
         near_slots = int(LP_NEAR_HORIZON_HOURS * 60 / self.interval_minutes)
@@ -774,6 +1151,9 @@ class BatteryOptimizer:
         bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus = import_bonus_prices or [0.0] * n
         grid_charge_allowed = grid_charge_allowed or [True] * n
+        priority_export_slots = priority_export_slots or [False] * n
+        mode_slots = mode_slots or [None] * n
+        required_self_use_kw = required_self_use_kw or [0.0] * n
         periods: list[_LpPeriod] = []
         idx = 0
 
@@ -798,6 +1178,9 @@ class BatteryOptimizer:
                 grid_charge_allowed,
                 bonus_prices,
                 import_bonus,
+                priority_export_slots,
+                mode_slots,
+                required_self_use_kw,
             )
 
             # Keep the pre-window SOC deadline on an exact internal boundary.
@@ -817,6 +1200,11 @@ class BatteryOptimizer:
                     allow_battery_export=allow_battery_export[idx],
                     block_battery_charge=block_battery_charge[idx],
                     grid_charge_allowed=all(grid_charge_allowed[idx:end]),
+                    priority_export=priority_export_slots[idx],
+                    mode=mode_slots[idx],
+                    required_self_use_kw=(
+                        sum(required_self_use_kw[idx:end]) / (end - idx)
+                    ),
                 )
             )
             idx = end
@@ -836,6 +1224,9 @@ class BatteryOptimizer:
         grid_charge_allowed: list[bool],
         export_bonus_prices: list[float],
         import_bonus_prices: list[float],
+        priority_export_slots: list[bool],
+        mode_slots: list[str | None],
+        required_self_use_kw: list[float],
     ) -> int:
         """Shorten a coarse period when correctness-sensitive inputs change."""
         if proposed_end <= start + 1:
@@ -844,6 +1235,17 @@ class BatteryOptimizer:
         first_allow = allow_battery_export[start]
         first_block = block_battery_charge[start]
         first_grid_charge_allowed = grid_charge_allowed[start]
+        first_priority_export = priority_export_slots[start]
+        first_mode = mode_slots[start]
+        import_group_ids = self._quota_import_group_ids or []
+        export_group_ids = self._quota_export_group_ids or []
+        first_import_group = (
+            import_group_ids[start] if start < len(import_group_ids) else None
+        )
+        first_export_group = (
+            export_group_ids[start] if start < len(export_group_ids) else None
+        )
+        min_required_self_use = max_required_self_use = required_self_use_kw[start]
         first_import_free = import_prices[start] <= 0.001
         first_export_free = export_prices[start] <= 0.001
         first_bonus_free = export_bonus_prices[start] <= 0.001
@@ -868,6 +1270,14 @@ class BatteryOptimizer:
             max_bonus = max(max_bonus, export_bonus_prices[idx])
             min_import_bonus = min(min_import_bonus, import_bonus_prices[idx])
             max_import_bonus = max(max_import_bonus, import_bonus_prices[idx])
+            min_required_self_use = min(
+                min_required_self_use,
+                required_self_use_kw[idx],
+            )
+            max_required_self_use = max(
+                max_required_self_use,
+                required_self_use_kw[idx],
+            )
             net_load = load[idx] - solar[idx]
             surplus = max(0.0, solar[idx] - load[idx])
             min_net_load = min(min_net_load, net_load)
@@ -878,6 +1288,16 @@ class BatteryOptimizer:
                 allow_battery_export[idx] != first_allow
                 or block_battery_charge[idx] != first_block
                 or grid_charge_allowed[idx] != first_grid_charge_allowed
+                or priority_export_slots[idx] != first_priority_export
+                or mode_slots[idx] != first_mode
+                or (
+                    import_group_ids[idx] if idx < len(import_group_ids) else None
+                )
+                != first_import_group
+                or (
+                    export_group_ids[idx] if idx < len(export_group_ids) else None
+                )
+                != first_export_group
                 or (import_prices[idx] <= 0.001) != first_import_free
                 or (export_prices[idx] <= 0.001) != first_export_free
                 or (export_bonus_prices[idx] <= 0.001) != first_bonus_free
@@ -886,6 +1306,8 @@ class BatteryOptimizer:
                 or max_export - min_export > LP_PRICE_SPLIT_THRESHOLD
                 or max_bonus - min_bonus > LP_PRICE_SPLIT_THRESHOLD
                 or max_import_bonus - min_import_bonus > LP_PRICE_SPLIT_THRESHOLD
+                or max_required_self_use - min_required_self_use
+                > LP_POWER_SPLIT_THRESHOLD_KW
                 or (net_load > LP_POWER_SPLIT_THRESHOLD_KW) != first_net_load_positive
                 or (surplus > LP_POWER_SPLIT_THRESHOLD_KW) != first_surplus_positive
                 or max_net_load - min_net_load > LP_POWER_SPLIT_THRESHOLD_KW
@@ -997,6 +1419,70 @@ class BatteryOptimizer:
                 expanded[base_idx] = value
         return expanded
 
+    @staticmethod
+    def _schedule_mode_constraints(
+        schedule: OptimizationSchedule,
+        n: int,
+    ) -> tuple[list[str], list[float]]:
+        """Return command modes and required natural discharge from a schedule."""
+        modes = ["idle"] * n
+        required_self_use_kw = [0.0] * n
+        for idx, action in enumerate((schedule.actions or [])[:n]):
+            if action.action == "charge":
+                modes[idx] = "charge"
+            elif action.action in ("export", "discharge"):
+                modes[idx] = "export"
+            elif action.action == "idle":
+                modes[idx] = "idle"
+            else:
+                modes[idx] = "self_use"
+                required_self_use_kw[idx] = max(
+                    0.0,
+                    float(action.battery_discharge_w or 0.0) / 1000.0,
+                )
+        return modes, required_self_use_kw
+
+    @staticmethod
+    def _mode_constraints_match(
+        left_modes: list[str],
+        left_required: list[float],
+        right_modes: list[str],
+        right_required: list[float],
+        slot_hours: float,
+    ) -> bool:
+        """Return True when two physical command projections are equivalent."""
+        if left_modes != right_modes:
+            return False
+
+        # Coarse LP periods can shift the exact base slot in which a continuous
+        # self-use run reaches its floor. Compare the run's total requested
+        # natural discharge rather than requiring an identical sub-slot shape;
+        # unlike a modes-only comparison, this still proves the next solve was
+        # constrained by the same amount of battery energy that will be emitted.
+        idx = 0
+        while idx < len(left_modes):
+            if left_modes[idx] != "self_use":
+                idx += 1
+                continue
+            end = idx + 1
+            while end < len(left_modes) and left_modes[end] == "self_use":
+                end += 1
+            left_total = math.fsum(
+                power_kw * slot_hours for power_kw in left_required[idx:end]
+            )
+            right_total = math.fsum(
+                power_kw * slot_hours for power_kw in right_required[idx:end]
+            )
+            if not math.isclose(
+                left_total,
+                right_total,
+                rel_tol=MODE_PROJECTION_SELF_USE_REL_TOL,
+                abs_tol=MODE_PROJECTION_SELF_USE_ABS_TOL_KWH,
+            ):
+                return False
+            idx = end
+        return True
+
     def _solve_lp(
         self,
         n: int,
@@ -1016,6 +1502,8 @@ class BatteryOptimizer:
         import_bonus_prices: list[float] | None = None,
         import_bonus_cap_kwh: float | None = None,
         schedule_timestamps: list[datetime] | None = None,
+        priority_export_slots: list[bool] | None = None,
+        disable_idle: bool = False,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -1035,9 +1523,10 @@ class BatteryOptimizer:
         _soc_below_reserve = soc_0 < self.backup_reserve
         allow_battery_export = allow_battery_export or [True] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
+        priority_export_slots = priority_export_slots or [False] * n
         terminal_weight_override: float | None = None
         if _soc_below_reserve:
-            effective_reserve = max(0.0, min(soc_0, self.hardware_reserve))
+            effective_reserve = self._natural_self_consumption_floor(soc_0)
             log = _LOGGER.info if self.suppress_reserve_warning else _LOGGER.warning
             log(
                 "SOC (%.1f%%) below optimiser reserve (%.0f%%) — using "
@@ -1069,24 +1558,104 @@ class BatteryOptimizer:
                 grid_charge_allowed or [True] * n,
                 acquisition_cost_kwh,
                 export_bonus_prices or [0.0] * n,
+                priority_export_slots,
             )
 
         try:
-            return self._solve_lp_inner(
-                n, import_prices, export_prices, solar, load, soc_0,
-                cost_function,
-                acquisition_cost_kwh,
-                allow_battery_export,
-                block_battery_charge or [False] * n,
-                allow_grid_charge,
-                grid_charge_allowed or [True] * n,
-                export_bonus_prices or [0.0] * n,
-                export_bonus_cap_kwh,
-                import_bonus_prices,
-                import_bonus_cap_kwh,
-                schedule_timestamps,
-                terminal_weight_override=terminal_weight_override,
+            mode_slots: list[str] | None = None
+            required_self_use_kw: list[float] | None = None
+            last_result: OptimizerResult | None = None
+            for iteration in range(MODE_PROJECTION_MAX_ITERATIONS):
+                result = self._solve_lp_inner(
+                    n, import_prices, export_prices, solar, load, soc_0,
+                    cost_function,
+                    acquisition_cost_kwh,
+                    allow_battery_export,
+                    block_battery_charge or [False] * n,
+                    allow_grid_charge,
+                    grid_charge_allowed or [True] * n,
+                    export_bonus_prices or [0.0] * n,
+                    export_bonus_cap_kwh,
+                    import_bonus_prices,
+                    import_bonus_cap_kwh,
+                    schedule_timestamps,
+                    terminal_weight_override=terminal_weight_override,
+                    priority_export_slots=priority_export_slots,
+                    disable_idle=disable_idle,
+                    mode_slots=mode_slots,
+                    required_self_use_kw=required_self_use_kw,
+                )
+                result.lp_stats["mode_iterations"] = iteration + 1
+                if result.solver_used != "highs":
+                    if last_result is not None:
+                        _LOGGER.warning(
+                            "Optimizer command-mode projection became infeasible on "
+                            "pass %d; using the previous physically projected HiGHS plan",
+                            iteration + 1,
+                        )
+                        last_result.lp_stats = {
+                            **last_result.lp_stats,
+                            "mode_iterations": iteration + 1,
+                            "mode_converged": False,
+                            "fallback_reason": (
+                                "mode_projection_infeasible_projected_highs"
+                            ),
+                        }
+                        return last_result
+                    return result
+
+                next_modes, next_required = self._schedule_mode_constraints(
+                    result.schedule,
+                    n,
+                )
+                if mode_slots is not None and self._mode_constraints_match(
+                    mode_slots,
+                    required_self_use_kw or [0.0] * n,
+                    next_modes,
+                    next_required,
+                    self.dt_hours,
+                ):
+                    result.lp_stats["mode_converged"] = True
+                    return result
+
+                mode_slots = next_modes
+                required_self_use_kw = next_required
+                last_result = result
+
+            # Every pass is rendered through _build_schedule(), which caps the
+            # chronological trajectory to the physical and export floors. If
+            # the command projection cycles, retain that last feasible projected
+            # HiGHS plan instead of replacing a valuable 48-hour plan with the
+            # much less capable emergency greedy heuristic.
+            _LOGGER.warning(
+                "Optimizer command-mode projection did not converge after %d passes; "
+                "using the last physically projected HiGHS plan",
+                MODE_PROJECTION_MAX_ITERATIONS,
             )
+            if last_result is None:
+                return self._solve_greedy(
+                    n, import_prices, export_prices, solar, load, soc_0,
+                    cost_function,
+                    acquisition_cost_kwh,
+                    allow_battery_export,
+                    block_battery_charge or [False] * n,
+                    allow_grid_charge,
+                    grid_charge_allowed or [True] * n,
+                    export_bonus_prices or [0.0] * n,
+                    export_bonus_cap_kwh,
+                    import_bonus_prices,
+                    import_bonus_cap_kwh,
+                    schedule_timestamps,
+                    priority_export_slots,
+                    disable_idle,
+                )
+            last_result.lp_stats = {
+                **last_result.lp_stats,
+                "mode_iterations": MODE_PROJECTION_MAX_ITERATIONS,
+                "mode_converged": False,
+                "fallback_reason": "mode_non_convergence_projected_highs",
+            }
+            return last_result
         finally:
             if _soc_below_reserve:
                 self._below_reserve_recovery_target = None
@@ -1105,25 +1674,66 @@ class BatteryOptimizer:
         grid_charge_allowed: list[bool],
         acquisition_cost_kwh: float,
         export_bonus_prices: list[float],
+        priority_export_slots: list[bool],
     ) -> list[bool]:
         """Allow export slots only after charge headroom can recover SOC."""
         if soc_0 >= export_floor:
             return allow_battery_export
 
-        reachable_soc = max(0.0, min(1.0, soc_0))
-        recovered: list[bool] = []
-        for idx, allowed in enumerate(allow_battery_export):
+        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        future_recovery_prices = [0.0] * len(allow_battery_export)
+        best_future_export = 0.0
+        for idx in range(len(allow_battery_export) - 1, -1, -1):
+            effective_export_price = (
+                export_prices[idx]
+                + (export_bonus_prices[idx] if idx < len(export_bonus_prices) else 0.0)
+                if idx < len(export_prices)
+                else 0.0
+            )
             export_profitable = (
-                bool(allowed)
+                bool(allow_battery_export[idx])
                 and idx < len(import_prices)
-                and idx < len(export_prices)
                 and self._is_export_profitable(
-                    export_prices[idx]
-                    + (export_bonus_prices[idx] if idx < len(export_bonus_prices) else 0.0),
+                    effective_export_price,
                     import_prices[idx],
                     acquisition_cost_kwh,
                     acquisition_cost_kwh,
                 )
+            )
+            priority_export = (
+                bool(allow_battery_export[idx])
+                and idx < len(priority_export_slots)
+                and priority_export_slots[idx]
+                and effective_export_price > 0.001
+            )
+            if export_profitable or priority_export:
+                best_future_export = max(best_future_export, effective_export_price)
+            future_recovery_prices[idx] = best_future_export
+
+        reachable_soc = max(0.0, min(1.0, soc_0))
+        recovered: list[bool] = []
+        for idx, allowed in enumerate(allow_battery_export):
+            effective_export_price = (
+                export_prices[idx]
+                + (export_bonus_prices[idx] if idx < len(export_bonus_prices) else 0.0)
+                if idx < len(export_prices)
+                else 0.0
+            )
+            export_profitable = (
+                bool(allowed)
+                and idx < len(import_prices)
+                and self._is_export_profitable(
+                    effective_export_price,
+                    import_prices[idx],
+                    acquisition_cost_kwh,
+                    acquisition_cost_kwh,
+                )
+            )
+            priority_export = (
+                bool(allowed)
+                and idx < len(priority_export_slots)
+                and priority_export_slots[idx]
+                and effective_export_price > 0.001
             )
             # Use this slot's own floor, not the horizon-wide maximum: a high
             # floor scoped to a later window (e.g. tomorrow's export bridge)
@@ -1140,7 +1750,8 @@ class BatteryOptimizer:
             # current (often peak) price purely to recover the optimiser
             # reserve — the behaviour this below-reserve path exists to avoid.
             recovered.append(
-                export_profitable and reachable_soc >= slot_export_floor - 1e-6
+                (export_profitable or priority_export)
+                and reachable_soc >= slot_export_floor - 1e-6
             )
             if idx >= len(solar) or idx >= len(load):
                 continue
@@ -1148,12 +1759,31 @@ class BatteryOptimizer:
             if not blocked:
                 # During a profitable-export slot the battery exports rather
                 # than charges, so it adds no recovery headroom.
-                blocked = export_profitable
+                blocked = export_profitable or priority_export
             if blocked:
                 continue
-            charge_kw = self._charge_limit_kw(load[idx], solar[idx], allow_grid_charge)
-            if not grid_charge_allowed[idx]:
-                charge_kw = self._charge_limit_kw(load[idx], solar[idx], False)
+            solar_only_charge_kw = self._charge_limit_kw(load[idx], solar[idx], False)
+            charge_kw = solar_only_charge_kw
+            if (
+                allow_grid_charge
+                and idx < len(grid_charge_allowed)
+                and grid_charge_allowed[idx]
+            ):
+                future_export_value = (
+                    future_recovery_prices[idx + 1]
+                    if idx + 1 < len(future_recovery_prices)
+                    else 0.0
+                )
+                try:
+                    import_price = float(import_prices[idx])
+                except (IndexError, TypeError, ValueError):
+                    import_price = None
+                if (
+                    import_price is not None
+                    and future_export_value > 0.001
+                    and import_price <= future_export_value * round_trip_eff + 1e-9
+                ):
+                    charge_kw = self._charge_limit_kw(load[idx], solar[idx], True)
             if charge_kw <= 0:
                 continue
             reachable_soc = min(
@@ -1183,6 +1813,10 @@ class BatteryOptimizer:
         import_bonus_cap_kwh: float | None = None,
         schedule_timestamps: list[datetime] | None = None,
         terminal_weight_override: float | None = None,
+        priority_export_slots: list[bool] | None = None,
+        disable_idle: bool = False,
+        mode_slots: list[str | None] | None = None,
+        required_self_use_kw: list[float] | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -1200,6 +1834,7 @@ class BatteryOptimizer:
         grid_charge_allowed = grid_charge_allowed or [True] * n
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
+        priority_export_slots = priority_export_slots or [False] * n
         allow_grid_charge = bool(allow_grid_charge)
         periods = self._build_lp_periods(
             n,
@@ -1212,17 +1847,49 @@ class BatteryOptimizer:
             grid_charge_allowed,
             export_bonus_prices,
             import_bonus_prices,
+            priority_export_slots,
+            mode_slots,
+            required_self_use_kw,
         )
         p_n = len(periods)
         p_import = [period.import_price for period in periods]
         p_export = [period.export_price for period in periods]
         p_export_bonus = [period.export_bonus_price for period in periods]
         p_import_bonus = [period.import_bonus_price for period in periods]
+        import_group_ids = list(self._quota_import_group_ids or [])
+        export_group_ids = list(self._quota_export_group_ids or [])
+        if len(import_group_ids) < n:
+            import_group_ids.extend([None] * (n - len(import_group_ids)))
+        if len(export_group_ids) < n:
+            export_group_ids.extend([None] * (n - len(export_group_ids)))
+        p_import_groups = [
+            import_group_ids[period.start]
+            if import_group_ids
+            and all(
+                import_group_ids[idx] == import_group_ids[period.start]
+                for idx in range(period.start, period.end)
+            )
+            else None
+            for period in periods
+        ]
+        p_export_groups = [
+            export_group_ids[period.start]
+            if export_group_ids
+            and all(
+                export_group_ids[idx] == export_group_ids[period.start]
+                for idx in range(period.start, period.end)
+            )
+            else None
+            for period in periods
+        ]
         p_solar = [period.solar_kw for period in periods]
         p_load = [period.load_kw for period in periods]
         p_allow_export = [period.allow_battery_export for period in periods]
         p_block_charge = [period.block_battery_charge for period in periods]
         p_grid_charge_allowed = [period.grid_charge_allowed for period in periods]
+        p_priority_export = [period.priority_export for period in periods]
+        p_mode = [period.mode for period in periods]
+        p_required_self_use = [period.required_self_use_kw for period in periods]
         p_dt = [period.slot_count * self.dt_hours for period in periods]
         p_effective_acquisition = self._effective_export_acquisition_costs(
             p_n,
@@ -1232,17 +1899,41 @@ class BatteryOptimizer:
             acquisition_cost_kwh,
             p_grid_charge_allowed,
         )
-        future_self_consumption_values = self._future_self_consumption_values(
-            p_n, p_import, p_solar, p_load
+
+        def _priority_export_slot(t: int) -> bool:
+            export_value = p_export[t] + p_export_bonus[t]
+            return (
+                p_priority_export[t]
+                and p_allow_export[t]
+                and export_value > 0.001
+            )
+
+        future_priority_recharge_cost = [float("inf")] * p_n
+        best_future_recharge_cost = float("inf")
+        import_bonus_active = bool(
+            import_bonus_cap_kwh is not None
+            and import_bonus_cap_kwh > 1e-6
+            and any(price > 1e-6 for price in p_import_bonus)
         )
-        # Periods where the LP pins battery_charge to zero (see charge bounds
-        # below): explicitly blocked windows, or export-profitable slots with
-        # no future self-consumption value. No charge — solar or grid — can
-        # enter the battery here, so these periods contribute nothing to the
-        # reachable SOC used for feasibility caps and prefill ceilings.
-        charge_pinned_periods = []
-        for t in range(p_n):
-            export_profitable_slot = (
+        for idx in range(p_n - 1, -1, -1):
+            future_priority_recharge_cost[idx] = best_future_recharge_cost
+            if (
+                allow_grid_charge
+                and p_grid_charge_allowed[idx]
+                and not p_block_charge[idx]
+            ):
+                net_import_price = max(
+                    0.0,
+                    p_import[idx]
+                    - (p_import_bonus[idx] if import_bonus_active else 0.0),
+                )
+                best_future_recharge_cost = min(
+                    best_future_recharge_cost,
+                    net_import_price / max(self.efficiency**2, 1e-9),
+                )
+
+        def _profitable_export_slot(t: int) -> bool:
+            return (
                 p_allow_export[t]
                 and self._is_export_profitable(
                     p_export[t] + p_export_bonus[t],
@@ -1251,8 +1942,33 @@ class BatteryOptimizer:
                     p_effective_acquisition[t],
                 )
             )
+
+        future_self_consumption_values = self._future_self_consumption_values(
+            p_n, p_import, p_solar, p_load
+        )
+        grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
+        )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
+        grid_charge_cap_energy_kwh = grid_charge_soc_cap * cap
+        grid_charge_cap_big_m_kwh = max(
+            0.0,
+            cap - grid_charge_cap_energy_kwh,
+        )
+
+        # Periods where the LP pins battery_charge to zero (see charge bounds
+        # below): explicitly blocked windows, or export-profitable slots with
+        # no future self-consumption value. No charge — solar or grid — can
+        # enter the battery here, so these periods contribute nothing to the
+        # reachable SOC used for feasibility caps and prefill ceilings.
+        charge_pinned_periods = []
+        for t in range(p_n):
+            export_profitable_slot = _profitable_export_slot(t)
             charge_pinned_periods.append(
-                p_block_charge[t]
+                p_mode[t] in ("export", "idle")
+                or p_block_charge[t]
+                or _priority_export_slot(t)
                 or (
                     export_profitable_slot
                     and not future_self_consumption_values[t]
@@ -1272,17 +1988,21 @@ class BatteryOptimizer:
                 charge_kw = self._charge_limit_kw(
                     p_load[t],
                     p_solar[t],
-                    allow_grid_charge and p_grid_charge_allowed[t],
+                    (
+                        False
+                        if p_mode[t] == "self_use"
+                        else allow_grid_charge and p_grid_charge_allowed[t]
+                    ),
                 )
             _reach = min(1.0, _reach + charge_kw * eff * p_dt[t] / cap)
             max_reachable_soc[t + 1] = _reach
 
-        optimizer_reserve = self.backup_reserve
-        self_consumption_floor = (
-            max(0.0, min(soc_0, self.hardware_reserve))
-            if soc_0 < optimizer_reserve
-            else optimizer_reserve
-        )
+        optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
+        # The ordinary energy bound is the physical/natural floor. The
+        # optimizer reserve is applied separately to slots that actually emit
+        # a forced battery-export command; merely permitting export must not
+        # make the software reserve a global hold target.
+        self_consumption_floor = self._natural_self_consumption_floor(soc_0)
         reserve_floor = [self_consumption_floor] * (p_n + 1)
         recovery_target = self._below_reserve_recovery_target
         if recovery_target is not None and recovery_target > self_consumption_floor:
@@ -1327,7 +2047,7 @@ class BatteryOptimizer:
                         periods[t].end,
                     ),
                 )
-                if allow_export:
+                if allow_export and p_mode[t] == "export":
                     # Cap at physically reachable SOC (0.5% buffer) so an
                     # export floor above what charging can reach cannot make
                     # the whole LP infeasible and collapse the horizon to a
@@ -1360,13 +2080,28 @@ class BatteryOptimizer:
         bonus_import_periods = [
             idx for idx, price in enumerate(p_import_bonus) if price > 1e-6
         ]
-        curtail_offset = 4 * p_n
-        next_offset = 5 * p_n
+        grid_charge_offset = 4 * p_n
+        curtail_offset = 5 * p_n
+        next_offset = 6 * p_n
         bonus_export_offset = next_offset
         if bonus_export_active:
             next_offset += p_n
         bonus_import_offset = next_offset
         if bonus_import_active:
+            next_offset += p_n
+        direction_binary_active = bool(
+            getattr(self, "_prevent_simultaneous_grid_flow", False)
+        )
+        max_grid_kw = (
+            max(0.0, self.max_grid_import_w / 1000.0)
+            if self.max_grid_import_w is not None
+            else 100.0
+        )
+        grid_direction_offset = next_offset
+        if direction_binary_active:
+            next_offset += p_n
+        grid_charge_cap_binary_offset = next_offset
+        if grid_charge_cap_active:
             next_offset += p_n
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
@@ -1383,6 +2118,9 @@ class BatteryOptimizer:
         def discharge_var(t: int) -> int:
             return 3 * p_n + t
 
+        def grid_charge_var(t: int) -> int:
+            return grid_charge_offset + t
+
         def curtail_var(t: int) -> int:
             return curtail_offset + t
 
@@ -1394,6 +2132,12 @@ class BatteryOptimizer:
 
         def energy_var(t: int) -> int:
             return energy_offset + t
+
+        def grid_direction_var(t: int) -> int:
+            return grid_direction_offset + t
+
+        def grid_charge_cap_binary_var(t: int) -> int:
+            return grid_charge_cap_binary_offset + t
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -1410,22 +2154,14 @@ class BatteryOptimizer:
 
         # Deadline mode: when pre_window_soc_target is binding (e.g. must reach
         # 100% before today's Flow Power Happy Hour), flip the import bias so
-        # ties resolve to EARLIER charging. Do the same when the battery is at
-        # the reserve floor: waiting until the end of a flat cheap window leaves
-        # no margin for inverter latency, BMS taper, or forecast jitter.
-        # Solar-SC users with useful SOC and no deadline keep the prefer-later
-        # default so grid imports happen after solar has had a chance to fill
-        # the battery.
+        # ties resolve to EARLIER charging. Without an explicit deadline, keep
+        # the prefer-later default so rolling solves cannot reverse charge timing
+        # merely because SOC crossed a reserve-proximity threshold.
         deadline_mode = (
             allow_grid_charge
-            and (
-                (
-                    self.pre_window_slot is not None
-                    and self.pre_window_slot > 0
-                    and self.pre_window_soc_target > 0.0
-                )
-                or soc_0 <= self.backup_reserve + 0.02
-            )
+            and self.pre_window_slot is not None
+            and self.pre_window_slot > 0
+            and self.pre_window_soc_target > 0.0
         )
 
         # Pre-compute free charging bonus: use median non-free import price
@@ -1448,8 +2184,15 @@ class BatteryOptimizer:
             # binding, prefer LATER otherwise (see deadline_mode comment above).
             import_eps = eps * (t if deadline_mode else (p_n - t))
             c[grid_import_var(t)] = (p_import[t] + import_eps) * p_dt[t]
+            # Prefer direct grid supply over a price-identical battery cycle.
+            # This is only a deterministic tie-breaker (0.001 c/kWh per side),
+            # not a degradation-cost model.
+            c[charge_var(t)] += 1e-5 * p_dt[t]
+            c[discharge_var(t)] += 1e-5 * p_dt[t]
             if p_export[t] > 0:
-                c[grid_export_var(t)] = -(p_export[t] + eps * (p_n - t)) * p_dt[t]  # grid_export: prefer earlier
+                c[grid_export_var(t)] = -(
+                    p_export[t] + eps * (p_n - t)
+                ) * p_dt[t]  # grid_export: prefer earlier
             elif bonus_export_active and p_export_bonus[t] > 0:
                 # ZeroHero-style capped bonuses make otherwise-zero exports
                 # valuable only through the linked bonus variable below.
@@ -1478,15 +2221,7 @@ class BatteryOptimizer:
                     p_import_bonus[t] + eps * (p_n - t)
                 ) * p_dt[t]
 
-            if (
-                p_allow_export[t]
-                and self._is_export_profitable(
-                    p_export[t] + p_export_bonus[t],
-                    p_import[t],
-                    acquisition_cost_kwh,
-                    p_effective_acquisition[t],
-                )
-            ):
+            if _profitable_export_slot(t) or _priority_export_slot(t):
                 # During an explicit export window, prefer serving concurrent
                 # household load from the battery instead of importing for load
                 # while exporting only the capped command amount.
@@ -1510,6 +2245,11 @@ class BatteryOptimizer:
             # at the better of avoided import or export value so the LP only
             # uses it after available charge/export outlets are exhausted.
             c[curtail_var(t)] = max(0.01, p_import[t], p_export[t]) * p_dt[t]
+            if grid_charge_cap_active:
+                # Keep the grid-charge accounting variable at its minimum
+                # feasible value so the cap constrains real grid-to-battery
+                # energy, not arbitrary solver slack.
+                c[grid_charge_var(t)] = 1e-9 * p_dt[t]
 
         # === Terminal valuation: incentivize keeping charge at end of horizon ===
         # Use the cheapest available recharge price as the replacement cost.
@@ -1599,13 +2339,66 @@ class BatteryOptimizer:
             A_eq[row, charge_var(t)] = -eff * p_dt[t]
             A_eq[row, discharge_var(t)] = p_dt[t] / eff
 
+        # Priority/provider status is permission, not a synthetic subsidy. When
+        # export is below the modeled acquisition cost, allow it only when real
+        # future charge is both cheap enough and explicitly paired by a linear
+        # constraint below. This keeps a one-kWh rebate or charge slot from
+        # authorising an entire window of below-cost battery export.
+        paired_priority_recharge_periods: dict[int, list[int]] = {}
+        for t in range(p_n):
+            export_value = p_export[t] + p_export_bonus[t]
+            if (
+                not _priority_export_slot(t)
+                or acquisition_cost_kwh <= 0
+                or export_value + 1e-9 >= p_effective_acquisition[t]
+            ):
+                continue
+            eligible_recharge = []
+            for future_idx in range(t + 1, p_n):
+                if (
+                    not allow_grid_charge
+                    or not p_grid_charge_allowed[future_idx]
+                    or p_block_charge[future_idx]
+                    or p_mode[future_idx] not in (None, "charge")
+                ):
+                    continue
+                net_import_price = max(
+                    0.0,
+                    p_import[future_idx]
+                    - (
+                        p_import_bonus[future_idx]
+                        if bonus_import_active
+                        else 0.0
+                    ),
+                )
+                if net_import_price <= export_value * eff * eff + 1e-9:
+                    eligible_recharge.append(future_idx)
+            if eligible_recharge:
+                paired_priority_recharge_periods[t] = eligible_recharge
+
         pre_window_boundary: int | None = None
         pre_window_effective_target: float | None = None
         A_ub_rows = 2 * p_n
         if bonus_export_active:
-            A_ub_rows += 2 * len(bonus_export_periods) + 1
+            export_bonus_cap_rows = (
+                len(self._quota_export_caps_by_group)
+                if self._quota_export_caps_by_group and any(p_export_groups)
+                else 1
+            )
+            A_ub_rows += 2 * len(bonus_export_periods) + export_bonus_cap_rows
         if bonus_import_active:
-            A_ub_rows += len(bonus_import_periods) + 1
+            import_bonus_cap_rows = (
+                len(self._quota_import_caps_by_group)
+                if self._quota_import_caps_by_group and any(p_import_groups)
+                else 1
+            )
+            A_ub_rows += len(bonus_import_periods) + import_bonus_cap_rows
+        if direction_binary_active:
+            A_ub_rows += 2 * p_n
+        if grid_charge_cap_active:
+            A_ub_rows += 5 * p_n
+        if paired_priority_recharge_periods:
+            A_ub_rows += len(paired_priority_recharge_periods) + 1
         if (
             allow_grid_charge
             and self.pre_window_slot is not None
@@ -1621,18 +2414,14 @@ class BatteryOptimizer:
                 slots_to_window = pre_window_boundary
 
                 def _deadline_charge_limit_kw(t: int) -> float:
-                    export_profitable_slot = (
-                        p_allow_export[t]
-                        and self._is_export_profitable(
-                            p_export[t] + p_export_bonus[t],
-                            p_import[t],
-                            acquisition_cost_kwh,
-                            p_effective_acquisition[t],
+                    export_profitable_slot = _profitable_export_slot(t)
+                    if (
+                        p_block_charge[t]
+                        or _priority_export_slot(t)
+                        or (
+                            export_profitable_slot
+                            and not future_self_consumption_values[t]
                         )
-                    )
-                    if p_block_charge[t] or (
-                        export_profitable_slot
-                        and not future_self_consumption_values[t]
                     ):
                         return 0.0
                     return self._charge_limit_kw(
@@ -1641,20 +2430,54 @@ class BatteryOptimizer:
                         allow_grid_charge and p_grid_charge_allowed[t],
                     )
 
-                max_soc_gain = (
-                    sum(
-                        _deadline_charge_limit_kw(t)
-                        * p_dt[t]
-                        for t in range(slots_to_window)
+                reachable_energy_kwh = soc_0 * cap
+                for t in range(slots_to_window):
+                    charge_limit_kw = _deadline_charge_limit_kw(t)
+                    if charge_limit_kw <= 0:
+                        continue
+                    solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                    solar_charge_kw = min(charge_limit_kw, solar_surplus_kw)
+                    grid_charge_kw = max(0.0, charge_limit_kw - solar_charge_kw)
+                    if grid_charge_kw > 0:
+                        grid_stored_kwh = grid_charge_kw * eff * p_dt[t]
+                        if grid_charge_cap_active:
+                            grid_stored_kwh = min(
+                                grid_stored_kwh,
+                                max(
+                                    0.0,
+                                    grid_charge_cap_energy_kwh
+                                    - reachable_energy_kwh,
+                                ),
+                            )
+                        reachable_energy_kwh = min(
+                            cap,
+                            reachable_energy_kwh + grid_stored_kwh,
+                        )
+                    # Grid may fill the available capped headroom first; solar
+                    # remains free to lift the battery above the grid cap.
+                    reachable_energy_kwh = min(
+                        cap,
+                        reachable_energy_kwh
+                        + solar_charge_kw * eff * p_dt[t],
                     )
-                    * eff
-                    / cap
+
+                max_soc_gain = max(
+                    0.0,
+                    reachable_energy_kwh / cap - soc_0,
                 )
                 max_reachable = min(1.0, soc_0 + max_soc_gain)
-                # 0.5% buffer so a tight LP doesn't flip infeasible from rounding
+                # Keep the established 0.5% feasibility margin while the
+                # configured target is reachable. Once execution has fallen
+                # behind that target, use only a numerical margin: granting a
+                # fresh 0.5% on every rolling solve ratchets the deadline down.
+                reachability_margin = (
+                    PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC
+                    if self.pre_window_soc_target <= max_reachable + 1e-9
+                    else PRE_WINDOW_REACHABILITY_MARGIN_SOC
+                )
                 pre_window_effective_target = min(
                     self.pre_window_soc_target,
-                    max_reachable - 0.005,
+                    max_reachable - reachability_margin,
                 )
                 A_ub_rows += 1
 
@@ -1676,6 +2499,58 @@ class BatteryOptimizer:
             A_ub[len(b_ub), discharge_var(t)] = -1.0
             b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
+            if direction_binary_active:
+                # y=1 selects import, y=0 selects export.  This conditional
+                # MILP guard is used only for quota tariffs where import can
+                # be cheaper than export and passthrough arbitrage would
+                # otherwise be mathematically profitable.
+                slot_export_limit_kw = self._grid_export_limit_kw_for_range(
+                    periods[t].start,
+                    periods[t].end,
+                    default_kw=100.0,
+                )
+                A_ub[len(b_ub), grid_import_var(t)] = 1.0
+                A_ub[len(b_ub), grid_direction_var(t)] = -max_grid_kw
+                b_ub.append(0.0)
+                A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                A_ub[len(b_ub), grid_direction_var(t)] = slot_export_limit_kw
+                b_ub.append(slot_export_limit_kw)
+
+        if paired_priority_recharge_periods:
+            # Per-period pairing prevents a cheap slot before a later export
+            # from being counted as its replacement.
+            for export_idx, recharge_indices in (
+                paired_priority_recharge_periods.items()
+            ):
+                A_ub[len(b_ub), discharge_var(export_idx)] = p_dt[export_idx]
+                for recharge_idx in recharge_indices:
+                    A_ub[len(b_ub), charge_var(recharge_idx)] = (
+                        -eff * eff * p_dt[recharge_idx]
+                    )
+                b_ub.append(
+                    max(0.0, p_load[export_idx] - p_solar[export_idx])
+                    * p_dt[export_idx]
+                )
+
+            # The aggregate row prevents one future charge kWh from backing
+            # multiple earlier below-acquisition priority exports.
+            paired_recharge_union: set[int] = set()
+            paired_home_kwh = 0.0
+            for export_idx, recharge_indices in (
+                paired_priority_recharge_periods.items()
+            ):
+                A_ub[len(b_ub), discharge_var(export_idx)] = p_dt[export_idx]
+                paired_home_kwh += (
+                    max(0.0, p_load[export_idx] - p_solar[export_idx])
+                    * p_dt[export_idx]
+                )
+                paired_recharge_union.update(recharge_indices)
+            for recharge_idx in paired_recharge_union:
+                A_ub[len(b_ub), charge_var(recharge_idx)] = (
+                    -eff * eff * p_dt[recharge_idx]
+                )
+            b_ub.append(paired_home_kwh)
+
         if bonus_export_active:
             for t in bonus_export_periods:
                 # Only physical exports can consume the capped ZeroHero bucket.
@@ -1690,9 +2565,17 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), bonus_export_var(t)] = -1.0
                 b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
-            for t in bonus_export_periods:
-                A_ub[len(b_ub), bonus_export_var(t)] = p_dt[t]
-            b_ub.append(max(0.0, float(export_bonus_cap_kwh or 0.0)))
+            export_group_caps = self._quota_export_caps_by_group
+            if export_group_caps and any(p_export_groups):
+                for group_id, cap_kwh in export_group_caps.items():
+                    for t in bonus_export_periods:
+                        if p_export_groups[t] == group_id:
+                            A_ub[len(b_ub), bonus_export_var(t)] = p_dt[t]
+                    b_ub.append(max(0.0, float(cap_kwh)))
+            else:
+                for t in bonus_export_periods:
+                    A_ub[len(b_ub), bonus_export_var(t)] = p_dt[t]
+                b_ub.append(max(0.0, float(export_bonus_cap_kwh or 0.0)))
 
         if bonus_import_active:
             for t in bonus_import_periods:
@@ -1702,9 +2585,61 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), grid_import_var(t)] = -1.0
                 b_ub.append(0.0)
 
-            for t in bonus_import_periods:
-                A_ub[len(b_ub), bonus_import_var(t)] = p_dt[t]
-            b_ub.append(max(0.0, float(import_bonus_cap_kwh or 0.0)))
+            import_group_caps = self._quota_import_caps_by_group
+            if import_group_caps and any(p_import_groups):
+                for group_id, cap_kwh in import_group_caps.items():
+                    for t in bonus_import_periods:
+                        if p_import_groups[t] == group_id:
+                            A_ub[len(b_ub), bonus_import_var(t)] = p_dt[t]
+                    b_ub.append(max(0.0, float(cap_kwh)))
+            else:
+                for t in bonus_import_periods:
+                    A_ub[len(b_ub), bonus_import_var(t)] = p_dt[t]
+                b_ub.append(max(0.0, float(import_bonus_cap_kwh or 0.0)))
+
+        if grid_charge_cap_active:
+            for t in range(p_n):
+                # grid_charge[t] <= battery_charge[t]
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                # grid_charge[t] <= grid_import[t]
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_import_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                # battery_charge[t] - grid_charge[t] <= available solar surplus.
+                # This lets solar charge above the cap while every kW of charge
+                # beyond exogenous surplus is counted as grid-to-battery energy.
+                A_ub[len(b_ub), charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                b_ub.append(max(0.0, p_solar[t] - p_load[t]))
+
+                grid_charge_limit_kw = self._charge_limit_kw(
+                    p_load[t],
+                    p_solar[t],
+                    p_grid_charge_allowed[t],
+                )
+                # A grid-charge flow activates the conditional SOC-cap row.
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_cap_binary_var(t)] = (
+                    -grid_charge_limit_kw
+                )
+                b_ub.append(0.0)
+
+                # When active, grid energy may fill only the headroom present
+                # at the start of this period. Prior-period discharge therefore
+                # reopens headroom, while solar may still lift E[t+1] above the
+                # cap and same-period discharge cannot launder grid energy.
+                A_ub[len(b_ub), energy_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = eff * p_dt[t]
+                A_ub[len(b_ub), grid_charge_cap_binary_var(t)] = (
+                    grid_charge_cap_big_m_kwh
+                )
+                b_ub.append(
+                    grid_charge_cap_energy_kwh + grid_charge_cap_big_m_kwh
+                )
 
         # === Pre-window SOC floor ===
         # Force soc[pre_window_slot - 1] >= target so the battery is filled
@@ -1715,7 +2650,7 @@ class BatteryOptimizer:
         if pre_window_boundary is not None and pre_window_boundary > 0:
             if (
                 pre_window_effective_target is not None
-                and pre_window_effective_target > soc_0
+                and pre_window_effective_target > 0.0
             ):
                 A_ub[len(b_ub), energy_var(pre_window_boundary)] = -1.0
                 b_ub.append(-pre_window_effective_target * cap)
@@ -1730,7 +2665,7 @@ class BatteryOptimizer:
                 )
             else:
                 # Keep A_ub row count aligned with b_ub when the pre-window
-                # request is already satisfied by current SOC.
+                # request has no positive effective deadline target.
                 b_ub.append(0.0)
 
         solar_prefill_ceilings = self._pre_window_solar_prefill_ceilings(
@@ -1749,14 +2684,24 @@ class BatteryOptimizer:
         # unbounded LP if a price accidentally goes negative or zero). Sites
         # with a known DNSP/export limit override the export side so the LP
         # models the same physical cap the runtime controller will enforce.
-        max_grid_kw = (
-            max(0.0, self.max_grid_import_w / 1000.0)
-            if self.max_grid_import_w is not None
-            else 100.0
-        )
-        max_grid_export_kw = 100.0
-        if self.max_grid_export_w is not None:
-            max_grid_export_kw = max(0.0, self.max_grid_export_w / 1000.0)
+        period_grid_export_limits_kw = [
+            self._grid_export_limit_kw_for_range(
+                period.start,
+                period.end,
+                default_kw=100.0,
+            )
+            for period in periods
+        ]
+
+        def _export_acquisition_threshold(t: int) -> float:
+            threshold = p_effective_acquisition[t]
+            if _priority_export_slot(t):
+                threshold = min(
+                    threshold,
+                    future_priority_recharge_cost[t],
+                )
+            return threshold
+
         bounds = []
         for t in range(p_n):
             bounds.append((0, max_grid_kw))  # grid_import
@@ -1765,19 +2710,18 @@ class BatteryOptimizer:
         # disabled, cap export to exogenous surplus so the LP cannot invent
         # grid-import -> grid-export or battery -> grid arbitrage.
         for t in range(p_n):
-            export_profitable_slot = (
-                p_allow_export[t]
-                and self._is_export_profitable(
-                    p_export[t] + p_export_bonus[t],
-                    p_import[t],
-                    acquisition_cost_kwh,
-                    p_effective_acquisition[t],
-                )
-            )
+            max_grid_export_kw = period_grid_export_limits_kw[t]
+            if p_mode[t] is not None and p_mode[t] != "export":
+                solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                bounds.append((0, min(max_grid_export_kw, solar_surplus_kw)))
+                continue
+            export_profitable_slot = _profitable_export_slot(t)
+            priority_export_slot = _priority_export_slot(t)
             future_self_consumption_value = future_self_consumption_values[t]
             suppress_generic_battery_export = (
                 export_profitable_slot
                 and future_self_consumption_value
+                and not priority_export_slot
                 and not p_block_charge[t]
             )
             if p_allow_export[t] and not suppress_generic_battery_export:
@@ -1794,17 +2738,25 @@ class BatteryOptimizer:
                 bounds.append((0, min(max_grid_export_kw, solar_surplus_kw)))
 
         for t in range(p_n):
-            export_profitable_slot = (
-                p_allow_export[t]
-                and self._is_export_profitable(
-                    p_export[t] + p_export_bonus[t],
-                    p_import[t],
-                    acquisition_cost_kwh,
-                    p_effective_acquisition[t],
-                )
-            )
+            if p_mode[t] in ("export", "idle"):
+                bounds.append((0, 0.0))
+                continue
+            if p_mode[t] == "self_use":
+                bounds.append((
+                    0,
+                    0.0
+                    if p_block_charge[t]
+                    else self._charge_limit_kw(
+                        p_load[t],
+                        p_solar[t],
+                        False,
+                    ),
+                ))
+                continue
+            export_profitable_slot = _profitable_export_slot(t)
+            priority_export_slot = _priority_export_slot(t)
             future_self_consumption_value = future_self_consumption_values[t]
-            if p_block_charge[t] or (
+            if p_block_charge[t] or priority_export_slot or (
                 export_profitable_slot and not future_self_consumption_value
             ):
                 # Do not charge during explicitly blocked export windows
@@ -1833,19 +2785,25 @@ class BatteryOptimizer:
                 ))  # battery_charge
 
         for t in range(p_n):
-            export_profitable_slot = (
-                p_allow_export[t]
-                and self._is_export_profitable(
-                    p_export[t] + p_export_bonus[t],
-                    p_import[t],
-                    acquisition_cost_kwh,
-                    p_effective_acquisition[t],
+            if p_mode[t] in ("charge", "idle"):
+                bounds.append((0, 0.0))
+                continue
+            if p_mode[t] == "self_use":
+                net_load_kw = max(0.0, p_load[t] - p_solar[t])
+                upper = min(self.max_discharge_kw, net_load_kw)
+                lower = min(
+                    upper,
+                    max(0.0, p_required_self_use[t]),
                 )
-            )
+                bounds.append((lower, upper))
+                continue
+            export_profitable_slot = _profitable_export_slot(t)
+            priority_export_slot = _priority_export_slot(t)
             future_self_consumption_value = future_self_consumption_values[t]
             suppress_generic_battery_export = (
                 export_profitable_slot
                 and future_self_consumption_value
+                and not priority_export_slot
                 and not p_block_charge[t]
             )
             restrict_to_self_consumption = (
@@ -1854,7 +2812,7 @@ class BatteryOptimizer:
                 or (
                     acquisition_cost_kwh > 0
                     and (p_export[t] + p_export_bonus[t])
-                    < p_effective_acquisition[t]
+                    < _export_acquisition_threshold(t)
                 )
             )
             if restrict_to_self_consumption:
@@ -1879,17 +2837,45 @@ class BatteryOptimizer:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
 
         for t in range(p_n):
+            if not grid_charge_cap_active:
+                bounds.append((0, 0.0))
+                continue
+            if p_block_charge[t] or not p_grid_charge_allowed[t]:
+                bounds.append((0, 0.0))
+            else:
+                bounds.append((
+                    0,
+                    self._charge_limit_kw(
+                        p_load[t],
+                        p_solar[t],
+                        p_grid_charge_allowed[t],
+                    ),
+                ))
+
+        for t in range(p_n):
             bounds.append((0, max(0.0, p_solar[t])))  # solar_curtail
 
         if bonus_export_active:
             for t in range(p_n):
-                bonus_limit_kw = max_grid_export_kw if p_export_bonus[t] > 0 else 0.0
+                bonus_limit_kw = (
+                    period_grid_export_limits_kw[t]
+                    if p_export_bonus[t] > 0
+                    else 0.0
+                )
                 bounds.append((0, bonus_limit_kw))
 
         if bonus_import_active:
             for t in range(p_n):
                 bonus_limit_kw = max_grid_kw if p_import_bonus[t] > 0 else 0.0
                 bounds.append((0, bonus_limit_kw))
+
+        if direction_binary_active:
+            for _t in range(p_n):
+                bounds.append((0.0, 1.0))
+
+        if grid_charge_cap_active:
+            for _t in range(p_n):
+                bounds.append((0.0, 1.0))
 
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
@@ -1915,15 +2901,42 @@ class BatteryOptimizer:
         )
 
         solver_start = time.monotonic()
-        result = _solve_lp_highs(
+        solve_args = (
             c,
             A_ub,
             b_ub,
             A_eq,
             b_eq,
             bounds,
-            time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
         )
+        integer_indices: list[int] = []
+        if direction_binary_active:
+            integer_indices.extend(
+                range(
+                    grid_direction_offset,
+                    grid_direction_offset + p_n,
+                )
+            )
+        if grid_charge_cap_active:
+            integer_indices.extend(
+                range(
+                    grid_charge_cap_binary_offset,
+                    grid_charge_cap_binary_offset + p_n,
+                )
+            )
+        if integer_indices:
+            result = _solve_lp_highs(
+                *solve_args,
+                time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
+                integer_indices=integer_indices,
+            )
+        else:
+            # Preserve the established wrapper call contract for every tariff
+            # that does not need mixed-integer grid-direction exclusion.
+            result = _solve_lp_highs(
+                *solve_args,
+                time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
+            )
         solver_time_s = time.monotonic() - solver_start
         lp_stats = {
             "backend": "highspy",
@@ -1961,6 +2974,7 @@ class BatteryOptimizer:
                     import_bonus_prices,
                     import_bonus_cap_kwh,
                     schedule_timestamps,
+                    disable_idle=disable_idle,
                 )
                 hold.lp_stats = {**lp_stats, "fallback_reason": "infeasible_self_consumption_hold"}
                 return hold
@@ -1977,6 +2991,8 @@ class BatteryOptimizer:
                 import_bonus_prices,
                 import_bonus_cap_kwh,
                 schedule_timestamps,
+                priority_export_slots,
+                disable_idle,
             )
             greedy.lp_stats = {**lp_stats, "fallback_reason": "solver_failed"}
             return greedy
@@ -2007,6 +3023,8 @@ class BatteryOptimizer:
             schedule_timestamps,
             allow_grid_charge,
             grid_charge_allowed,
+            priority_export_slots,
+            disable_idle,
         )
 
         # _build_schedule re-models "hold" slots (LP imports to serve load while
@@ -2020,10 +3038,18 @@ class BatteryOptimizer:
             schedule, n, solar, load
         )
         bonus_export = self._allocate_capped_bonus(
-            grid_export, export_bonus_prices, export_bonus_cap_kwh
+            grid_export,
+            export_bonus_prices,
+            export_bonus_cap_kwh,
+            self._quota_export_group_ids,
+            self._quota_export_caps_by_group,
         )
         bonus_import = self._allocate_capped_bonus(
-            grid_import, import_bonus_prices, import_bonus_cap_kwh
+            grid_import,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            self._quota_import_group_ids,
+            self._quota_import_caps_by_group,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -2149,13 +3175,6 @@ class BatteryOptimizer:
             recommendation["note"] = "No discharge bridge before next charge"
         if next_charge_idx is None:
             recommendation["note"] = "No charging opportunity in optimizer horizon"
-        home_load_export_bridge = self._build_home_load_export_bridge(
-            actions,
-            solar,
-            load,
-        )
-        if home_load_export_bridge:
-            recommendation.update(home_load_export_bridge)
         return recommendation
 
     def _build_home_load_export_bridge(
@@ -2266,6 +3285,8 @@ class BatteryOptimizer:
         import_bonus_prices: list[float] | None = None,
         import_bonus_cap_kwh: float | None = None,
         schedule_timestamps: list[datetime] | None = None,
+        priority_export_slots: list[bool] | None = None,
+        disable_idle: bool = False,
     ) -> OptimizerResult:
         """Safe fallback when the LP is infeasible: hold in self-consumption.
 
@@ -2307,11 +3328,8 @@ class BatteryOptimizer:
         # the optimiser reserve would make grid_import_w/predicted_cost describe
         # a dispatch that never happens and diverge from the displayed SOC.
         self_consumption_floor = self._natural_self_consumption_floor(soc_0)
-        max_grid_export_kw = (
-            max(0.0, self.max_grid_export_w / 1000.0)
-            if self.max_grid_export_w is not None
-            else None
-        )
+        def _max_grid_export_kw(t: int) -> float | None:
+            return self._grid_export_limit_kw_for_range(t, t + 1)
 
         grid_import = [0.0] * n
         grid_export = [0.0] * n
@@ -2320,6 +3338,7 @@ class BatteryOptimizer:
 
         soc = soc_0
         for t in range(n):
+            max_grid_export_kw = _max_grid_export_kw(t)
             net_load = load[t] - solar[t]
             charge_kw = 0.0
             discharge_kw = 0.0
@@ -2361,24 +3380,29 @@ class BatteryOptimizer:
             schedule_timestamps,
             allow_grid_charge,
             grid_charge_allowed,
+            disable_idle=disable_idle,
         )
 
         n_24h = min(n, int(24 * 60 / self.interval_minutes))
-        bonus_import = [0.0] * n
-        import_bonus_remaining = max(0.0, float(import_bonus_cap_kwh or 0.0))
-        if import_bonus_remaining > 0:
-            for t in range(n):
-                if import_bonus_prices[t] <= 0:
-                    continue
-                bonus_kw = min(grid_import[t], import_bonus_remaining / dt)
-                bonus_import[t] = bonus_kw
-                import_bonus_remaining -= bonus_kw * dt
-                if import_bonus_remaining <= 1e-6:
-                    break
+        bonus_import = self._allocate_capped_bonus(
+            grid_import,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            self._quota_import_group_ids,
+            self._quota_import_caps_by_group,
+        )
+        bonus_export = self._allocate_capped_bonus(
+            grid_export,
+            export_bonus_prices,
+            export_bonus_cap_kwh,
+            self._quota_export_group_ids,
+            self._quota_export_caps_by_group,
+        )
         predicted_cost = sum(
             import_prices[t] * grid_import[t] * dt
             - import_bonus_prices[t] * bonus_import[t] * dt
             - export_prices[t] * grid_export[t] * dt
+            - export_bonus_prices[t] * bonus_export[t] * dt
             for t in range(n_24h)
         )
         baseline_cost = self._calculate_baseline_cost(
@@ -2424,6 +3448,8 @@ class BatteryOptimizer:
         import_bonus_prices: list[float] | None = None,
         import_bonus_cap_kwh: float | None = None,
         schedule_timestamps: list[datetime] | None = None,
+        priority_export_slots: list[bool] | None = None,
+        disable_idle: bool = False,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
@@ -2439,16 +3465,45 @@ class BatteryOptimizer:
         grid_charge_allowed = grid_charge_allowed or [True] * n
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
+        import_group_ids = list(self._quota_import_group_ids or [None] * n)[:n]
+        export_group_ids = list(self._quota_export_group_ids or [None] * n)[:n]
+        if len(import_group_ids) < n:
+            import_group_ids.extend([None] * (n - len(import_group_ids)))
+        if len(export_group_ids) < n:
+            export_group_ids.extend([None] * (n - len(export_group_ids)))
+        import_caps_by_group = dict(self._quota_import_caps_by_group)
+        export_caps_by_group = dict(self._quota_export_caps_by_group)
+
+        def _remaining_by_group(
+            group_ids: list[str | None],
+            caps: dict[str, float],
+            fallback_cap: float | None,
+        ) -> dict[str, float]:
+            if caps and any(group_ids):
+                return {key: max(0.0, float(value)) for key, value in caps.items()}
+            return {"__all__": max(0.0, float(fallback_cap or 0.0))}
+
+        def _group_key(group_ids: list[str | None], slot: int) -> str:
+            return group_ids[slot] or "__all__"
+
+        def _remaining_for(
+            remaining: dict[str, float],
+            group_ids: list[str | None],
+            slot: int,
+        ) -> float:
+            return max(0.0, remaining.get(_group_key(group_ids, slot), 0.0))
+
+        def _consume_for(
+            remaining: dict[str, float],
+            group_ids: list[str | None],
+            slot: int,
+            energy_kwh: float,
+        ) -> None:
+            key = _group_key(group_ids, slot)
+            remaining[key] = max(0.0, remaining.get(key, 0.0) - energy_kwh)
+        priority_export_slots = priority_export_slots or [False] * n
         effective_export_prices = [
             export_prices[t] + export_bonus_prices[t]
-            for t in range(n)
-        ]
-        # Import price net of any per-kWh import bonus/rebate (e.g. GloBird
-        # ZeroCharge fully rebates in-window import to ~0c). Used to rank charge
-        # slots so effectively-free windows are preferred over nominally-cheaper
-        # raw-price slots — mirrors the LP, which credits the bonus.
-        effective_import_prices = [
-            max(0.0, import_prices[t] - import_bonus_prices[t])
             for t in range(n)
         ]
         allow_grid_charge = bool(allow_grid_charge)
@@ -2460,18 +3515,57 @@ class BatteryOptimizer:
             acquisition_cost_kwh,
             grid_charge_allowed,
         )
-        max_grid_export_kw = (
-            max(0.0, self.max_grid_export_w / 1000.0)
-            if self.max_grid_export_w is not None
-            else None
+
+        def _priority_export_slot(t: int) -> bool:
+            export_value = effective_export_prices[t]
+            return (
+                priority_export_slots[t]
+                and allow_battery_export[t]
+                and export_value > 0.001
+            )
+
+        future_priority_recharge_cost = [float("inf")] * n
+        best_future_recharge_cost = float("inf")
+        import_bonus_active = bool(
+            import_bonus_cap_kwh is not None
+            and import_bonus_cap_kwh > 1e-6
+            and any(price > 1e-6 for price in import_bonus_prices)
         )
+        for idx in range(n - 1, -1, -1):
+            future_priority_recharge_cost[idx] = best_future_recharge_cost
+            if (
+                allow_grid_charge
+                and grid_charge_allowed[idx]
+                and not block_battery_charge[idx]
+            ):
+                net_import_price = max(
+                    0.0,
+                    import_prices[idx]
+                    - (import_bonus_prices[idx] if import_bonus_active else 0.0),
+                )
+                best_future_recharge_cost = min(
+                    best_future_recharge_cost,
+                    net_import_price / max(eff**2, 1e-9),
+                )
+
+        def _economic_export_slot(t: int) -> bool:
+            return self._is_export_profitable(
+                effective_export_prices[t],
+                import_prices[t],
+                acquisition_cost_kwh,
+                effective_acquisition_costs[t],
+            )
+
+        def _max_grid_export_kw(t: int) -> float | None:
+            return self._grid_export_limit_kw_for_range(t, t + 1)
         optimizer_reserve = self.backup_reserve
         below_optimizer_reserve = soc_0 < optimizer_reserve
-        self_consumption_floor = (
-            max(0.0, min(soc_0, self.hardware_reserve))
-            if below_optimizer_reserve
-            else optimizer_reserve
+        self_consumption_floor = self._natural_self_consumption_floor(soc_0)
+        grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
         )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
 
         grid_import = [0.0] * n
         grid_export = [0.0] * n
@@ -2500,19 +3594,20 @@ class BatteryOptimizer:
         # price — a loss. When the slot is profitable only because of the bonus,
         # cap intentional battery export to what still fits in the bucket, as
         # the LP does.
-        bonus_export_remaining_kwh = max(0.0, float(export_bonus_cap_kwh or 0.0))
+        bonus_export_remaining = _remaining_by_group(
+            export_group_ids,
+            export_caps_by_group,
+            export_bonus_cap_kwh,
+        )
         soc_tracker = soc_0
         for spread, t, net_load in spreads:
+            max_grid_export_kw = _max_grid_export_kw(t)
             battery_export_allowed = allow_battery_export[t] and not below_optimizer_reserve
             export_profitable_slot = (
                 battery_export_allowed
-                and self._is_export_profitable(
-                    effective_export_prices[t],
-                    import_prices[t],
-                    acquisition_cost_kwh,
-                    effective_acquisition_costs[t],
-                )
+                and _economic_export_slot(t)
             )
+            priority_export_slot = battery_export_allowed and _priority_export_slot(t)
             future_self_consumption_value = self._has_future_self_consumption_value(
                 t, n, import_prices, solar, load
             )
@@ -2525,10 +3620,13 @@ class BatteryOptimizer:
                 )
             )
             if (
-                (export_profitable_slot and not future_self_consumption_value)
+                export_profitable_slot
+                and (priority_export_slot or not future_self_consumption_value)
                 or self_consumption_value_slot
             ):
-                forced_export_slot = export_profitable_slot and not future_self_consumption_value
+                forced_export_slot = export_profitable_slot and (
+                    priority_export_slot or not future_self_consumption_value
+                )
                 # Profitable to discharge; cap to home load when battery export
                 # is not explicitly permitted or export is below acquisition cost.
                 discharge_limit = self.max_discharge_kw
@@ -2545,7 +3643,8 @@ class BatteryOptimizer:
                 if (
                     not battery_export_allowed
                     or (
-                        acquisition_cost_kwh > 0
+                        not priority_export_slot
+                        and acquisition_cost_kwh > 0
                         and effective_export_prices[t] < effective_acquisition_costs[t]
                     )
                 ):
@@ -2565,7 +3664,10 @@ class BatteryOptimizer:
                     )
                 )
                 if bonus_only_profitable:
-                    intentional_export_room_kw = bonus_export_remaining_kwh / dt
+                    intentional_export_room_kw = (
+                        _remaining_for(bonus_export_remaining, export_group_ids, t)
+                        / dt
+                    )
                     discharge_limit = min(
                         discharge_limit,
                         max(0.0, net_load) + max(0.0, intentional_export_room_kw),
@@ -2585,58 +3687,708 @@ class BatteryOptimizer:
                     soc_tracker -= discharge_kw * dt / (eff * cap)
                     if bonus_only_profitable:
                         intentional_export_kw = max(0.0, discharge_kw - max(0.0, net_load))
-                        bonus_export_remaining_kwh = max(
-                            0.0,
-                            bonus_export_remaining_kwh - intentional_export_kw * dt,
+                        _consume_for(
+                            bonus_export_remaining,
+                            export_group_ids,
+                            t,
+                            intentional_export_kw * dt,
                         )
 
-        # Pass 2: assign charging to cheapest import periods. Do this
-        # independently from export spread so import<export tariffs (e.g.
-        # Octopus IOG 7p import with 12p export) do not suppress grid charging
-        # when the export price is still below the stored-energy acquisition cost.
+        # Pass 2: buy only the energy that can avoid a strictly more expensive
+        # future import. The previous greedy fallback filled every available
+        # slot to the battery ceiling, which created mandatory and uneconomic
+        # top-ups whenever HiGHS was unavailable.
+        remaining_load_kwh = [
+            max(
+                0.0,
+                max(0.0, load[idx] - solar[idx])
+                - actions.get(idx, (0.0, 0.0))[1],
+            )
+            * dt
+            for idx in range(n)
+        ]
+        base_discharge_kw = [
+            actions.get(idx, (0.0, 0.0))[1]
+            for idx in range(n)
+        ]
+
+        # Split future household demand into its rebated and ordinary marginal
+        # values. A capped ZeroCharge-style rebate makes only the covered kWh
+        # cheap; treating every future kWh at the raw retail tariff can make the
+        # fallback buy energy now to avoid a later import that would cost zero.
+        remaining_rebated_load_kwh = [0.0] * n
+        remaining_standard_load_kwh = list(remaining_load_kwh)
+        import_bonus_remaining = _remaining_by_group(
+            import_group_ids,
+            import_caps_by_group,
+            import_bonus_cap_kwh,
+        )
+        for idx in range(n):
+            if import_bonus_prices[idx] <= 0:
+                continue
+            group_remaining_kwh = _remaining_for(
+                import_bonus_remaining, import_group_ids, idx
+            )
+            if group_remaining_kwh <= 1e-9:
+                continue
+            covered_kwh = min(
+                remaining_standard_load_kwh[idx],
+                group_remaining_kwh,
+            )
+            remaining_rebated_load_kwh[idx] = covered_kwh
+            remaining_standard_load_kwh[idx] -= covered_kwh
+            _consume_for(
+                import_bonus_remaining,
+                import_group_ids,
+                idx,
+                covered_kwh,
+            )
+
+        initial_rebated_load_kwh = list(remaining_rebated_load_kwh)
+        import_bonus_cap_total_kwh = sum(
+            import_caps_by_group.values()
+        ) if import_caps_by_group and any(import_group_ids) else max(
+            0.0, float(import_bonus_cap_kwh or 0.0)
+        )
+        bonus_charge_consumed_by_group: dict[str, float] = {}
+
+        # Describe still-available future battery-to-grid output. Pass 1 can
+        # spend energy already present at the start of the horizon; these
+        # buckets let pass 2 buy additional energy only when a later export
+        # pays for the complete round trip. Bonus output is kept separate so a
+        # capped provider credit cannot value more export than it settles.
+        remaining_bonus_export_kwh = [0.0] * n
+        remaining_base_export_kwh = [0.0] * n
+        export_bonus_remaining = _remaining_by_group(
+            export_group_ids,
+            export_caps_by_group,
+            export_bonus_cap_kwh,
+        )
+        for idx in range(n):
+            max_grid_export_kw = _max_grid_export_kw(idx)
+            solar_surplus_kw = max(0.0, solar[idx] - load[idx])
+            if max_grid_export_kw is not None:
+                solar_surplus_kw = min(solar_surplus_kw, max_grid_export_kw)
+
+            existing_discharge_kw = actions.get(idx, (0.0, 0.0))[1]
+            net_home_kw = max(0.0, load[idx] - solar[idx])
+            existing_battery_export_kw = max(
+                0.0,
+                existing_discharge_kw - net_home_kw,
+            )
+
+            slot_export_remaining = _remaining_for(
+                export_bonus_remaining, export_group_ids, idx
+            )
+            if export_bonus_prices[idx] > 0 and slot_export_remaining > 0:
+                settled_existing_kwh = min(
+                    slot_export_remaining,
+                    (solar_surplus_kw + existing_battery_export_kw) * dt,
+                )
+                _consume_for(
+                    export_bonus_remaining,
+                    export_group_ids,
+                    idx,
+                    settled_existing_kwh,
+                )
+
+            if not allow_battery_export[idx] or below_optimizer_reserve:
+                continue
+
+            battery_export_limit_kw = max(0.0, self.max_discharge_kw - net_home_kw)
+            if self.max_battery_export_kw is not None:
+                battery_export_limit_kw = min(
+                    battery_export_limit_kw,
+                    self.max_battery_export_kw,
+                )
+            if max_grid_export_kw is not None:
+                battery_export_limit_kw = min(
+                    battery_export_limit_kw,
+                    max(0.0, max_grid_export_kw - solar_surplus_kw),
+                )
+            remaining_output_kwh = max(
+                0.0,
+                (battery_export_limit_kw - existing_battery_export_kw) * dt,
+            )
+            if remaining_output_kwh <= 1e-9:
+                continue
+
+            bonus_output_kwh = 0.0
+            slot_export_remaining = _remaining_for(
+                export_bonus_remaining, export_group_ids, idx
+            )
+            if export_bonus_prices[idx] > 0 and slot_export_remaining > 0:
+                bonus_output_kwh = min(
+                    remaining_output_kwh,
+                    slot_export_remaining,
+                )
+                _consume_for(
+                    export_bonus_remaining,
+                    export_group_ids,
+                    idx,
+                    bonus_output_kwh,
+                )
+            remaining_bonus_export_kwh[idx] = bonus_output_kwh
+            remaining_base_export_kwh[idx] = (
+                remaining_output_kwh - bonus_output_kwh
+            )
+
+        planned_load_output_kwh = [0.0] * n
+        planned_export_output_kwh = [0.0] * n
+
+        def _projected_soc_before(slot: int) -> float:
+            """Project assigned actions chronologically up to ``slot``."""
+            projected_soc = soc_0
+            for idx in range(slot):
+                charge_kw, discharge_kw = actions.get(idx, (0.0, 0.0))
+                charge_kw = min(
+                    max(0.0, charge_kw),
+                    max(0.0, (1.0 - projected_soc) * cap / (eff * dt)),
+                )
+                solar_charge_kw = min(
+                    charge_kw,
+                    max(0.0, solar[idx] - load[idx]),
+                )
+                grid_charge_kw = max(0.0, charge_kw - solar_charge_kw)
+                if grid_charge_cap_active:
+                    grid_charge_kw = min(
+                        grid_charge_kw,
+                        max(0.0, grid_charge_soc_cap - projected_soc)
+                        * cap
+                        / max(eff * dt, 1e-9),
+                    )
+                charge_kw = solar_charge_kw + grid_charge_kw
+                net_home_kw = max(0.0, load[idx] - solar[idx])
+                discharge_floor = self_consumption_floor
+                if (
+                    discharge_kw > net_home_kw + 0.001
+                    and allow_battery_export[idx]
+                    and not below_optimizer_reserve
+                ):
+                    discharge_floor = max(
+                        optimizer_reserve,
+                        self._configured_export_reserve_floor_for_range(
+                            idx, idx + 1
+                        ),
+                    )
+                discharge_kw = min(
+                    max(0.0, discharge_kw),
+                    max(
+                        0.0,
+                        (projected_soc - discharge_floor) * cap * eff / dt,
+                    ),
+                )
+                projected_soc += (
+                    charge_kw * eff - discharge_kw / eff
+                ) * dt / cap
+                projected_soc = max(
+                    self_consumption_floor,
+                    min(1.0, projected_soc),
+                )
+            return projected_soc
+
         for _, t, net_load in sorted(
             spreads,
-            key=lambda item: (effective_import_prices[item[1]], item[1]),
+            key=lambda item: (
+                0
+                if import_bonus_cap_total_kwh > 0
+                and import_bonus_prices[item[1]] > 0
+                else 1,
+                item[1]
+                if import_bonus_cap_total_kwh > 0
+                and import_bonus_prices[item[1]] > 0
+                else import_prices[item[1]],
+                item[1],
+            ),
         ):
             if t in actions:
                 continue
             battery_export_allowed = allow_battery_export[t] and not below_optimizer_reserve
             export_profitable_slot = (
                 battery_export_allowed
-                and self._is_export_profitable(
-                    effective_export_prices[t],
-                    import_prices[t],
-                    acquisition_cost_kwh,
-                    effective_acquisition_costs[t],
-                )
+                and _economic_export_slot(t)
             )
+            priority_export_slot = battery_export_allowed and _priority_export_slot(t)
             future_self_consumption_value = self._has_future_self_consumption_value(
                 t, n, import_prices, solar, load
             )
-            if (
-                below_optimizer_reserve
-                and soc_tracker > self_consumption_floor + 0.005
-                and import_prices[t] > 0.001
-            ):
-                future_import_value = max(import_prices[t + 1:] or [import_prices[t]])
-                cheap_for_future_load = (
-                    future_import_value > import_prices[t] + 0.02
-                    and any(load[i] > solar[i] for i in range(t + 1, n))
-                )
-                if not cheap_for_future_load:
-                    continue
-            if block_battery_charge[t] or (
+            if block_battery_charge[t] or priority_export_slot or (
                 export_profitable_slot and not future_self_consumption_value
             ):
                 continue
-            charge_room = (1.0 - soc_tracker) * cap / (eff * dt)
+            projected_soc = _projected_soc_before(t)
+            charge_room = (1.0 - projected_soc) * cap / (eff * dt)
             charge_limit = self._charge_limit_kw(
                 load[t], solar[t], allow_grid_charge and grid_charge_allowed[t]
             )
-            charge_kw = min(charge_limit, max(0, charge_room))
+            charge_limit = min(charge_limit, max(0, charge_room))
+            if charge_limit <= 0.01:
+                continue
+
+            total_charge_input_capacity_kwh = charge_limit * dt
+            solar_charge_input_capacity_kwh = min(
+                total_charge_input_capacity_kwh,
+                max(0.0, solar[t] - load[t]) * dt,
+            )
+            grid_charge_input_capacity_kwh = max(
+                0.0,
+                total_charge_input_capacity_kwh
+                - solar_charge_input_capacity_kwh,
+            )
+            if grid_charge_cap_active:
+                grid_charge_input_capacity_kwh = min(
+                    grid_charge_input_capacity_kwh,
+                    max(0.0, grid_charge_soc_cap - projected_soc)
+                    * cap
+                    / max(eff, 1e-9),
+                )
+            bonus_input_capacity_kwh = 0.0
+            import_group = _group_key(import_group_ids, t)
+            import_group_cap = (
+                import_caps_by_group.get(import_group, 0.0)
+                if import_caps_by_group and any(import_group_ids)
+                else import_bonus_cap_total_kwh
+            )
+            bonus_load_before_or_at_t = sum(
+                initial_rebated_load_kwh[idx]
+                for idx in range(t + 1)
+                if _group_key(import_group_ids, idx) == import_group
+            )
+            bonus_available_for_charge_kwh = max(
+                0.0,
+                import_group_cap
+                - bonus_load_before_or_at_t
+                - bonus_charge_consumed_by_group.get(import_group, 0.0),
+            )
+            if (
+                import_bonus_prices[t] > 0
+                and bonus_available_for_charge_kwh > 1e-9
+            ):
+                bonus_input_capacity_kwh = min(
+                    grid_charge_input_capacity_kwh,
+                    bonus_available_for_charge_kwh,
+                )
+            charge_tiers = []
+            if solar_charge_input_capacity_kwh > 1e-9:
+                charge_tiers.append((
+                    max(0.0, export_prices[t]),
+                    solar_charge_input_capacity_kwh,
+                    False,
+                    False,
+                ))
+            if bonus_input_capacity_kwh > 1e-9:
+                charge_tiers.append((
+                    max(0.0, import_prices[t] - import_bonus_prices[t]),
+                    bonus_input_capacity_kwh,
+                    True,
+                    True,
+                ))
+            base_input_capacity_kwh = (
+                grid_charge_input_capacity_kwh - bonus_input_capacity_kwh
+            )
+            if base_input_capacity_kwh > 1e-9:
+                charge_tiers.append((
+                    import_prices[t],
+                    base_input_capacity_kwh,
+                    False,
+                    True,
+                ))
+            charge_tiers.sort(key=lambda tier: tier[0])
+
+            charged_input_kwh = 0.0
+            for (
+                marginal_import_price,
+                tier_input_kwh,
+                uses_bonus,
+                uses_grid,
+            ) in charge_tiers:
+                delivered_capacity_kwh = tier_input_kwh * eff * eff
+                delivered_kwh = 0.0
+                # Allocate the charge to the highest-value future output,
+                # whether that output avoids a household import or funds an
+                # intentional battery export.
+                candidates: list[tuple[float, int, str]] = []
+                for future_idx in range(t + 1, n):
+                    if remaining_rebated_load_kwh[future_idx] > 1e-9:
+                        candidates.append((
+                            max(
+                                0.0,
+                                import_prices[future_idx]
+                                - import_bonus_prices[future_idx],
+                            ),
+                            future_idx,
+                            "rebated_load",
+                        ))
+                    if remaining_standard_load_kwh[future_idx] > 1e-9:
+                        candidates.append((
+                            import_prices[future_idx],
+                            future_idx,
+                            "standard_load",
+                        ))
+                    if remaining_bonus_export_kwh[future_idx] > 1e-9:
+                        candidates.append((
+                            export_prices[future_idx]
+                            + export_bonus_prices[future_idx],
+                            future_idx,
+                            "bonus_export",
+                        ))
+                    if remaining_base_export_kwh[future_idx] > 1e-9:
+                        candidates.append((
+                            export_prices[future_idx],
+                            future_idx,
+                            "base_export",
+                        ))
+
+                candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+                for future_value, future_idx, kind in candidates:
+                    if delivered_kwh >= delivered_capacity_kwh - 1e-9:
+                        break
+                    if (
+                        future_value * eff * eff
+                        <= marginal_import_price + 0.001
+                    ):
+                        continue
+                    if kind == "rebated_load":
+                        remaining_kwh = remaining_rebated_load_kwh[future_idx]
+                    elif kind == "standard_load":
+                        remaining_kwh = remaining_standard_load_kwh[future_idx]
+                    elif kind == "bonus_export":
+                        remaining_kwh = remaining_bonus_export_kwh[future_idx]
+                    else:
+                        remaining_kwh = remaining_base_export_kwh[future_idx]
+                    take = min(
+                        remaining_kwh,
+                        delivered_capacity_kwh - delivered_kwh,
+                    )
+                    if kind == "rebated_load":
+                        remaining_rebated_load_kwh[future_idx] -= take
+                    elif kind == "standard_load":
+                        remaining_standard_load_kwh[future_idx] -= take
+                    elif kind == "bonus_export":
+                        remaining_bonus_export_kwh[future_idx] -= take
+                    else:
+                        remaining_base_export_kwh[future_idx] -= take
+
+                    if kind in ("rebated_load", "standard_load"):
+                        planned_load_output_kwh[future_idx] += take
+                    else:
+                        planned_export_output_kwh[future_idx] += take
+                    total_discharge_kw = (
+                        base_discharge_kw[future_idx]
+                        + planned_load_output_kwh[future_idx] / dt
+                        + planned_export_output_kwh[future_idx] / dt
+                    )
+                    if planned_export_output_kwh[future_idx] > 0:
+                        total_discharge_kw = max(
+                            total_discharge_kw,
+                            max(0.0, load[future_idx] - solar[future_idx])
+                            + planned_export_output_kwh[future_idx] / dt,
+                        )
+                    actions[future_idx] = (0.0, total_discharge_kw)
+                    delivered_kwh += take
+
+                used_input_kwh = delivered_kwh / max(1e-9, eff * eff)
+                charged_input_kwh += used_input_kwh
+                if uses_bonus:
+                    bonus_charge_consumed_by_group[import_group] = (
+                        bonus_charge_consumed_by_group.get(import_group, 0.0)
+                        + used_input_kwh
+                    )
+                    # Canonical settlement applies the cap chronologically.
+                    # Earlier battery import therefore displaces an equal
+                    # amount of credit previously forecast for later home load.
+                    displaced_kwh = used_input_kwh
+                    for future_idx in range(t + 1, n):
+                        if displaced_kwh <= 1e-9:
+                            break
+                        if (
+                            _group_key(import_group_ids, future_idx)
+                            != import_group
+                        ):
+                            continue
+                        move_kwh = min(
+                            remaining_rebated_load_kwh[future_idx],
+                            displaced_kwh,
+                        )
+                        if move_kwh <= 0:
+                            continue
+                        remaining_rebated_load_kwh[future_idx] -= move_kwh
+                        remaining_standard_load_kwh[future_idx] += move_kwh
+                        displaced_kwh -= move_kwh
+
+            charge_kw = charged_input_kwh / max(1e-9, dt)
             if charge_kw > 0.01:
                 actions[t] = (charge_kw, 0.0)
-                soc_tracker += charge_kw * eff * dt / cap
+
+        # Pair below-acquisition priority export with actual future recharge.
+        # This is deliberately quantity-aware: a one-kWh cheap/rebated slot can
+        # fund one round-trip kWh, not authorize the whole battery to be sold
+        # below its modeled acquisition cost.
+        paired_bonus_export_remaining = _remaining_by_group(
+            export_group_ids,
+            export_caps_by_group,
+            export_bonus_cap_kwh,
+        )
+        if any(value > 0 for value in paired_bonus_export_remaining.values()):
+            for idx in range(n):
+                max_grid_export_kw = _max_grid_export_kw(idx)
+                if export_bonus_prices[idx] <= 0:
+                    continue
+                net_home_kw = max(0.0, load[idx] - solar[idx])
+                battery_export_kw = max(
+                    0.0,
+                    actions.get(idx, (0.0, 0.0))[1] - net_home_kw,
+                )
+                existing_grid_export_kw = (
+                    max(0.0, solar[idx] - load[idx]) + battery_export_kw
+                )
+                if max_grid_export_kw is not None:
+                    existing_grid_export_kw = min(
+                        existing_grid_export_kw,
+                        max_grid_export_kw,
+                    )
+                _consume_for(
+                    paired_bonus_export_remaining,
+                    export_group_ids,
+                    idx,
+                    existing_grid_export_kw * dt,
+                )
+        for t in range(n):
+            max_grid_export_kw = _max_grid_export_kw(t)
+            export_value = effective_export_prices[t]
+            if (
+                not _priority_export_slot(t)
+                or acquisition_cost_kwh <= 0
+                or export_value + 1e-9 >= effective_acquisition_costs[t]
+                or future_priority_recharge_cost[t] > export_value + 1e-9
+            ):
+                continue
+
+            net_home_kw = max(0.0, load[t] - solar[t])
+            existing_discharge_kw = actions.get(t, (0.0, 0.0))[1]
+            if existing_discharge_kw > net_home_kw + 0.001:
+                # Already backed by an earlier charge allocation.
+                continue
+
+            projected_soc = _projected_soc_before(t)
+            export_floor = max(
+                optimizer_reserve,
+                self._configured_export_reserve_floor_for_range(t, t + 1),
+            )
+            available_output_kwh = max(
+                0.0,
+                (projected_soc - export_floor) * cap * eff
+                - net_home_kw * dt,
+            )
+            battery_export_limit_kw = max(0.0, self.max_discharge_kw - net_home_kw)
+            if self.max_battery_export_kw is not None:
+                battery_export_limit_kw = min(
+                    battery_export_limit_kw,
+                    self.max_battery_export_kw,
+                )
+            if max_grid_export_kw is not None:
+                solar_surplus_kw = max(0.0, solar[t] - load[t])
+                battery_export_limit_kw = min(
+                    battery_export_limit_kw,
+                    max(0.0, max_grid_export_kw - solar_surplus_kw),
+                )
+            max_paired_output_kwh = min(
+                available_output_kwh,
+                battery_export_limit_kw * dt,
+            )
+
+            base_export_can_fund_recharge = (
+                export_prices[t] + 1e-9 >= future_priority_recharge_cost[t]
+            )
+            bonus_only_pair = (
+                export_bonus_prices[t] > 0
+                and not base_export_can_fund_recharge
+            )
+            if bonus_only_pair:
+                max_paired_output_kwh = min(
+                    max_paired_output_kwh,
+                    _remaining_for(
+                        paired_bonus_export_remaining,
+                        export_group_ids,
+                        t,
+                    ),
+                )
+            if max_paired_output_kwh <= 1e-9:
+                continue
+
+            remaining_output_kwh = max_paired_output_kwh
+            for recharge_idx in range(t + 1, n):
+                if remaining_output_kwh <= 1e-9:
+                    break
+                if (
+                    not allow_grid_charge
+                    or not grid_charge_allowed[recharge_idx]
+                    or block_battery_charge[recharge_idx]
+                ):
+                    continue
+                existing_charge_kw, future_discharge_kw = actions.get(
+                    recharge_idx,
+                    (0.0, 0.0),
+                )
+                if future_discharge_kw > 0:
+                    continue
+                charge_limit_kw = self._charge_limit_kw(
+                    load[recharge_idx],
+                    solar[recharge_idx],
+                    True,
+                )
+                available_charge_input_kwh = max(
+                    0.0,
+                    (charge_limit_kw - existing_charge_kw) * dt,
+                )
+                if available_charge_input_kwh <= 1e-9:
+                    continue
+
+                solar_charge_input_kwh = min(
+                    available_charge_input_kwh,
+                    max(
+                        0.0,
+                        solar[recharge_idx]
+                        - load[recharge_idx]
+                        - existing_charge_kw,
+                    )
+                    * dt,
+                )
+                grid_charge_input_kwh = max(
+                    0.0,
+                    available_charge_input_kwh - solar_charge_input_kwh,
+                )
+                if grid_charge_cap_active:
+                    projected_soc = _projected_soc_before(recharge_idx)
+                    existing_solar_charge_kw = min(
+                        existing_charge_kw,
+                        max(0.0, solar[recharge_idx] - load[recharge_idx]),
+                    )
+                    existing_grid_input_kwh = max(
+                        0.0,
+                        existing_charge_kw - existing_solar_charge_kw,
+                    ) * dt
+                    grid_charge_input_kwh = min(
+                        grid_charge_input_kwh,
+                        max(
+                            0.0,
+                            max(0.0, grid_charge_soc_cap - projected_soc)
+                            * cap
+                            / max(eff, 1e-9)
+                            - existing_grid_input_kwh,
+                        ),
+                    )
+
+                recharge_group = _group_key(import_group_ids, recharge_idx)
+                recharge_group_cap = (
+                    import_caps_by_group.get(recharge_group, 0.0)
+                    if import_caps_by_group and any(import_group_ids)
+                    else import_bonus_cap_total_kwh
+                )
+                bonus_load_before_or_at_slot = sum(
+                    initial_rebated_load_kwh[idx]
+                    for idx in range(recharge_idx + 1)
+                    if _group_key(import_group_ids, idx) == recharge_group
+                )
+                bonus_available_kwh = max(
+                    0.0,
+                    recharge_group_cap
+                    - bonus_load_before_or_at_slot
+                    - bonus_charge_consumed_by_group.get(recharge_group, 0.0),
+                )
+                bonus_capacity_kwh = 0.0
+                if import_bonus_prices[recharge_idx] > 0:
+                    bonus_capacity_kwh = min(
+                        grid_charge_input_kwh,
+                        bonus_available_kwh,
+                    )
+                recharge_tiers = []
+                if solar_charge_input_kwh > 1e-9:
+                    recharge_tiers.append((
+                        max(0.0, export_prices[recharge_idx]),
+                        solar_charge_input_kwh,
+                        False,
+                        False,
+                    ))
+                if bonus_capacity_kwh > 1e-9:
+                    recharge_tiers.append((
+                        max(
+                            0.0,
+                            import_prices[recharge_idx]
+                            - import_bonus_prices[recharge_idx],
+                        ),
+                        bonus_capacity_kwh,
+                        True,
+                        True,
+                    ))
+                raw_capacity_kwh = grid_charge_input_kwh - bonus_capacity_kwh
+                if raw_capacity_kwh > 1e-9:
+                    recharge_tiers.append((
+                        import_prices[recharge_idx],
+                        raw_capacity_kwh,
+                        False,
+                        True,
+                    ))
+                recharge_tiers.sort(key=lambda tier: tier[0])
+
+                added_input_kwh = 0.0
+                for (
+                    marginal_price,
+                    tier_input_kwh,
+                    uses_bonus,
+                    uses_grid,
+                ) in recharge_tiers:
+                    if marginal_price >= export_value * eff * eff - 0.001:
+                        continue
+                    take_input_kwh = min(
+                        tier_input_kwh,
+                        remaining_output_kwh / max(eff * eff, 1e-9),
+                    )
+                    if take_input_kwh <= 1e-9:
+                        continue
+                    added_input_kwh += take_input_kwh
+                    remaining_output_kwh -= take_input_kwh * eff * eff
+                    if uses_bonus:
+                        bonus_charge_consumed_by_group[recharge_group] = (
+                            bonus_charge_consumed_by_group.get(recharge_group, 0.0)
+                            + take_input_kwh
+                        )
+                        displaced_kwh = take_input_kwh
+                        for future_idx in range(recharge_idx + 1, n):
+                            if displaced_kwh <= 1e-9:
+                                break
+                            if (
+                                _group_key(import_group_ids, future_idx)
+                                != recharge_group
+                            ):
+                                continue
+                            move_kwh = min(
+                                remaining_rebated_load_kwh[future_idx],
+                                displaced_kwh,
+                            )
+                            remaining_rebated_load_kwh[future_idx] -= move_kwh
+                            remaining_standard_load_kwh[future_idx] += move_kwh
+                            displaced_kwh -= move_kwh
+                if added_input_kwh > 1e-9:
+                    actions[recharge_idx] = (
+                        existing_charge_kw + added_input_kwh / dt,
+                        0.0,
+                    )
+
+            paired_output_kwh = max_paired_output_kwh - remaining_output_kwh
+            if paired_output_kwh <= 0.001:
+                continue
+            actions[t] = (
+                0.0,
+                net_home_kw + paired_output_kwh / dt,
+            )
+            if bonus_only_pair:
+                _consume_for(
+                    paired_bonus_export_remaining,
+                    export_group_ids,
+                    t,
+                    paired_output_kwh,
+                )
 
         # Now compute grid flows in time order. The two price-priority passes
         # above track SOC in assignment order, not chronological order, so an
@@ -2646,8 +4398,114 @@ class BatteryOptimizer:
         # physically available now so the emitted schedule — and the grid flows
         # / predicted cost derived from it — cannot overcharge a full battery
         # or discharge energy that is not there.
+        pre_window_deadline = None
+        pre_window_effective_target = None
+        if (
+            allow_grid_charge
+            and self.pre_window_slot is not None
+            and 0 < self.pre_window_slot <= n
+            and self.pre_window_soc_target > 0.0
+        ):
+            pre_window_deadline = self.pre_window_slot
+
+            def _deadline_charge_soc(
+                start_idx: int,
+                start_soc: float,
+                *,
+                planned_only: bool,
+            ) -> float:
+                """Project physically available or already planned deadline charge."""
+                projected_soc = start_soc
+                for future_idx in range(start_idx, pre_window_deadline):
+                    priority_export_slot = _priority_export_slot(future_idx)
+                    export_profitable_slot = (
+                        allow_battery_export[future_idx]
+                        and not below_optimizer_reserve
+                        and _economic_export_slot(future_idx)
+                    )
+                    future_self_consumption_value = (
+                        self._has_future_self_consumption_value(
+                            future_idx,
+                            n,
+                            import_prices,
+                            solar,
+                            load,
+                        )
+                    )
+                    if (
+                        block_battery_charge[future_idx]
+                        or priority_export_slot
+                        or (
+                            export_profitable_slot
+                            and not future_self_consumption_value
+                        )
+                    ):
+                        continue
+
+                    solar_surplus_kw = max(
+                        0.0,
+                        solar[future_idx] - load[future_idx],
+                    )
+                    if planned_only:
+                        planned_charge_kw, planned_discharge_kw = actions.get(
+                            future_idx,
+                            (0.0, 0.0),
+                        )
+                        charge_limit_kw = (
+                            0.0
+                            if planned_discharge_kw > 0.0
+                            else min(
+                                self.max_charge_kw,
+                                max(planned_charge_kw, solar_surplus_kw),
+                            )
+                        )
+                    else:
+                        charge_limit_kw = self._charge_limit_kw(
+                            load[future_idx],
+                            solar[future_idx],
+                            allow_grid_charge
+                            and grid_charge_allowed[future_idx],
+                        )
+
+                    charge_limit_kw = min(
+                        charge_limit_kw,
+                        max(
+                            0.0,
+                            (1.0 - projected_soc) * cap / (eff * dt),
+                        ),
+                    )
+                    solar_charge_kw = min(charge_limit_kw, solar_surplus_kw)
+                    grid_charge_kw = max(
+                        0.0,
+                        charge_limit_kw - solar_charge_kw,
+                    )
+                    if grid_charge_cap_active:
+                        grid_charge_kw = min(
+                            grid_charge_kw,
+                            max(0.0, grid_charge_soc_cap - projected_soc)
+                            * cap
+                            / max(eff * dt, 1e-9),
+                        )
+                    projected_soc += (
+                        solar_charge_kw + grid_charge_kw
+                    ) * eff * dt / cap
+                    projected_soc = min(1.0, projected_soc)
+                return projected_soc
+
+            max_reachable = _deadline_charge_soc(0, soc_0, planned_only=False)
+            reachability_margin = (
+                PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC
+                if self.pre_window_soc_target <= max_reachable + 1e-9
+                else PRE_WINDOW_REACHABILITY_MARGIN_SOC
+            )
+            pre_window_effective_target = min(
+                self.pre_window_soc_target,
+                max_reachable - reachability_margin,
+            )
+
         soc = soc_0
         for t in range(n):
+            max_grid_export_kw = _max_grid_export_kw(t)
             net_load = load[t] - solar[t]
             charge_kw, discharge_kw = actions.get(t, (0.0, 0.0))
 
@@ -2660,25 +4518,57 @@ class BatteryOptimizer:
                 )
                 export_profitable_slot = (
                     battery_export_allowed
-                    and self._is_export_profitable(
-                        effective_export_prices[t],
-                        import_prices[t],
-                        acquisition_cost_kwh,
-                        effective_acquisition_costs[t],
-                    )
+                    and _economic_export_slot(t)
                 )
+                priority_export_slot = battery_export_allowed and _priority_export_slot(t)
                 future_self_consumption_value = self._has_future_self_consumption_value(
                     t, n, import_prices, solar, load
                 )
-                if export_profitable_slot and not future_self_consumption_value:
+                if priority_export_slot or (
+                    export_profitable_slot and not future_self_consumption_value
+                ):
                     discharge_floor = max(
                         optimizer_reserve,
                         self._configured_export_reserve_floor_for_range(t, t + 1),
                     )
+            original_discharge_kw = discharge_kw
+            if (
+                pre_window_effective_target is not None
+                and pre_window_deadline is not None
+                and t < pre_window_deadline
+            ):
+                soc_after_charge = min(
+                    1.0,
+                    soc + charge_kw * eff * dt / cap,
+                )
+                low_soc = discharge_floor
+                high_soc = soc_after_charge
+                for _ in range(24):
+                    candidate_soc = (low_soc + high_soc) / 2.0
+                    if (
+                        _deadline_charge_soc(
+                            t + 1,
+                            candidate_soc,
+                            planned_only=True,
+                        )
+                        >= pre_window_effective_target
+                    ):
+                        high_soc = candidate_soc
+                    else:
+                        low_soc = candidate_soc
+                discharge_floor = max(discharge_floor, high_soc)
             max_discharge_room_kw = max(
                 0.0, (soc - discharge_floor) * cap * eff / dt
             )
             discharge_kw = min(discharge_kw, max_discharge_room_kw)
+            if (
+                discharge_kw + 1e-6 < original_discharge_kw
+                and discharge_kw
+                <= max(0.0, net_load) + ACTION_THRESHOLD_W / 1000.0
+            ):
+                # A clipped natural-use discharge is not an executable partial
+                # mode; emit a zero-discharge idle candidate instead.
+                discharge_kw = 0.0
 
             battery_charge[t] = charge_kw
             battery_discharge[t] = discharge_kw
@@ -2689,8 +4579,8 @@ class BatteryOptimizer:
                 grid_import[t] = net_grid
             else:
                 export_kw = -net_grid
-                if self.max_grid_export_w is not None:
-                    export_kw = min(export_kw, max(0.0, self.max_grid_export_w / 1000.0))
+                if max_grid_export_kw is not None:
+                    export_kw = min(export_kw, max_grid_export_kw)
                 if self.max_battery_export_kw is not None:
                     solar_surplus_kw = max(0.0, solar[t] - load[t])
                     export_kw = min(export_kw, solar_surplus_kw + self.max_battery_export_kw)
@@ -2707,32 +4597,61 @@ class BatteryOptimizer:
             schedule_timestamps,
             allow_grid_charge,
             grid_charge_allowed,
+            priority_export_slots,
+            disable_idle,
+        )
+
+        grid_import, grid_export = self._grid_flows_from_schedule(
+            schedule,
+            n,
+            solar,
+            load,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
         n_24h = min(n, int(24 * 60 / self.interval_minutes))
         bonus_import = [0.0] * n
-        import_bonus_remaining = max(0.0, float(import_bonus_cap_kwh or 0.0))
-        if import_bonus_remaining > 0:
+        import_bonus_remaining = _remaining_by_group(
+            import_group_ids,
+            import_caps_by_group,
+            import_bonus_cap_kwh,
+        )
+        if any(value > 0 for value in import_bonus_remaining.values()):
             for t in range(n):
                 if import_bonus_prices[t] <= 0:
                     continue
-                bonus_kw = min(grid_import[t], import_bonus_remaining / dt)
+                slot_remaining = _remaining_for(
+                    import_bonus_remaining, import_group_ids, t
+                )
+                bonus_kw = min(grid_import[t], slot_remaining / dt)
                 bonus_import[t] = bonus_kw
-                import_bonus_remaining -= bonus_kw * dt
-                if import_bonus_remaining <= 1e-6:
-                    break
+                _consume_for(
+                    import_bonus_remaining,
+                    import_group_ids,
+                    t,
+                    bonus_kw * dt,
+                )
         bonus_export = [0.0] * n
-        bonus_remaining = max(0.0, float(export_bonus_cap_kwh or 0.0))
-        if bonus_remaining > 0:
+        bonus_remaining = _remaining_by_group(
+            export_group_ids,
+            export_caps_by_group,
+            export_bonus_cap_kwh,
+        )
+        if any(value > 0 for value in bonus_remaining.values()):
             for t in range(n):
                 if export_bonus_prices[t] <= 0:
                     continue
-                bonus_kw = min(grid_export[t], bonus_remaining / dt)
+                slot_remaining = _remaining_for(
+                    bonus_remaining, export_group_ids, t
+                )
+                bonus_kw = min(grid_export[t], slot_remaining / dt)
                 bonus_export[t] = bonus_kw
-                bonus_remaining -= bonus_kw * dt
-                if bonus_remaining <= 1e-6:
-                    break
+                _consume_for(
+                    bonus_remaining,
+                    export_group_ids,
+                    t,
+                    bonus_kw * dt,
+                )
         predicted_cost = sum(
             import_prices[t] * grid_import[t] * dt
             - import_bonus_prices[t] * bonus_import[t] * dt
@@ -2785,6 +4704,8 @@ class BatteryOptimizer:
         schedule_timestamps: list[datetime] | None = None,
         allow_grid_charge: bool = True,
         grid_charge_allowed: list[bool] | None = None,
+        priority_export_slots: list[bool] | None = None,
+        disable_idle: bool = False,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -2818,10 +4739,205 @@ class BatteryOptimizer:
 
         block_battery_charge = block_battery_charge or [False] * n
         grid_charge_allowed = grid_charge_allowed or [True] * n
+        priority_export_slots = priority_export_slots or [False] * n
         actions = []
         soc = soc_0
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
         self_consumption_floor = self._natural_self_consumption_floor(soc_0)
+        grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
+        )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
+
+        def _future_grid_charge_planned(start_idx: int) -> bool:
+            for future_idx in range(start_idx + 1, n):
+                if future_idx >= len(battery_charge) or future_idx >= len(grid_import):
+                    break
+                future_charge_kw = battery_charge[future_idx]
+                future_import_kw = grid_import[future_idx]
+                if future_charge_kw <= threshold_kw:
+                    continue
+                if (
+                    import_prices is not None
+                    and future_idx < len(import_prices)
+                    and import_prices[future_idx] <= 0.001
+                ):
+                    return True
+                net_load_kw = max(0.0, load[future_idx] - solar[future_idx])
+                if future_import_kw > net_load_kw + threshold_kw:
+                    return True
+            return False
+
+        def _charge_by_time_hold_required(start_idx: int, start_soc: float) -> bool:
+            """Return whether natural use now would make the deadline unreachable."""
+            if (
+                self.pre_window_slot is None
+                or start_idx >= self.pre_window_slot
+                or self.pre_window_soc_target <= 0.0
+                or cap <= 0
+                or dt <= 0
+            ):
+                return False
+
+            deadline = min(n, self.pre_window_slot)
+
+            def _max_reachable_charge_kw(idx: int, projected_soc: float) -> float:
+                """Return charge available without changing the projected mode."""
+                intentional_export = (
+                    grid_export[idx] > threshold_kw
+                    and battery_discharge[idx] > threshold_kw
+                )
+                priority_export_slot = (
+                    idx < len(priority_export_slots)
+                    and priority_export_slots[idx]
+                    and export_prices is not None
+                    and idx < len(export_prices)
+                    and export_prices[idx] > 0.001
+                )
+                if (
+                    block_battery_charge[idx]
+                    or priority_export_slot
+                    or intentional_export
+                ):
+                    return 0.0
+
+                net_load_kw = max(0.0, load[idx] - solar[idx])
+                free_import_slot = (
+                    import_prices is not None
+                    and idx < len(import_prices)
+                    and import_prices[idx] <= 0.001
+                    and allow_grid_charge
+                    and grid_charge_allowed[idx]
+                )
+                planned_charge_mode = free_import_slot or (
+                    battery_charge[idx] > threshold_kw
+                    and grid_import[idx] > net_load_kw + threshold_kw
+                )
+                if not planned_charge_mode:
+                    # A self-use or idle mode is not free to become a forced
+                    # grid-charge command on the next projection pass. Keep its
+                    # existing physical flow; only a charge-mode slot provides
+                    # concrete recharge headroom for replacing this hold.
+                    return max(0.0, battery_charge[idx])
+
+                charge_limit_kw = self._charge_limit_kw(
+                    load[idx],
+                    solar[idx],
+                    allow_grid_charge and grid_charge_allowed[idx],
+                )
+                solar_charge_kw = min(
+                    charge_limit_kw,
+                    max(0.0, solar[idx] - load[idx]),
+                )
+                grid_charge_kw = max(0.0, charge_limit_kw - solar_charge_kw)
+                if grid_charge_cap_active:
+                    grid_headroom_kw = (
+                        max(0.0, grid_charge_soc_cap - projected_soc)
+                        * cap
+                        / (eff * dt)
+                    )
+                    grid_charge_kw = min(grid_charge_kw, grid_headroom_kw)
+
+                battery_headroom_kw = (
+                    max(0.0, 1.0 - projected_soc) * cap / (eff * dt)
+                )
+                return min(
+                    charge_limit_kw,
+                    solar_charge_kw + grid_charge_kw,
+                    battery_headroom_kw,
+                )
+
+            projected_soc = start_soc
+            for future_idx in range(start_idx, deadline):
+                if future_idx == start_idx:
+                    net_home_kw = load[future_idx] - solar[future_idx]
+                    if net_home_kw > threshold_kw:
+                        available_kw = (
+                            max(0.0, projected_soc - self_consumption_floor)
+                            * cap
+                            * eff
+                            / dt
+                        )
+                        charge_future_kw = 0.0
+                        discharge_future_kw = min(
+                            self.max_discharge_kw,
+                            net_home_kw,
+                            available_kw,
+                        )
+                    elif net_home_kw < -threshold_kw:
+                        available_kw = (
+                            max(0.0, 1.0 - projected_soc) * cap / (eff * dt)
+                        )
+                        charge_future_kw = min(
+                            self.max_charge_kw,
+                            -net_home_kw,
+                            available_kw,
+                        )
+                        discharge_future_kw = 0.0
+                    else:
+                        charge_future_kw = 0.0
+                        discharge_future_kw = 0.0
+                else:
+                    charge_future_kw = _max_reachable_charge_kw(
+                        future_idx,
+                        projected_soc,
+                    )
+                    discharge_future_kw = max(0.0, battery_discharge[future_idx])
+                    intentional_export = (
+                        grid_export[future_idx] > threshold_kw
+                        and discharge_future_kw > threshold_kw
+                    )
+                    if intentional_export:
+                        configured_floor = (
+                            self._configured_export_reserve_floor_for_range(
+                                future_idx,
+                                future_idx + 1,
+                            )
+                        )
+                        future_export_floor = max(
+                            optimizer_reserve,
+                            configured_floor,
+                        )
+                        export_room_kw = (
+                            max(0.0, projected_soc - future_export_floor)
+                            * cap
+                            * eff
+                            / dt
+                        )
+                        if export_room_kw <= threshold_kw:
+                            net_home_kw = max(
+                                0.0,
+                                load[future_idx] - solar[future_idx],
+                            )
+                            natural_room_kw = (
+                                max(
+                                    0.0,
+                                    projected_soc - self_consumption_floor,
+                                )
+                                * cap
+                                * eff
+                                / dt
+                            )
+                            discharge_future_kw = min(
+                                self.max_discharge_kw,
+                                net_home_kw,
+                                natural_room_kw,
+                            )
+                        else:
+                            discharge_future_kw = min(
+                                discharge_future_kw,
+                                export_room_kw,
+                            )
+                projected_soc += (
+                    charge_future_kw * eff - discharge_future_kw / eff
+                ) * dt / cap
+                projected_soc = max(
+                    self_consumption_floor,
+                    min(1.0, projected_soc),
+                )
+
+            return projected_soc < self.pre_window_soc_target - 0.0001
 
         for t in range(n):
             ts = (
@@ -2833,17 +4949,20 @@ class BatteryOptimizer:
                 t, t + 1
             )
             export_floor = max(optimizer_reserve, configured_export_floor)
-            active_export_floor = configured_export_floor > max(
-                self_consumption_floor,
-                optimizer_reserve,
-            ) + 1e-6
-            natural_floor = export_floor if active_export_floor else self_consumption_floor
+            natural_floor = self_consumption_floor
 
             charge_kw = battery_charge[t]
             discharge_kw = battery_discharge[t]
             import_kw = grid_import[t]
             export_kw = grid_export[t]
             charge_blocked = block_battery_charge[t]
+            priority_export_slot = (
+                t < len(priority_export_slots)
+                and priority_export_slots[t]
+                and export_prices is not None
+                and t < len(export_prices)
+                and export_prices[t] > 0.001
+            )
             free_import_slot = (
                 import_prices is not None
                 and import_prices[t] <= 0.001
@@ -2889,7 +5008,22 @@ class BatteryOptimizer:
                 # self_consumption — the battery naturally serves load,
                 # avoiding expensive grid import.
                 meaningful_hold = soc > self.backup_reserve + 0.05
-                if meaningful_hold and export_prices is not None and import_prices is not None:
+                preserve_charge_by_time_hold = (
+                    _charge_by_time_hold_required(t, soc)
+                )
+                preserve_recovery_hold = (
+                    not disable_idle
+                    and soc <= optimizer_reserve
+                    and soc
+                    <= self_consumption_floor
+                    + BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC
+                    and _future_grid_charge_planned(t)
+                )
+                if preserve_charge_by_time_hold or preserve_recovery_hold:
+                    action = "idle"
+                elif disable_idle:
+                    action = "self_consumption"
+                elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery
                     # over letting it serve load (avoiding import cost).
                     # Need: export_price > import_price / efficiency
@@ -2952,14 +5086,27 @@ class BatteryOptimizer:
                     power_w = natural_discharge_kw * 1000
                     reported_charge_w = 0.0
                     reported_discharge_w = natural_discharge_kw * 1000
-                    if active_export_floor and natural_discharge_kw <= threshold_kw:
-                        action = "idle"
-                        power_w = 0.0
                 elif discharge_kw > export_room_kw:
                     capped_discharge_w = export_room_kw * 1000
                     reported_charge_w = 0.0
                     reported_discharge_w = capped_discharge_w
                     power_w = min(power_w, capped_discharge_w)
+            elif action == "self_consumption" and discharge_kw >= threshold_kw:
+                net_home_kw = max(0.0, load[t] - solar[t])
+                natural_room_kw = (
+                    max(0.0, soc - natural_floor) * cap * eff / dt
+                    if cap > 0 and dt > 0
+                    else 0.0
+                )
+                natural_discharge_kw = min(
+                    self.max_discharge_kw,
+                    net_home_kw,
+                    discharge_kw,
+                    max(0.0, natural_room_kw),
+                )
+                reported_charge_w = 0.0
+                reported_discharge_w = natural_discharge_kw * 1000
+                power_w = natural_discharge_kw * 1000
             elif (
                 action == "self_consumption"
                 and charge_kw < threshold_kw
@@ -2978,9 +5125,6 @@ class BatteryOptimizer:
                     reported_discharge_w = natural_discharge_kw * 1000
                     reported_charge_w = 0.0
                     power_w = natural_discharge_kw * 1000
-                    if active_export_floor and natural_discharge_kw <= threshold_kw:
-                        action = "idle"
-                        power_w = 0.0
                 elif net_home_kw < -threshold_kw and not charge_blocked:
                     available_kw = (1.0 - soc) * cap / (eff * dt)
                     natural_charge_kw = min(
@@ -2991,6 +5135,34 @@ class BatteryOptimizer:
                     reported_charge_w = natural_charge_kw * 1000
                     reported_discharge_w = 0.0
                     power_w = natural_charge_kw * 1000
+
+            if action == "charge" and reported_charge_w > 0:
+                preserve_free_charge_command = free_import_slot
+                solar_surplus_w = max(0.0, solar[t] - load[t]) * 1000.0
+                solar_charge_w = min(reported_charge_w, solar_surplus_w)
+                grid_charge_w = max(0.0, reported_charge_w - solar_charge_w)
+                if grid_charge_cap_active:
+                    allowed_grid_charge_w = (
+                        max(0.0, grid_charge_soc_cap - soc)
+                        * cap
+                        * 1000.0
+                        / max(eff * dt, 1e-9)
+                    )
+                    grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
+                reported_charge_w = solar_charge_w + grid_charge_w
+                # A genuinely free import slot owns the inverter's charge mode
+                # for the complete slot.  Keep that command intent (and its
+                # requested power) even when the configured SOC cap leaves no
+                # battery-energy headroom; physical flow and SOC remain clipped
+                # through reported_charge_w below.
+                if not preserve_free_charge_command:
+                    power_w = min(power_w, reported_charge_w)
+                if (
+                    grid_charge_w <= ACTION_THRESHOLD_W
+                    and not preserve_free_charge_command
+                ):
+                    action = "self_consumption"
+                    power_w = reported_charge_w
 
             effective_charge_kw = reported_charge_w / 1000
             effective_discharge_kw = reported_discharge_w / 1000
@@ -3036,16 +5208,16 @@ class BatteryOptimizer:
         """
         grid_import = [0.0] * n
         grid_export = [0.0] * n
-        max_grid_export_kw = (
-            max(0.0, self.max_grid_export_w / 1000.0)
-            if self.max_grid_export_w is not None
-            else None
-        )
         actions = schedule.actions or []
         for t in range(n):
             if t >= len(actions):
                 break
             action = actions[t]
+            if action.action == "off_grid":
+                # OFF_GRID represents an islanded/curtailed site. Any forecast
+                # imbalance is absorbed by local control or curtailment, not by
+                # a billable grid flow.
+                continue
             charge_kw = action.battery_charge_w / 1000.0
             discharge_kw = action.battery_discharge_w / 1000.0
             solar_kw = solar[t] if t < len(solar) else 0.0
@@ -3055,33 +5227,331 @@ class BatteryOptimizer:
                 grid_import[t] = net_grid
             else:
                 export_kw = -net_grid
+                max_grid_export_kw = self._grid_export_limit_kw_for_range(t, t + 1)
                 if max_grid_export_kw is not None:
                     export_kw = min(export_kw, max_grid_export_kw)
                 grid_export[t] = export_kw
         return grid_import, grid_export
+
+    def reconcile_result_with_schedule(
+        self,
+        result: OptimizerResult,
+        schedule: OptimizationSchedule,
+        *,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        export_bonus_prices: list[float] | None = None,
+        export_bonus_cap_kwh: float | None = None,
+        import_bonus_prices: list[float] | None = None,
+        import_bonus_cap_kwh: float | None = None,
+        initial_soc: float | None = None,
+        optimizer_reserve: float | None = None,
+    ) -> OptimizerResult:
+        """Make result flows and economics describe the final emitted schedule."""
+        actions = list(schedule.actions or [])
+        if initial_soc is None and actions and actions[0].soc is not None:
+            first = actions[0]
+            first_delta = (
+                max(0.0, first.battery_charge_w) / 1000.0 * self.efficiency
+                - max(0.0, first.battery_discharge_w)
+                / 1000.0
+                / self.efficiency
+            ) * self.dt_hours / self.capacity_kwh
+            initial_soc = float(first.soc) - first_delta
+
+        if initial_soc is not None and self.capacity_kwh > 0:
+            soc_cursor = max(0.0, min(1.0, float(initial_soc)))
+            modeled_backup_reserve = optimizer_reserve
+            if modeled_backup_reserve is None:
+                modeled_backup_reserve = (
+                    result.modeled_backup_reserve
+                    if result.modeled_backup_reserve is not None
+                    else self.backup_reserve
+                )
+            modeled_backup_reserve = max(
+                0.0,
+                min(1.0, float(modeled_backup_reserve)),
+            )
+            if getattr(self, "hardware_reserve_known", False):
+                physical_floor = min(
+                    soc_cursor,
+                    max(0.0, min(1.0, self.hardware_reserve)),
+                )
+            else:
+                physical_floor = min(soc_cursor, modeled_backup_reserve)
+            grid_charge_soc_cap = max(
+                0.0,
+                min(
+                    1.0,
+                    float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0),
+                ),
+            )
+            grid_charge_cap_active = grid_charge_soc_cap < 0.999
+
+            def _modeled_export_floor(idx: int) -> float:
+                floor = result.modeled_export_reserve_floor
+                if floor is None:
+                    floor = self._configured_export_reserve_floor_for_range(
+                        idx, idx + 1
+                    )
+                slot_floors = result.modeled_export_reserve_floor_slots
+                if slot_floors is not None and idx < len(slot_floors):
+                    floor = max(float(floor or 0.0), float(slot_floors[idx] or 0.0))
+                return max(0.0, min(1.0, float(floor or 0.0)))
+
+            restamped: list[ScheduleAction] = []
+            for idx, action in enumerate(actions):
+                emitted_action = action.action
+                preserve_free_charge_command = (
+                    action.action == "charge"
+                    and idx < len(import_prices)
+                    and import_prices[idx] <= 0.001
+                )
+                effective_grid_charge_w = 0.0
+                solar_w = (
+                    max(0.0, float(solar[idx] or 0.0)) * 1000.0
+                    if idx < len(solar)
+                    else 0.0
+                )
+                load_w = (
+                    max(0.0, float(load[idx] or 0.0)) * 1000.0
+                    if idx < len(load)
+                    else 0.0
+                )
+                net_home_w = max(0.0, load_w - solar_w)
+                solar_surplus_w = max(0.0, solar_w - load_w)
+                charge_w = max(0.0, float(action.battery_charge_w or 0.0))
+                discharge_w = max(0.0, float(action.battery_discharge_w or 0.0))
+                if action.action == "idle":
+                    charge_w = 0.0
+                    discharge_w = 0.0
+                elif action.action == "charge":
+                    discharge_w = 0.0
+                elif action.action in ("export", "discharge"):
+                    charge_w = 0.0
+                elif action.action in ("self_consumption", "consume"):
+                    # Natural operation can serve local imbalance only; it must
+                    # not hide an unlabelled battery export or grid top-up.
+                    charge_w = min(charge_w, solar_surplus_w)
+                    discharge_w = min(discharge_w, net_home_w)
+                elif action.action == "off_grid":
+                    # Islanded operation must locally serve load or absorb solar
+                    # before curtailing any remainder.
+                    charge_w = solar_surplus_w
+                    discharge_w = net_home_w
+
+                charge_room_w = (
+                    max(0.0, 1.0 - soc_cursor)
+                    * self.capacity_kwh
+                    * 1000.0
+                    / max(self.efficiency * self.dt_hours, 1e-9)
+                )
+                charge_w = min(charge_w, self.max_charge_w, charge_room_w)
+                if action.action == "charge" and charge_w > 0:
+                    solar_charge_w = min(charge_w, solar_surplus_w)
+                    grid_charge_w = max(0.0, charge_w - solar_charge_w)
+                    if grid_charge_cap_active:
+                        allowed_grid_charge_w = (
+                            max(0.0, grid_charge_soc_cap - soc_cursor)
+                            * self.capacity_kwh
+                            * 1000.0
+                            / max(self.efficiency * self.dt_hours, 1e-9)
+                        )
+                        grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
+                    charge_w = solar_charge_w + grid_charge_w
+                    effective_grid_charge_w = grid_charge_w
+
+                discharge_floor = physical_floor
+                if action.action in ("export", "discharge"):
+                    discharge_floor = max(
+                        discharge_floor,
+                        modeled_backup_reserve,
+                        _modeled_export_floor(idx),
+                    )
+                discharge_room_w = (
+                    max(0.0, soc_cursor - discharge_floor)
+                    * self.capacity_kwh
+                    * 1000.0
+                    * self.efficiency
+                    / max(self.dt_hours, 1e-9)
+                )
+                discharge_w = min(
+                    discharge_w,
+                    self.max_discharge_w,
+                    discharge_room_w,
+                )
+
+                if action.action in ("export", "discharge"):
+                    # Preserve local load first, then cap the intentional battery
+                    # export to the remaining site and battery export headroom.
+                    home_discharge_w = min(discharge_w, net_home_w)
+                    battery_export_w = max(0.0, discharge_w - home_discharge_w)
+                    if self.max_battery_export_w is not None:
+                        battery_export_w = min(
+                            battery_export_w,
+                            self.max_battery_export_w,
+                        )
+                    slot_export_limit_kw = self._grid_export_limit_kw_for_range(
+                        idx, idx + 1
+                    )
+                    if slot_export_limit_kw is not None:
+                        battery_export_w = min(
+                            battery_export_w,
+                            max(0.0, slot_export_limit_kw * 1000.0 - solar_surplus_w),
+                        )
+                    discharge_w = home_discharge_w + battery_export_w
+
+                soc_cursor += (
+                    charge_w / 1000.0 * self.efficiency
+                    - discharge_w / 1000.0 / self.efficiency
+                ) * self.dt_hours / self.capacity_kwh
+                soc_cursor = max(physical_floor, min(1.0, soc_cursor))
+
+                power_w = float(action.power_w or 0.0)
+                if action.action == "charge":
+                    # Free import keeps the charge command for the whole slot,
+                    # while charge_w/SOC/grid flows above describe only energy
+                    # the battery can physically accept.  Non-free charge keeps
+                    # the ordinary clipped-action behavior.
+                    if (
+                        effective_grid_charge_w <= ACTION_THRESHOLD_W
+                        and not preserve_free_charge_command
+                    ):
+                        emitted_action = "self_consumption"
+                        power_w = charge_w
+                    elif not preserve_free_charge_command:
+                        power_w = min(power_w, charge_w)
+                elif action.action in ("export", "discharge"):
+                    home_discharge_w = min(
+                        discharge_w,
+                        net_home_w,
+                    )
+                    battery_export_w = max(0.0, discharge_w - home_discharge_w)
+                    if battery_export_w <= ACTION_THRESHOLD_W:
+                        emitted_action = "self_consumption"
+                        power_w = discharge_w
+                    else:
+                        power_w = battery_export_w
+                elif action.action in ("self_consumption", "consume", "off_grid"):
+                    power_w = discharge_w if discharge_w > 0 else charge_w
+                else:
+                    power_w = 0.0
+                restamped.append(
+                    ScheduleAction(
+                        timestamp=action.timestamp,
+                        action=emitted_action,
+                        power_w=round(power_w, 1),
+                        soc=round(soc_cursor, 4),
+                        battery_charge_w=round(charge_w, 1),
+                        battery_discharge_w=round(discharge_w, 1),
+                    )
+                )
+            schedule = OptimizationSchedule(
+                actions=restamped,
+                predicted_cost=schedule.predicted_cost,
+                predicted_savings=schedule.predicted_savings,
+                last_updated=schedule.last_updated,
+            )
+
+        n = min(
+            len(schedule.actions or []),
+            len(import_prices),
+            len(export_prices),
+            len(solar),
+            len(load),
+        )
+        export_bonus_prices = self._pad_array(export_bonus_prices, n, 0.0)
+        import_bonus_prices = self._pad_array(import_bonus_prices, n, 0.0)
+        grid_import, grid_export = self._grid_flows_from_schedule(
+            schedule,
+            n,
+            solar,
+            load,
+        )
+        bonus_export = self._allocate_capped_bonus(
+            grid_export,
+            export_bonus_prices,
+            export_bonus_cap_kwh,
+            self._quota_export_group_ids,
+            self._quota_export_caps_by_group,
+        )
+        bonus_import = self._allocate_capped_bonus(
+            grid_import,
+            import_bonus_prices,
+            import_bonus_cap_kwh,
+            self._quota_import_group_ids,
+            self._quota_import_caps_by_group,
+        )
+        n_24h = min(n, int(24 * 60 / self.interval_minutes))
+        predicted_cost = sum(
+            import_prices[t] * grid_import[t] * self.dt_hours
+            - import_bonus_prices[t] * bonus_import[t] * self.dt_hours
+            - export_prices[t] * grid_export[t] * self.dt_hours
+            - export_bonus_prices[t] * bonus_export[t] * self.dt_hours
+            for t in range(n_24h)
+        )
+        baseline_cost = self._calculate_baseline_cost(
+            n_24h,
+            import_prices,
+            export_prices,
+            solar,
+            load,
+            export_bonus_prices=export_bonus_prices,
+            export_bonus_cap_kwh=export_bonus_cap_kwh,
+            import_bonus_prices=import_bonus_prices,
+            import_bonus_cap_kwh=import_bonus_cap_kwh,
+        )
+        schedule.predicted_cost = round(predicted_cost, 2)
+        schedule.predicted_savings = round(baseline_cost - predicted_cost, 2)
+        result.schedule = schedule
+        result.grid_import_w = [value * 1000 for value in grid_import]
+        result.grid_export_w = [value * 1000 for value in grid_export]
+        if result.feasible:
+            result.reserve_recommendation = self._build_reserve_recommendation(
+                schedule,
+                solar,
+                load,
+            )
+        return result
 
     def _allocate_capped_bonus(
         self,
         flows: list[float],
         bonus_prices: list[float],
         cap_kwh: float | None,
+        group_ids: list[str | None] | None = None,
+        caps_by_group: dict[str, float] | None = None,
     ) -> list[float]:
         """Assign the first ``cap_kwh`` of bonus-priced flow to the bonus bucket."""
         bonus = [0.0] * len(flows)
-        remaining = max(0.0, float(cap_kwh or 0.0))
-        if remaining <= 0:
+        grouped = bool(caps_by_group and group_ids and any(group_ids))
+        remaining_by_group = (
+            {
+                str(key): max(0.0, float(value))
+                for key, value in (caps_by_group or {}).items()
+            }
+            if grouped
+            else {"__all__": max(0.0, float(cap_kwh or 0.0))}
+        )
+        if not any(value > 0 for value in remaining_by_group.values()):
             return bonus
         dt = self.dt_hours
         for t in range(len(flows)):
             if t >= len(bonus_prices) or bonus_prices[t] <= 0:
                 continue
+            group = (
+                str(group_ids[t])
+                if grouped and t < len(group_ids or []) and group_ids[t] is not None
+                else "__all__"
+            )
+            remaining = remaining_by_group.get(group, 0.0)
             take_kw = min(flows[t], remaining / dt)
             if take_kw <= 0:
                 continue
             bonus[t] = take_kw
-            remaining -= take_kw * dt
-            if remaining <= 1e-6:
-                break
+            remaining_by_group[group] = max(0.0, remaining - take_kw * dt)
         return bonus
 
     def _calculate_baseline_cost(
@@ -3103,31 +5573,32 @@ class BatteryOptimizer:
         All load from grid, all excess solar exported.
         """
         dt = self.dt_hours
-        cost = 0.0
         bonus_prices = export_bonus_prices or [0.0] * n
-        bonus_remaining = max(0.0, float(export_bonus_cap_kwh or 0.0))
         import_bonus = import_bonus_prices or [0.0] * n
-        import_bonus_remaining = max(0.0, float(import_bonus_cap_kwh or 0.0))
+        baseline_import = [max(0.0, load[t] - solar[t]) for t in range(n)]
+        baseline_export = [max(0.0, solar[t] - load[t]) for t in range(n)]
+        bonus_import_flow = self._allocate_capped_bonus(
+            baseline_import,
+            import_bonus,
+            import_bonus_cap_kwh,
+            self._quota_import_group_ids,
+            self._quota_import_caps_by_group,
+        )
+        bonus_export_flow = self._allocate_capped_bonus(
+            baseline_export,
+            bonus_prices,
+            export_bonus_cap_kwh,
+            self._quota_export_group_ids,
+            self._quota_export_caps_by_group,
+        )
 
-        for t in range(n):
-            net = load[t] - solar[t]
-            if net > 0:
-                cost += import_prices[t] * net * dt
-                if (
-                    import_bonus_remaining > 0
-                    and t < len(import_bonus)
-                    and import_bonus[t] > 0
-                ):
-                    bonus_kw = min(net, import_bonus_remaining / dt)
-                    cost -= import_bonus[t] * bonus_kw * dt
-                    import_bonus_remaining -= bonus_kw * dt
-            else:
-                export_kw = -net
-                cost -= export_prices[t] * export_kw * dt
-                if bonus_remaining > 0 and t < len(bonus_prices) and bonus_prices[t] > 0:
-                    bonus_kw = min(export_kw, bonus_remaining / dt)
-                    cost -= bonus_prices[t] * bonus_kw * dt
-                    bonus_remaining -= bonus_kw * dt
+        cost = sum(
+            import_prices[t] * baseline_import[t] * dt
+            - import_bonus[t] * bonus_import_flow[t] * dt
+            - export_prices[t] * baseline_export[t] * dt
+            - bonus_prices[t] * bonus_export_flow[t] * dt
+            for t in range(n)
+        )
 
         return round(cost, 2)
 

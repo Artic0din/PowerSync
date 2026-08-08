@@ -1,0 +1,55 @@
+name: HACS Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Enable PowerSync under Graphite CI Optimizations and store the workspace token
+  # as GRAPHITE_CI_OPTIMIZER_TOKEN. After rotation, update the secret and verify this job logs a Graphite decision.
+  optimize_ci:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.normalize.outputs.skip }}
+    steps:
+      - name: Optimize CI
+        id: check_skip
+        continue-on-error: true
+        uses: withgraphite/graphite-ci-action@402a89bc8aa6db18ae1f9c61953d001d5f9d828f # v0.0.11
+        with:
+          graphite_token: ${{ secrets.GRAPHITE_CI_OPTIMIZER_TOKEN }}
+      - name: Normalize optimizer decision
+        id: normalize
+        if: always()
+        env:
+          GRAPHITE_SKIP: ${{ steps.check_skip.outputs.skip }}
+        run: echo "skip=${GRAPHITE_SKIP:-false}" >> "$GITHUB_OUTPUT"
+
+  validate-hacs:
+    needs: optimize_ci
+    if: ${{ always() && !cancelled() && needs.optimize_ci.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: HACS Action
+        uses: hacs/action@main
+        with:
+          category: integration
+          # issues: issue tracking is Discord-only by policy; GitHub Issues stay disabled.
+          # license: the repo IS licensed (PolyForm Noncommercial 1.0.0, see LICENSE),
+          # but GitHub's license detector does not recognize PolyForm, so the HACS
+          # check reads SPDX NOASSERTION and can never pass.
+          ignore: issues license
+
+  validate-hassfest:
+    needs: optimize_ci
+    if: ${{ always() && !cancelled() && needs.optimize_ci.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Hassfest
+        if: ${{ always() && !cancelled() }}
+        uses: home-assistant/actions/hassfest@master

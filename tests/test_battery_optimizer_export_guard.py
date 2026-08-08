@@ -149,6 +149,385 @@ def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     )
 
 
+def test_grid_charge_soc_cap_chooses_cheapest_eligible_slot(battery_optimizer_module):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.50
+    optimizer.pre_window_slot = 4
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.28, 0.05, 0.04],
+        export_prices=[0.0, 0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 0.0],
+        current_soc=0.20,
+        allow_battery_export=[False] * 4,
+        block_battery_charge=[False] * 4,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 4,
+    )
+
+    assert result.feasible is True
+    assert result.grid_import_w[:3] == pytest.approx([0.0, 0.0, 0.0])
+    assert result.grid_import_w[3] == pytest.approx(2950.0)
+
+
+def test_grid_charge_soc_cap_blocks_grid_energy_but_allows_solar_charge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.70
+    optimizer.pre_window_slot = 1
+
+    result = optimizer.optimize(
+        import_prices=[0.01],
+        export_prices=[0.0],
+        solar_forecast=[5.0],
+        load_forecast=[0.0],
+        current_soc=0.50,
+        allow_battery_export=[False],
+        block_battery_charge=[False],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True],
+    )
+
+    assert result.feasible is True
+    assert result.grid_import_w == pytest.approx([0.0])
+    assert result.schedule.actions[0].battery_charge_w > 0
+
+
+def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.70
+    optimizer.pre_window_slot = 4
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.28, 0.05, 0.04],
+        export_prices=[0.0, 0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 0.0],
+        current_soc=0.20,
+        allow_battery_export=[False] * 4,
+        block_battery_charge=[False] * 4,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 4,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    # Once the configured deadline is already unreachable, do not subtract a
+    # fresh 0.5% from the reachable grid-charge cap on every rolling solve.
+    assert sum(result.grid_import_w) == pytest.approx(3000.0)
+    assert result.grid_import_w[3] == pytest.approx(3000.0)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_charge_by_time_deadline_stays_active_when_starting_at_target(
+    battery_optimizer_module, monkeypatch, backend
+):
+    """Starting at the target must not allow SOC to drain below it by deadline."""
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    if backend == "highs":
+        if not battery_optimizer_module.HIGHS_AVAILABLE:
+            pytest.skip("requires HiGHS LP solver")
+    else:
+        monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+
+    result = optimizer.optimize(
+        import_prices=[1.00, 0.05, 0.10],
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == backend
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+    assert result.schedule.actions[2].soc < result.schedule.actions[1].soc
+
+
+def test_greedy_charge_by_time_preserves_rolling_target_margin(
+    battery_optimizer_module, monkeypatch
+):
+    """A rolling fallback solve just below target must not drop the deadline."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[1.00, 0.05, 0.10],
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=0.999,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[1].soc >= 0.9988
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+
+
+def test_greedy_charge_by_time_allows_solar_refill_before_deadline(
+    battery_optimizer_module, monkeypatch
+):
+    """The fallback may self-consume when planned solar restores the target."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0, 1.0, 0.0],
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].soc == pytest.approx(0.9)
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_solar_projection_respects_charge_rate(
+    battery_optimizer_module, monkeypatch
+):
+    """Forecast solar cannot refill faster than the battery charge limit."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=1000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0, 10.0, 0.0],
+        load_forecast=[5.0, 0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_solar_ignores_disallowed_export_price(
+    battery_optimizer_module, monkeypatch
+):
+    """A high FiT cannot suppress refill when battery export is disabled."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0, 1.0, 0.0],
+        solar_forecast=[0.0, 1.0, 0.0],
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_clamp_keeps_idle_flows_consistent(
+    battery_optimizer_module, monkeypatch
+):
+    """A clipped export must not leave discharge flow attached to IDLE."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.30] * 3,
+        export_prices=[1.00, 0.0, 0.0],
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[True, False, False],
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "idle"
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+    assert result.grid_import_w[0] == pytest.approx(1000.0)
+
+
+def test_grid_charge_soc_cap_reopens_after_export_before_charge_by_time_deadline(
+    battery_optimizer_module,
+):
+    """A charge deadline cannot truncate an earlier two-hour export window."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=49_000,
+        max_charge_w=10_000,
+        max_discharge_w=7_500,
+        efficiency=0.95,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        grid_charge_soc_cap=0.95,
+        interval_minutes=5,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.00
+    optimizer.pre_window_slot = 48
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 24 + [0.05] * 24,
+        export_prices=[1.00] * 24 + [0.0] * 24,
+        solar_forecast=[0.0] * 44 + [7.0] * 4,
+        load_forecast=[0.0] * 48,
+        current_soc=0.96,
+        allow_battery_export=[True] * 24 + [False] * 24,
+        block_battery_charge=[True] * 24 + [False] * 24,
+        allow_grid_charge=True,
+        grid_charge_allowed=[False] * 24 + [True] * 24,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    assert result.grid_export_w[:24] == pytest.approx([7500.0] * 24, abs=0.1)
+    assert sum(result.grid_export_w[:24]) / 1000.0 / 12.0 == pytest.approx(
+        15.0,
+        abs=1e-3,
+    )
+    assert result.schedule.actions[-1].soc >= 0.995 - 1e-4
+
+
 def test_zero_grid_import_limit_is_treated_as_unset_cap(
     battery_optimizer_module,
 ):
@@ -240,6 +619,42 @@ def test_self_consumption_schedule_uses_hardware_floor_when_below_optimizer_rese
     assert schedule.actions[-1].soc == pytest.approx(0.05, abs=0.001)
 
 
+def test_below_reserve_lp_hold_preserved_before_planned_charge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=42000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.35,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    n = 12
+    battery_charge = [0.0] * n
+    battery_charge[4] = 10.0
+    grid_import = [1.0] * n
+    grid_import[4] = 11.0
+
+    schedule = optimizer._build_schedule(
+        n=n,
+        grid_import=grid_import,
+        grid_export=[0.0] * n,
+        battery_charge=battery_charge,
+        battery_discharge=[0.0] * n,
+        solar=[0.0] * n,
+        load=[1.0] * n,
+        soc_0=0.11,
+        import_prices=[0.30] * n,
+        export_prices=[0.0] * n,
+    )
+
+    assert schedule.actions[0].action == "idle"
+    assert schedule.actions[0].soc == pytest.approx(0.11, abs=0.001)
+    assert schedule.actions[4].action == "charge"
+
+
 def test_pre_window_target_is_capped_by_grid_import_limit(
     battery_optimizer_module,
 ):
@@ -266,6 +681,48 @@ def test_pre_window_target_is_capped_by_grid_import_limit(
     )
 
     assert max(result.grid_import_w) <= 11100.1
+
+
+def test_pre_window_reachability_buffer_does_not_ratchet_deadline_down(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=1000,
+        max_discharge_w=1000,
+        efficiency=1.0,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=5,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    current_soc = 0.60
+
+    # Re-solve the same physically tight deadline after each executed slot.
+    # A feasibility margin may lower the target once, but each new solve must
+    # not grant another margin and progressively abandon reachable SOC.
+    for slots_to_deadline in range(4, 0, -1):
+        optimizer.pre_window_slot = slots_to_deadline
+        result = optimizer.optimize(
+            import_prices=[0.50]
+            + [0.10] * (slots_to_deadline - 1)
+            + [0.50] * (5 - slots_to_deadline),
+            export_prices=[0.0] * 4 + [0.50],
+            solar_forecast=[0.0] * 5,
+            load_forecast=[0.0] * 5,
+            current_soc=current_soc,
+            acquisition_cost_kwh=0.0,
+            allow_battery_export=[False] * 4 + [True],
+            allow_grid_charge=True,
+        )
+        assert result.feasible is True
+        current_soc = result.schedule.actions[0].soc
+
+    assert current_soc >= 0.994
 
 
 def test_pre_window_reachability_uses_grid_import_charge_limit_source():
@@ -441,6 +898,43 @@ def test_grid_export_cap_allows_extra_discharge_for_home_load(
     assert max(action.battery_discharge_w for action in result.schedule.actions) > 7000
 
 
+def test_schedule_api_splits_export_discharge_from_home_load(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10600,
+        max_discharge_w=10600,
+        max_grid_export_w=5500,
+        max_battery_export_w=5500,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[1.00] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[2.0] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 12,
+        block_battery_charge=[True] * 12,
+    )
+
+    api = result.schedule.to_api_response()
+    export_idx = next(
+        idx
+        for idx, action in enumerate(result.schedule.actions)
+        if action.action == "export"
+    )
+
+    assert api["battery_export_w"][export_idx] == pytest.approx(5500, abs=0.1)
+    assert api["battery_consume_w"][export_idx] == pytest.approx(2000, abs=0.1)
+    assert api["discharge_w"][export_idx] == pytest.approx(7500, abs=0.1)
+
+
 def test_zero_grid_export_cap_blocks_battery_export_plan(
     battery_optimizer_module,
 ):
@@ -496,6 +990,110 @@ def test_target_export_cap_is_separate_from_total_discharge(battery_optimizer_mo
     assert max(result.grid_export_w) <= 1000.1
     assert max(action.power_w for action in result.schedule.actions) <= 1000.1
     assert max(action.battery_discharge_w for action in result.schedule.actions) > 2500
+
+
+def test_negative_max_battery_export_w_is_normalized_not_inverted(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=7000,
+        max_discharge_w=7000,
+        max_battery_export_w=-500,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    # A negative config value must not survive raw — it should normalize away
+    # (no additional battery-export cap) rather than flow into
+    # `solar_surplus_kw + max_battery_export_kw` and invert the LP bound.
+    assert optimizer.max_battery_export_w is None
+    assert optimizer.max_battery_export_kw is None
+
+    optimizer.update_config(max_battery_export_w=-500)
+
+    assert optimizer.max_battery_export_w is None
+    assert optimizer.max_battery_export_kw is None
+
+
+def test_pad_array_honors_default_for_short_nonempty_array(battery_optimizer_module):
+    optimizer = _optimizer(battery_optimizer_module)
+
+    padded = optimizer._pad_array([1.0, 2.0], 5, 9.0)
+
+    assert padded == [1.0, 2.0, 9.0, 9.0, 9.0]
+
+
+def test_solve_lp_highs_keeps_time_limit_incumbent(
+    battery_optimizer_module, monkeypatch
+):
+    module = battery_optimizer_module
+    if not module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
+
+    real_highspy = module.highspy
+
+    class _FakeHighs:
+        def __init__(self):
+            self._n_cols = 0
+
+        def setOptionValue(self, *args, **kwargs):
+            pass
+
+        def addCol(self, obj, lo, hi, *args, **kwargs):
+            self._n_cols += 1
+
+        def addRow(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            pass
+
+        def getModelStatus(self):
+            return real_highspy.HighsModelStatus.kTimeLimit
+
+        def modelStatusToString(self, status):
+            return "Time limit reached."
+
+        def getInfo(self):
+            info = types.SimpleNamespace()
+            info.primal_solution_status = real_highspy.kSolutionStatusFeasible
+            return info
+
+        def getSolution(self):
+            sol = types.SimpleNamespace()
+            sol.col_value = [1.5] * self._n_cols
+            return sol
+
+        def getObjectiveValue(self):
+            return 3.0
+
+    fake_highspy = types.SimpleNamespace(
+        kHighsInf=real_highspy.kHighsInf,
+        Highs=_FakeHighs,
+        HighsModelStatus=real_highspy.HighsModelStatus,
+        kSolutionStatusFeasible=real_highspy.kSolutionStatusFeasible,
+    )
+    monkeypatch.setattr(module, "highspy", fake_highspy)
+
+    A_eq = module._LpMatrix((0, 1))
+    A_ub = module._LpMatrix((0, 1))
+    result = module._solve_lp_highs(
+        c=[1.0],
+        A_ub=A_ub,
+        b_ub=[],
+        A_eq=A_eq,
+        b_eq=[],
+        bounds=[(0, 5)],
+        time_limit=1.0,
+    )
+
+    # A time-limited solve with a feasible incumbent should be used instead
+    # of being discarded and falling all the way to the greedy fallback.
+    assert result.success is True
+    assert result.x == [1.5]
+    assert result.fun == 3.0
 
 
 def test_solar_surplus_export_still_works_when_battery_export_blocked(
@@ -769,7 +1367,7 @@ def test_below_optimizer_reserve_blocks_lp_battery_export(
     )
 
     assert result.solver_used == "highs"
-    period_count = (captured["variable_count"] - 1) // 6
+    period_count = (captured["variable_count"] - 1) // 7
     grid_export_bounds = captured["bounds"][period_count:period_count * 2]
     assert grid_export_bounds
     assert all(bound[1] == 0.0 for bound in grid_export_bounds)
@@ -814,6 +1412,44 @@ def test_below_optimizer_reserve_allows_later_export_after_recovery(
     assert any(action.action == "export" for action in later_actions)
     assert max(result.grid_export_w[12:]) > 1000
     assert min(action.soc for action in later_actions) >= 0.15
+
+
+def test_below_reserve_priority_export_does_not_recover_at_bad_import_price(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("Reserve recovery export gating is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=2,
+    )
+    n = 24
+    export_slots = [False] * 12 + [True] * 12
+
+    result = optimizer.optimize(
+        import_prices=[0.42] * n,
+        export_prices=[0.0] * 12 + [0.45] * 12,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * n,
+        current_soc=0.04,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=export_slots,
+        block_battery_charge=export_slots,
+        allow_grid_charge=True,
+        priority_export_slots=export_slots,
+        priority_export_enabled=True,
+    )
+
+    assert max(action.battery_charge_w for action in result.schedule.actions[:12]) <= 1e-6
+    assert all(action.action != "charge" for action in result.schedule.actions[:12])
+    assert max(result.grid_export_w[12:]) <= 1e-6
+    assert all(action.action != "export" for action in result.schedule.actions[12:])
 
 
 def test_below_optimizer_reserve_later_export_respects_configured_floor(
@@ -1160,7 +1796,7 @@ def test_charge_block_mask_prevents_greedy_fallback_charging(
     optimizer = _optimizer(battery_optimizer_module)
 
     unblocked = optimizer.optimize(
-        import_prices=[0.05] * 12,
+        import_prices=[0.05] * 6 + [0.30] * 6,
         export_prices=[0.04] * 12,
         solar_forecast=[0.0] * 12,
         load_forecast=[0.1] * 12,
@@ -1170,7 +1806,7 @@ def test_charge_block_mask_prevents_greedy_fallback_charging(
         block_battery_charge=[False] * 12,
     )
     blocked = optimizer.optimize(
-        import_prices=[0.05] * 12,
+        import_prices=[0.05] * 6 + [0.30] * 6,
         export_prices=[0.04] * 12,
         solar_forecast=[0.0] * 12,
         load_forecast=[0.1] * 12,
@@ -1399,6 +2035,315 @@ def test_cheap_import_charge_not_blocked_by_lower_fit_than_acquisition_cost(
     assert result.schedule.actions[-1].soc > 0.20
 
 
+def test_fit_export_above_acquisition_not_blocked_by_peak_import(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=48,
+    )
+    n = 48 * 12
+    import_prices = [0.42] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+
+    # Current time is 16:35: today's Flow Power Happy Hour starts in 55 minutes.
+    # The coincident peak network tariff makes import more expensive than the
+    # FIT, but the battery's acquisition cost is still below that FIT.
+    today_start = 11
+    tomorrow_start = today_start + 24 * 12
+    for start, import_price in ((today_start, 0.498), (tomorrow_start, 0.3474)):
+        for idx in range(start, start + 24):
+            import_prices[idx] = import_price
+            export_prices[idx] = 0.45
+            allow_export[idx] = True
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.99,
+        acquisition_cost_kwh=0.322,
+        allow_battery_export=allow_export,
+    )
+
+    today_window = result.schedule.actions[today_start:today_start + 24]
+    assert any(action.action == "export" for action in today_window)
+    assert max(result.grid_export_w[today_start:today_start + 24]) > 1000
+
+
+def test_priority_export_uses_surplus_above_optimizer_floor(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=12,
+    )
+    n = 12 * 12
+    export_start = 12
+    export_end = export_start + 24
+    next_charge_start = export_end + 36
+    import_prices = [0.42] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    for idx in range(export_start, export_end):
+        import_prices[idx] = 0.486
+        export_prices[idx] = 0.45
+        allow_export[idx] = True
+        block_charge[idx] = True
+    for idx in range(next_charge_start, next_charge_start + 24):
+        import_prices[idx] = 0.303
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.49,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[export_start:export_end]
+    export_actions = [action for action in export_window if action.action == "export"]
+    assert export_actions
+    assert max(result.grid_export_w[export_start:export_end]) > 1000
+    assert min(action.soc for action in export_actions) >= 0.10
+    assert "home_load_bridge_kwh" not in result.reserve_recommendation
+
+
+def test_priority_export_does_not_add_a_mandatory_home_load_bridge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    export_prices = [0.45] * 12 + [0.0] * (n - 12)
+    allow_export = [idx < 12 for idx in range(n)]
+
+    result = optimizer.optimize(
+        import_prices=[0.486] * 12 + [0.42] * (n - 24) + [0.303] * 12,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * 12 + [4.0] * (n - 12),
+        current_soc=0.18,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[:12]
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[:12]) > 100
+
+
+def test_priority_export_applies_to_generic_export_windows(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    allow_export = [12 <= idx < 24 for idx in range(n)]
+    import_prices = [0.30] * n
+    export_prices = [0.0] * n
+    for idx in range(12, 24):
+        import_prices[idx] = 0.42
+        export_prices[idx] = 0.35
+    for idx in range(36, 48):
+        import_prices[idx] = 0.20
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.3] * n,
+        current_soc=0.70,
+        acquisition_cost_kwh=0.20,
+        allow_battery_export=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[12:24]
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[12:24]) > 1000
+
+
+def test_priority_export_bonus_is_not_counted_in_predicted_cost(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    import_prices = [0.42] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+    for idx in range(12, 24):
+        import_prices[idx] = 0.486
+        export_prices[idx] = 0.45
+        allow_export[idx] = True
+    for idx in range(36, 48):
+        import_prices[idx] = 0.303
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.49,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=allow_export,
+        priority_export_enabled=True,
+    )
+
+    dt = optimizer.dt_hours
+    actual_cost = sum(
+        import_prices[idx] * result.grid_import_w[idx] / 1000 * dt
+        - export_prices[idx] * result.grid_export_w[idx] / 1000 * dt
+        for idx in range(n)
+    )
+    assert result.schedule.predicted_cost == round(actual_cost, 2)
+
+
+def test_priority_export_bonus_window_exports_below_acquisition_cost(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32200,
+        max_charge_w=10000,
+        max_discharge_w=5000,
+        max_battery_export_w=5000,
+        backup_reserve=0.18,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    n = 24 * 12
+    export_start = 44
+    export_end = export_start + 36
+    zerocharge_start = 248
+    zerocharge_end = zerocharge_start + 36
+    import_prices = [0.418] * n
+    export_prices = [0.0] * n
+    export_bonus_prices = [0.0] * n
+    import_bonus_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    for idx in range(export_start, export_end):
+        # ZeroHero models Super Export as a capped bonus on top of a 0c base FiT.
+        export_bonus_prices[idx] = 0.15
+        allow_export[idx] = True
+        block_charge[idx] = True
+    for idx in range(zerocharge_start, zerocharge_end):
+        import_bonus_prices[idx] = import_prices[idx]
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.2] * n,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.418,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=15.0,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=50.0,
+        priority_export_slots=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[export_start:export_end]
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[export_start:export_end]) > 1000
+    assert min(action.soc for action in export_window) >= 0.25
+
+
+def test_zerohero_low_value_export_does_not_force_paid_prefill_without_priority(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32200,
+        max_charge_w=10000,
+        max_discharge_w=5000,
+        max_battery_export_w=5000,
+        backup_reserve=0.24,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=8,
+    )
+    n = 8 * 12
+    export_start = 40
+    export_end = export_start + 36
+    import_prices = [0.407] * 16 + [0.528] * 24 + [0.528] * 36 + [0.407] * 20
+    export_prices = [0.0] * n
+    export_bonus_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    load = [0.4] * n
+    for idx in range(16, 40):
+        load[idx] = 3.6
+    for idx in range(export_start, export_end):
+        export_prices[idx] = 0.10
+        export_bonus_prices[idx] = 0.05
+        allow_export[idx] = True
+        block_charge[idx] = True
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=load,
+        current_soc=0.608,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=15.0,
+        priority_export_slots=[False] * n,
+        priority_export_enabled=False,
+    )
+
+    pre_export = result.schedule.actions[:export_start]
+    assert max(action.battery_charge_w for action in pre_export) == pytest.approx(0.0)
+    assert max(result.grid_export_w[export_start:export_end]) == pytest.approx(0.0)
+
+
 @pytest.mark.parametrize("acquisition_cost", [0.0, 0.069, 0.12])
 def test_cheap_import_charge_not_blocked_by_positive_fit_at_reserve(
     battery_optimizer_module,
@@ -1524,7 +2469,7 @@ def test_reserve_recommendation_marks_no_charge_in_horizon(
     assert recommendation["protects_until"].startswith("2026-05-04T00:55")
 
 
-def test_reserve_recommendation_reports_export_floor_for_home_load_bridge(
+def test_reserve_recommendation_does_not_create_home_load_export_bridge(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -1564,11 +2509,9 @@ def test_reserve_recommendation_reports_export_floor_for_home_load_bridge(
         load=[1.0] * 24,
     )
 
-    assert recommendation["home_load_bridge_next_charge_reason"] == "forecast_solar_surplus"
-    assert recommendation["home_load_bridge_kwh"] == pytest.approx(1.0)
-    assert 15 <= recommendation["home_load_export_floor_percent"] <= 17
-    assert recommendation["home_load_bridge_start"].startswith("2026-05-04T00:30")
-    assert recommendation["home_load_bridge_until"].startswith("2026-05-04T01:30")
+    assert "home_load_bridge_next_charge_reason" not in recommendation
+    assert "home_load_bridge_kwh" not in recommendation
+    assert "home_load_export_floor_percent" not in recommendation
 
 
 def test_export_reserve_floor_limits_planned_export_and_home_load_projection(
@@ -1601,10 +2544,7 @@ def test_export_reserve_floor_limits_planned_export_and_home_load_projection(
     assert export_actions
     # Forced export is gated at the floor: it never drives SOC below it.
     assert min(action.soc for action in export_actions) >= 0.55
-    # Once it can no longer export, the battery idles at the floor.
-    assert any(action.action == "idle" for action in result.schedule.actions)
-    # After the export window, the home-load bridge reserve is consumed to serve
-    # load: self-consumption draws the reported SOC naturally below the export
+    # After the export window, self-consumption draws the reported SOC naturally below the export
     # floor (it is an export gate, not a hard SOC floor), matching what the
     # battery actually does — but never below the real hardware reserve.
     self_consumption_socs = [
@@ -1645,9 +2585,9 @@ def test_high_export_reserve_floor_limits_first_export_window(
     export_actions = [a for a in schedule.actions if a.action == "export"]
     assert export_actions
     assert min(action.soc for action in export_actions) >= 0.92
-    assert min(action.soc for action in schedule.actions) >= 0.92
-    assert schedule.actions[2].action == "idle"
-    assert schedule.actions[2].battery_discharge_w == 0
+    assert min(action.soc for action in schedule.actions) < 0.92
+    assert schedule.actions[2].action == "self_consumption"
+    assert schedule.actions[2].battery_discharge_w > 0
 
 
 def test_export_capped_solar_surplus_during_charge_block_stays_feasible(
@@ -1734,6 +2674,105 @@ def test_build_schedule_caps_export_actions_at_optimizer_reserve(
     )
 
 
+def test_build_schedule_does_not_invent_priority_export_from_idle(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    n = 3
+
+    schedule = optimizer._build_schedule(
+        n,
+        grid_import=[0.5, 0.5, 0.5],
+        grid_export=[0.0, 0.0, 0.0],
+        battery_charge=[0.0, 0.0, 0.0],
+        battery_discharge=[0.0, 0.0, 0.0],
+        solar=[0.0, 0.0, 0.0],
+        load=[0.5, 0.5, 0.5],
+        soc_0=0.66,
+        import_prices=[0.30, 0.30, 0.30],
+        export_prices=[0.45, 0.45, 0.45],
+        block_battery_charge=[True, True, True],
+        priority_export_slots=[True, True, True],
+    )
+
+    assert schedule.actions[0].action == "idle"
+    assert schedule.actions[0].power_w == 0.0
+    assert schedule.actions[0].battery_discharge_w == 0.0
+
+
+def test_build_schedule_does_not_invent_priority_export_from_self_consumption(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=49000,
+        max_charge_w=10000,
+        max_discharge_w=7500,
+        max_grid_export_w=7500,
+        backup_reserve=0.15,
+        hardware_reserve=0.15,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.0],
+        grid_export=[0.0],
+        battery_charge=[0.0],
+        battery_discharge=[2.0],
+        solar=[0.0],
+        load=[2.0],
+        soc_0=0.90,
+        import_prices=[0.486],
+        export_prices=[0.45],
+        block_battery_charge=[True],
+        priority_export_slots=[True],
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[0].power_w == 2000.0
+    assert schedule.actions[0].battery_discharge_w == 2000.0
+
+
+def test_build_schedule_keeps_non_priority_profitable_hold_idle(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.5],
+        grid_export=[0.0],
+        battery_charge=[0.0],
+        battery_discharge=[0.0],
+        solar=[0.0],
+        load=[0.5],
+        soc_0=0.66,
+        import_prices=[0.30],
+        export_prices=[0.45],
+        block_battery_charge=[True],
+        priority_export_slots=[False],
+    )
+
+    assert schedule.actions[0].action == "idle"
+
+
 def test_positive_fit_iog_charge_does_not_create_all_day_export_loop(
     battery_optimizer_module,
 ):
@@ -1761,7 +2800,7 @@ def test_positive_fit_iog_charge_does_not_create_all_day_export_loop(
     cheap_window = result.schedule.actions[:cheap_slots]
     charge_actions = [action for action in cheap_window if action.action == "charge"]
 
-    assert cheap_window[0].action == "charge"
+    assert charge_actions
     assert max(action.battery_charge_w for action in charge_actions) > 1000
     assert len(charge_actions) < 40
     assert max(result.grid_export_w[:cheap_slots]) <= 1e-6
@@ -2209,6 +3248,67 @@ def test_sparse_lp_stats_and_schedule_expansion(
     assert result.lp_stats["backend"] == "highspy"
     assert result.lp_stats["base_steps"] == n
     assert result.lp_stats["period_count"] == 132
-    assert result.lp_stats["variables"] == 6 * 132 + 1
+    assert result.lp_stats["variables"] == 7 * 132 + 1
     assert result.lp_stats["constraints"] == captured["A_eq"].shape[0] + captured["A_ub"].shape[0]
     assert len(captured["bounds"]) == result.lp_stats["variables"]
+
+
+def test_priority_export_bridge_nets_import_bonus_hd7(battery_optimizer_module):
+    """HD-7: the priority-export bridge-to-recharge floor must net an
+    import-bonus (ZeroCharge/import-bonus window) off the raw import price
+    when checking for a cheap recharge opportunity, not compare raw import
+    prices alone -- otherwise the bridge over-reserves straight through a
+    window that is actually cheap to recharge in.
+    """
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    priority_export_slots = [True, True, False, False, False, False]
+    export_prices = [0.10, 0.10, 0.0, 0.0, 0.0, 0.0]
+    import_prices = [0.0, 0.0, 0.15, 0.15, 0.15, 0.15]
+    solar = [0.0] * 6
+    load = [0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
+    block_battery_charge = [False] * 6
+    grid_charge_allowed = [True] * 6
+
+    # Without an import bonus, the raw import price (0.15) stays above the
+    # cheap-recharge threshold (reference export 0.10) for the whole
+    # horizon, so the bridge floor keeps accumulating home load through
+    # idx 2-5.
+    no_bonus_floors = optimizer._priority_export_reserve_floor_slots(
+        import_prices,
+        export_prices,
+        solar,
+        load,
+        priority_export_slots,
+        block_battery_charge,
+        True,
+        grid_charge_allowed,
+        import_bonus_prices=[0.0] * 6,
+    )
+    assert no_bonus_floors is not None
+    assert no_bonus_floors[0] == pytest.approx(0.6667 / 13.5, abs=0.001)
+
+    # A ZeroCharge/import-bonus window at idx 2 nets the effective import
+    # price down to 0.07 (<= 0.10 cheap-recharge price), so the bridge scan
+    # must stop right there instead of over-reserving straight through it.
+    bonus_floors = optimizer._priority_export_reserve_floor_slots(
+        import_prices,
+        export_prices,
+        solar,
+        load,
+        priority_export_slots,
+        block_battery_charge,
+        True,
+        grid_charge_allowed,
+        import_bonus_prices=[0.0, 0.0, 0.08, 0.0, 0.0, 0.0],
+    )
+    assert bonus_floors is None

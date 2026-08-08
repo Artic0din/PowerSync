@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -62,16 +63,38 @@ from .const import (
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_CONTROLS,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
     POWERWALL_LOCAL_POLL_INTERVAL,
-    supports_no_idle_mode_provider,
 )
+from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
 # GloBird and AEMO VPP use spike detection only — no TOU sync
 PROVIDERS_WITH_TOU_SYNC = {"amber", "octopus", "flow_power"}
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _fresh_powerwall_local_snapshot(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> Any | None:
+    """Return a fresh paired local Powerwall snapshot, if available."""
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+    coordinator = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("powerwall_local", {})
+        .get("coordinator")
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
+    if data is None or last_success_monotonic is None:
+        return None
+    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 def _coerce_duration(value: Any, default: int = DEFAULT_DISCHARGE_DURATION) -> int:
@@ -295,15 +318,14 @@ async def async_setup_entry(
 
     hass.data[DOMAIN][entry.entry_id]["switch_add_charge_by_time"] = _add_charge_by_time_switch
 
-    if supports_no_idle_mode_provider(electricity_provider):
-        def _add_disable_idle_switch(coordinator: Any) -> None:
-            async_add_entities([
-                DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
-            ])
+    def _add_disable_idle_switch(coordinator: Any) -> None:
+        async_add_entities([
+            DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
+        ])
 
-        hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"] = (
-            _add_disable_idle_switch
-        )
+    hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"] = (
+        _add_disable_idle_switch
+    )
 
     if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:
         def _add_spread_export_switch(coordinator: Any) -> None:
@@ -817,7 +839,10 @@ class ForceDischargeSwitch(SwitchEntity):
         duration = _coerce_duration(
             kwargs.get("duration", selected_duration), self._duration_minutes,
         )
-        service_data = {"duration": duration}
+        # This entity is a user-facing manual control. Mark the nested service
+        # call explicitly so Monitoring Mode does not mistake it for an
+        # optimizer/automation command when Home Assistant drops UI context.
+        service_data = {"duration": duration, "source": "user"}
         power_w = _selected_force_power_w(self.hass)
         if power_w > 0:
             service_data["power_w"] = power_w
@@ -851,7 +876,7 @@ class ForceDischargeSwitch(SwitchEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 "restore_normal",
-                {},
+                {"source": "user"},
                 blocking=True,
             )
 
@@ -995,7 +1020,10 @@ class ForceChargeSwitch(SwitchEntity):
         duration = _coerce_duration(
             kwargs.get("duration", selected_duration), self._duration_minutes,
         )
-        service_data = {"duration": duration}
+        # This entity is a user-facing manual control. Mark the nested service
+        # call explicitly so Monitoring Mode does not mistake it for an
+        # optimizer/automation command when Home Assistant drops UI context.
+        service_data = {"duration": duration, "source": "user"}
         power_w = _selected_force_power_w(self.hass)
         if power_w > 0:
             service_data["power_w"] = power_w
@@ -1029,7 +1057,7 @@ class ForceChargeSwitch(SwitchEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 "restore_normal",
-                {},
+                {"source": "user"},
                 blocking=True,
             )
 
@@ -1156,31 +1184,29 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable monitoring mode — all control commands will be logged but not executed."""
+        if self._current_value():
+            return
         _LOGGER.info("Monitoring mode ENABLED — all battery/inverter commands will be blocked")
-        self._attr_is_on = True
-
-        new_options = {**self._entry.options}
-        new_options[CONF_MONITORING_MODE] = True
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-
-        restore_data = {"source": "manual", "_force_restore": True}
-        if self._entry.data.get(CONF_SIGENERGY_STATION_ID):
-            restore_data["_native_control"] = True
         try:
-            await self.hass.services.async_call(
-                DOMAIN,
-                SERVICE_RESTORE_NORMAL,
-                restore_data,
-                blocking=True,
-            )
+            await async_prepare_monitoring_handoff(self.hass, self._entry)
         except Exception as err:
+            finish_monitoring_handoff(self.hass, self._entry)
             _LOGGER.warning(
-                "Monitoring mode enabled but restore normal failed: %s",
+                "Monitoring mode was not enabled because cleanup failed: %s",
                 err,
             )
+            return
+
+        self._attr_is_on = True
+        new_options = {**self._entry.options}
+        new_options[CONF_MONITORING_MODE] = True
+        try:
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                options=new_options,
+            )
+        finally:
+            finish_monitoring_handoff(self.hass, self._entry)
 
         self.async_write_ha_state()
 
@@ -1611,6 +1637,10 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     @property
     def is_on(self) -> bool | None:
+        local_snapshot = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_enabled = getattr(local_snapshot, "grid_charging_enabled", None)
+        if local_enabled is not None:
+            return bool(local_enabled)
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:

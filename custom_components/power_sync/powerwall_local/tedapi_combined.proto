@@ -9,12 +9,14 @@
 // Credits:
 // - @Matthew1471's Tesla-API repository (signing protocol)
 // - @Nexarian's TEDAPI protocol updates (Feb 12, 2026)
+// - Teslemetry/tesla-protocol energy_device common/networking schemas
 
 syntax = "proto3";
 
 package tedapi_combined;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
 
 // ===================================================================
 // PART 1: Tesla Signed Message Protocol
@@ -181,6 +183,34 @@ enum AuthorizedClientType {
   AUTHORIZED_CLIENT_TYPE_VEHICLE = 2;
 }
 
+enum AuthorizationRole {
+  AUTHORIZATION_ROLE_INVALID = 0;
+  AUTHORIZATION_ROLE_CUSTOMER = 1;
+  AUTHORIZATION_ROLE_VEHICLE = 2;
+}
+
+enum AuthorizedState {
+  AUTHORIZED_STATE_INVALID = 0;
+  AUTHORIZED_STATE_PENDING_VERIFICATION = 1;
+  AUTHORIZED_STATE_PENDING_VERIFICATION_TIMEOUT = 2;
+  AUTHORIZED_STATE_VERIFIED = 3;
+  AUTHORIZED_STATE_REMOVED = 4;
+}
+
+enum AuthorizedKeyType {
+  AUTHORIZED_KEY_TYPE_INVALID = 0;
+  AUTHORIZED_KEY_TYPE_RSA = 1;
+  AUTHORIZED_KEY_TYPE_ECC = 2;
+}
+
+enum AuthorizedVerificationType {
+  AUTHORIZED_VERIFICATION_TYPE_INVALID = 0;
+  AUTHORIZED_VERIFICATION_TYPE_PRESENCE_PROOF = 1;
+  AUTHORIZED_VERIFICATION_TYPE_BLE = 2;
+  AUTHORIZED_VERIFICATION_TYPE_SIGNED = 3;
+  AUTHORIZED_VERIFICATION_TYPE_HERMES_COMMAND = 4;
+}
+
 message Message {
   MessageEnvelope message = 1;
   Tail tail = 2;
@@ -216,8 +246,98 @@ message Tail {
   int32 value = 1;
 }
 
+enum DeviceType {
+  DEVICE_TYPE_INVALID        = 0;
+  DEVICE_TYPE_GEN3WC         = 1;
+  DEVICE_TYPE_PVCOM          = 2;
+  DEVICE_TYPE_MSA            = 3;
+  DEVICE_TYPE_SITECONTROLLER = 4;
+  DEVICE_TYPE_MEGAPUTER      = 5;
+  DEVICE_TYPE_IPM            = 6;
+}
+
+message EcuId {
+  string part_number   = 1;
+  string serial_number = 2;
+}
+
+message Din {
+  string value = 1;
+}
+
+message FirmwareVersion {
+  string version = 1;
+  bytes githash   = 2;
+}
+
+message Rssi {
+  sint32 value                                        = 1;
+  google.protobuf.UInt32Value signal_strength_percent = 2;
+}
+
+message NetworkInterfaceIPv4Config {
+  reserved 1;
+  bool dhcp_enabled    = 2;
+  fixed32 address      = 3;
+  fixed32 subnet_mask  = 4;
+  fixed32 gateway      = 5;
+  repeated fixed32 dns = 6;
+}
+
+message NetworkConnectivityStatus {
+  bool connected_physical        = 1;
+  bool connected_internet        = 2;
+  bool connected_tesla           = 3;
+  Rssi rssi                      = 4;
+  google.protobuf.Int32Value snr = 5;
+}
+
+message NetworkInterface {
+  bytes mac_address                             = 1;
+  bool enabled                                  = 2;
+  bool active_route                             = 3;
+  NetworkInterfaceIPv4Config ipv4_config        = 4;
+  NetworkConnectivityStatus connectivity_status = 5;
+}
+
+message CommonAPIGetSystemInfoRequest {}
+
+message CommonAPIGetSystemInfoResponse {
+  EcuId device_id                 = 1;
+  Din din                         = 2;
+  FirmwareVersion firmare_version = 3;
+  reserved 4;
+  DeviceType device_type          = 5;
+}
+
+message CommonAPIGetNetworkingStatusRequest {}
+
+// Field 1 is WifiConfig upstream. It is intentionally omitted so credentials
+// cannot be decoded or exposed through PowerSync diagnostics.
+message CommonAPIGetNetworkingStatusResponse {
+  reserved 1;
+  NetworkInterface wifi = 2;
+  NetworkInterface eth  = 3;
+  NetworkInterface gsm  = 4;
+}
+
+message CommonAPICheckInternetRequest {}
+
+message CommonAPICheckInternetResponse {
+  NetworkInterface wifi = 1;
+  NetworkInterface eth  = 2;
+  NetworkInterface gsm  = 3;
+}
+
 message CommonMessages {
-  bytes placeholder = 1;
+  oneof message {
+    CommonAPIGetSystemInfoRequest get_system_info_request = 2;
+    CommonAPIGetSystemInfoResponse get_system_info_response = 3;
+    CommonAPIGetNetworkingStatusRequest get_networking_status_request = 22;
+    CommonAPIGetNetworkingStatusResponse get_networking_status_response = 23;
+    CommonAPICheckInternetRequest check_internet_request = 30;
+    CommonAPICheckInternetResponse check_internet_response = 31;
+  }
 }
 
 message ControlEventSchedulingInfo {
@@ -295,8 +415,31 @@ message EnergySiteNetMessages {
   bytes placeholder = 1;
 }
 
+message AuthorizationRecord {
+  AuthorizedClientType type               = 1;
+  string description                      = 2;
+  AuthorizedKeyType key_type              = 3;
+  bytes public_key                        = 4;
+  repeated AuthorizationRole roles        = 5;
+  AuthorizedState state                   = 6;
+  AuthorizedVerificationType verification = 7;
+  google.protobuf.Timestamp added_time    = 8;
+  optional string identifier              = 9;
+  optional bytes authorized_by_public_key = 10;
+}
+
+message AuthorizationAPIListAuthorizedClientsRequest {}
+
+message AuthorizationAPIListAuthorizedClientsResponse {
+  repeated AuthorizationRecord clients = 1;
+  bool enable_line_switch_off = 2;
+}
+
 message AuthorizationMessages {
-  bytes placeholder = 1;
+  oneof message {
+    AuthorizationAPIListAuthorizedClientsRequest list_authorized_clients_request = 5;
+    AuthorizationAPIListAuthorizedClientsResponse list_authorized_clients_response = 6;
+  }
 }
 
 message GraphQLMessages {

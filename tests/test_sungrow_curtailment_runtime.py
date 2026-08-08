@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
+import importlib.util
 from pathlib import Path
+import textwrap
 from types import SimpleNamespace
 
 
@@ -11,6 +14,18 @@ ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 ACTIONS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "actions.py"
 SUNGROW_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "sungrow.py"
+TARIFF_UTILS_PATH = ROOT / "custom_components" / "power_sync" / "tariff_utils.py"
+
+
+def _load_with_hysteresis():
+    """Load the real HD-15/HD-24 hysteresis helper from tariff_utils.py."""
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_tariff_utils_for_curtailment_test", TARIFF_UTILS_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.with_hysteresis
 
 
 def _function_source(name: str) -> str:
@@ -67,10 +82,23 @@ def test_sungrow_has_native_export_limit_curtailment_handler():
     assert "sungrow_curtailment_state" in handler
     assert "sungrow_power_limit_w" in handler
     assert "get_current_prices_for_curtailment" in handler
-    assert "await sungrow_coord.set_export_limit(home_load_w)" in handler
+    assert "export_limit_w = 0" in handler
+    assert "await sungrow_coord.set_export_limit(export_limit_w)" in handler
     assert "await sungrow_coord.set_export_limit(None)" in handler
     assert "ac_inverter_is_same_hybrid" in handler
     assert "await apply_inverter_curtailment(" in handler
+
+
+def test_sungrow_native_curtailment_uses_zero_site_export_not_home_load_limit():
+    handler = _function_source("handle_sungrow_curtailment")
+
+    load_index = handler.index("home_load_w = int(live_status.get(\"load_power\", 0))")
+    target_index = handler.index("export_limit_w = 0")
+    command_index = handler.index("await sungrow_coord.set_export_limit(export_limit_w)")
+
+    assert load_index < target_index < command_index
+    assert "await sungrow_coord.set_export_limit(home_load_w)" not in handler
+    assert "zero-export limit" in handler
 
 
 def test_sungrow_curtailment_releases_limit_for_active_solar_surplus_ev():
@@ -82,7 +110,7 @@ def test_sungrow_curtailment_releases_limit_for_active_solar_surplus_ev():
     assert "get_ev_battery_level" in helper
     assert 'state.get("paused")' in helper
     assert "_active_solar_surplus_ev_needs_inverter_headroom" in handler
-    assert "should_curtail_for_price = export_earnings < 1 and not ev_needs_headroom" in handler
+    assert "should_curtail_for_price = export_uneconomic and not ev_needs_headroom" in handler
     assert "solar surplus EV needs PV headroom" in handler
     assert "curtail=should_curtail_for_price" in handler
 
@@ -185,18 +213,18 @@ def test_goodwe_curtailment_releases_limit_before_force_discharge():
     handler = _function_source("handle_force_discharge")
     helper = _function_source("_restore_goodwe_curtailment_for_export")
 
-    assert handler.count("await _restore_goodwe_curtailment_for_export(") >= 2
+    assert handler.count("lambda _guarded_w: _restore_goodwe_curtailment_for_export(") >= 2
     release_index = handler.index(
-        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "optimizer force discharge",'
+        'lambda _guarded_w: _restore_goodwe_curtailment_for_export(\n                        entry_data,\n                        "optimizer force discharge",'
     )
     optimizer_force_index = handler.index(
-        "await goodwe_coord.force_discharge(duration, power_w=power_w)"
+        "lambda guarded_w: goodwe_coord.force_discharge("
     )
     manual_release_index = handler.index(
-        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "force discharge",'
+        'lambda _guarded_w: _restore_goodwe_curtailment_for_export(\n                        entry_data,\n                        "force discharge",'
     )
-    manual_force_index = handler.index(
-        "discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    manual_force_index = handler.rindex(
+        "lambda guarded_w: goodwe_coord.force_discharge("
     )
 
     assert release_index < optimizer_force_index
@@ -215,12 +243,79 @@ def test_goodwe_curtailment_does_not_reapply_during_force_export():
     assert "GoodWe curtailment skipped while force discharge/export is active" in handler
 
 
+def test_solaredge_curtailment_releases_limit_during_force_dispatch():
+    handler = _function_source("handle_solaredge_curtailment")
+    active_helper = _function_source("_solaredge_force_dispatch_active")
+    restore_helper = _function_source("_restore_solaredge_curtailment_for_dispatch")
+
+    assert "force_charge_state.get(\"active\")" in active_helper
+    assert "get_active_force_state" in active_helper
+    assert "_optimizer_current_force_action_matches(\"charge\")" in active_helper
+    assert "controller.restore()" in restore_helper
+    assert "solaredge_curtailment_state" in restore_helper
+    assert "if _solaredge_force_dispatch_active(entry_data):" in handler
+    assert '"active force dispatch"' in handler
+    assert "SolarEdge curtailment skipped while force dispatch is active" in handler
+
+
+def test_solaredge_force_dispatch_releases_active_power_curtailment_first():
+    charge_handler = _function_source("handle_force_charge")
+    discharge_handler = _function_source("handle_force_discharge")
+
+    assert charge_handler.count("await _restore_solaredge_curtailment_for_dispatch(") >= 2
+    optimizer_charge_release = charge_handler.index(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "optimizer force charge",'
+    )
+    optimizer_charge_call = charge_handler.index(
+        "await solaredge_coord.force_charge(duration, power_w=power_w)"
+    )
+    manual_charge_release = charge_handler.rindex(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "force charge",'
+    )
+    manual_charge_call = charge_handler.rindex(
+        "charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)"
+    )
+
+    assert discharge_handler.count("lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(") >= 2
+    optimizer_discharge_release = discharge_handler.index(
+        'lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(\n                        entry_data,\n                        "optimizer force discharge",'
+    )
+    optimizer_discharge_call = discharge_handler.index(
+        "lambda guarded_w: solaredge_coord.force_discharge("
+    )
+    manual_discharge_release = discharge_handler.rindex(
+        'lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(\n                        entry_data,\n                        "force discharge",'
+    )
+    manual_discharge_call = discharge_handler.rindex(
+        "lambda guarded_w: solaredge_coord.force_discharge("
+    )
+
+    assert optimizer_charge_release < optimizer_charge_call
+    assert manual_charge_release < manual_charge_call
+    assert optimizer_discharge_release < optimizer_discharge_call
+    assert manual_discharge_release < manual_discharge_call
+
+
 def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
     handler = _function_source("handle_solar_curtailment_check")
     pre_tesla_path = handler[: handler.index("if token_getter is None:")]
 
     assert "if is_sungrow:" in pre_tesla_path
     assert "await handle_sungrow_curtailment()" in pre_tesla_path
+
+
+def test_solar_curtailment_runs_startup_check_before_first_periodic_tick():
+    source = INIT_PATH.read_text()
+    setup_section = source[
+        source.index("# Set up automatic curtailment check every 5 minutes"):
+        source.index("# Set up Flow Power v2 tariff rate refresh")
+    ]
+
+    assert "async def _startup_curtailment_check" in setup_section
+    assert "await asyncio.sleep(5)" in setup_section
+    assert "await handle_solar_curtailment_check(None)" in setup_section
+    assert "hass.async_create_task(_startup_curtailment_check())" in setup_section
+    assert "EVENT_HOMEASSISTANT_STARTED" in setup_section
 
 
 def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():
@@ -248,6 +343,34 @@ def test_ac_curtailment_live_status_uses_non_tesla_coordinator_before_api():
     assert live_status.index("cached_status = _get_cached_live_status()") < live_status.index(
         "if not callable(token_getter):"
     )
+
+
+def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbing():
+    async def get_live_status():
+        return {
+            "solar_power": 3958,
+            "battery_power": 5,
+            "grid_power": -2851.2,
+            "load_power": 1112,
+            "battery_soc": 98.9,
+        }
+
+    namespace = {
+        "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
+        "DEFAULT_INVERTER_RESTORE_SOC": 90,
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        ),
+        "entry": SimpleNamespace(options={}, data={}, entry_id="test_entry"),
+        "get_live_status": get_live_status,
+        "hass": SimpleNamespace(data={}),
+        "DOMAIN": "power_sync",
+        "with_hysteresis": _load_with_hysteresis(),
+    }
+    exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
+
+    assert asyncio.run(namespace["should_curtail_ac_coupled"](20.09, 0.0)) is True
 
 
 def test_solar_curtailment_is_not_blocked_by_monitoring_mode():

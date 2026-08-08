@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import symtable
 from pathlib import Path
 
 
@@ -10,6 +11,19 @@ CONST_PATH = ROOT / "custom_components" / "power_sync" / "const.py"
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+
+
+def test_custom_grid_entity_constant_remains_global_during_setup():
+    """A nested import must not shadow this constant before custom setup uses it."""
+    module_table = symtable.symtable(INIT_PATH.read_text(), str(INIT_PATH), "exec")
+    setup_table = next(
+        child for child in module_table.get_children() if child.get_name() == "async_setup_entry"
+    )
+
+    symbol = setup_table.lookup("CONF_CUSTOM_GRID_POWER_ENTITY")
+
+    assert symbol.is_global()
+    assert not symbol.is_local()
 
 
 def test_custom_battery_system_is_setup_stage_with_entities():
@@ -46,6 +60,9 @@ def test_custom_optimizer_telemetry_parser_reads_selected_entities():
     assert "def _get_energy_data(self) -> dict[str, Any] | None:" in coordinator_source
     assert "custom_data = self._read_custom_energy_data()" in coordinator_source
     assert "if self.battery_system == CUSTOM_BATTERY_SYSTEM:" in coordinator_source
+    assert "from ..coordinator import normalize_custom_power_kw" in coordinator_source
+    assert "return normalize_custom_power_kw(value, unit)" in coordinator_source
+    assert "if not math.isfinite(value):" in coordinator_source
 
 
 def test_custom_optimizer_telemetry_feeds_state_and_cost_paths():

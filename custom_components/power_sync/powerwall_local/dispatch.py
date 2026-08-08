@@ -20,6 +20,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from ..const import CONF_POWERWALL_LOCAL_IP, CONF_POWERWALL_LOCAL_PAIRED, DOMAIN
+from ..powerwall_host import normalize_powerwall_gateway_host
 from .exceptions import (
     PowerwallAuthError,
     PowerwallLocalError,
@@ -31,6 +32,13 @@ from .transport import TEDAPIv1rTransport
 _LOGGER = logging.getLogger(__name__)
 
 _RUNTIME_KEY = "powerwall_local"
+
+# Mirrors powerwall_local/coordinator.py's _CLOUD_FALLBACK_PENDING_KEY. Set
+# here (the write side) when a local attempt failed but the cloud fallback
+# succeeded; consumed there (the poll side) to skip re-stamping the next
+# local snapshot as fresh, since that poll re-fetches the gateway's
+# still-stale (unwritten) local state (PW-4).
+_CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
 
 LocalCall = Callable[[TEDAPIv1rTransport], Awaitable[Any]]
 CloudCall = Callable[[], Awaitable[Any]]
@@ -52,7 +60,14 @@ def is_local_preferred(entry: ConfigEntry) -> bool:
 
 def has_local_gateway_ip(entry: ConfigEntry) -> bool:
     """True when the entry has a non-empty gateway LAN address configured."""
-    return bool(str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip())
+    try:
+        return bool(
+            normalize_powerwall_gateway_host(
+                entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            )
+        )
+    except ValueError:
+        return False
 
 
 def get_local_transport(
@@ -150,4 +165,8 @@ async def dispatch_powerwall_write(
         label,
         (time.monotonic() - t0) * 1000.0,
     )
+    if transport is not None and result:
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if isinstance(entry_data, dict):
+            entry_data[_CLOUD_FALLBACK_PENDING_KEY] = True
     return result

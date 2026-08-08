@@ -77,7 +77,7 @@ def _install_sensor_stubs() -> None:
     )
     ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
     ha_const.UnitOfEnergy = SimpleNamespace(KILO_WATT_HOUR="kWh")
-    ha_const.UnitOfPower = SimpleNamespace(KILO_WATT="kW")
+    ha_const.UnitOfPower = SimpleNamespace(KILO_WATT="kW", WATT="W")
     ha_const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C")
     ha_const.UnitOfTime = SimpleNamespace(HOURS="h")
     ha_const.PERCENTAGE = "%"
@@ -219,6 +219,37 @@ def test_flow_power_import_price_uses_restored_state_before_coordinator_data():
     assert entity.native_value == 0.321
 
 
+def test_tariff_schedule_attributes_convert_high_tesla_rates_to_cents():
+    sensor = _sensor_module()
+    entity = sensor.TariffScheduleSensor(_hass("AUD"), _entry("globird"))
+
+    entity._rebuild_schedule_cache(
+        {
+            "last_sync": "2026-07-10 16:53:49",
+            "utility": "GloBird",
+            "plan_name": "Zero Hero",
+            "current_season": "Summer",
+            "buy_rates": {
+                "ON_PEAK": 10.0,
+                "OFF_PEAK": 0.52,
+            },
+            "sell_rates": {
+                "ON_PEAK": 0.10,
+                "OFF_PEAK": 0.0,
+            },
+            "tou_periods": {
+                "ON_PEAK": [{"fromHour": 15, "toHour": 23}],
+                "OFF_PEAK": [{"fromHour": 0, "toHour": 15}],
+            },
+        }
+    )
+
+    assert entity._schedule_cache["buy_rates"]["ON_PEAK"] == 1000.0
+    assert entity._schedule_cache["sell_rates"]["ON_PEAK"] == 10.0
+    assert entity._schedule_cache["tou_schedule"][0]["buy"] == 1000.0
+    assert entity._schedule_cache["tou_schedule"][0]["sell"] == 10.0
+
+
 def test_flow_power_current_import_price_prefers_tariff_schedule():
     sensor = _sensor_module()
     entity = sensor.FlowPowerPriceSensor(
@@ -235,6 +266,7 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
                         "currency": "AUD",
                         "buy_prices": {"PEAK": 0.25},
                         "sell_prices": {"PEAK": 0.08},
+                        "price_source": "flow_power_kwatch",
                         "utility": "Flow Power",
                         "plan_name": "PowerSync Flow Power",
                     }
@@ -248,7 +280,89 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
     assert attrs["source"] == "tariff_schedule"
     assert attrs["current_period"] == "PEAK"
     assert attrs["final_rate_cents"] == 25.0
+    assert attrs["price_source"] == "flow_power_kwatch"
     assert attrs["price_spike"] is None
+
+
+def test_covau_price_and_quota_sensors_use_live_provider_contract():
+    sensor = _sensor_module()
+    entry = _entry("covau")
+    contract = {
+        "plan": {
+            "plan_id": "COV1117616MRE2@EME",
+            "display_name": "SolarMax SA Residential TOU",
+        },
+        "prices": {
+            "import": {
+                "c_per_kwh": 0.0,
+                "base_c_per_kwh": 35.17,
+                "period": "covau_solarmax_free_import",
+            },
+            "export": {
+                "c_per_kwh": 15.0,
+                "base_c_per_kwh": 5.0,
+                "period": "covau_solarmax_premium_export",
+            },
+        },
+        "tariff_day": "2026-05-03",
+        "settlement_confidence": "authoritative",
+        "settlement_reason": None,
+        "quotas": {
+            "import": {
+                "rule_id": "covau_solarmax_free_import",
+                "remaining_kwh": 42.5,
+            },
+            "export": {
+                "rule_id": "covau_solarmax_premium_export",
+                "remaining_kwh": 21.25,
+            },
+        },
+    }
+    coordinator = SimpleNamespace(get_provider_contract=lambda: contract)
+    hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                entry.entry_id: {"optimization_coordinator": coordinator}
+            }
+        },
+    )
+
+    import_price = sensor.TariffPriceSensor(
+        hass,
+        entry,
+        sensor.SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+        "Current Import Price",
+    )
+    export_price = sensor.TariffPriceSensor(
+        hass,
+        entry,
+        sensor.SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+        "Current Export Price",
+    )
+    free_remaining = sensor.CovaUProviderSensor(
+        hass,
+        entry,
+        sensor.COVAU_SENSOR_IMPORT_REMAINING,
+    )
+    premium_remaining = sensor.CovaUProviderSensor(
+        hass,
+        entry,
+        sensor.COVAU_SENSOR_EXPORT_REMAINING,
+    )
+
+    assert import_price.native_value == 0.0
+    assert export_price.native_value == 0.15
+    assert import_price.extra_state_attributes["current_period"] == "covau_solarmax_free_import"
+    assert export_price.extra_state_attributes["current_period"] == "covau_solarmax_premium_export"
+    assert import_price.extra_state_attributes["quota"]["remaining_kwh"] == 42.5
+    assert free_remaining.native_value == 42.5
+    assert premium_remaining.native_value == 21.25
+    assert free_remaining.extra_state_attributes["settlement_confidence"] == "authoritative"
+    for quota_sensor in (free_remaining, premium_remaining):
+        assert quota_sensor._attr_device_class == "energy"
+        assert quota_sensor._attr_native_unit_of_measurement == "kWh"
+        assert getattr(quota_sensor, "_attr_state_class", None) is None
 
 
 def test_dedicated_flow_power_import_price_keeps_coordinator_calculation():
@@ -323,6 +437,8 @@ def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
             "battery_system": sensor.BATTERY_SYSTEM_SUNGROW,
             "ac_inverter_curtailment_enabled": True,
             "inverter_brand": "sungrow",
+            "inverter_host": "192.0.2.20",
+            "sungrow_host": "192.0.2.10",
         },
         options={},
     )
@@ -397,6 +513,7 @@ def test_local_powerwall_home_load_excludes_observed_ev_power():
     local_coord = SimpleNamespace(
         data=SimpleNamespace(load_w=10_700.0),
         last_success_ts=time.time(),
+        last_success_monotonic=time.monotonic(),
     )
     entity = sensor.TeslaEnergySensor(
         SimpleNamespace(data={"load_power": 3.6, "ev_power": 7.1}),
@@ -430,6 +547,7 @@ def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     local_coord = SimpleNamespace(
         data=SimpleNamespace(load_w=2_000.0),
         last_success_ts=time.time(),
+        last_success_monotonic=time.monotonic(),
     )
     entity = sensor.TeslaEnergySensor(
         SimpleNamespace(data={"load_power": 0.0, "ev_power": 7.1}),
@@ -617,6 +735,33 @@ def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():
     assert entity.native_unit_of_measurement == "EUR/kWh"
     assert entity.device_class is None
     assert entity.extra_state_attributes["minor_price_unit"] == "ct/kWh"
+
+
+def test_lp_battery_forecast_exposes_home_and_export_split_attributes():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.LP_FORECAST_SENSORS if d.key == "lp_battery_power_forecast")
+    entity = sensor.LPForecastSensor(
+        SimpleNamespace(get_forecast_data=lambda: {
+            "battery_schedule_available": True,
+            "battery_power_now_kw": 7.5,
+            "battery_charge_peak_kw": 0.0,
+            "battery_discharge_peak_kw": 7.5,
+            "battery_charge_forecast": [0.0],
+            "battery_discharge_forecast": [7.5],
+            "battery_home_consumption_forecast": [2.0],
+            "battery_export_forecast": [5.5],
+            "battery_power_forecast": [7.5],
+        }),
+        desc,
+        _entry("amber"),
+    )
+    entity.hass = _hass("AUD")
+
+    attrs = entity.extra_state_attributes
+
+    assert attrs["discharge_values_kw"] == [7.5]
+    assert attrs["home_consumption_values_kw"] == [2.0]
+    assert attrs["export_values_kw"] == [5.5]
 
 
 def test_nzd_tariff_schedule_prefers_tariff_currency_metadata():
@@ -1033,7 +1178,7 @@ def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
     power_sync._get_ev_vehicle_status = lambda hass, entry: {"ev_power_kw": 0.0}
     power_sync._get_ev_vehicles_status = lambda hass, entry: []
 
-    async def read_sigenergy_charger_state(entry):
+    async def read_sigenergy_charger_state(entry, hass):
         return SimpleNamespace(
             charger_type="evac",
             power_kw=0.0,

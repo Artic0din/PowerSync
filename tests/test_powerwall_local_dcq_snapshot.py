@@ -213,6 +213,146 @@ def test_coordinator_skips_poll_when_local_access_disabled():
     assert asyncio.run(coord._async_update_data()) is None
 
 
+class _FakeLocalClient:
+    """A local client that always returns a fresh (but still stale-basis,
+    per PW-4) snapshot -- exercises _async_update_data's freshness stamp."""
+
+    local_access_enabled = True
+
+    async def get_snapshot(self):
+        return client_mod.PowerwallSnapshot(
+            soc=50.0,
+            solar_w=0.0,
+            battery_w=0.0,
+            grid_w=0.0,
+            load_w=0.0,
+            grid_status="SystemGridConnected",
+            operation_mode="self_consumption",
+            backup_reserve_percent=10,
+            raw={},
+        )
+
+
+def _make_poll_coordinator(entry_data: dict) -> "coordinator_mod.PowerwallLocalCoordinator":
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    coord._client = _FakeLocalClient()
+    coord._consecutive_failures = 0
+    coord._last_success_ts = 100.0
+    coord._last_success_monotonic = 100.0
+    return coord
+
+
+def test_coordinator_skips_freshness_restamp_after_cloud_fallback_write():
+    """PW-4 residual closure, part B: a poll that immediately follows a
+    failed-local/succeeded-cloud write must not re-stamp _last_success_ts,
+    because it is re-fetching the gateway's still-stale (unwritten) local
+    snapshot -- stamping it fresh would make battery_controller's 30s
+    LIVE-trust window treat the stale reserve as trustworthy.
+
+    HD-26: the PW-4 skip must gate the monotonic stamp identically to the
+    wall-clock stamp, since freshness consumers now compare monotonic time."""
+    entry_data = {"powerwall_local_cloud_fallback_pending": True}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+
+    assert coord._last_success_ts == 100.0
+    assert coord._last_success_monotonic == 100.0
+    assert "powerwall_local_cloud_fallback_pending" not in entry_data
+
+
+def test_coordinator_restamps_freshness_on_next_poll_after_marker_consumed():
+    """The very next periodic poll (no marker set) must restamp normally --
+    the self-correction the registry note describes."""
+    entry_data = {"powerwall_local_cloud_fallback_pending": True}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+    assert coord._last_success_ts == 100.0
+    assert coord._last_success_monotonic == 100.0
+
+    asyncio.run(coord._async_update_data())
+    assert coord._last_success_ts != 100.0
+    assert coord._last_success_ts is not None
+    assert coord._last_success_monotonic != 100.0
+    assert coord._last_success_monotonic is not None
+
+
+def test_coordinator_restamps_freshness_when_no_fallback_pending():
+    entry_data: dict = {}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+
+    assert coord._last_success_ts != 100.0
+    assert coord._last_success_ts is not None
+    assert coord._last_success_monotonic != 100.0
+    assert coord._last_success_monotonic is not None
+
+
+def test_v1r_diagnostics_refresh_publishes_without_replacing_snapshot():
+    class _DiagnosticsClient:
+        async def get_v1r_diagnostics(self):
+            return {
+                "system_info": {"firmware_version": "24.44.0"},
+                "networking": {"wifi": {"active_route": True}},
+                "internet": {"wifi": {"connectivity": {"internet": True}}},
+            }
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._client = _DiagnosticsClient()
+    coord._v1r_diagnostics = {
+        "available": False,
+        "last_success_ts": None,
+        "system_info": None,
+        "networking": None,
+        "internet": None,
+    }
+    coord.data = object()
+    listener_calls = []
+    coord.async_update_listeners = lambda: listener_calls.append(True)
+
+    asyncio.run(coord._async_refresh_v1r_diagnostics())
+
+    assert coord.data is not None
+    assert coord._v1r_diagnostics["available"] is True
+    assert coord._v1r_diagnostics["system_info"]["firmware_version"] == "24.44.0"
+    assert coord._v1r_diagnostics["error"] is None
+    assert listener_calls == [True]
+
+
+def test_v1r_diagnostics_failure_retains_last_read_but_marks_unavailable():
+    class _FailingDiagnosticsClient:
+        async def get_v1r_diagnostics(self):
+            raise RuntimeError("gateway busy")
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._client = _FailingDiagnosticsClient()
+    coord._v1r_diagnostics = {
+        "available": True,
+        "last_success_ts": 123.0,
+        "system_info": {"firmware_version": "24.44.0"},
+        "networking": None,
+        "internet": None,
+    }
+    coord.async_update_listeners = lambda: None
+
+    asyncio.run(coord._async_refresh_v1r_diagnostics())
+
+    assert coord._v1r_diagnostics["available"] is False
+    assert coord._v1r_diagnostics["last_success_ts"] == 123.0
+    assert coord._v1r_diagnostics["system_info"]["firmware_version"] == "24.44.0"
+    assert coord._v1r_diagnostics["error"] == "gateway busy"
+
+
 def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
     entry_data = {
         "tesla_coordinator": SimpleNamespace(
@@ -246,6 +386,81 @@ def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
 
     assert entry_data["powerwall_local_low_soe_reserve_pct"] == 10
     assert snap.backup_reserve_percent == 5
+
+
+def test_coordinator_preserves_local_write_offset_when_cloud_site_info_is_stale():
+    entry_data = {
+        "powerwall_local_low_soe_reserve_pct": 5,
+        "powerwall_local_backup_reserve_write_local_pct": 24,
+        "powerwall_local_backup_reserve_write_user_pct": 19,
+        "tesla_coordinator": SimpleNamespace(
+            _site_info_cache={"backup_reserve_percent": 10}
+        ),
+    }
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    snap = client_mod.PowerwallSnapshot(
+        soc=50.0,
+        solar_w=0.0,
+        battery_w=0.0,
+        grid_w=0.0,
+        load_w=0.0,
+        grid_status="SystemGridConnected",
+        operation_mode="self_consumption",
+        backup_reserve_percent=10,
+        raw={
+            "config": {
+                "site_info": {
+                    "backup_reserve_percent": 24,
+                }
+            }
+        },
+    )
+
+    coord._update_backup_reserve_offset(snap)
+
+    assert entry_data["powerwall_local_low_soe_reserve_pct"] == 5
+    assert snap.backup_reserve_percent == 19
+
+
+def test_coordinator_reapplies_persisted_offset_when_cloud_reserve_missing():
+    entry_data = {
+        "powerwall_local_low_soe_reserve_pct": 10,
+        "tesla_coordinator": SimpleNamespace(_site_info_cache=None),
+    }
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    # backup_reserve_percent as produced by the client's default-5 basis
+    # normalization (24 - DEFAULT_LOW_SOE_RESERVE_PCT=5 = 19), before the
+    # coordinator has a chance to correct it against the persisted offset.
+    snap = client_mod.PowerwallSnapshot(
+        soc=50.0,
+        solar_w=0.0,
+        battery_w=0.0,
+        grid_w=0.0,
+        load_w=0.0,
+        grid_status="SystemGridConnected",
+        operation_mode="self_consumption",
+        backup_reserve_percent=19,
+        raw={
+            "config": {
+                "site_info": {
+                    "backup_reserve_percent": 24,
+                }
+            }
+        },
+    )
+
+    coord._update_backup_reserve_offset(snap)
+
+    assert entry_data["powerwall_local_low_soe_reserve_pct"] == 10
+    assert snap.backup_reserve_percent == 14
 
 
 def _coordinator_with_snapshot(ev_power_kw: float = 0.0):
@@ -325,6 +540,8 @@ def _sample_cfg() -> dict:
         "site_info": {
             "default_real_mode": "self_consumption",
             "backup_reserve_percent": 15,
+            "disallow_charge_from_grid_with_solar_installed": True,
+            "customer_preferred_export_rule": "pv_only",
         }
     }
 
@@ -340,6 +557,8 @@ def test_snapshot_from_dcq_full_payload():
     assert snap.grid_status == "SystemGridConnected"
     assert snap.operation_mode == "self_consumption"
     assert snap.backup_reserve_percent == 10
+    assert snap.grid_charging_enabled is False
+    assert snap.grid_export_rule == "pv_only"
     assert snap.pw_count == 2
     assert snap.total_pack_full_wh == 27000.0
     assert snap.total_pack_remaining_wh == 8100.0

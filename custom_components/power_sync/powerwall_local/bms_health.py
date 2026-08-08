@@ -15,6 +15,29 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def resolve_physical_battery_count(
+    relay_count: Any,
+    site_battery_count: Any,
+) -> int:
+    """Reconcile Tesla's physical site count with relay BMS telemetry.
+
+    The DeviceController relay can both over-report PW3 BMS sub-modules and
+    intermittently omit a physical pack. Tesla site info reports the physical
+    battery count, so prefer a valid positive site count in either direction.
+    """
+    try:
+        derived_count = max(0, int(relay_count))
+    except (TypeError, ValueError):
+        derived_count = 0
+
+    try:
+        authoritative_count = int(site_battery_count)
+    except (TypeError, ValueError):
+        authoritative_count = 0
+
+    return authoritative_count if authoritative_count > 0 else derived_count
+
+
 def serial_from_din(din: Any) -> str | None:
     """Return the trailing serial from a Tesla DIN/VIN string."""
     if not din or not isinstance(din, str):
