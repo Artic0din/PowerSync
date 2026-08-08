@@ -5,13 +5,16 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict
 
 
 ROOT = Path(__file__).resolve().parent.parent
 AUTOMATIONS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "__init__.py"
+TRIGGERS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "triggers.py"
 
 
 def _load_engine_method(name: str, namespace: dict[str, Any]):
@@ -36,6 +39,18 @@ def _load_engine_method(name: str, namespace: dict[str, Any]):
     module = ast.fix_missing_locations(ast.Module(body=[extracted], type_ignores=[]))
     exec(compile(module, str(AUTOMATIONS_PATH), "exec"), namespace)
     return namespace["_ExtractedEngine"]
+
+
+def _load_trigger_function(name: str, namespace: dict[str, Any]):
+    tree = ast.parse(TRIGGERS_PATH.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    exec(compile(module, str(TRIGGERS_PATH), "exec"), namespace)
+    return namespace[name]
 
 
 def test_automation_current_state_includes_supported_battery_coordinators():
@@ -83,6 +98,102 @@ def test_automation_time_defaults_to_home_assistant_timezone_before_sydney():
     assert 'self._config_entry.data.get("timezone")' in source
     assert 'getattr(getattr(self._hass, "config", None), "time_zone", None)' in source
     assert 'configured_timezone or ha_timezone or "Australia/Sydney"' in source
+
+
+def test_automation_current_state_consumes_coordinator_power_values_as_kw(monkeypatch):
+    """Battery coordinators expose solar/grid/load/battery power in kW."""
+    power_sync = ModuleType("power_sync")
+    power_sync.__path__ = []
+    const = ModuleType("power_sync.const")
+    const.DOMAIN = "power_sync"
+    const.CONF_AEMO_REGION = "aemo_region"
+    monkeypatch.setitem(sys.modules, "power_sync", power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+
+    engine_class = _load_engine_method(
+        "_async_get_current_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "datetime": datetime,
+            "timezone": timezone,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._config_entry = SimpleNamespace(
+        entry_id="entry",
+        options={},
+        data={},
+    )
+    engine._hass = SimpleNamespace(
+        config=SimpleNamespace(time_zone="UTC"),
+        data={
+            "power_sync": {
+                "entry": {
+                    "tesla_coordinator": SimpleNamespace(
+                        data={
+                            "battery_level": 73,
+                            "backup_reserve_percent": 20,
+                            "solar_power": 10.0,
+                            "grid_power": 10.0,
+                            "battery_power": -2.5,
+                            "load_power": 17.5,
+                            "grid_status": "Active",
+                        }
+                    ),
+                    # Prevent the extracted method from falling through to
+                    # tariff fetching, which is outside this regression's scope.
+                    "amber_coordinator": SimpleNamespace(data={"current": []}),
+                    "force_charge_state": {},
+                    "force_discharge_state": {},
+                }
+            }
+        },
+    )
+
+    state = asyncio.run(engine._async_get_current_state())
+
+    assert state["solar_power_kw"] == 10.0
+    assert state["home_usage_kw"] == 17.5
+    assert state["grid_import_kw"] == 10.0
+    assert state["grid_import_energy_power_kw"] == 10.0
+    assert state["grid_export_kw"] == 0
+    assert state["battery_charge_kw"] == 2.5
+    assert state["battery_discharge_kw"] == 0
+
+    evaluate_flow_condition = _load_trigger_function(
+        "_evaluate_flow_condition",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "TriggerResult": SimpleNamespace,
+        },
+    )
+    flow_result = evaluate_flow_condition(
+        {
+            "condition_type": "flow",
+            "flow_source": "grid_import",
+            "flow_comparison": "below",
+            "flow_threshold_kw": 5.0,
+        },
+        state,
+    )
+    assert flow_result.triggered is False
+
+    engine._hass.data["power_sync"]["entry"]["tesla_coordinator"].data.update(
+        {
+            "grid_power": -10.0,
+            "battery_power": 2.5,
+        }
+    )
+    state = asyncio.run(engine._async_get_current_state())
+
+    assert state["grid_import_kw"] == 0
+    assert state["grid_export_kw"] == 10.0
+    assert state["battery_charge_kw"] == 0
+    assert state["battery_discharge_kw"] == 2.5
 
 
 def test_automation_stop_context_preserves_triggered_ble_vehicle():

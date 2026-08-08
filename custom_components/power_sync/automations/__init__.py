@@ -655,27 +655,25 @@ class AutomationEngine:
                 state["battery_percent"] = coord_data.get("battery_level")
                 state["backup_reserve"] = coord_data.get("backup_reserve_percent")
 
-                # Power flows (convert W to kW)
-                solar_w = coord_data.get("solar_power", 0) or 0
-                battery_w = coord_data.get("battery_power", 0) or 0
-                grid_w = coord_data.get("grid_power", 0) or 0
-                load_w = coord_data.get("load_power", 0) or 0
+                # Power flows from battery coordinators are standardized to kW.
+                solar_kw = coord_data.get("solar_power", 0) or 0
+                battery_kw = coord_data.get("battery_power", 0) or 0
+                grid_kw = coord_data.get("grid_power", 0) or 0
+                load_kw = coord_data.get("load_power", 0) or 0
 
-                state["solar_power_kw"] = solar_w / 1000
-                state["home_usage_kw"] = load_w / 1000
+                state["solar_power_kw"] = solar_kw
+                state["home_usage_kw"] = load_kw
 
                 # Grid: positive = import, negative = export
-                if grid_w >= 0:
-                    state["grid_import_kw"] = grid_w / 1000
-                    # Coordinator energy data is normalized to kW. Keep this
-                    # dedicated value correctly scaled for the cumulative
-                    # energy fallback without changing legacy flow-trigger
-                    # behavior.
-                    state["grid_import_energy_power_kw"] = grid_w
+                if grid_kw >= 0:
+                    state["grid_import_kw"] = grid_kw
+                    # Preserve the dedicated value for cumulative energy
+                    # fallback consumers.
+                    state["grid_import_energy_power_kw"] = grid_kw
                     state["grid_export_kw"] = 0
                 else:
                     state["grid_import_kw"] = 0
-                    state["grid_export_kw"] = abs(grid_w) / 1000
+                    state["grid_export_kw"] = abs(grid_kw)
 
                 energy_summary = coord_data.get("energy_summary")
                 if isinstance(energy_summary, dict):
@@ -693,11 +691,11 @@ class AutomationEngine:
                         state["grid_import_today_kwh"] = grid_import_today
 
                 # Battery: positive = discharge, negative = charge
-                if battery_w >= 0:
-                    state["battery_discharge_kw"] = battery_w / 1000
+                if battery_kw >= 0:
+                    state["battery_discharge_kw"] = battery_kw
                     state["battery_charge_kw"] = 0
                 else:
-                    state["battery_charge_kw"] = abs(battery_w) / 1000
+                    state["battery_charge_kw"] = abs(battery_kw)
                     state["battery_discharge_kw"] = 0
 
                 # Grid status
