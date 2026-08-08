@@ -21,6 +21,10 @@ from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .battery_controller import TRUSTED_FOR_PERSIST
+from .battery_efficiency import (
+    BatteryEfficiencyLearner,
+    ResolvedOptimizerParameters,
+)
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
 from .cost_neutral import (
     CostNeutralBudget,
@@ -113,6 +117,8 @@ COST_STORE_VERSION = 1
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
 SOLAR_FORECAST_LEARNING_STORE_VERSION = 1
 SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY = 300
+BATTERY_EFFICIENCY_LEARNING_STORE_VERSION = 1
+BATTERY_EFFICIENCY_LEARNING_STORE_SAVE_DELAY = 300
 INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0
 FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
@@ -234,6 +240,7 @@ class OptimizationConfig:
     spread_export_enabled: bool = False
     spread_import_enabled: bool = False
     disable_idle_enabled: bool = False
+    battery_efficiency_learning_enabled: bool = True
     auto_apply_reserve_enabled: bool = False
     manual_backup_reserve: float | None = None
 
@@ -457,6 +464,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_solar_nowcast_allowance_kwh: float = 0.0
         self._last_solar_effective_error_margin_kwh: float | None = None
         self._solar_forecast_learner = SolarForecastLearner()
+        self._battery_efficiency_learner = BatteryEfficiencyLearner()
+        self._last_resolved_optimizer_parameters = (
+            ResolvedOptimizerParameters.legacy()
+        )
 
         # Battery specs source tracking
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
@@ -514,6 +525,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             SOLAR_FORECAST_LEARNING_STORE_VERSION,
             f"power_sync.solar_forecast_learning.{entry_id}",
+        )
+        self._battery_efficiency_learning_store = Store(
+            hass,
+            BATTERY_EFFICIENCY_LEARNING_STORE_VERSION,
+            f"power_sync.battery_efficiency_learning.{entry_id}",
         )
 
         # Saving sessions coordinator (set from __init__.py when configured)
@@ -1071,6 +1087,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._should_disable_idle_schedule()
 
     @property
+    def battery_efficiency_learning_enabled(self) -> bool:
+        """Return whether learned physical efficiency is applied to solves."""
+        return bool(
+            getattr(self._config, "battery_efficiency_learning_enabled", True)
+        )
+
+    @property
     def auto_apply_reserve_enabled(self) -> bool:
         """Return whether forecast reserve recommendations update the LP floor."""
         return bool(getattr(self, "_auto_apply_reserve_enabled", False))
@@ -1320,6 +1343,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     data=new_data,
                     options=new_options,
                 )
+        return True
+
+    def set_battery_efficiency_learning_enabled(self, enabled: bool) -> bool:
+        """Enable or disable applying learned battery efficiency."""
+        enabled = bool(enabled)
+        if self._config.battery_efficiency_learning_enabled == enabled:
+            return False
+        self._config.battery_efficiency_learning_enabled = enabled
+        _LOGGER.info(
+            "Battery efficiency learning application %s",
+            "ENABLED" if enabled else "DISABLED",
+        )
+        if self._entry:
+            from ..const import (
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                DOMAIN,
+            )
+
+            new_data = dict(self._entry.data)
+            new_options = dict(self._entry.options)
+            new_data[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = enabled
+            new_options[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = enabled
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                self.entry_id, {}
+            )["_skip_reload"] = True
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data=new_data,
+                options=new_options,
+            )
         return True
 
     async def set_auto_apply_reserve_enabled(
@@ -3930,6 +3983,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
                 CONF_OPTIMIZATION_DISABLE_IDLE,
                 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
                 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
@@ -3947,6 +4001,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._entry.data.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True),
             )
             self._config.allow_grid_charge = bool(allow_grid_charge)
+            self._config.battery_efficiency_learning_enabled = bool(
+                self._entry.options.get(
+                    CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                    self._entry.data.get(
+                        CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                        True,
+                    ),
+                )
+            )
             if not self._config.allow_grid_charge:
                 _LOGGER.info("Smart Optimization grid charging: DISABLED")
             self._config.spread_export_enabled = bool(
@@ -4074,6 +4137,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             provider_preference=solar_forecast_provider,
         )
         await self._restore_solar_forecast_learning()
+        await self._restore_battery_efficiency_learning()
 
         # Initialize executor (for battery control)
         self._executor = ScheduleExecutor(
@@ -5139,6 +5203,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._config.max_discharge_w / 1000,
                 )
 
+            # Resolve exactly once for this solve. Any closed cycle accepted
+            # later in the run becomes eligible on the next solve, preventing
+            # a mixture of old/new conversion values within one plan.
+            solve_timestamp = dt_util.now()
+            topology_changed = self._battery_efficiency_learner.ensure_topology(
+                self._battery_efficiency_topology_fingerprint(
+                    self._config.battery_capacity_wh
+                )
+            )
+            if topology_changed:
+                self._schedule_battery_efficiency_learning_save()
+            resolved_parameters = (
+                self._battery_efficiency_learner.resolved_parameters(
+                    application_enabled=(
+                        self.battery_efficiency_learning_enabled
+                    ),
+                    now=solve_timestamp,
+                )
+            )
+            self._last_resolved_optimizer_parameters = resolved_parameters
+            self._optimizer.apply_resolved_parameters(resolved_parameters)
+
             if self._ev_integration_enabled:
                 await self._refresh_ev_forecast_inputs()
 
@@ -5149,6 +5235,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
             soc, capacity = await self._get_battery_state()
+            self._observe_battery_efficiency(
+                timestamp=solve_timestamp,
+                soc=soc,
+                capacity_wh=capacity,
+            )
 
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
@@ -10167,15 +10258,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Anti-arbitrage cap: the boosted export price must not create phantom
         # arbitrage where the LP charges from grid to export at inflated prices.
-        # Cap = max(real_export, cheapest_import / round_trip_efficiency²)
+        # Cap = max(real_export, cheapest_import / economic round-trip efficiency)
         # This allows discharge of existing/solar charge at boosted prices
         # but prevents grid-charge-then-export from appearing profitable.
-        eff = 0.92  # round-trip efficiency (matches optimizer default)
+        economic_round_trip_efficiency = max(
+            1e-9,
+            getattr(
+                getattr(
+                    self,
+                    "_last_resolved_optimizer_parameters",
+                    ResolvedOptimizerParameters.legacy(),
+                ),
+                "economic_round_trip_efficiency",
+                ResolvedOptimizerParameters.legacy().economic_round_trip_efficiency,
+            ),
+        )
         arbitrage_cap = None
         if import_prices:
             min_import = min(p for p in import_prices if p > 0.001) if any(p > 0.001 for p in import_prices) else 0
             if min_import > 0:
-                arbitrage_cap = min_import / (eff * eff)
+                arbitrage_cap = min_import / economic_round_trip_efficiency
 
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
@@ -13033,6 +13135,93 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             _LOGGER.debug("Solar forecast learning state: %s", diagnostics)
 
+    async def _restore_battery_efficiency_learning(self) -> None:
+        """Restore provider-neutral closed-cycle battery efficiency evidence."""
+        try:
+            data = await self._battery_efficiency_learning_store.async_load()
+        except Exception as exc:
+            _LOGGER.warning("Failed to load battery efficiency learning data: %s", exc)
+            return
+        self._battery_efficiency_learner = BatteryEfficiencyLearner.from_dict(data)
+        self._last_resolved_optimizer_parameters = (
+            self._battery_efficiency_learner.resolved_parameters(
+                application_enabled=self.battery_efficiency_learning_enabled,
+                now=dt_util.now(),
+            )
+        )
+        if data:
+            diagnostics = self._battery_efficiency_learner.diagnostics(
+                application_enabled=self.battery_efficiency_learning_enabled,
+                now=dt_util.now(),
+            )
+            _LOGGER.info(
+                "Restored battery efficiency learning: %d valid cycle(s), "
+                "%d day(s), %.2f equivalent cycle(s)",
+                diagnostics["valid_cycles"],
+                diagnostics["distinct_days"],
+                diagnostics["equivalent_full_cycles"],
+            )
+            _LOGGER.debug("Battery efficiency learning state: %s", diagnostics)
+
+    def _schedule_battery_efficiency_learning_save(self) -> None:
+        """Schedule a coalesced write of accepted/rejected learner state."""
+        store = getattr(self, "_battery_efficiency_learning_store", None)
+        learner = getattr(self, "_battery_efficiency_learner", None)
+        if store is None or learner is None:
+            return
+        store.async_delay_save(
+            learner.to_dict,
+            BATTERY_EFFICIENCY_LEARNING_STORE_SAVE_DELAY,
+        )
+
+    def _battery_efficiency_topology_fingerprint(self, capacity_wh: float) -> str:
+        """Return a stable aggregate AC measurement-boundary identifier."""
+        try:
+            normalized_capacity = int(round(float(capacity_wh)))
+        except (TypeError, ValueError):
+            normalized_capacity = 0
+        return (
+            f"{self.battery_system}|integrated_ac_power|ac_system|"
+            f"{normalized_capacity}"
+        )
+
+    def _observe_battery_efficiency(
+        self,
+        *,
+        timestamp: datetime,
+        soc: float,
+        capacity_wh: float,
+    ) -> None:
+        """Feed one normalized telemetry sample to the closed-cycle learner."""
+        data = self._get_energy_data()
+        if not isinstance(data, dict):
+            return
+        result = self._battery_efficiency_learner.observe(
+            timestamp=timestamp,
+            soc=soc,
+            battery_power_kw=data.get("battery_power"),
+            capacity_kwh=float(capacity_wh) / 1000.0,
+            topology_fingerprint=(
+                self._battery_efficiency_topology_fingerprint(capacity_wh)
+            ),
+            valid=data.get("telemetry_ready") is not False,
+            skip_reason="stale_telemetry",
+        )
+        if result.changed:
+            self._schedule_battery_efficiency_learning_save()
+        if result.accepted_cycle:
+            diagnostics = self._battery_efficiency_learner.diagnostics(
+                application_enabled=self.battery_efficiency_learning_enabled,
+                now=timestamp,
+            )
+            _LOGGER.info(
+                "Battery efficiency learner accepted cycle: candidate=%.1f%%, "
+                "confidence=%.0f%%, applied one-way=%.1f%%",
+                (diagnostics.get("candidate_round_trip_efficiency") or 0.0) * 100,
+                diagnostics["confidence"] * 100,
+                diagnostics["applied_one_way_efficiency"] * 100,
+            )
+
     def _schedule_solar_forecast_learning_save(self) -> None:
         """Schedule a coalesced write of forecast calibration state."""
         store = getattr(self, "_solar_forecast_learning_store", None)
@@ -14752,6 +14941,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self, "_last_solar_effective_error_margin_kwh", None
             )
             data["solar_forecast_learning"] = learning_diagnostics
+        battery_learner = getattr(self, "_battery_efficiency_learner", None)
+        if battery_learner is not None:
+            data["battery_efficiency_learning"] = battery_learner.diagnostics(
+                application_enabled=self.battery_efficiency_learning_enabled,
+                now=dt_util.now(),
+            )
         if self._last_solar_nowcast_ratio is not None:
             data["solar_nowcast_ratio"] = round(self._last_solar_nowcast_ratio, 3)
         dt_h = self._config.interval_minutes / 60
@@ -15028,6 +15223,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "spread_export_enabled": self._config.spread_export_enabled,
             "spread_import_enabled": self._config.spread_import_enabled,
             "disable_idle_enabled": self.disable_idle_enabled,
+            "battery_efficiency_learning_enabled": (
+                self.battery_efficiency_learning_enabled
+            ),
             "profit_max_enabled": self.profit_max_mode,
             "profit_max_mode": self.profit_max_mode,
             "cost_neutral_enabled": self.cost_neutral_enabled,
@@ -15098,6 +15296,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "spread_export_enabled": self._config.spread_export_enabled,
                 "spread_import_enabled": self._config.spread_import_enabled,
                 "disable_idle_enabled": self.disable_idle_enabled,
+                "battery_efficiency_learning_enabled": (
+                    self.battery_efficiency_learning_enabled
+                ),
                 "profit_max_enabled": self.profit_max_mode,
                 "cost_neutral_enabled": self.cost_neutral_enabled,
                 "charge_by_time_enabled": self.charge_by_time_enabled,
@@ -15867,6 +16068,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if changed:
                 response["changes"].append(
                     f"disable_idle_enabled: {self.disable_idle_enabled}"
+                )
+                rerun_after_settings = True
+
+        if "battery_efficiency_learning_enabled" in settings:
+            new_val = bool(settings["battery_efficiency_learning_enabled"])
+            changed = self.set_battery_efficiency_learning_enabled(new_val)
+            if changed:
+                response["changes"].append(
+                    "battery_efficiency_learning_enabled: "
+                    f"{self.battery_efficiency_learning_enabled}"
                 )
                 rerun_after_settings = True
 

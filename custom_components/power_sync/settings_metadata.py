@@ -204,6 +204,12 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "order": 82,
                 "capability": "disable_idle",
             },
+            "battery_efficiency_learning_enabled": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
+                "order": 83,
+            },
         },
     }
 
@@ -243,6 +249,7 @@ def optimizer_settings_groups() -> dict[str, Any]:
                 "spread_import_enabled",
                 "spread_export_enabled",
                 "disable_idle_enabled",
+                "battery_efficiency_learning_enabled",
                 "auto_apply_reserve_enabled",
             ],
         },

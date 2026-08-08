@@ -22,6 +22,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.util.dt",
     "power_sync",
     "power_sync.optimization",
+    "power_sync.optimization.battery_efficiency",
     "power_sync.optimization.battery_optimizer",
     "power_sync.optimization.schedule_reader",
 )
@@ -89,6 +90,50 @@ def test_update_config_applies_horizon_hours(battery_optimizer_module):
 
     assert optimizer.horizon_hours == 12
     assert optimizer._align_forecasts([0.1] * 200, [0.1] * 200, [0.0] * 200, [0.0] * 200) == 144
+
+
+def test_learned_physical_efficiency_keeps_legacy_economic_arbitrage_guard(
+    battery_optimizer_module,
+):
+    efficiency_module = importlib.import_module(
+        "power_sync.optimization.battery_efficiency"
+    )
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.0,
+    )
+    optimizer.apply_resolved_parameters(
+        efficiency_module.ResolvedOptimizerParameters(
+            charge_efficiency=0.99,
+            discharge_efficiency=0.99,
+            physical_round_trip_efficiency=0.99**2,
+            economic_round_trip_efficiency=0.92**2,
+            battery_efficiency_confidence=1.0,
+            battery_efficiency_source="learned",
+            battery_efficiency_candidate_rte=0.98,
+        )
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.10, 0.50],
+        export_prices=[0.0, 0.11],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=0.0,
+        allow_grid_charge=True,
+    )
+
+    assert result.feasible is True
+    assert max(result.grid_import_w) == pytest.approx(0.0, abs=0.1)
+    assert max(result.grid_export_w) == pytest.approx(0.0, abs=0.1)
+    assert optimizer.physical_round_trip_efficiency == pytest.approx(0.99**2)
+    assert optimizer.economic_round_trip_efficiency == pytest.approx(0.92**2)
 
 
 def test_grid_import_limit_caps_grid_sourced_charge(battery_optimizer_module):

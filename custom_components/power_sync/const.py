@@ -2016,6 +2016,9 @@ CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
+CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING = (
+    "optimization_battery_efficiency_learning"
+)
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER = "optimization_ai_summary_provider"
 CONF_OPTIMIZATION_AI_SUMMARY_API_KEY = "optimization_ai_summary_api_key"

@@ -502,6 +502,7 @@ from .const import (
     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
+    CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
@@ -3347,6 +3348,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 disable_idle = bool(
                     user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)
                 )
+                battery_efficiency_learning_enabled = bool(
+                    user_input.get(
+                        CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                        True,
+                    )
+                )
                 backup_reserve = (
                     user_input.get(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
@@ -3412,6 +3419,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: spread_export_enabled,
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: spread_import_enabled,
                     CONF_OPTIMIZATION_DISABLE_IDLE: disable_idle,
+                    CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING: (
+                        battery_efficiency_learning_enabled
+                    ),
                     CONF_PROFIT_MAX_ENABLED: bool(
                         user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                         and not user_input.get(CONF_COST_NEUTRAL_ENABLED, False)
@@ -3617,6 +3627,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(
                 CONF_OPTIMIZATION_DISABLE_IDLE,
                 default=False,
+            )
+        ] = BooleanSelector()
+        schema_fields[
+            vol.Required(
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                default=True,
             )
         ] = BooleanSelector()
         schema_fields.update({
@@ -10819,6 +10835,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 disable_idle = bool(
                     user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)
                 )
+                battery_efficiency_learning_enabled = bool(
+                    user_input.get(
+                        CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                        True,
+                    )
+                )
                 new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_options[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = backup_reserve
@@ -10885,6 +10907,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled
                 new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
                 new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
+                new_data[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = (
+                    battery_efficiency_learning_enabled
+                )
+                new_options[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = (
+                    battery_efficiency_learning_enabled
+                )
                 new_data[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
                 new_options[CONF_OPTIMIZATION_LOAD_ENTITY] = load_entity
                 new_data[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled
@@ -11079,6 +11107,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "spread_export_enabled": spread_export_enabled,
                     "spread_import_enabled": spread_import_enabled,
                     "disable_idle_enabled": disable_idle,
+                    "battery_efficiency_learning_enabled": (
+                        battery_efficiency_learning_enabled
+                    ),
                     "ev_integration": ev_integration_enabled,
                     "load_entity": load_entity,
                     "planned_ev_load_entity": planned_ev_load_entity,
@@ -11121,6 +11152,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED
                         ),
                         "disable_idle_enabled": CONF_OPTIMIZATION_DISABLE_IDLE,
+                        "battery_efficiency_learning_enabled": (
+                            CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING
+                        ),
                         "ev_integration": CONF_OPTIMIZATION_EV_INTEGRATION,
                         "load_entity": CONF_OPTIMIZATION_LOAD_ENTITY,
                         "planned_ev_load_entity": (
@@ -11274,6 +11308,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OPTIMIZATION_DISABLE_IDLE,
             self.config_entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
         )
+        current_battery_efficiency_learning = self._get_option(
+            CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+            self.config_entry.data.get(
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                True,
+            ),
+        )
         current_ev_integration_enabled = self._get_option(
             CONF_OPTIMIZATION_EV_INTEGRATION,
             self.config_entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
@@ -11423,6 +11464,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )
         current_form_values[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(
             current_disable_idle
+        )
+        current_form_values[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = bool(
+            current_battery_efficiency_learning
         )
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
             current_form_values[CONF_NEOVOLT_SURPLUS_BALANCER_MODE] = (
@@ -11602,6 +11646,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=bool(current_disable_idle),
             )
         ] = BooleanSelector()
+        schema_fields[
+            vol.Required(
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                default=bool(current_battery_efficiency_learning),
+            )
+        ] = BooleanSelector()
         schema_fields.update(
             {
                 vol.Required(
@@ -11660,6 +11710,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
                 CONF_OPTIMIZATION_MAX_CHARGE_W,
                 CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
                 CONF_OPTIMIZATION_LOAD_ENTITY,
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,

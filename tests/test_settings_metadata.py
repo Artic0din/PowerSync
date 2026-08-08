@@ -52,6 +52,16 @@ def test_optimizer_schema_is_versioned_and_legacy_groups_remain_compatible():
     assert schema["fields"]["hardware_backup_reserve"]["owner"] == "optimizer"
     assert schema["fields"]["hardware_backup_reserve"]["section"] == "reserve_controls"
     assert schema["fields"]["battery_capacity_wh"]["owner"] == "optimizer"
+    assert schema["fields"]["battery_efficiency_learning_enabled"] == {
+        "category": "advanced",
+        "owner": "optimizer",
+        "section": "battery_forecast_inputs",
+        "order": 83,
+    }
+    assert (
+        "battery_efficiency_learning_enabled"
+        in groups["advanced_optimizer"]["fields"]
+    )
     assert schema["fields"]["daily_supply_charge"] == {
         "category": "core",
         "owner": "optimizer",

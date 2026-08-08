@@ -840,6 +840,7 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
+    CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
     CONF_PROFIT_MAX_ENABLED,
     CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
@@ -40188,8 +40189,18 @@ class OptimizationSettingsView(HomeAssistantView):
                         config_entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
                     )
                 )
+                battery_efficiency_learning_enabled = bool(
+                    config_entry.options.get(
+                        CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                        config_entry.data.get(
+                            CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
+                            True,
+                        ),
+                    )
+                )
             else:
                 disable_idle_enabled = False
+                battery_efficiency_learning_enabled = True
 
             displayed_backup_reserve, _ = split_optimizer_reserve_values(
                 auto_apply_enabled=auto_apply_reserve,
@@ -40260,6 +40271,9 @@ class OptimizationSettingsView(HomeAssistantView):
                     )
                 ),
                 "disable_idle_enabled": disable_idle_enabled,
+                "battery_efficiency_learning_enabled": (
+                    battery_efficiency_learning_enabled
+                ),
                 "config": {
                     "battery_capacity_wh": _entry_int_setting(
                         CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
@@ -40326,6 +40340,9 @@ class OptimizationSettingsView(HomeAssistantView):
                         else False
                     ),
                     "disable_idle_enabled": disable_idle_enabled,
+                    "battery_efficiency_learning_enabled": (
+                        battery_efficiency_learning_enabled
+                    ),
                     "auto_apply_reserve_enabled": auto_apply_reserve,
                     "manual_backup_reserve": (
                         round(manual_reserve * 100)
@@ -40388,6 +40405,9 @@ class OptimizationSettingsView(HomeAssistantView):
             "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
             "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
+            "battery_efficiency_learning_enabled": (
+                opt_coordinator.battery_efficiency_learning_enabled
+            ),
             "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
             "settings_groups": _optimizer_settings_groups(),
             "settings_schema": optimizer_settings_schema(),
@@ -40420,6 +40440,9 @@ class OptimizationSettingsView(HomeAssistantView):
                 "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
                 "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
                 "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
+                "battery_efficiency_learning_enabled": (
+                    opt_coordinator.battery_efficiency_learning_enabled
+                ),
                 "charge_by_time_enabled": opt_coordinator.charge_by_time_enabled,
                 "daily_supply_charge": _entry_nonnegative_float_setting(
                     CONF_DAILY_SUPPLY_CHARGE
@@ -40864,6 +40887,21 @@ class OptimizationSettingsView(HomeAssistantView):
                 new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
                 new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
                 changes.append(f"Set No Idle mode to {disable_idle}")
+
+            if "battery_efficiency_learning_enabled" in settings:
+                efficiency_learning = bool(
+                    settings["battery_efficiency_learning_enabled"]
+                )
+                new_data[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = (
+                    efficiency_learning
+                )
+                new_options[CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING] = (
+                    efficiency_learning
+                )
+                changes.append(
+                    "Set battery efficiency learning to "
+                    f"{efficiency_learning}"
+                )
 
             if "auto_apply_reserve_enabled" in settings:
                 auto_apply = bool(settings["auto_apply_reserve_enabled"])

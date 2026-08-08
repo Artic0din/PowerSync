@@ -25,6 +25,10 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from .battery_efficiency import (
+    DEFAULT_ONE_WAY_EFFICIENCY,
+    ResolvedOptimizerParameters,
+)
 from .cost_neutral import CostNeutralPlan
 from .schedule_reader import ScheduleAction, OptimizationSchedule
 
@@ -201,7 +205,7 @@ DEFAULT_EXPORT_PRICE = 0.08
 # NOTE: this is NOT the round-trip figure; to target a specific round trip R,
 # set this to sqrt(R). Changing it shifts arbitrage aggressiveness for every
 # user, so treat it as an economic tuning decision, not a units fix.
-DEFAULT_EFFICIENCY = 0.92
+DEFAULT_EFFICIENCY = DEFAULT_ONE_WAY_EFFICIENCY
 
 # HiGHS can legitimately need more than 10s for 48h/5min plans on HA hardware.
 LP_SOLVER_TIME_LIMIT_SECONDS = 30.0
@@ -302,7 +306,7 @@ class BatteryOptimizer:
         self.max_battery_export_w = self._normalize_optional_export_power_w(
             max_battery_export_w
         )
-        self.efficiency = efficiency
+        self.apply_resolved_parameters(ResolvedOptimizerParameters.legacy(efficiency))
         self.backup_reserve = backup_reserve
         self.hardware_reserve = max(0.0, min(1.0, float(hardware_reserve or 0.0)))
         self.hardware_reserve_known = hardware_reserve is not None
@@ -377,6 +381,28 @@ class BatteryOptimizer:
         )
         self.dt_hours = interval_minutes / 60.0  # time step in hours
 
+    def apply_resolved_parameters(
+        self,
+        parameters: ResolvedOptimizerParameters,
+    ) -> None:
+        """Apply one immutable parameter bundle before an optimiser solve.
+
+        ``efficiency`` remains the compatibility alias used by the physical
+        charge/SOC equations. Economic export checks use the separately
+        resolved round-trip guard so learning can never make arbitrage more
+        permissive than the legacy 0.92-per-direction policy.
+        """
+        self.resolved_parameters = parameters
+        self.charge_efficiency = parameters.charge_efficiency
+        self.discharge_efficiency = parameters.discharge_efficiency
+        self.physical_round_trip_efficiency = (
+            parameters.physical_round_trip_efficiency
+        )
+        self.economic_round_trip_efficiency = (
+            parameters.economic_round_trip_efficiency
+        )
+        self.efficiency = parameters.charge_efficiency
+
     def update_config(
         self,
         capacity_wh: float | None = None,
@@ -419,7 +445,9 @@ class BatteryOptimizer:
                 else None
             )
         if efficiency is not None:
-            self.efficiency = efficiency
+            self.apply_resolved_parameters(
+                ResolvedOptimizerParameters.legacy(efficiency)
+            )
         if backup_reserve is not None:
             self.backup_reserve = backup_reserve
         if grid_charge_soc_cap is not None:
@@ -1126,7 +1154,7 @@ class BatteryOptimizer:
                 raw.extend([False] * (target_len - len(raw)))
 
         flags: list[bool] = []
-        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        round_trip_eff = self.economic_round_trip_efficiency
         for idx in range(target_len):
             if not raw[idx] or not allow_battery_export[idx]:
                 flags.append(False)
@@ -1176,7 +1204,7 @@ class BatteryOptimizer:
             min(1.0, self.backup_reserve),
             min(1.0, self.hardware_reserve),
         )
-        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        round_trip_eff = self.economic_round_trip_efficiency
         threshold_kw = ACTION_THRESHOLD_W / 1000.0
         idx = 0
 
@@ -1991,7 +2019,7 @@ class BatteryOptimizer:
         if soc_0 >= export_floor:
             return allow_battery_export
 
-        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        round_trip_eff = self.economic_round_trip_efficiency
         future_recovery_prices = [0.0] * len(allow_battery_export)
         best_future_export = 0.0
         for idx in range(len(allow_battery_export) - 1, -1, -1):
@@ -2294,7 +2322,8 @@ class BatteryOptimizer:
                 )
                 best_future_recharge_cost = min(
                     best_future_recharge_cost,
-                    net_import_price / max(self.efficiency**2, 1e-9),
+                    net_import_price
+                    / max(self.economic_round_trip_efficiency, 1e-9),
                 )
 
         def _profitable_export_slot(t: int) -> bool:
@@ -2498,8 +2527,19 @@ class BatteryOptimizer:
             }
         )
         cost_neutral_active = bool(cost_neutral_days)
+        economic_adjustment_active = (
+            self.physical_round_trip_efficiency
+            > self.economic_round_trip_efficiency + 1e-9
+        )
+        battery_to_grid_active = (
+            cost_neutral_active or economic_adjustment_active
+        )
         battery_to_grid_offset = next_offset
-        if cost_neutral_active:
+        if battery_to_grid_active:
+            # Split battery-to-grid discharge from battery-to-home output when
+            # Cost Neutral needs settlement accounting or a higher learned
+            # physical RTE needs the legacy economic hurdle. Cold-start/default
+            # solves retain the previous model size and exact objective.
             next_offset += p_n
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
@@ -2590,6 +2630,24 @@ class BatteryOptimizer:
             # not a degradation-cost model.
             c[charge_var(t)] += 1e-5 * p_dt[t]
             c[discharge_var(t)] += 1e-5 * p_dt[t]
+            if economic_adjustment_active:
+                physical_rte = max(self.physical_round_trip_efficiency, 1e-9)
+                economic_loss_fraction = max(
+                    0.0,
+                    1.0 - self.economic_round_trip_efficiency / physical_rte,
+                )
+                # Discount the avoided-import value of all battery output to
+                # the conservative economic RTE. The battery-to-grid split
+                # then substitutes actual export value for home import value.
+                c[discharge_var(t)] += (
+                    p_import[t] * economic_loss_fraction * p_dt[t]
+                )
+                effective_export_value = p_export[t] + p_export_bonus[t]
+                c[battery_to_grid_var(t)] += (
+                    (effective_export_value - p_import[t])
+                    * economic_loss_fraction
+                    * p_dt[t]
+                )
             if p_export[t] > 0:
                 c[grid_export_var(t)] = -(
                     p_export[t] + eps * (p_n - t)
@@ -2698,7 +2756,13 @@ class BatteryOptimizer:
             all_nonzero = [p for p in p_import if p > 0.01]
             if all_nonzero:
                 median_price = sorted(all_nonzero)[len(all_nonzero) // 2]
-                terminal_price = max(terminal_price, median_price * (1 - eff))
+                economic_one_way_efficiency = math.sqrt(
+                    max(self.economic_round_trip_efficiency, 0.0)
+                )
+                terminal_price = max(
+                    terminal_price,
+                    median_price * (1 - economic_one_way_efficiency),
+                )
 
         terminal_price *= terminal_weight
 
@@ -2772,7 +2836,10 @@ class BatteryOptimizer:
                         else 0.0
                     ),
                 )
-                if net_import_price <= export_value * eff * eff + 1e-9:
+                if (
+                    net_import_price
+                    <= export_value * self.economic_round_trip_efficiency + 1e-9
+                ):
                     eligible_recharge.append(future_idx)
             if eligible_recharge:
                 paired_priority_recharge_periods[t] = eligible_recharge
@@ -2798,9 +2865,12 @@ class BatteryOptimizer:
             A_ub_rows += 5 * p_n
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
+        if battery_to_grid_active:
+            # Four source-split rows per period identify the physical
+            # intersection of battery discharge and grid export.
+            A_ub_rows += 4 * p_n
         if cost_neutral_active:
-            # Four source-split rows per period plus one earnings cap per day.
-            A_ub_rows += 4 * p_n + len(cost_neutral_days)
+            A_ub_rows += len(cost_neutral_days)
         if (
             allow_grid_charge
             and self.pre_window_slot is not None
@@ -2901,10 +2971,10 @@ class BatteryOptimizer:
             A_ub[len(b_ub), discharge_var(t)] = -1.0
             b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
-            if cost_neutral_active:
+            if battery_to_grid_active:
                 # Pin battery_to_grid to the physical intersection of battery
-                # discharge and grid export. The residual discharge may serve
-                # net home load; the residual export may only be solar surplus.
+                # discharge and grid export. Residual discharge may serve home
+                # load; residual export may only be solar surplus.
                 A_ub[len(b_ub), battery_to_grid_var(t)] = 1.0
                 A_ub[len(b_ub), discharge_var(t)] = -1.0
                 b_ub.append(0.0)
@@ -3346,7 +3416,7 @@ class BatteryOptimizer:
             for _t in range(p_n):
                 bounds.append((0.0, 1.0))
 
-        if cost_neutral_active:
+        if battery_to_grid_active:
             for t in range(p_n):
                 bounds.append((
                     0.0,
@@ -3512,7 +3582,7 @@ class BatteryOptimizer:
         period_battery_discharge = [x[discharge_var(t)] for t in range(p_n)]
         period_battery_to_grid = (
             [x[battery_to_grid_var(t)] for t in range(p_n)]
-            if cost_neutral_active
+            if battery_to_grid_active
             else [0.0] * p_n
         )
         grid_import = self._expand_period_values(periods, period_grid_import, n)
@@ -4148,7 +4218,8 @@ class BatteryOptimizer:
                 )
                 best_future_recharge_cost = min(
                     best_future_recharge_cost,
-                    net_import_price / max(eff**2, 1e-9),
+                    net_import_price
+                    / max(self.economic_round_trip_efficiency, 1e-9),
                 )
 
         def _economic_export_slot(t: int) -> bool:
@@ -4687,7 +4758,7 @@ class BatteryOptimizer:
                     if delivered_kwh >= delivered_capacity_kwh - 1e-9:
                         break
                     if (
-                        future_value * eff * eff
+                        future_value * self.economic_round_trip_efficiency
                         <= marginal_import_price + 0.001
                     ):
                         continue
@@ -4981,7 +5052,10 @@ class BatteryOptimizer:
                     uses_bonus,
                     uses_grid,
                 ) in recharge_tiers:
-                    if marginal_price >= export_value * eff * eff - 0.001:
+                    if (
+                        marginal_price
+                        >= export_value * self.economic_round_trip_efficiency - 0.001
+                    ):
                         continue
                     take_input_kwh = min(
                         tier_input_kwh,

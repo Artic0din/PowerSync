@@ -3844,6 +3844,7 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "home_consumption_values_kw": data.get("battery_home_consumption_forecast"),
             "export_values_kw": data.get("battery_export_forecast"),
             "power_values_kw": data.get("battery_power_forecast"),
+            "efficiency_learning": data.get("battery_efficiency_learning", {}),
         } if data and data.get("battery_schedule_available") else {},
     ),
     PowerSyncSensorEntityDescription(
