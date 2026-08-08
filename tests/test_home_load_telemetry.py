@@ -513,6 +513,191 @@ def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
     assert len(coordinator._energy_acc.updates) == 1
 
 
+def test_tesla_explicit_zero_wall_connector_power_suppresses_vehicle_fallback(
+    monkeypatch,
+):
+    """A reporting Wall Connector's zero is authoritative when native charging stops."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    entry = types.SimpleNamespace(entry_id="stream-entry", data={}, options={})
+    coordinator.hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == "stream-entry" else None
+    )
+
+    fallback_calls = []
+
+    def _stale_vehicle_status(hass, config_entry):
+        fallback_calls.append((hass, config_entry))
+        return {"ev_power_kw": 4.0, "ev_soc": 75}
+
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "_get_ev_vehicle_status",
+        _stale_vehicle_status,
+        raising=False,
+    )
+    event = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 5880,
+            "grid_power": -2803,
+            "battery_power": 0,
+            "load_power": 3077,
+            "percentage_charged": 100,
+            "grid_status": "Active",
+            "wall_connectors": [
+                {
+                    "wall_connector_state": 4,
+                    "wall_connector_power": 0,
+                }
+            ],
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert fallback_calls == []
+    assert result["ev_power"] == pytest.approx(0.0)
+    assert result["load_power"] == pytest.approx(3.077)
+
+
+def test_tesla_missing_wall_connector_power_preserves_vehicle_fallback(monkeypatch):
+    """Vehicle telemetry remains the fallback when the site reports no connector power."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    entry = types.SimpleNamespace(entry_id="stream-entry", data={}, options={})
+    coordinator.hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == "stream-entry" else None
+    )
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "_get_ev_vehicle_status",
+        lambda hass, config_entry: {"ev_power_kw": 4.0, "ev_soc": 75},
+        raising=False,
+    )
+    event = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 7077,
+            "grid_power": 0,
+            "battery_power": 0,
+            "load_power": 7077,
+            "percentage_charged": 80,
+            "grid_status": "Active",
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["ev_power"] == pytest.approx(4.0)
+    assert result["load_power"] == pytest.approx(3.077)
+
+
+@pytest.mark.parametrize(
+    ("wall_connectors", "expected_ev_power", "fallback_expected"),
+    [
+        (
+            [
+                {"wall_connector_power": 1200},
+                {"wall_connector_power": 800},
+            ],
+            2.0,
+            False,
+        ),
+        ('[{"wall_connector_power": 1200}, {"wall_connector_power": 800}]', 2.0, False),
+        (
+            '[{"wall_connector_power": 1200}, '
+            '{"wall_connector_power": null}, '
+            '{"wall_connector_power": 800}]',
+            2.0,
+            False,
+        ),
+        (
+            [
+                {"wall_connector_power": 1200},
+                {"wall_connector_power": "not-a-number"},
+                {"wall_connector_power": 800},
+            ],
+            2.0,
+            False,
+        ),
+        ([{"wall_connector_power": "not-a-number"}], 4.0, True),
+        ([{"wall_connector_power": True}], 4.0, True),
+        ([{"wall_connector_power": 1500}], 1.5, False),
+    ],
+    ids=(
+        "multiple",
+        "json-string",
+        "json-null",
+        "mixed-invalid",
+        "invalid",
+        "boolean",
+        "positive",
+    ),
+)
+def test_tesla_wall_connector_power_preserves_aggregation_and_fallback_boundaries(
+    monkeypatch,
+    wall_connectors,
+    expected_ev_power,
+    fallback_expected,
+):
+    """Valid connector readings aggregate; invalid readings retain vehicle fallback."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    entry = types.SimpleNamespace(entry_id="stream-entry", data={}, options={})
+    coordinator.hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == "stream-entry" else None
+    )
+    fallback_calls = []
+
+    def _vehicle_status(hass, config_entry):
+        fallback_calls.append((hass, config_entry))
+        return {"ev_power_kw": 4.0, "ev_soc": 75}
+
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "_get_ev_vehicle_status",
+        _vehicle_status,
+        raising=False,
+    )
+    event = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 7077,
+            "grid_power": 0,
+            "battery_power": 0,
+            "load_power": 7077,
+            "percentage_charged": 80,
+            "grid_status": "Active",
+            "wall_connectors": wall_connectors,
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert bool(fallback_calls) is fallback_expected
+    assert result["ev_power"] == pytest.approx(expected_ev_power)
+    assert result["load_power"] == pytest.approx(7.077 - expected_ev_power)
+
+
 def test_teslemetry_sse_ignores_other_sites_and_out_of_order_replays():
     coordinator = _new_stream_tesla_coordinator()
     refresh_count = 0

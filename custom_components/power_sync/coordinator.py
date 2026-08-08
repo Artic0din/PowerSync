@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date, timezone
+import json
 import logging
 import math
 import re
@@ -2526,26 +2527,43 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             # Extract EV charging power from Tesla Wall Connectors
             ev_power_kw = 0.0
+            wall_connector_power_reported = False
             wall_connectors_raw = live_status.get("wall_connectors")
             if wall_connectors_raw:
                 try:
                     # wall_connectors can be a JSON string or a list
                     if isinstance(wall_connectors_raw, str):
-                        import ast
-                        wall_connectors = ast.literal_eval(wall_connectors_raw)
+                        try:
+                            wall_connectors = json.loads(wall_connectors_raw)
+                        except (TypeError, ValueError):
+                            import ast
+                            wall_connectors = ast.literal_eval(wall_connectors_raw)
                     else:
                         wall_connectors = wall_connectors_raw
                     for wc in wall_connectors:
-                        wc_power = wc.get("wall_connector_power", 0) or 0
+                        if not isinstance(wc, dict):
+                            continue
+                        wc_power_raw = wc.get("wall_connector_power")
+                        if wc_power_raw is None or isinstance(wc_power_raw, bool):
+                            continue
+                        try:
+                            wc_power = float(wc_power_raw)
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if not math.isfinite(wc_power) or wc_power < 0:
+                            continue
+                        # An explicit zero is a valid stopped-charging sample.
+                        # Do not replace it with a stale Fleet/BLE vehicle value.
+                        wall_connector_power_reported = True
                         if wc_power > 0:
                             ev_power_kw += wc_power / 1000
                 except Exception:
                     pass
 
             # Fallback: get EV power from BLE/Fleet vehicle sensors when
-            # Wall Connector isn't reporting through Powerwall gateway.
+            # Wall Connector power is absent from the Powerwall gateway.
             # Without this, EV charging power is counted as home load.
-            if ev_power_kw == 0:
+            if not wall_connector_power_reported:
                 try:
                     entry = self.hass.config_entries.async_get_entry(self._entry_id)
                     if entry:
