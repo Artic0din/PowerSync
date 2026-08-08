@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,13 +42,13 @@ def _top_level_node(name: str) -> ast.AST:
 def _tariff_helpers_source() -> str:
     """Verbatim source for the whole tariff-filter helper block: from the
     ``_FORCE_TARIFF_TEXT_MARKERS`` constant through the end of
-    ``_select_restorable_tesla_tariff``. Sliced by line range (not by
+    ``_extract_tesla_tariff_content``. Sliced by line range (not by
     enumerating individual names) so any new constant the fix adds inside
     this block — e.g. a manager-own-code rejection list — is picked up
     automatically without the test needing to know its name.
     """
     start = _top_level_node("_FORCE_TARIFF_TEXT_MARKERS")
-    end = _top_level_node("_select_restorable_tesla_tariff")
+    end = _top_level_node("_extract_tesla_tariff_content")
     lines = _SOURCE.splitlines()
     return "\n".join(lines[start.lineno - 1 : end.end_lineno])
 
@@ -158,6 +159,7 @@ def _build_namespace(session, upload_calls, send_result=True):
         "HomeAssistant": object,
         "ConfigEntry": object,
         "Any": object,
+        "copy": copy,
         "dt_util": _FakeDtUtil(),
         "_LOGGER": _FakeLogger(),
         "aiohttp": aiohttp_stub,
@@ -202,7 +204,7 @@ LIVE_SAVING_SESSION_TARIFF = {
 # ---------------------------------------------------------------------------
 
 def test_is_powersync_force_tariff_rejects_managers_own_codes():
-    namespace: dict = {}
+    namespace: dict = {"Any": object, "copy": copy}
     exec(compile(_TARIFF_HELPERS_SOURCE, "<tariff_helpers>", "exec"), namespace)
     is_force = namespace["_is_powersync_force_tariff"]
     select_restorable = namespace["_select_restorable_tesla_tariff"]

@@ -2530,12 +2530,28 @@ async def _action_force_discharge(
         power_w = params.get("power_w")
         if power_w is not None:
             service_data["power_w"] = int(power_w)
-        await hass.services.async_call(
-            DOMAIN,
-            SERVICE_FORCE_DISCHARGE,
-            service_data,
-            blocking=True,
-        )
+        if _is_tesla_battery(config_entry):
+            response = await hass.services.async_call(
+                DOMAIN,
+                SERVICE_FORCE_DISCHARGE,
+                service_data,
+                blocking=True,
+                return_response=True,
+            )
+            if not isinstance(response, Mapping) or response.get("success") is not True:
+                error = response.get("error") if isinstance(response, Mapping) else None
+                _LOGGER.warning(
+                    "Tesla force discharge automation was not confirmed%s",
+                    f": {error}" if error else "",
+                )
+                return False
+        else:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_FORCE_DISCHARGE,
+                service_data,
+                blocking=True,
+            )
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to activate force discharge: {e}")
@@ -2558,12 +2574,28 @@ async def _action_force_charge(
         power_w = params.get("power_w")
         if power_w is not None:
             service_data["power_w"] = int(power_w)
-        await hass.services.async_call(
-            DOMAIN,
-            SERVICE_FORCE_CHARGE,
-            service_data,
-            blocking=True,
-        )
+        if _is_tesla_battery(config_entry):
+            response = await hass.services.async_call(
+                DOMAIN,
+                SERVICE_FORCE_CHARGE,
+                service_data,
+                blocking=True,
+                return_response=True,
+            )
+            if not isinstance(response, Mapping) or response.get("success") is not True:
+                error = response.get("error") if isinstance(response, Mapping) else None
+                _LOGGER.warning(
+                    "Tesla force charge automation was not confirmed%s",
+                    f": {error}" if error else "",
+                )
+                return False
+        else:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_FORCE_CHARGE,
+                service_data,
+                blocking=True,
+            )
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to activate force charge: {e}")

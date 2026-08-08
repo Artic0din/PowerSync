@@ -344,7 +344,37 @@ def _select_restorable_tesla_tariff(*tariffs: Any) -> dict[str, Any] | None:
     """Return the first tariff that is safe to use as a normal restore tariff."""
     for tariff in tariffs:
         if isinstance(tariff, dict) and tariff and not _is_powersync_force_tariff(tariff):
-            return tariff
+            return copy.deepcopy(tariff)
+    return None
+
+
+def _extract_tesla_tariff_content(payload: Any) -> dict[str, Any] | None:
+    """Extract a tariff from legacy and linked-rate-plan response shapes."""
+    if not isinstance(payload, dict):
+        return None
+
+    response = payload.get("response")
+    if isinstance(response, dict):
+        nested_response = _extract_tesla_tariff_content(response)
+        if nested_response:
+            return nested_response
+
+    containers = [payload]
+    for key in (
+        "tou_settings",
+        "rate_plan",
+        "rate_plan_settings",
+        "utility_rate_plan",
+    ):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict):
+            containers.append(candidate)
+
+    for container in containers:
+        for key in ("tariff_content_v2", "tariff_content"):
+            tariff = container.get(key)
+            if isinstance(tariff, dict) and tariff:
+                return copy.deepcopy(tariff)
     return None
 
 
@@ -2559,7 +2589,7 @@ class AEMOSpikeManager:
                         data = await response.json()
                         resp = data.get("response", {})
                         # Try tariff_content_v2 first, then fall back to tariff_content
-                        tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        tariff_candidate = _extract_tesla_tariff_content(resp)
                         self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
                         if self._saved_tariff:
                             _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
@@ -2599,7 +2629,7 @@ class AEMOSpikeManager:
 
                     # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
                     if not self._saved_tariff:
-                        site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                        site_tariff = _extract_tesla_tariff_content(site_info)
                         self._saved_tariff = _select_restorable_tesla_tariff(site_tariff)
                         if self._saved_tariff:
                             _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
@@ -3244,7 +3274,7 @@ class SavingSessionTariffManager:
                     if response.status == 200:
                         data = await response.json()
                         resp = data.get("response", {})
-                        tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        tariff_candidate = _extract_tesla_tariff_content(resp)
                         self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
                         if self._saved_tariff:
                             _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
@@ -3280,7 +3310,7 @@ class SavingSessionTariffManager:
                         )
 
                     if not self._saved_tariff:
-                        site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                        site_tariff = _extract_tesla_tariff_content(site_info)
                         self._saved_tariff = _select_restorable_tesla_tariff(site_tariff)
                         if self._saved_tariff:
                             _LOGGER.info("Saved tariff from site_info fallback")
@@ -4108,7 +4138,7 @@ async def _confirm_tesla_tariff_uploaded(
                     continue
                 data = await response.json()
                 site_info = data.get("response", {})
-                observed = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                observed = _extract_tesla_tariff_content(site_info)
                 if _tesla_tariff_matches_readback(tariff_data, observed):
                     elapsed_seconds = loop.time() - started_at
                     _LOGGER.info(
@@ -11100,7 +11130,7 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
 
         # Get tariff_content from site_info. Newer Tesla API responses may only
         # expose the v2 tariff shape, which the write/restore paths already use.
-        tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content", {})
+        tariff = _extract_tesla_tariff_content(site_info)
         if not tariff:
             _LOGGER.warning("No tariff_content or tariff_content_v2 in Tesla site_info response")
             return None
@@ -30070,7 +30100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if response.status == 200:
                             data = await response.json()
                             resp = data.get("response", {})
-                            tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                            tariff_candidate = _extract_tesla_tariff_content(resp)
                             saved_tariff = await _cache_restorable_tesla_tariff(
                                 tariff_candidate,
                                 f"tariff_rate for site {site_id}",
@@ -30150,17 +30180,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 saved_grid_charging_enabled,
                             )
 
-                            if not site_state.get("saved_tariff"):
-                                site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
-                                saved_tariff = await _cache_restorable_tesla_tariff(
-                                    site_tariff,
-                                    f"site_info for site {site_id}",
+                            # site_info is the documented Fleet API source and is
+                            # authoritative for retailer-linked rate plans. The
+                            # legacy tariff_rate endpoint can lag after an in-app
+                            # provider import, so a valid site_info tariff must
+                            # replace that fallback snapshot.
+                            site_tariff = _extract_tesla_tariff_content(site_info)
+                            site_info_saved_tariff = await _cache_restorable_tesla_tariff(
+                                site_tariff,
+                                f"site_info for site {site_id}",
+                            )
+                            if site_info_saved_tariff:
+                                if (
+                                    site_state.get("saved_tariff")
+                                    and site_state["saved_tariff"] != site_info_saved_tariff
+                                ):
+                                    _LOGGER.info(
+                                        "Replacing tariff_rate snapshot with authoritative "
+                                        "site_info tariff for site %s",
+                                        site_id,
+                                    )
+                                site_state["saved_tariff"] = site_info_saved_tariff
+                                _LOGGER.info(
+                                    "Saved authoritative tariff from site_info for site %s (name: %s)",
+                                    site_id,
+                                    site_info_saved_tariff.get("name", "unknown"),
                                 )
-                                if saved_tariff:
-                                    site_state["saved_tariff"] = saved_tariff
-                                    _LOGGER.info("Saved tariff from site_info fallback for site %s (name: %s)",
-                                                site_id, saved_tariff.get("name", "unknown"))
-                                elif _cached_restorable_tesla_tariff():
+                            elif not site_state.get("saved_tariff"):
+                                if _cached_restorable_tesla_tariff():
                                     site_state["saved_tariff"] = _cached_restorable_tesla_tariff()
                                     _LOGGER.info(
                                         "Using cached Tesla tariff baseline for site %s (name: %s)",
@@ -31817,7 +31864,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if response.status == 200:
                             data = await response.json()
                             resp = data.get("response", {})
-                            tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                            tariff_candidate = _extract_tesla_tariff_content(resp)
                             saved_tariff = await _cache_restorable_tesla_tariff(
                                 tariff_candidate,
                                 f"tariff_rate for site {site_id}",
@@ -31889,17 +31936,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 saved_grid_charging_enabled,
                             )
 
-                            if not site_state.get("saved_tariff"):
-                                site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
-                                saved_tariff = await _cache_restorable_tesla_tariff(
-                                    site_tariff,
-                                    f"site_info for site {site_id}",
+                            # Prefer the documented site_info snapshot over the
+                            # legacy tariff_rate endpoint for linked rate plans.
+                            site_tariff = _extract_tesla_tariff_content(site_info)
+                            site_info_saved_tariff = await _cache_restorable_tesla_tariff(
+                                site_tariff,
+                                f"site_info for site {site_id}",
+                            )
+                            if site_info_saved_tariff:
+                                if (
+                                    site_state.get("saved_tariff")
+                                    and site_state["saved_tariff"] != site_info_saved_tariff
+                                ):
+                                    _LOGGER.info(
+                                        "Replacing tariff_rate snapshot with authoritative "
+                                        "site_info tariff for site %s",
+                                        site_id,
+                                    )
+                                site_state["saved_tariff"] = site_info_saved_tariff
+                                _LOGGER.info(
+                                    "Saved authoritative tariff from site_info for site %s (name: %s)",
+                                    site_id,
+                                    site_info_saved_tariff.get("name", "unknown"),
                                 )
-                                if saved_tariff:
-                                    site_state["saved_tariff"] = saved_tariff
-                                    _LOGGER.info("Saved tariff from site_info fallback for site %s (name: %s)",
-                                                site_id, saved_tariff.get("name", "unknown"))
-                                elif _cached_restorable_tesla_tariff():
+                            elif not site_state.get("saved_tariff"):
+                                if _cached_restorable_tesla_tariff():
                                     site_state["saved_tariff"] = _cached_restorable_tesla_tariff()
                                     _LOGGER.info(
                                         "Using cached Tesla tariff baseline for site %s (name: %s)",

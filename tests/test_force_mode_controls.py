@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -607,6 +608,42 @@ def test_force_tariff_filter_matches_names_and_codes():
     assert "_iter_tariff_strings" in function_source
 
 
+def test_tesla_tariff_extractor_supports_linked_rate_plan_shapes():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_extract_tesla_tariff_content")
+    function_source = ast.get_source_segment(source, function)
+    namespace = {"Any": object, "copy": copy}
+
+    assert function_source is not None
+    exec(function_source, namespace)
+    extract = namespace["_extract_tesla_tariff_content"]
+    tariff = {"code": "retailer-plan", "name": "Core"}
+
+    assert extract({"tariff_content_v2": tariff}) == tariff
+    assert extract({"tou_settings": {"tariff_content_v2": tariff}}) == tariff
+    assert extract({"response": {"rate_plan": {"tariff_content": tariff}}}) == tariff
+
+    snapshot = extract({"utility_rate_plan": {"tariff_content_v2": tariff}})
+    tariff["name"] = "changed after capture"
+    assert snapshot == {"code": "retailer-plan", "name": "Core"}
+
+
+def test_tesla_force_modes_prefer_site_info_linked_rate_plan_snapshot():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    for handler_name in ("handle_force_charge", "handle_force_discharge"):
+        handler = _find_function(tree, handler_name)
+        handler_source = ast.get_source_segment(source, handler)
+
+        assert handler_source is not None
+        assert "site_tariff = _extract_tesla_tariff_content(site_info)" in handler_source
+        assert "site_info_saved_tariff = await _cache_restorable_tesla_tariff(" in handler_source
+        assert 'site_state["saved_tariff"] = site_info_saved_tariff' in handler_source
+        assert "Replacing tariff_rate snapshot with authoritative" in handler_source
+
+
 def test_restore_normal_filters_force_tariffs_before_upload():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -775,7 +812,7 @@ def test_tesla_tou_upload_waits_for_site_info_readback():
     assert "confirm_readback: bool = True" in function_source
     assert "await _confirm_tesla_tariff_uploaded(" in function_source
     assert "site_info" in confirm_source
-    assert "tariff_content_v2" in confirm_source
+    assert "_extract_tesla_tariff_content(site_info)" in confirm_source
     assert "_tesla_tariff_matches_readback(tariff_data, observed)" in confirm_source
     assert "_tariff_charge_rates(expected, sell=False)" in matcher_source
 
@@ -868,6 +905,10 @@ def test_tesla_tou_readback_accepts_delayed_match_without_reupload():
         "asyncio": FakeAsyncio(clock),
         "Any": object,
         "_LOGGER": FakeLogger(),
+        "_extract_tesla_tariff_content": lambda site_info: (
+            site_info.get("tariff_content_v2")
+            or site_info.get("tariff_content")
+        ),
         "_tesla_tariff_matches_readback": lambda expected, observed: (
             expected == observed
         ),
@@ -945,6 +986,21 @@ def test_tesla_force_discharge_exposes_optional_optimizer_result():
         "except HomeAssistantError as e:", 1
     )[1].split("except Exception as e:", 1)[0]
     assert "raise" in home_assistant_error_handler
+
+
+def test_tesla_automation_force_actions_require_confirmed_service_response():
+    source = AUTOMATION_ACTIONS_PATH.read_text()
+    tree = ast.parse(source)
+
+    for function_name in ("_action_force_charge", "_action_force_discharge"):
+        function = _find_function(tree, function_name)
+        function_source = ast.get_source_segment(source, function)
+
+        assert function_source is not None
+        assert "if _is_tesla_battery(config_entry):" in function_source
+        assert "return_response=True" in function_source
+        assert 'response.get("success") is not True' in function_source
+        assert "return False" in function_source
 
 
 def test_tesla_grid_charging_service_requires_confirmed_response_for_automation():
@@ -2149,7 +2205,7 @@ def test_tesla_tariff_fetch_rejects_force_tariffs():
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    assert 'site_info.get("tariff_content_v2") or site_info.get("tariff_content", {})' in function_source
+    assert "_extract_tesla_tariff_content(site_info)" in function_source
     assert "if _is_powersync_force_tariff(tariff):" in function_source
     assert '"last_restorable_tesla_tariff"' in function_source
 
