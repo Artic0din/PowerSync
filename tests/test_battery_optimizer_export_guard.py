@@ -300,11 +300,13 @@ def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
     assert result.grid_import_w[3] == pytest.approx(3000.0)
 
 
-@pytest.mark.parametrize("backend", ["highs", "greedy"])
-def test_charge_by_time_deadline_stays_active_when_starting_at_target(
-    battery_optimizer_module, monkeypatch, backend
+def test_highs_charge_by_time_deadline_is_inactive_when_starting_at_target(
+    battery_optimizer_module,
 ):
-    """Starting at the target must not allow SOC to drain below it by deadline."""
+    """Starting at the target must not force a later grid top-up."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
         max_charge_w=5000,
@@ -320,12 +322,6 @@ def test_charge_by_time_deadline_stays_active_when_starting_at_target(
     optimizer.pre_window_soc_target = 1.0
     optimizer.pre_window_slot = 2
 
-    if backend == "highs":
-        if not battery_optimizer_module.HIGHS_AVAILABLE:
-            pytest.skip("requires HiGHS LP solver")
-    else:
-        monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
-
     result = optimizer.optimize(
         import_prices=[1.00, 0.05, 0.10],
         export_prices=[0.0] * 3,
@@ -339,9 +335,14 @@ def test_charge_by_time_deadline_stays_active_when_starting_at_target(
     )
 
     assert result.feasible is True
-    assert result.solver_used == backend
-    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
-    assert result.schedule.actions[2].soc < result.schedule.actions[1].soc
+    assert result.solver_used == "highs"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(1000.0)
+    assert result.schedule.actions[1].soc == pytest.approx(0.90)
+    assert all(
+        action.battery_charge_w == pytest.approx(0.0)
+        for action in result.schedule.actions
+    )
 
 
 def test_greedy_charge_by_time_preserves_rolling_target_margin(

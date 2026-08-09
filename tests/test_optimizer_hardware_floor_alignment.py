@@ -917,6 +917,48 @@ def test_disable_idle_keeps_charge_by_time_deadline_feasible(
     ) == pytest.approx(3.95, abs=0.01)
 
 
+def test_disable_idle_drops_already_satisfied_charge_by_time_constraint(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A satisfied target must not conflict with natural self-consumption."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        max_charge_w=2000,
+        horizon_hours=3,
+    )
+    optimizer.pre_window_slot = 2
+    optimizer.pre_window_soc_target = 0.60
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.30, 0.30],
+        export_prices=[0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[1.0, 1.0, 1.0],
+        current_soc=0.60,
+        allow_battery_export=[False, False, False],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True, True, True],
+        disable_idle=True,
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible is True
+    assert result.lp_stats["mode_converged"] is True
+    assert all(
+        action.action == "self_consumption"
+        for action in result.schedule.actions
+    )
+    assert all(
+        action.battery_charge_w == pytest.approx(0.0)
+        for action in result.schedule.actions
+    )
+
+
 def test_disable_idle_uses_future_charge_headroom_before_deadline(
     battery_optimizer_module,
     monkeypatch,
