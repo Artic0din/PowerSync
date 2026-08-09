@@ -511,23 +511,23 @@ def _two_fleet_vehicle_hass() -> _Hass:
 
 def test_fleet_only_second_vehicle_never_uses_first_cars_ble_bridge():
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("tessy_bridge")
+    entry = _both_provider_entry("primary_ev_bridge")
 
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "tessy_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "primary_ev_bridge"
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == ""
 
 
 def test_second_ble_bridge_becomes_preferred_for_second_fleet_vehicle():
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
 
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "tessy_bridge"
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "w3rt13_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "primary_ev_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "secondary_ev_bridge"
 
 
 def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
     ble_start = AsyncMock(return_value=True)
     tbt_start = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
@@ -546,13 +546,13 @@ def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     )
 
     assert result is True
-    ble_start.assert_awaited_once_with(hass, "w3rt13_bridge")
+    ble_start.assert_awaited_once_with(hass, "secondary_ev_bridge")
     tbt_start.assert_not_awaited()
 
 
 def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
     ble_amps = AsyncMock(return_value=True)
     tbt_amps = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
@@ -576,7 +576,7 @@ def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     )
 
     assert result is True
-    assert ble_amps.await_args.args[:3] == (hass, "w3rt13_bridge", 10)
+    assert ble_amps.await_args.args[:3] == (hass, "secondary_ev_bridge", 10)
     tbt_amps.assert_not_awaited()
 
 

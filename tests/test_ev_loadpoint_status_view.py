@@ -55,3 +55,11 @@ def test_hacs_ocpp_discovery_is_enabled_and_claim_filtered():
     assert "if opts.get(CONF_OCPP_ENABLED) else ()" in source
     assert "claimed_hacs_ocpp_prefixes" in source
     assert "prefix in claimed_prefixes" in source
+
+
+def test_configured_vehicle_profiles_are_kept_as_idle_loadpoints():
+    method = _get_method()
+    source = ast.unparse(method)
+
+    assert "stored_data.get('vehicle_charging_configs', [])" in source
+    assert "'include_idle': any((vehicle_ids_match(configured_id, vehicle_id)" in source

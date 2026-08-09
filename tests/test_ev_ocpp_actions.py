@@ -709,12 +709,12 @@ def test_tesla_entity_lookup_prefers_healthy_duplicate_vin_provider():
     vin = "LRW3F7FS1NC484342"
     stale_device = SimpleNamespace(
         id="fleet-device",
-        name="Tessy Fleet",
+        name="Primary EV Fleet",
         identifiers={("tesla_fleet", vin)},
     )
     healthy_device = SimpleNamespace(
         id="teslemetry-device",
-        name="Tessy Teslemetry",
+        name="Primary EV Teslemetry",
         identifiers={("teslemetry", vin)},
     )
 
@@ -722,46 +722,46 @@ def test_tesla_entity_lookup_prefers_healthy_duplicate_vin_provider():
         return SimpleNamespace(entity_id=entity_id, device_id=device_id)
 
     registry_entities = {
-        "stale-wake": registry_entity("button.tessy_wake", stale_device.id),
+        "stale-wake": registry_entity("button.primary_ev_wake", stale_device.id),
         "stale-status": registry_entity(
-            "binary_sensor.tessy_status", stale_device.id
+            "binary_sensor.primary_ev_status", stale_device.id
         ),
-        "stale-charge": registry_entity("switch.tessy_charge", stale_device.id),
+        "stale-charge": registry_entity("switch.primary_ev_charge", stale_device.id),
         "stale-limit": registry_entity(
-            "number.tessy_charge_limit", stale_device.id
+            "number.primary_ev_charge_limit", stale_device.id
         ),
         "stale-battery": registry_entity(
-            "sensor.tessy_battery_level", stale_device.id
+            "sensor.primary_ev_battery_level", stale_device.id
         ),
         "healthy-wake": registry_entity(
-            "button.tessy_wake_2", healthy_device.id
+            "button.primary_ev_wake_2", healthy_device.id
         ),
         "healthy-status": registry_entity(
-            "binary_sensor.tessy_status_2", healthy_device.id
+            "binary_sensor.primary_ev_status_2", healthy_device.id
         ),
         "healthy-cable": registry_entity(
-            "binary_sensor.tessy_charge_cable_2", healthy_device.id
+            "binary_sensor.primary_ev_charge_cable_2", healthy_device.id
         ),
         "healthy-charge": registry_entity(
-            "switch.tessy_charge_2", healthy_device.id
+            "switch.primary_ev_charge_2", healthy_device.id
         ),
         "healthy-current": registry_entity(
-            "number.tessy_charge_current_2", healthy_device.id
+            "number.primary_ev_charge_current_2", healthy_device.id
         ),
     }
     hass = _Hass(
         [
-            _State("button.tessy_wake", "2026-08-03T00:06:05+00:00"),
+            _State("button.primary_ev_wake", "2026-08-03T00:06:05+00:00"),
             # Cached telemetry can remain usable even when command controls are not.
-            _State("binary_sensor.tessy_status", "off"),
-            _State("switch.tessy_charge", "unknown"),
-            _State("number.tessy_charge_limit", "80"),
-            _State("sensor.tessy_battery_level", "76"),
-            _State("button.tessy_wake_2", "unknown"),
-            _State("binary_sensor.tessy_status_2", "off"),
-            _State("binary_sensor.tessy_charge_cable_2", "on"),
-            _State("switch.tessy_charge_2", "off"),
-            _State("number.tessy_charge_current_2", "16"),
+            _State("binary_sensor.primary_ev_status", "off"),
+            _State("switch.primary_ev_charge", "unknown"),
+            _State("number.primary_ev_charge_limit", "80"),
+            _State("sensor.primary_ev_battery_level", "76"),
+            _State("button.primary_ev_wake_2", "unknown"),
+            _State("binary_sensor.primary_ev_status_2", "off"),
+            _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+            _State("switch.primary_ev_charge_2", "off"),
+            _State("number.primary_ev_charge_current_2", "16"),
         ],
         registry_entities=registry_entities,
         # Keep the stale integration first to reproduce HA registry ordering.
@@ -786,8 +786,8 @@ def test_tesla_entity_lookup_prefers_healthy_duplicate_vin_provider():
         )
     )
 
-    assert charge_switch == "switch.tessy_charge_2"
-    assert wake_button == "button.tessy_wake_2"
+    assert charge_switch == "switch.primary_ev_charge_2"
+    assert wake_button == "button.primary_ev_wake_2"
 
 
 def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeypatch):

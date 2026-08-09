@@ -56,7 +56,7 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 
 
-VIN = "LRWYHCEK3PC907290"
+VIN = "5YJTEST0000000001"
 
 
 class _State:

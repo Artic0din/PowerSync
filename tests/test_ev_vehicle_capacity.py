@@ -165,7 +165,7 @@ def test_capacity_validation_accepts_decimals_and_null_clear():
 
 
 def test_stable_vehicle_aliases_do_not_duplicate_ble_or_vin_profiles():
-    assert canonical_vehicle_id("5YJ3E1EA7KF000001") == "5YJ3E1EA7KF000001"
+    assert canonical_vehicle_id("5YJTEST0000000002") == "5YJTEST0000000002"
     assert vehicle_ids_match("ble_My_Model_3", "my_model_3")
     assert vehicle_ids_match("ble_My_Model_3", "BLE_my_model_3")
     assert vehicle_ids_match("byd_DEVICE-123", "BYD_device-123")
@@ -246,11 +246,11 @@ def test_byd_29_6_kwh_energy_uses_explicit_capacity_not_60_kwh_fallback():
     assert plan.battery_capacity_source == CAPACITY_SOURCE_PROVIDER
 
 
-def test_werty_86_kwh_at_ten_amps_requires_full_configured_energy_duration():
+def test_secondary_ev_86_kwh_at_ten_amps_requires_full_configured_energy_duration():
     charger_power_kw = 10 * 240 * 1 / 1000
     plan = asyncio.run(
         _planner().plan_charging(
-            vehicle_id="5YJ3E1EA7KF000001",
+            vehicle_id="5YJTEST0000000002",
             current_soc=69,
             target_soc=80,
             target_time=None,

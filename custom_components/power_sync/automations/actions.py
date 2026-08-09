@@ -773,7 +773,7 @@ def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
         vehicle_vin: The vehicle's VIN
 
     Returns:
-        The vehicle's friendly name (e.g., "TESSY") or a truncated VIN if not found
+        The vehicle's friendly name (e.g., "PRIMARY EV") or a truncated VIN if not found
     """
     device_registry = dr.async_get(hass)
 
@@ -8243,7 +8243,7 @@ async def _action_start_ev_charging_dynamic_locked(
             return False
 
     # Prevent duplicate sessions for the same vehicle/mode
-    # _default and a resolved VIN (e.g. LRWYHCEK3PC907290) refer to the same physical
+    # _default and a resolved VIN (e.g. 5YJTEST0000000001) refer to the same physical
     # vehicle in single-vehicle setups. Treat them as duplicates to prevent two update
     # loops fighting over the same car's charge current.
     for vid, v_state in entry_vehicles.items():

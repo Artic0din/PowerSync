@@ -494,13 +494,13 @@ def test_power_to_amps_uses_configured_vehicle_minimum():
 
 
 def test_legacy_numeric_schedule_uses_resolved_vehicle_current_and_capacity():
-    werty_vin = "5YJ3E1EA7KF000001"
+    secondary_vin = "5YJTEST0000000002"
     automation_store = types.SimpleNamespace(
         _data={
             "vehicle_charging_configs": [
                 {
-                    "vehicle_id": werty_vin,
-                    "display_name": "Werty",
+                    "vehicle_id": secondary_vin,
+                    "display_name": "Secondary EV",
                     "charger_type": "tesla",
                     "min_amps": 6,
                     "max_amps": 10,
@@ -524,7 +524,7 @@ def test_legacy_numeric_schedule_uses_resolved_vehicle_current_and_capacity():
     executor.config_entry = entry
     executor._store = types.SimpleNamespace(_data={})
     executor._resolve_vehicle_vin = lambda vehicle_id: (
-        werty_vin if vehicle_id == "2" else None
+        secondary_vin if vehicle_id == "2" else None
     )
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id="2",
@@ -655,7 +655,7 @@ def test_stable_vehicle_settings_remove_legacy_phantom_rows():
         "auto_schedule_settings": {
             "_default": {"enabled": False, "charger_type": "tesla"},
             "1": {"enabled": False, "charger_type": "tesla"},
-            "LRWYHCEK3PC907290": {
+            "5YJTEST0000000001": {
                 "enabled": True,
                 "charger_type": "tesla",
             },
@@ -663,7 +663,7 @@ def test_stable_vehicle_settings_remove_legacy_phantom_rows():
         "cached_vehicle_soc": {
             "_default": {"soc": 40},
             "1": {"soc": 45},
-            "LRWYHCEK3PC907290": {"soc": 50},
+            "5YJTEST0000000001": {"soc": 50},
         },
     }
 
@@ -674,8 +674,8 @@ def test_stable_vehicle_settings_remove_legacy_phantom_rows():
     )
 
     assert changed is True
-    assert set(stored_data["auto_schedule_settings"]) == {"LRWYHCEK3PC907290"}
-    assert set(stored_data["cached_vehicle_soc"]) == {"LRWYHCEK3PC907290"}
+    assert set(stored_data["auto_schedule_settings"]) == {"5YJTEST0000000001"}
+    assert set(stored_data["cached_vehicle_soc"]) == {"5YJTEST0000000001"}
 
 
 def test_missing_vehicle_id_updates_canonical_generic_settings():
@@ -709,7 +709,7 @@ def test_configured_generic_backend_overrides_stale_ocpp_synthetic_type():
 
 def test_real_vin_preserves_explicit_ocpp_backend():
     settings = ev_planner.AutoScheduleSettings(
-        vehicle_id="5YJ3E1EA7KF000001",
+        vehicle_id="5YJTEST0000000002",
         charger_type="ocpp",
     )
 

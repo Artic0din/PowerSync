@@ -121,8 +121,8 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 
 
-VIN = "LRWYHCEK3PC907290"
-WERTY_VIN = "5YJ3E1EA7KF000001"
+VIN = "5YJTEST0000000001"
+SECONDARY_VIN = "5YJTEST0000000002"
 BRISBANE_TZ = timezone(timedelta(hours=10))
 
 
@@ -160,14 +160,14 @@ class _RecordingPlanner:
 def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
     hass = _Hass()
     hass.device_registry.devices = {
-        "fleet-tessy": SimpleNamespace(
+        "fleet-primary_ev": SimpleNamespace(
             identifiers={("tesla_fleet", VIN)},
         ),
-        "teslemetry-tessy": SimpleNamespace(
+        "teslemetry-primary_ev": SimpleNamespace(
             identifiers={("teslemetry", VIN)},
         ),
-        "fleet-werty": SimpleNamespace(
-            identifiers={("tesla_fleet", WERTY_VIN)},
+        "fleet-secondary_ev": SimpleNamespace(
+            identifiers={("tesla_fleet", SECONDARY_VIN)},
         ),
     }
     entry = SimpleNamespace(
@@ -175,7 +175,7 @@ def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
         data={},
         options={
             "ev_provider": "both",
-            "tesla_ble_entity_prefix": "tessy_bridge",
+            "tesla_ble_entity_prefix": "primary_ev_bridge",
         },
     )
     executor = ev_planner.AutoScheduleExecutor(
@@ -185,25 +185,25 @@ def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
     )
 
     assert executor._resolve_vehicle_vin("1") == VIN
-    assert executor._resolve_vehicle_vin("2") == WERTY_VIN
-    assert executor._resolve_vehicle_vin("3") == "ble_tessy_bridge"
+    assert executor._resolve_vehicle_vin("2") == SECONDARY_VIN
+    assert executor._resolve_vehicle_vin("3") == "ble_primary_ev_bridge"
     assert ev_planner._configured_ble_prefixes(
         entry,
         VIN,
         hass=hass,
-    ) == ["tessy_bridge"]
+    ) == ["primary_ev_bridge"]
     assert ev_planner._configured_ble_prefixes(
         entry,
-        WERTY_VIN,
+        SECONDARY_VIN,
         hass=hass,
     ) == []
 
-    entry.options["tesla_ble_entity_prefix"] = "tessy_bridge,w3rt13_bridge"
+    entry.options["tesla_ble_entity_prefix"] = "primary_ev_bridge,secondary_ev_bridge"
     assert ev_planner._configured_ble_prefixes(
         entry,
-        WERTY_VIN,
+        SECONDARY_VIN,
         hass=hass,
-    ) == ["w3rt13_bridge"]
+    ) == ["secondary_ev_bridge"]
 
 
 def test_regenerate_plan_selects_ha_local_weekday_not_os_weekday(monkeypatch):

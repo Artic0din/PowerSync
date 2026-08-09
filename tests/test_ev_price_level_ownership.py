@@ -100,7 +100,7 @@ ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner
 ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
 
 
-VIN = "LRWYHCEK3PC907290"
+VIN = "5YJTEST0000000001"
 
 
 def test_price_log_value_formats_unknown_without_cents_suffix():
@@ -1938,7 +1938,7 @@ def test_scheduled_sigenergy_start_uses_sigenergy_charger_loadpoint(fake_actions
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
-        "vehicle_id": "LRWYHCEK3PC907290",
+        "vehicle_id": "5YJTEST0000000001",
         "charger_type": "tesla",
         "min_amps": 5,
         "max_amps": 32,
@@ -5389,7 +5389,7 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
 def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
     monkeypatch,
 ):
-    active_vin = "5YJ3E1EA7KF000001"
+    active_vin = "5YJTEST0000000002"
     unplugged_vin = "5YJ3E1EA7KF000002"
     plugged_vin = "5YJ3E1EA7KF000003"
 

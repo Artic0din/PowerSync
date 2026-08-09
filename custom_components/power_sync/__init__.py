@@ -1283,7 +1283,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     """Get EV charging status from configured EV sensors.
 
     Checks generic charger SoC plus Teslemetry/Fleet API sensors
-    (e.g. sensor.tessy_charger_power) and Tesla BLE sensors
+    (e.g. sensor.primary_ev_charger_power) and Tesla BLE sensors
     (e.g. sensor.teslable_charge_power, charge_level).
 
     Returns:
@@ -1425,7 +1425,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                 if val > 0:
                     ev_power_kw = max(ev_power_kw, val)
 
-            # Read battery level (e.g. sensor.tessy_battery_level)
+            # Read battery level (e.g. sensor.primary_ev_battery_level)
             if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
                 try:
                     val = float(state.state)
@@ -15173,7 +15173,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                         "charging_started": state.get("charging_started", False),
                     })
 
-            # Get EV power and SoC — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
+            # Get EV power and SoC — prefer vehicle sensor (e.g. sensor.primary_ev_charger_power),
             # fall back to Wall Connector data from coordinator
             ev_status = _get_ev_vehicle_status(self._hass, entry)
             ev_power_kw = ev_status["ev_power_kw"]
@@ -17386,7 +17386,7 @@ class EVWidgetDataView(HomeAssistantView):
                 # charge_cable (Teslemetry/Fleet) — "on" = plugged in
                 if eid.startswith("binary_sensor.") and eid.endswith("_charge_cable") and "power_sync" not in eid:
                     if state.state == "on":
-                        # Extract vehicle name from entity: binary_sensor.tessy_charge_cable → tessy
+                        # Extract vehicle name from entity: binary_sensor.primary_ev_charge_cable → primary_ev
                         vname = eid.replace("binary_sensor.", "").replace("_charge_cable", "")
                         matched = False
                         for tv in tesla_vehicles:
@@ -17673,6 +17673,10 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_price_level_executor,
                 get_scheduled_charging_executor,
             )
+            from .automations.ev_vehicle_capacity import (
+                resolve_ev_battery_capacity,
+                vehicle_ids_match,
+            )
             from .solar_surplus_config import get_stored_solar_surplus_config
             from .const import (
                 CONF_GENERIC_CHARGER_AMPS_ENTITY,
@@ -17687,6 +17691,14 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             entry_id = self._config_entry.entry_id
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
+            automation_store = entry_data.get("automation_store")
+            stored_data = getattr(automation_store, "_data", {}) or {}
+            vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+            configured_vehicle_ids = tuple(
+                str(item.get("vehicle_id") or "").strip()
+                for item in vehicle_configs
+                if item.get("vehicle_id")
+            )
 
             site = self._site_snapshot()
             live_status = {
@@ -17700,8 +17712,9 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             observed_vehicles = []
             for vehicle in _get_ev_vehicles_status(self._hass, self._config_entry):
+                vehicle_id = vehicle.get("vehicle_id")
                 observed_vehicles.append({
-                    "vehicle_id": vehicle.get("vehicle_id"),
+                    "vehicle_id": vehicle_id,
                     "vehicle_name": vehicle.get("vehicle_name"),
                     "bridge_vehicle_id": vehicle.get("bridge_vehicle_id"),
                     "charger_type": "tesla",
@@ -17709,6 +17722,14 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "ev_soc": vehicle.get("ev_soc"),
                     "is_connected": vehicle.get("is_connected", False),
                     "is_charging": vehicle.get("is_charging", False),
+                    # A configured vehicle remains a real loadpoint even when
+                    # sleeping Fleet telemetry cannot currently prove cable
+                    # state or SOC. This keeps Fleet-only vehicles visible
+                    # without restoring an unconfigured BLE bridge row.
+                    "include_idle": any(
+                        vehicle_ids_match(configured_id, vehicle_id)
+                        for configured_id in configured_vehicle_ids
+                    ),
                 })
 
             zaptec_cached = entry_data.get("zaptec_cached_state")
@@ -17893,15 +17914,8 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_ev_last_commands(self._hass, self._config_entry),
             )
 
-            from .automations.ev_vehicle_capacity import (
-                resolve_ev_battery_capacity,
-                vehicle_ids_match,
-            )
             from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
 
-            automation_store = entry_data.get("automation_store")
-            stored_data = getattr(automation_store, "_data", {}) or {}
-            vehicle_configs = stored_data.get("vehicle_charging_configs", [])
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
                 vehicle_config = next(

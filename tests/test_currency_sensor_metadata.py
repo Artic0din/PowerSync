@@ -1304,7 +1304,7 @@ def test_has_tesla_ev_device_tolerates_extended_identifier_shape():
         device_registry=SimpleNamespace(
             devices={
                 "tesla-device": SimpleNamespace(
-                    identifiers={("teslemetry", "LRWYHCEK3PC907290", "vehicle")},
+                    identifiers={("teslemetry", "5YJTEST0000000001", "vehicle")},
                 ),
                 "ignored-device": SimpleNamespace(
                     identifiers={"not-a-valid-identifier"},
@@ -1330,8 +1330,8 @@ def test_has_solaredge_ev_power_detects_reported_charger_entity():
 def test_has_solaredge_ev_power_ignores_unrelated_charger_power():
     sensor = _sensor_module()
     state = SimpleNamespace(
-        entity_id="sensor.tessy_charger_power",
-        attributes={"friendly_name": "Tessy Charger Power"},
+        entity_id="sensor.primary_ev_charger_power",
+        attributes={"friendly_name": "Primary EV Charger Power"},
     )
     hass = SimpleNamespace(states=SimpleNamespace(async_all=lambda domain=None: [state]))
 

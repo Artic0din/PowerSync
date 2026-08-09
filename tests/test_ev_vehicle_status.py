@@ -222,8 +222,8 @@ def _tesla_hass(states: list[_State]) -> _Hass:
         {
             device_id: SimpleNamespace(
                 id=device_id,
-                name="TESSY",
-                identifiers={("teslemetry", "LRWYHCEK3PC907290")},
+                name="PRIMARY EV",
+                identifiers={("teslemetry", "5YJTEST0000000001")},
             )
         },
     )
@@ -232,18 +232,18 @@ def _tesla_hass(states: list[_State]) -> _Hass:
 def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnected():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
-        _State("sensor.tessy_charger_power_2", "0.4", {"unit_of_measurement": "kW"}),
-        _State("sensor.tessy_charging_2", "disconnected"),
-        _State("binary_sensor.tessy_charge_cable_2", "off"),
-        _State("device_tracker.tessy_location_2", "not_home"),
-        _State("sensor.tessy_battery_level_2", "72.887", {"unit_of_measurement": "%"}),
+        _State("sensor.primary_ev_charger_power_2", "0.4", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_2", "disconnected"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "off"),
+        _State("device_tracker.primary_ev_location_2", "not_home"),
+        _State("sensor.primary_ev_battery_level_2", "72.887", {"unit_of_measurement": "%"}),
     ])
 
     vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
-        "vehicle_id": "LRWYHCEK3PC907290",
-        "vehicle_name": "TESSY",
+        "vehicle_id": "5YJTEST0000000001",
+        "vehicle_name": "PRIMARY EV",
         "ev_power_kw": 0.0,
         "ev_soc": 72,
         "is_connected": False,
@@ -255,11 +255,11 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
-        _State("sensor.tessy_charger_power_2", "6.8", {"unit_of_measurement": "kW"}),
-        _State("sensor.tessy_charging_2", "charging"),
-        _State("binary_sensor.tessy_charge_cable_2", "on"),
-        _State("device_tracker.tessy_location_2", "home"),
-        _State("sensor.tessy_battery_level_2", "73", {"unit_of_measurement": "%"}),
+        _State("sensor.primary_ev_charger_power_2", "6.8", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "home"),
+        _State("sensor.primary_ev_battery_level_2", "73", {"unit_of_measurement": "%"}),
     ])
 
     vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
@@ -272,25 +272,25 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
 
 def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
     power_sync = _power_sync_module()
-    tessy_vin = "LRWYHCEK3PC907290"
-    werty_vin = "5YJ3E1EA7KF000001"
+    primary_vin = "5YJTEST0000000001"
+    secondary_vin = "5YJTEST0000000002"
     states = [
-        _State("sensor.tessy_battery_level", "78"),
-        _State("sensor.tessy_charging_state", "stopped"),
-        _State("binary_sensor.tessy_charge_cable", "on"),
-        _State("sensor.werty_battery_level", "69"),
-        _State("sensor.werty_charging_state", "charging"),
-        _State("binary_sensor.werty_charge_cable", "on"),
-        _State("sensor.werty_charger_power", "2.4", {"unit_of_measurement": "kW"}),
-        _State("binary_sensor.tessy_bridge_status", "on"),
-        _State("sensor.tessy_bridge_charge_level", "78"),
-        _State("sensor.tessy_bridge_charging_state", "stopped"),
-        _State("binary_sensor.tessy_bridge_charge_flap", "on"),
+        _State("sensor.primary_ev_battery_level", "78"),
+        _State("sensor.primary_ev_charging_state", "stopped"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("sensor.secondary_ev_battery_level", "69"),
+        _State("sensor.secondary_ev_charging_state", "charging"),
+        _State("binary_sensor.secondary_ev_charge_cable", "on"),
+        _State("sensor.secondary_ev_charger_power", "2.4", {"unit_of_measurement": "kW"}),
+        _State("binary_sensor.primary_ev_bridge_status", "on"),
+        _State("sensor.primary_ev_bridge_charge_level", "78"),
+        _State("sensor.primary_ev_bridge_charging_state", "stopped"),
+        _State("binary_sensor.primary_ev_bridge_charge_flap", "on"),
     ]
     registry_entities = {
         state.entity_id: _entity(
             state.entity_id,
-            "tessy-device" if "tessy_" in state.entity_id else "werty-device",
+            "primary_ev-device" if "primary_ev_" in state.entity_id else "secondary_ev-device",
         )
         for state in states[:7]
     }
@@ -298,15 +298,15 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
         states,
         registry_entities,
         {
-            "tessy-device": SimpleNamespace(
-                id="tessy-device",
-                name="TESSY",
-                identifiers={("teslemetry", tessy_vin)},
+            "primary_ev-device": SimpleNamespace(
+                id="primary_ev-device",
+                name="PRIMARY EV",
+                identifiers={("teslemetry", primary_vin)},
             ),
-            "werty-device": SimpleNamespace(
-                id="werty-device",
-                name="Werty",
-                identifiers={("tesla_fleet", werty_vin)},
+            "secondary_ev-device": SimpleNamespace(
+                id="secondary_ev-device",
+                name="Secondary EV",
+                identifiers={("tesla_fleet", secondary_vin)},
             ),
         },
     )
@@ -315,14 +315,14 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
         data={},
         options={
             "ev_provider": power_sync.EV_PROVIDER_BOTH,
-            "tesla_ble_entity_prefix": "tessy_bridge",
+            "tesla_ble_entity_prefix": "primary_ev_bridge",
         },
     )
 
     vehicles = power_sync._get_ev_vehicles_status(hass, entry)
 
-    assert [vehicle["vehicle_name"] for vehicle in vehicles] == ["TESSY", "Werty"]
-    assert [vehicle["vehicle_id"] for vehicle in vehicles] == [tessy_vin, werty_vin]
+    assert [vehicle["vehicle_name"] for vehicle in vehicles] == ["PRIMARY EV", "Secondary EV"]
+    assert [vehicle["vehicle_id"] for vehicle in vehicles] == [primary_vin, secondary_vin]
     assert vehicles[0]["ev_soc"] == 78
     assert vehicles[1]["ev_soc"] == 69
     assert vehicles[1]["ev_power_kw"] == 2.4
@@ -330,53 +330,53 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
 
 def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
     power_sync = _power_sync_module()
-    tessy_vin = "LRWYHCEK3PC907290"
-    werty_vin = "5YJ3E1EA7KF000001"
+    primary_vin = "5YJTEST0000000001"
+    secondary_vin = "5YJTEST0000000002"
     hass = _Hass(
         [],
         devices={
-            "fleet-tessy": SimpleNamespace(
-                id="fleet-tessy",
-                name="TESSY",
-                identifiers={("tesla_fleet", tessy_vin)},
+            "fleet-primary_ev": SimpleNamespace(
+                id="fleet-primary_ev",
+                name="PRIMARY EV",
+                identifiers={("tesla_fleet", primary_vin)},
             ),
-            "teslemetry-tessy": SimpleNamespace(
-                id="teslemetry-tessy",
-                name="TESSY",
-                identifiers={("teslemetry", tessy_vin)},
+            "teslemetry-primary_ev": SimpleNamespace(
+                id="teslemetry-primary_ev",
+                name="PRIMARY EV",
+                identifiers={("teslemetry", primary_vin)},
             ),
-            "fleet-werty": SimpleNamespace(
-                id="fleet-werty",
-                name="Werty",
-                identifiers={("tesla_fleet", werty_vin)},
+            "fleet-secondary_ev": SimpleNamespace(
+                id="fleet-secondary_ev",
+                name="Secondary EV",
+                identifiers={("tesla_fleet", secondary_vin)},
             ),
         },
     )
     one_bridge = {
         "ev_provider": power_sync.EV_PROVIDER_BOTH,
-        "tesla_ble_entity_prefix": "tessy_bridge",
+        "tesla_ble_entity_prefix": "primary_ev_bridge",
     }
     two_bridges = {
         **one_bridge,
-        "tesla_ble_entity_prefix": "tessy_bridge,w3rt13_bridge",
+        "tesla_ble_entity_prefix": "primary_ev_bridge,secondary_ev_bridge",
     }
     view = power_sync.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: one_bridge
 
-    assert view._get_vin_from_vehicle_id("1") == tessy_vin
-    assert view._get_vin_from_vehicle_id("2") == werty_vin
-    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, tessy_vin) == "tessy_bridge"
-    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, werty_vin) is None
-    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, werty_vin) == "w3rt13_bridge"
+    assert view._get_vin_from_vehicle_id("1") == primary_vin
+    assert view._get_vin_from_vehicle_id("2") == secondary_vin
+    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, primary_vin) == "primary_ev_bridge"
+    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, secondary_vin) is None
+    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, secondary_vin) == "secondary_ev_bridge"
 
 
 def test_external_tesla_power_uses_coalesced_charging_vehicle():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
-        _State("sensor.tessy_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
-        _State("sensor.tessy_charging_2", "charging"),
-        _State("binary_sensor.tessy_charge_cable_2", "on"),
-        _State("device_tracker.tessy_location_2", "home"),
+        _State("sensor.primary_ev_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "home"),
     ])
 
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 7.0
@@ -398,13 +398,13 @@ def test_external_tesla_power_excludes_other_charger_types():
             "is_charging": True,
         },
         {
-            "vehicle_id": "LRWYHCEK3PC907290",
+            "vehicle_id": "5YJTEST0000000001",
             "brand": "tesla",
             "ev_power_kw": 7.0,
             "is_charging": True,
         },
         {
-            "vehicle_id": "5YJ3E1EA7KF000001",
+            "vehicle_id": "5YJTEST0000000002",
             "brand": "tesla",
             "ev_power_kw": 3.0,
             "is_charging": True,
@@ -423,17 +423,17 @@ def test_external_tesla_power_honors_fleet_provider_with_ble_duplicate():
     power_sync = _power_sync_module()
     power_sync._get_ev_vehicles_status = lambda hass, entry: [
         {
-            "vehicle_id": "LRWYHCEK3PC907290",
+            "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 7.0,
             "is_charging": True,
         },
         {
-            "vehicle_id": "5YJ3E1EA7KF000001",
+            "vehicle_id": "5YJTEST0000000002",
             "ev_power_kw": 0.0,
             "is_charging": False,
         },
         {
-            "vehicle_id": "ble_tessy",
+            "vehicle_id": "ble_primary_ev",
             "ev_power_kw": 7.0,
             "is_charging": True,
         },
@@ -446,17 +446,17 @@ def test_external_tesla_power_coalesces_reversed_fleet_and_ble_in_both_mode():
     power_sync = _power_sync_module()
     power_sync._get_ev_vehicles_status = lambda hass, entry: [
         {
-            "vehicle_id": "LRWYHCEK3PC907290",
+            "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 7.0,
             "is_charging": True,
         },
         {
-            "vehicle_id": "5YJ3E1EA7KF000001",
+            "vehicle_id": "5YJTEST0000000002",
             "ev_power_kw": 3.0,
             "is_charging": True,
         },
         {
-            "vehicle_id": "ble_tessy",
+            "vehicle_id": "ble_primary_ev",
             "ev_power_kw": 3.0,
             "is_charging": True,
         },
@@ -484,12 +484,12 @@ def test_external_tesla_power_uses_conservative_total_for_partial_both_mode():
     power_sync = _power_sync_module()
     power_sync._get_ev_vehicles_status = lambda hass, entry: [
         {
-            "vehicle_id": "LRWYHCEK3PC907290",
+            "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 3.0,
             "is_charging": True,
         },
         {
-            "vehicle_id": "ble_tessy",
+            "vehicle_id": "ble_primary_ev",
             "ev_power_kw": 7.0,
             "is_charging": True,
         },
@@ -534,11 +534,11 @@ def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_stat
 def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesla():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
-        _State("sensor.tessy_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
-        _State("sensor.tessy_charging_2", "charging"),
-        _State("binary_sensor.tessy_charge_cable_2", "on"),
-        _State("device_tracker.tessy_location_2", "home"),
-        _State("sensor.tessy_battery_level_2", "70", {"unit_of_measurement": "%"}),
+        _State("sensor.primary_ev_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "home"),
+        _State("sensor.primary_ev_battery_level_2", "70", {"unit_of_measurement": "%"}),
     ])
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
@@ -554,8 +554,8 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
     vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
-        "vehicle_id": "LRWYHCEK3PC907290",
-        "vehicle_name": "TESSY",
+        "vehicle_id": "5YJTEST0000000001",
+        "vehicle_name": "PRIMARY EV",
         "ev_power_kw": 3.4,
         "ev_soc": 70,
         "is_connected": True,
@@ -567,10 +567,10 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
 def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
     power_sync = _power_sync_module()
     hass = _tesla_hass([
-        _State("sensor.tessy_charger_power", "0.4", {"unit_of_measurement": "kW"}),
-        _State("sensor.tessy_charging", "stopped"),
-        _State("binary_sensor.tessy_charge_cable", "on"),
-        _State("device_tracker.tessy_location", "home"),
+        _State("sensor.primary_ev_charger_power", "0.4", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging", "stopped"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("device_tracker.primary_ev_location", "home"),
     ])
 
     vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
@@ -602,7 +602,7 @@ def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
 
 def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
     power_sync = _power_sync_module()
-    vin = "LRWYHCEK3PC907290"
+    vin = "5YJTEST0000000001"
     hass = _Hass([
         _State(f"sensor.{vin}_charging_state", "Stopped"),
         _State(f"switch.{vin}_charge", "off"),
@@ -738,7 +738,7 @@ def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
 
 def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallback():
     power_sync = _power_sync_module()
-    vin = "LRWYHCEK3PC907290"
+    vin = "5YJTEST0000000001"
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},

@@ -1097,8 +1097,8 @@ class AutomationEngine:
         # or stopped bridge before the vehicle that is actually charging; using
         # entity-registry order would make a global "charging starts" trigger
         # miss that vehicle and lose the BLE id needed by the stop action.
-        # Tesla Fleet uses: sensor.tessy_charging (no _state suffix)
-        # Some versions use: sensor.tessy_charging_state
+        # Tesla Fleet uses: sensor.primary_ev_charging (no _state suffix)
+        # Some versions use: sensor.primary_ev_charging_state
         best_charging_rank = (-1, -1)
         for state in all_states:
             entity_id = state.entity_id
@@ -1168,8 +1168,8 @@ class AutomationEngine:
                 continue
 
             # Charger binary sensor (plugged in)
-            # Tesla Fleet: binary_sensor.tessy_charger
-            # Teslemetry: binary_sensor.tessy_charge_cable
+            # Tesla Fleet: binary_sensor.primary_ev_charger
+            # Teslemetry: binary_sensor.primary_ev_charge_cable
             # Tesla BLE: binary_sensor.tesla_ble_charge_flap
             if entity_id in (f"binary_sensor.{vehicle_prefix}_charger",
                             f"binary_sensor.{vehicle_prefix}_charge_cable",
@@ -1178,8 +1178,8 @@ class AutomationEngine:
                 _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
 
             # Battery level sensor
-            # Tesla Fleet: sensor.tessy_battery
-            # Teslemetry: sensor.tessy_battery_level
+            # Tesla Fleet: sensor.primary_ev_battery
+            # Teslemetry: sensor.primary_ev_battery_level
             # Tesla BLE: sensor.tesla_ble_charge_level
             elif entity_id in (f"sensor.{vehicle_prefix}_battery",
                               f"sensor.{vehicle_prefix}_battery_level",
@@ -1193,7 +1193,7 @@ class AutomationEngine:
                     pass
 
             # Device tracker for location
-            # Tesla Fleet/Teslemetry: device_tracker.tessy_location
+            # Tesla Fleet/Teslemetry: device_tracker.primary_ev_location
             # Tesla BLE: no location tracking (BLE is local only)
             elif entity_id == f"device_tracker.{vehicle_prefix}_location":
                 ev_state["location"] = state_value.lower()
