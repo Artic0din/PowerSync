@@ -41576,6 +41576,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("EV runtime persist on unload failed: %s", err)
 
+    # Invalidate this entry's dynamic EV callbacks after persistence and
+    # before the hass.data mirror is removed.  The cleanup is command-neutral:
+    # it cancels local timers only and never releases another/newer owner.
+    try:
+        from .automations.actions import cleanup_dynamic_ev_entry
+
+        cleanup_dynamic_ev_entry(hass, entry.entry_id)
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV runtime cleanup on unload failed: %s", err)
+
     # Save Flow Power TWAP history on unload
     if twap_tracker := entry_data.get("flow_power_twap_tracker"):
         try:

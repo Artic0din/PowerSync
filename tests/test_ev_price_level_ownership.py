@@ -2014,7 +2014,7 @@ def test_solar_surplus_config_marks_sigenergy_evdc_native_handoff():
     assert config["solar_control_strategy"] == "native_handoff"
 
 
-def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions):
+def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions, monkeypatch):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -2022,6 +2022,14 @@ def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions):
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {"preserve_home_battery": True}
+
+    monkeypatch.setattr(
+        ev_planner,
+        "discover_all_tesla_vehicles",
+        AsyncMock(return_value=[{"vin": VIN, "source": "fleet_api"}]),
+    )
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
 
     executor = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
     result = asyncio.run(executor._start_charging("Scheduled window"))
@@ -2038,13 +2046,21 @@ def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions):
     assert preserve_state["active"] is False
 
 
-def test_scheduled_no_grid_import_passes_dynamic_start_param(fake_actions):
+def test_scheduled_no_grid_import_passes_dynamic_start_param(fake_actions, monkeypatch):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {"no_grid_import": True}
+
+    monkeypatch.setattr(
+        ev_planner,
+        "discover_all_tesla_vehicles",
+        AsyncMock(return_value=[{"vin": VIN, "source": "fleet_api"}]),
+    )
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
 
     executor = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
     result = asyncio.run(executor._start_charging("Scheduled window"))
@@ -3174,6 +3190,7 @@ def test_auto_schedule_stops_untracked_tesla_while_waiting(monkeypatch, fake_act
     _hass, _entry, params = fake_actions._action_stop_ev_charging_dynamic.await_args.args
     assert params["vehicle_id"] == VIN
     assert params["vehicle_vin"] == VIN
+
     assert params["stop_untracked"] is True
     assert params["stop_reason"] == stop_reason
     assert state.last_decision == "stopped"
@@ -3182,6 +3199,56 @@ def test_auto_schedule_stops_untracked_tesla_while_waiting(monkeypatch, fake_act
         executor.config_entry,
         vehicle_vin=VIN,
     )
+
+
+def test_auto_schedule_stop_uses_targeted_smart_schedule_owner_guard(monkeypatch):
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        charger_type="tesla",
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+    state.curtailment_override_active = True
+    guarded_stop = AsyncMock(return_value=True)
+    restore = AsyncMock()
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", guarded_stop)
+    monkeypatch.setattr(executor, "_restore_curtailment", restore)
+
+    assert asyncio.run(executor._stop_charging(VIN, settings, state)) is True
+    guarded_stop.assert_awaited_once()
+    assert guarded_stop.await_args.kwargs["expected_owner_mode"] == "smart_schedule"
+    assert guarded_stop.await_args.kwargs["vehicle_vin"] == VIN
+    assert guarded_stop.await_args.kwargs["stop_untracked"] is False
+    assert state.is_charging is False
+    restore.assert_awaited_once_with(state)
+
+
+def test_auto_schedule_failed_stop_preserves_local_state(monkeypatch):
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=VIN, charger_type="tesla")
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+    state.curtailment_override_active = True
+    monkeypatch.setattr(
+        ev_planner,
+        "_stop_coordinated_charging",
+        AsyncMock(return_value=False),
+    )
+    restore = AsyncMock()
+    monkeypatch.setattr(executor, "_restore_curtailment", restore)
+
+    assert asyncio.run(executor._stop_charging(VIN, settings, state)) is False
+    assert state.is_charging is True
+    restore.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -4795,6 +4862,36 @@ def _mixed_ble_config_entry():
             "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
         },
     )
+
+
+def test_price_level_pairs_all_fleet_ble_aliases_and_preserves_partial_mapping(
+    fake_actions,
+):
+    fleet_a = "5YJTEST0000000001"
+    fleet_b = "5YJTEST0000000002"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_gateway,driveway_gateway",
+        },
+    )
+    vehicles = [
+        {"vin": fleet_a, "source": "fleet_api"},
+        {"vin": fleet_b, "source": "fleet_api"},
+        {"vin": "ble_garage_gateway", "source": "tesla_ble"},
+        {"vin": "ble_driveway_gateway", "source": "tesla_ble"},
+    ]
+
+    assert ev_planner._paired_ble_aliases_for_fleet_vins(
+        _FakeHass(), entry, vehicles
+    ) == {"ble_garage_gateway", "ble_driveway_gateway"}
+    assert ev_planner._paired_ble_aliases_for_fleet_vins(
+        _FakeHass(),
+        entry,
+        vehicles[:2] + [vehicles[2]],
+    ) == {"ble_garage_gateway", "ble_driveway_gateway"}
 
 
 def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(

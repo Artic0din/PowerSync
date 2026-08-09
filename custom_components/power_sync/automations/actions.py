@@ -3819,6 +3819,30 @@ async def _action_start_ev_charging(
     """
     charger_type = params.get("charger_type", "tesla")
 
+    if charger_type == "tesla" and not params.get("vehicle_vin") and params.get(
+        "vehicle_id"
+    ) in (None, DEFAULT_VEHICLE_ID):
+        # The skip-ownership/manual command seam can call this low-level
+        # action directly.  Resolve an anonymous Tesla before any hardware
+        # command so it cannot fall back to the first configured device.
+        from .ev_charging_planner import _resolve_unspecified_tesla_start_vin
+
+        resolved_vehicle_id = await _resolve_unspecified_tesla_start_vin(
+            hass,
+            config_entry,
+            None,
+        )
+        if resolved_vehicle_id is None:
+            _LOGGER.info(
+                "Tesla EV start blocked because the default loadpoint is not uniquely resolved"
+            )
+            return False
+        params = {
+            **params,
+            "vehicle_id": resolved_vehicle_id,
+            "vehicle_vin": resolved_vehicle_id,
+        }
+
     # OCPP charger: use HA switch entity
     if charger_type == "ocpp":
         ocpp_charger_id = params.get("ocpp_charger_id")
@@ -4009,8 +4033,20 @@ async def _action_start_ev_charging(
         # Calculate when the window ends
         end_datetime = _get_window_end_datetime(time_window_end, time_window_start, timezone)
         if end_datetime:
+            scheduled_stop_token = object()
+
             async def stop_charging_at_window_end(now) -> None:
                 """Stop charging when time window ends."""
+                current_stop = _ev_scheduled_stop.get(entry_id)
+                if (
+                    not isinstance(current_stop, dict)
+                    or current_stop.get("token") is not scheduled_stop_token
+                ):
+                    _LOGGER.debug(
+                        "Skipping stale EV window-end callback for %s",
+                        entry_id,
+                    )
+                    return
                 _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
                 stop_success = await _action_stop_ev_charging(hass, config_entry, params)
                 if stop_success and not params.get("skip_ownership"):
@@ -4023,7 +4059,11 @@ async def _action_start_ev_charging(
                 # Send notification that charging stopped
                 await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 # Clean up the scheduled stop entry
-                if entry_id in _ev_scheduled_stop:
+                current_stop = _ev_scheduled_stop.get(entry_id)
+                if (
+                    isinstance(current_stop, dict)
+                    and current_stop.get("token") is scheduled_stop_token
+                ):
                     del _ev_scheduled_stop[entry_id]
 
             cancel_func = async_track_point_in_time(
@@ -4035,6 +4075,7 @@ async def _action_start_ev_charging(
             _ev_scheduled_stop[entry_id] = {
                 "cancel": cancel_func,
                 "end_time": end_datetime,
+                "token": scheduled_stop_token,
             }
             _LOGGER.info(f"⚡ EV charging started, will stop at {end_datetime.strftime('%H:%M')}")
         else:
@@ -4498,6 +4539,58 @@ _ev_scheduled_stop: Dict[str, Any] = {}
 # Default vehicle ID for single-vehicle setups
 DEFAULT_VEHICLE_ID = "_default"
 
+
+def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
+    """Cancel and remove dynamic EV runtime state for one config entry.
+
+    This is deliberately command-neutral: unload must not send a charger
+    command, release ownership belonging to another/newer runtime, or touch
+    another config entry.  Persistence is performed by the caller before this
+    helper runs; this helper only invalidates local callbacks and mirrors.
+    """
+    vehicles = _dynamic_ev_state.get(entry_id, {})
+    for state in list(vehicles.values()):
+        if not isinstance(state, dict):
+            continue
+        state["active"] = False
+        for timer_key in ("cancel_timer", "quick_stop_timer"):
+            cancel_timer = state.get(timer_key)
+            if callable(cancel_timer):
+                try:
+                    cancel_timer()
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Dynamic EV: failed to cancel %s for %s: %s",
+                        timer_key,
+                        entry_id,
+                        err,
+                    )
+            state[timer_key] = None
+
+    scheduled_stop = _ev_scheduled_stop.pop(entry_id, None)
+    if isinstance(scheduled_stop, dict):
+        cancel_timer = scheduled_stop.get("cancel")
+        if callable(cancel_timer):
+            try:
+                cancel_timer()
+            except Exception as err:
+                _LOGGER.debug(
+                    "Dynamic EV: failed to cancel scheduled stop for %s: %s",
+                    entry_id,
+                    err,
+                )
+
+    _dynamic_ev_state.pop(entry_id, None)
+    _dynamic_ev_update_locks.pop(entry_id, None)
+
+    entry_data = (
+        hass.data.get(DOMAIN, {}).get(entry_id)
+        if isinstance(getattr(hass, "data", None), dict)
+        else None
+    )
+    if isinstance(entry_data, dict):
+        entry_data.pop("dynamic_ev_state", None)
+
 # Internal charger type for HA-native charger integrations that expose their
 # own service domains rather than the generic switch/number model.
 HA_NATIVE_CHARGER_TYPES = {
@@ -4830,6 +4923,30 @@ async def _start_manual_ev_charging(
     )
 
     loadpoint_id = _ev_action_loadpoint_id(params)
+    if params.get("charger_type", "tesla") == "tesla" and loadpoint_id == DEFAULT_VEHICLE_ID:
+        # Resolve an anonymous Tesla manual start before ownership bookkeeping
+        # or the physical command path.  Ambiguous/default starts fail closed
+        # and never create a default lease/session.
+        from .ev_charging_planner import _resolve_unspecified_tesla_start_vin
+
+        resolved_vehicle_id = await _resolve_unspecified_tesla_start_vin(
+            hass,
+            config_entry,
+            None,
+        )
+        if resolved_vehicle_id is None:
+            _LOGGER.info(
+                "Manual EV start blocked because the Tesla default loadpoint "
+                "is not uniquely resolved"
+            )
+            return False
+        params = {
+            **params,
+            "vehicle_id": resolved_vehicle_id,
+            "vehicle_vin": resolved_vehicle_id,
+        }
+        loadpoint_id = resolved_vehicle_id
+
     async with _start_dynamic_lock:
         allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
             hass,
@@ -7582,6 +7699,11 @@ async def _dynamic_ev_update(
     if not state or not state.get("active"):
         return
 
+    def _session_is_current() -> bool:
+        """Return whether this callback still owns its entry/vehicle state."""
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        return current_state is state and bool(current_state and current_state.get("active"))
+
     params = state.get("params", {})
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
@@ -7601,6 +7723,11 @@ async def _dynamic_ev_update(
     ):
         return
 
+    # Unload can invalidate this callback while the asynchronous unplug probe
+    # is in flight.  Never dispatch an outside-window stop for removed state.
+    if not _session_is_current():
+        return
+
     # Check time window if stop_outside_window is enabled
     stop_outside_window = params.get("stop_outside_window", False)
     if stop_outside_window:
@@ -7611,7 +7738,22 @@ async def _dynamic_ev_update(
         if time_window_start and time_window_end:
             if not _is_inside_time_window(time_window_start, time_window_end, timezone):
                 _LOGGER.info("⏰ Dynamic EV: Outside time window, stopping charging")
-                await _action_stop_ev_charging_dynamic(hass, config_entry, {"stop_charging": True})
+                if not _session_is_current():
+                    return
+                target_vehicle_id = (
+                    params.get("vehicle_vin")
+                    if vehicle_id == DEFAULT_VEHICLE_ID and params.get("vehicle_vin")
+                    else vehicle_id
+                )
+                await _action_stop_ev_charging_dynamic(
+                    hass,
+                    config_entry,
+                    {
+                        "vehicle_id": target_vehicle_id,
+                        "vehicle_vin": target_vehicle_id,
+                        "stop_charging": True,
+                    },
+                )
                 # Send notification that charging stopped
                 await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 return
@@ -7706,6 +7848,8 @@ async def _dynamic_ev_update(
         fixed_amps = max(min_amps, min(max_amps, fixed_charge_amps))
         state["target_amps"] = fixed_amps
         if abs(fixed_amps - current_amps) >= 1:
+            if not _session_is_current():
+                return
             _LOGGER.info(
                 f"⚡ Dynamic EV: Holding fixed charge rate {fixed_amps}A "
                 f"(current={current_amps}A)"
@@ -7719,6 +7863,13 @@ async def _dynamic_ev_update(
 
     # Get live status
     live_status = await _get_tesla_live_status(hass, config_entry)
+    if not _session_still_owns_vehicle():
+        _LOGGER.debug(
+            "Dynamic EV: Session changed while reading live status for %s; "
+            "skipping stale rate update",
+            vehicle_id,
+        )
+        return
     if not live_status:
         _LOGGER.debug("Dynamic EV: Could not get live status, keeping current amps")
         return
@@ -8031,6 +8182,30 @@ async def _action_start_ev_charging_dynamic_locked(
 
     entry_id = config_entry.entry_id
     vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+
+    # Anonymous Tesla starts must resolve to exactly one physical loadpoint
+    # before any ownership claim, timer, or dynamic-session state is created.
+    # Keep the planner import local to avoid the actions ↔ planner import cycle.
+    if params.get("charger_type", "tesla") == "tesla" and vehicle_id == DEFAULT_VEHICLE_ID:
+        from .ev_charging_planner import _resolve_unspecified_tesla_start_vin
+
+        resolved_vehicle_id = await _resolve_unspecified_tesla_start_vin(
+            hass,
+            config_entry,
+            None,
+        )
+        if resolved_vehicle_id is None:
+            _LOGGER.info(
+                "Dynamic EV: anonymous Tesla start blocked because the loadpoint "
+                "is not uniquely resolved"
+            )
+            return False
+        params = {
+            **params,
+            "vehicle_id": resolved_vehicle_id,
+            "vehicle_vin": resolved_vehicle_id,
+        }
+        vehicle_id = resolved_vehicle_id
 
     # Determine mode
     dynamic_mode = params.get("dynamic_mode", "battery_target")

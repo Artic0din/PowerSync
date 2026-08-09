@@ -39,6 +39,7 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -928,3 +929,277 @@ def test_clear_under_default_does_not_evict_unrelated_vin_lease():
 
     _lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, VIN_A)
     assert lease is not None
+
+
+def test_dynamic_entry_cleanup_cancels_only_target_timers_and_is_command_neutral(
+    monkeypatch,
+):
+    hass = _Hass()
+    hass.data["power_sync"]["entry-2"] = {"dynamic_ev_state": {}}
+    entry_id = "entry-1"
+    other_id = "entry-2"
+    cancelled: list[str] = []
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_update_locks.clear()
+    actions._ev_scheduled_stop.clear()
+    actions._dynamic_ev_state[entry_id] = {
+        VIN_A: {
+            "active": True,
+            "cancel_timer": lambda: cancelled.append("a-cancel"),
+            "quick_stop_timer": lambda: cancelled.append("a-quick"),
+        },
+    }
+    actions._dynamic_ev_state[other_id] = {
+        VIN_B: {
+            "active": True,
+            "cancel_timer": lambda: cancelled.append("b-cancel"),
+            "quick_stop_timer": lambda: cancelled.append("b-quick"),
+        },
+    }
+    actions._ev_scheduled_stop[entry_id] = {
+        "cancel": lambda: cancelled.append("a-scheduled"),
+    }
+    actions._ev_scheduled_stop[other_id] = {
+        "cancel": lambda: cancelled.append("b-scheduled"),
+    }
+    command_calls: list[str] = []
+    monkeypatch.setattr(
+        actions,
+        "_action_stop_ev_charging",
+        lambda *args, **kwargs: command_calls.append("stop"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_action_start_ev_charging",
+        lambda *args, **kwargs: command_calls.append("start"),
+        raising=False,
+    )
+
+    actions.cleanup_dynamic_ev_entry(hass, entry_id)
+
+    assert sorted(cancelled) == ["a-cancel", "a-quick", "a-scheduled"]
+    assert command_calls == []
+    assert entry_id not in actions._dynamic_ev_state
+    assert other_id in actions._dynamic_ev_state
+    assert entry_id not in actions._ev_scheduled_stop
+    assert other_id in actions._ev_scheduled_stop
+    assert hass.data["power_sync"][entry_id].get("dynamic_ev_state") is None
+    assert other_id in hass.data["power_sync"]
+
+    # Idempotent: a second unload cleanup neither raises nor touches the
+    # surviving entry's timers.
+    actions.cleanup_dynamic_ev_entry(hass, entry_id)
+    assert sorted(cancelled) == ["a-cancel", "a-quick", "a-scheduled"]
+
+
+def test_dynamic_outside_window_stop_is_scoped_to_current_vehicle(monkeypatch):
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    monkeypatch.setattr(actions, "_is_inside_time_window", lambda *args, **kwargs: False)
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        VIN_A: {
+            "active": True,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": VIN_A,
+                "stop_outside_window": True,
+                "time_window_start": "00:00",
+                "time_window_end": "01:00",
+            },
+        },
+        VIN_B: {
+            "active": True,
+            "params": {"dynamic_mode": "battery_target", "charger_type": "tesla"},
+        },
+    }
+
+    asyncio.run(actions._dynamic_ev_update(_Hass(), _Entry(), "entry-1", VIN_A))
+
+    stop.assert_awaited_once()
+    stop_params = stop.await_args.args[2]
+    assert stop_params["vehicle_id"] == VIN_A
+    assert stop_params["vehicle_vin"] == VIN_A
+
+
+def test_dynamic_update_becomes_noop_when_unload_invalidates_in_flight_callback(
+    monkeypatch,
+):
+    hass = _Hass()
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    monkeypatch.setattr(actions, "_is_inside_time_window", lambda *args, **kwargs: False)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        VIN_A: {
+            "active": True,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "stop_outside_window": True,
+                "time_window_start": "00:00",
+                "time_window_end": "01:00",
+            },
+            "cancel_timer": lambda: None,
+        }
+    }
+
+    async def invalidate_then_continue(*_args, **_kwargs):
+        actions.cleanup_dynamic_ev_entry(hass, "entry-1")
+        return False
+
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        invalidate_then_continue,
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", VIN_A))
+    stop.assert_not_awaited()
+
+
+def test_dynamic_rate_update_becomes_noop_when_unload_invalidates_live_read(
+    monkeypatch,
+):
+    hass = _Hass()
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        VIN_A: {
+            "active": True,
+            "current_amps": 20,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": VIN_A,
+                "no_grid_import": True,
+                "max_charge_amps": 32,
+                "min_charge_amps": 5,
+                "max_inverter_kw": 10,
+            },
+            "cancel_timer": lambda: None,
+        }
+    }
+
+    async def invalidate_during_live_read(*_args, **_kwargs):
+        actions.cleanup_dynamic_ev_entry(hass, "entry-1")
+        return {
+            "battery_power": 5_000,
+            "grid_power": 2_000,
+            "solar_power": 0,
+            "battery_soc": 50,
+        }
+
+    monkeypatch.setattr(
+        actions,
+        "_get_tesla_live_status",
+        invalidate_during_live_read,
+    )
+
+    asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", VIN_A))
+    set_amps.assert_not_awaited()
+
+
+def test_window_end_callback_becomes_noop_after_entry_cleanup(monkeypatch):
+    hass = _Hass([_State("switch.car_charge", "off")])
+    callbacks = []
+    cancelled = []
+    stop = AsyncMock(return_value=True)
+
+    def capture_timer(_hass, callback, _when):
+        callbacks.append(callback)
+        return lambda: cancelled.append(True)
+
+    monkeypatch.setattr(actions, "async_track_point_in_time", capture_timer)
+    monkeypatch.setattr(
+        actions,
+        "_get_window_end_datetime",
+        lambda *_args, **_kwargs: datetime(2026, 8, 9, 12, 0),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_tesla_ev_entity",
+        AsyncMock(return_value="switch.car_charge"),
+    )
+    monkeypatch.setattr(actions, "_wake_tesla_ev", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", stop)
+    actions._ev_scheduled_stop.clear()
+
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "tesla",
+                "vehicle_id": VIN_A,
+                "vehicle_vin": VIN_A,
+                "stop_outside_window": True,
+            },
+            context={
+                "time_window_start": "11:00",
+                "time_window_end": "12:00",
+                "timezone": "UTC",
+            },
+        )
+    ) is True
+    assert len(callbacks) == 1
+
+    actions.cleanup_dynamic_ev_entry(hass, "entry-1")
+    assert cancelled == [True]
+    asyncio.run(callbacks[0](None))
+
+    stop.assert_not_awaited()
+
+
+def test_anonymous_tesla_dynamic_start_fails_closed_before_state(monkeypatch):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    ev_planner._resolve_unspecified_tesla_start_vin = unresolved
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass(),
+            _Entry(),
+            {"charger_type": "tesla", "vehicle_id": actions.DEFAULT_VEHICLE_ID},
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+
+
+def test_anonymous_tesla_manual_start_fails_closed_before_claim(monkeypatch):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def unresolved(*_args, **_kwargs):
+        return None
+
+    ev_planner._resolve_unspecified_tesla_start_vin = unresolved
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._start_manual_ev_charging(
+            hass,
+            entry,
+            {"charger_type": "tesla", "vehicle_id": actions.DEFAULT_VEHICLE_ID},
+        )
+    )
+
+    assert result is False
+    assert ev_ownership.get_ev_ownerships(hass, entry) == {}
+    assert actions._dynamic_ev_state == {}

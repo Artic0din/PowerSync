@@ -1168,8 +1168,8 @@ async def is_ev_actively_charging(
     than PowerSync's bookkeeping.
     """
     from ..const import (
-        CONF_TESLA_BLE_ENTITY_PREFIX,
-        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        CONF_EV_PROVIDER,
+        EV_PROVIDER_BOTH,
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
     import re as _re
@@ -1238,12 +1238,31 @@ async def is_ev_actively_charging(
                     return True
 
     # Method 2: Tesla BLE — switch.{prefix}_charger state
-    config = dict(config_entry.options) if config_entry else {}
+    config = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
     if vehicle_vin and vehicle_vin.startswith("ble_"):
+        # An explicit BLE loadpoint must probe that exact bridge only.
         ble_prefixes = [vehicle_vin[4:]]
+    elif vehicle_vin:
+        # A real Fleet VIN can use a BLE fallback only when the configured
+        # provider is BOTH, and then only through the positional VIN/prefix
+        # association.  Fleet-only (or an unknown VIN) must not probe stale
+        # BLE switches belonging to another vehicle.
+        ble_prefixes = (
+            _configured_ble_prefixes(config_entry, vehicle_vin, hass=hass)
+            if (
+                config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+                and len(vehicle_vin) == 17
+                and vehicle_vin.isalnum()
+            )
+            else []
+        )
     else:
-        raw_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
+        # Preserve anonymous backward compatibility: any configured BLE
+        # vehicle may satisfy the aggregate probe.
+        ble_prefixes = _configured_ble_prefixes(config_entry, None, hass=hass)
     for prefix in ble_prefixes:
         s = hass.states.get(f"switch.{prefix}_charger")
         if s and s.state == "on":
@@ -6513,6 +6532,30 @@ class AutoScheduleExecutor:
                 )
                 return False
 
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        charger_type = _effective_auto_schedule_charger_type(settings, opts)
+        # Resolve an anonymous Tesla loadpoint before any curtailment override,
+        # dynamic-session state, or ownership claim can be created.  A default
+        # start with multiple (or no) plugged-in Teslas is fail-closed.
+        vehicle_vin = (
+            self._resolve_vehicle_vin(vehicle_id)
+            if vehicle_id != "_default"
+            else None
+        )
+        if charger_type == "tesla" and vehicle_vin is None:
+            vehicle_vin = await _resolve_unspecified_tesla_start_vin(
+                self.hass,
+                self.config_entry,
+                None,
+            )
+            if vehicle_vin is None:
+                _LOGGER.info(
+                    "Auto-schedule: Start blocked for %s because Tesla default "
+                    "loadpoint is not uniquely resolved",
+                    vehicle_id,
+                )
+                return False
+
         # Determine mode based on source
         control_battery_target = (
             source.startswith("grid")
@@ -6538,12 +6581,6 @@ class AutoScheduleExecutor:
             await self._disable_curtailment_for_ev(state)
         else:
             dynamic_mode = "battery_target"
-
-        # Resolve vehicle_id to actual VIN or BLE identifier
-        # Sequential IDs (e.g. "1", "3") are mapped to BLE identifiers or VINs
-        vehicle_vin = self._resolve_vehicle_vin(vehicle_id) if vehicle_id != "_default" else None
-        opts = {**self.config_entry.data, **self.config_entry.options}
-        charger_type = _effective_auto_schedule_charger_type(settings, opts)
 
         params = {
             "vehicle_id": vehicle_id,
@@ -6749,28 +6786,54 @@ class AutoScheduleExecutor:
         vehicle_id: str,
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
-    ) -> None:
+    ) -> bool:
         """Stop charging for the vehicle."""
-        from .actions import _action_stop_ev_charging_dynamic
+        from ..const import DOMAIN
 
-        # Resolve vehicle_id to actual VIN or BLE identifier
-        vehicle_vin = self._resolve_vehicle_vin(vehicle_id) if vehicle_id != "_default" else None
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        vehicle_vin = (
+            self._resolve_vehicle_vin(vehicle_id)
+            if vehicle_id != "_default"
+            else None
+        )
+        if vehicle_vin is None and _effective_auto_schedule_charger_type(settings, opts) == "tesla":
+            vehicle_vin = await _resolve_unspecified_tesla_start_vin(
+                self.hass,
+                self.config_entry,
+                None,
+            )
+            if vehicle_vin is None:
+                _LOGGER.info(
+                    "Auto-schedule: Stop skipped for %s because Tesla default "
+                    "loadpoint is not uniquely resolved",
+                    vehicle_id,
+                )
+                return False
 
-        params = {"vehicle_id": vehicle_vin or vehicle_id, "vehicle_vin": vehicle_vin}
-
+        loadpoint_id = vehicle_vin or vehicle_id
         try:
-            await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
+            stopped = await _stop_coordinated_charging(
+                self.hass,
+                DOMAIN,
+                self.config_entry,
+                expected_owner_mode="smart_schedule",
+                reason="Auto-schedule window ended",
+                vehicle_vin=loadpoint_id,
+                command="stop_smart_schedule",
+                stop_untracked=False,
+                log_prefix="Auto-schedule",
+            )
+            if not stopped:
+                return False
             state.is_charging = False
             state.started_at = None
             state.current_window = None
             _LOGGER.info(f"Auto-schedule: Stopped charging for {vehicle_id}")
-            # Note: Notifications are sent by _action_stop_ev_charging_dynamic
-
-            # Always restore curtailment when stopping (if it was overridden)
             await self._restore_curtailment(state)
-
+            return True
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error stopping charging for {vehicle_id}: {e}")
+            return False
 
 
 
@@ -6839,6 +6902,58 @@ def _get_active_dynamic_ev_mode(hass: "HomeAssistant", config_entry: "ConfigEntr
         return str(params.get("owner_mode") or params.get("dynamic_mode") or "dynamic")
 
     return None
+
+
+def _paired_ble_aliases_for_fleet_vins(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicles: list[dict[str, Any]],
+) -> set[str]:
+    """Return every BLE discovery alias paired to a discovered Fleet VIN.
+
+    The command path owns the positional Fleet/BLE association in
+    ``_resolve_ble_prefix_for_vehicle``.  Reusing it here keeps price-level
+    duplicate suppression aligned with actual command routing, including
+    partial (fewer BLE prefixes than Fleet vehicles) configurations.
+    """
+    fleet_vins = [
+        str(vehicle.get("vin") or "").strip()
+        for vehicle in vehicles
+        if str(vehicle.get("vin") or "").strip()
+        and not str(vehicle.get("vin") or "").strip().startswith("ble_")
+    ]
+    if not fleet_vins:
+        return set()
+    try:
+        try:
+            from .actions import _resolve_ble_prefix_for_vehicle
+        except (ImportError, AttributeError):
+            _resolve_ble_prefix_for_vehicle = None
+
+        aliases: set[str] = set()
+        configured_prefixes = _configured_ble_prefixes(
+            config_entry,
+            None,
+            hass=hass,
+        )
+        for index, fleet_vin in enumerate(fleet_vins):
+            prefix = (
+                _resolve_ble_prefix_for_vehicle(hass, config_entry, fleet_vin)
+                if _resolve_ble_prefix_for_vehicle is not None
+                else ""
+            )
+            # Lightweight callers/tests may provide discovered Fleet rows
+            # without populating HA's device registry.  Preserve the same
+            # positional contract as discovery in that case; a partial BLE
+            # list naturally leaves later Fleet VINs without an alias.
+            if not prefix and index < len(configured_prefixes):
+                prefix = configured_prefixes[index]
+            if prefix:
+                aliases.add(f"ble_{prefix}")
+        return aliases
+    except Exception as err:
+        _LOGGER.debug("Tesla Fleet/BLE alias pairing unavailable: %s", err)
+        return set()
 
 
 def _can_stop_owned_loadpoint(
@@ -7520,7 +7635,14 @@ async def _resolve_unspecified_tesla_start_vin(
     config_entry: "ConfigEntry",
     vehicle_vin: Optional[str],
 ) -> Optional[str]:
-    """Resolve a default Tesla start to the single home plugged-in vehicle."""
+    """Resolve a default Tesla start to one physical home loadpoint.
+
+    Discovery exposes a Fleet row and a BLE row for the same car in BOTH
+    mode.  Coalesce those positional aliases before counting candidates so a
+    single Fleet vehicle does not become spuriously ambiguous.  Unpaired BLE
+    rows remain independent loadpoints and therefore keep the fail-closed
+    behaviour when more than one physical vehicle is plugged in.
+    """
     if vehicle_vin:
         return vehicle_vin
 
@@ -7530,19 +7652,61 @@ async def _resolve_unspecified_tesla_start_vin(
         _LOGGER.debug("Tesla start VIN discovery unavailable: %s", err)
         return None
 
-    candidates: list[str] = []
+    fleet_vins: list[str] = []
+    for vehicle in vehicles or []:
+        candidate = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
+        if candidate and not candidate.startswith("ble_"):
+            fleet_vins.append(candidate)
+    paired_ble_to_fleet: dict[str, str] = {}
+    if fleet_vins:
+        # Keep pairing in one place with the command path.  The helper uses
+        # the same deduplicated Fleet-device ordering as discovery.
+        try:
+            from .actions import _resolve_ble_prefix_for_vehicle
+
+            configured_prefixes = _configured_ble_prefixes(
+                config_entry,
+                None,
+                hass=hass,
+            )
+            for index, fleet_vin in enumerate(fleet_vins):
+                prefix = _resolve_ble_prefix_for_vehicle(
+                    hass,
+                    config_entry,
+                    fleet_vin,
+                )
+                if not prefix and index < len(configured_prefixes):
+                    prefix = configured_prefixes[index]
+                if prefix:
+                    paired_ble_to_fleet[f"ble_{prefix}"] = fleet_vin
+        except Exception as err:
+            _LOGGER.debug("Tesla Fleet/BLE pairing unavailable: %s", err)
+
+    # Keep rows grouped by physical loadpoint before querying plug state.  If
+    # either a Fleet row or its paired BLE alias reports plugged-in, that
+    # physical loadpoint is a candidate exactly once.
+    grouped_rows: dict[str, list[str]] = {}
     for vehicle in vehicles or []:
         vin = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
         if not vin:
             continue
-        try:
-            location = await get_ev_location(hass, config_entry, vehicle_vin=vin)
-            if location not in ("home", "unknown"):
-                continue
-            if await is_ev_plugged_in(hass, config_entry, vehicle_vin=vin):
-                candidates.append(vin)
-        except Exception as err:
-            _LOGGER.debug("Tesla start VIN check failed for %s: %s", vin[:8], err)
+        physical_id = paired_ble_to_fleet.get(vin, vin)
+        grouped_rows.setdefault(physical_id, []).append(vin)
+
+    candidates: list[str] = []
+    for physical_id, row_vins in grouped_rows.items():
+        for vin in row_vins:
+            try:
+                location = await get_ev_location(hass, config_entry, vehicle_vin=vin)
+                if location not in ("home", "unknown"):
+                    continue
+                if await is_ev_plugged_in(hass, config_entry, vehicle_vin=vin):
+                    candidates.append(physical_id)
+                    break
+            except Exception as err:
+                _LOGGER.debug("Tesla start VIN check failed for %s: %s", vin[:8], err)
+
+    candidates = list(dict.fromkeys(candidates))
 
     if len(candidates) == 1:
         _LOGGER.debug(
@@ -7579,6 +7743,12 @@ async def _start_coordinated_charging(
             config_entry,
             vehicle_vin,
         )
+        if resolved_vehicle_vin is None:
+            _LOGGER.info(
+                "%s start blocked: Tesla default loadpoint is not uniquely resolved",
+                log_prefix,
+            )
+            return False
     params = _build_dynamic_charging_params(
         hass,
         domain,
@@ -8759,10 +8929,15 @@ class PriceLevelChargingExecutor:
         has_vehicle_specific_tesla = any(
             not vehicle["vin"].startswith("ble_") for vehicle in vehicles
         )
-        shared_ble_alias_vin: Optional[str] = None
-        if has_vehicle_specific_tesla:
-            first_ble_prefix = _configured_ble_prefixes(self.config_entry)[0]
-            shared_ble_alias_vin = f"ble_{first_ble_prefix}"
+        paired_ble_aliases = (
+            _paired_ble_aliases_for_fleet_vins(
+                self.hass,
+                self.config_entry,
+                vehicles,
+            )
+            if has_vehicle_specific_tesla
+            else set()
+        )
 
         for vehicle in vehicles:
             vin = vehicle["vin"]
@@ -8773,7 +8948,7 @@ class PriceLevelChargingExecutor:
             # identifier for the same charger, not an independent vehicle.
             # Suppress it regardless of whether BLE SOC is available; allowing
             # a known-SOC alias to act would reintroduce duplicate starts/stops.
-            if vin == shared_ble_alias_vin:
+            if vin in paired_ble_aliases:
                 reason = (
                     "Tesla BLE control path shares the configured charger with "
                     "another Tesla vehicle; using the vehicle-specific decision"
