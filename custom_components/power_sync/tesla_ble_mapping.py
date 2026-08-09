@@ -34,6 +34,53 @@ def configured_ble_prefixes(config: Mapping[str, Any]) -> list[str]:
     return prefixes or [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
 
 
+def resolve_ble_prefixes(hass: Any, config: Mapping[str, Any]) -> list[str]:
+    """Resolve configured BLE prefixes with an unambiguous discovery fallback.
+
+    Explicit VIN mappings always keep their configured prefixes. Automatic
+    discovery is only safe for a single, unmapped prefix with exactly one
+    matching BLE charging-state entity.
+    """
+    from .tesla_ble import get_tesla_ble_status_state
+
+    prefixes = configured_ble_prefixes(config)
+    states = getattr(hass, "states", None)
+    if states is None:
+        return prefixes
+    try:
+        has_explicit_mapping = bool(
+            parse_tesla_ble_vehicle_mapping(
+                config.get(CONF_TESLA_BLE_VEHICLE_MAPPING)
+            )
+        )
+    except TeslaBleMappingError:
+        has_explicit_mapping = True
+
+    resolved: list[str] = []
+    for prefix in prefixes:
+        if get_tesla_ble_status_state(hass, prefix) is not None:
+            resolved.append(prefix)
+            continue
+
+        if len(prefixes) != 1 or has_explicit_mapping:
+            resolved.append(prefix)
+            continue
+
+        detected_prefixes: list[str] = []
+        for state in states.async_all():
+            match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+            if not match or "ble" not in match.group(1).lower():
+                continue
+            detected = match.group(1)
+            if detected not in detected_prefixes:
+                detected_prefixes.append(detected)
+
+        resolved.append(
+            detected_prefixes[0] if len(detected_prefixes) == 1 else prefix
+        )
+    return resolved
+
+
 def parse_tesla_ble_vehicle_mapping(raw_mapping: Any) -> dict[str, str]:
     """Parse comma/newline-separated ``VIN=prefix`` associations."""
     if raw_mapping is None or not str(raw_mapping).strip():
@@ -72,12 +119,18 @@ def vehicle_ble_prefix(
     config: Mapping[str, Any],
     vehicle_vin: str | None,
     fleet_vins: Sequence[str] = (),
+    resolved_prefixes: Sequence[str] | None = None,
 ) -> str | None:
     """Resolve one vehicle's BLE prefix without relying on discovery order."""
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         return vehicle_vin[4:]
 
-    prefixes = configured_ble_prefixes(config)
+    configured_prefixes = configured_ble_prefixes(config)
+    prefixes = (
+        list(dict.fromkeys(str(prefix) for prefix in resolved_prefixes if prefix))
+        if resolved_prefixes is not None
+        else configured_prefixes
+    )
     if not (
         vehicle_vin
         and len(vehicle_vin) == 17
@@ -95,7 +148,7 @@ def vehicle_ble_prefix(
 
     mapped_prefix = explicit_mapping.get(vehicle_vin.upper())
     if mapped_prefix is not None:
-        return mapped_prefix if mapped_prefix in prefixes else None
+        return mapped_prefix if mapped_prefix in configured_prefixes else None
 
     unique_fleet_vins = list(dict.fromkeys(vin.upper() for vin in fleet_vins if vin))
     if len(unique_fleet_vins) == 1 and len(prefixes) == 1:
@@ -106,11 +159,17 @@ def vehicle_ble_prefix(
 def ble_prefix_vehicle_pairs(
     config: Mapping[str, Any],
     fleet_vins: Sequence[str],
+    resolved_prefixes: Sequence[str] | None = None,
 ) -> dict[str, str]:
     """Return BLE-prefix-to-VIN pairs that are explicit or unambiguous."""
     pairs: dict[str, str] = {}
     for vin in dict.fromkeys(str(candidate) for candidate in fleet_vins if candidate):
-        prefix = vehicle_ble_prefix(config, vin, fleet_vins)
+        prefix = vehicle_ble_prefix(
+            config,
+            vin,
+            fleet_vins,
+            resolved_prefixes,
+        )
         if prefix:
             pairs[prefix] = vin
     return pairs

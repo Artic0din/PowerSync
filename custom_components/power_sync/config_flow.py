@@ -14020,6 +14020,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
         current_ev_provider = self._get_option(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        current_tesla_ble_vehicle_mapping = (
+            user_input.get(CONF_TESLA_BLE_VEHICLE_MAPPING, "")
+            if user_input is not None
+            else self._get_option(CONF_TESLA_BLE_VEHICLE_MAPPING, "")
+        )
         current_generic_capacity = self._get_option(
             CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None
         )
@@ -14066,7 +14071,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_TESLA_BLE_VEHICLE_MAPPING,
-                default=self._get_option(CONF_TESLA_BLE_VEHICLE_MAPPING, ""),
+                default=current_tesla_ble_vehicle_mapping,
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             # OCPP settings
             vol.Optional(

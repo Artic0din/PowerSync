@@ -329,6 +329,48 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
     assert vehicles[1]["ev_power_kw"] == 2.4
 
 
+def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    states = [
+        _State("sensor.primary_ev_battery_level", "75"),
+        _State("sensor.primary_ev_charging_state", "stopped"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("sensor.garage_ble_charging_state", "Stopped"),
+        _State("binary_sensor.garage_ble_ble_status", "on"),
+        _State("sensor.garage_ble_charge_level", "81"),
+        _State("binary_sensor.garage_ble_charge_flap", "on"),
+    ]
+    hass = _Hass(
+        states,
+        {
+            state.entity_id: _entity(state.entity_id, "primary_ev-device")
+            for state in states[:3]
+        },
+        {
+            "primary_ev-device": SimpleNamespace(
+                id="primary_ev-device",
+                name="PRIMARY EV",
+                identifiers={("tesla_fleet", vin)},
+            )
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": "tesla_ble",
+        },
+    )
+    config = {**entry.data, **entry.options}
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert [vehicle["vehicle_id"] for vehicle in vehicles] == [vin]
+    assert power_sync._ble_prefix_for_vehicle(hass, config, vin) == "garage_ble"
+
+
 def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
     power_sync = _power_sync_module()
     primary_vin = "5YJTEST0000000001"

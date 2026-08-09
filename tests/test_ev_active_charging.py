@@ -239,6 +239,38 @@ def test_discovery_hides_only_explicitly_paired_ble_duplicate():
     assert [vehicle["vin"] for vehicle in vehicles] == [vin, "ble_bridge_alpha"]
 
 
+def test_discovery_empty_prefix_uses_default_bridge():
+    _install_registry_stubs()
+    hass = _Hass([_State("binary_sensor.tesla_ble_status", "on")])
+
+    vehicles = asyncio.run(
+        ev_planner.discover_all_tesla_vehicles(hass, _both_entry(""))
+    )
+
+    assert [vehicle["vin"] for vehicle in vehicles] == ["ble_tesla_ble"]
+
+
+def test_discovery_pairs_unambiguous_autodetected_bridge_to_single_fleet_vin():
+    _install_registry_stubs()
+    vin = "5YJTEST0000000001"
+    hass = _Hass(
+        [
+            _State("sensor.garage_ble_charging_state", "Stopped"),
+            _State("binary_sensor.garage_ble_ble_status", "on"),
+        ],
+        devices=_fleet_devices(vin),
+    )
+
+    vehicles = asyncio.run(
+        ev_planner.discover_all_tesla_vehicles(
+            hass,
+            _both_entry("tesla_ble"),
+        )
+    )
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [vin]
+
+
 def test_default_tesla_start_coalesces_paired_fleet_and_ble(monkeypatch):
     vin = "5YJTEST0000000001"
     ble_vin = "ble_ble_a"

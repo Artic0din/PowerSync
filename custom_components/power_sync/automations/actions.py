@@ -62,7 +62,7 @@ from ..solar_surplus_config import (
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
 )
-from ..tesla_ble_mapping import vehicle_ble_prefix
+from ..tesla_ble_mapping import resolve_ble_prefixes, vehicle_ble_prefix
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1222,6 +1222,7 @@ def _resolve_ble_prefix_for_vehicle(
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
     }
+    resolved_prefixes = resolve_ble_prefixes(hass, config)
     explicitly_mapped_prefix = vehicle_ble_prefix(config, vehicle_vin)
     if explicitly_mapped_prefix:
         return explicitly_mapped_prefix
@@ -1250,7 +1251,12 @@ def _resolve_ble_prefix_for_vehicle(
                         seen_vins.add(candidate_key)
                         fleet_vins.append(candidate)
                     break
-            return vehicle_ble_prefix(config, vehicle_vin, fleet_vins) or ""
+            return vehicle_ble_prefix(
+                config,
+                vehicle_vin,
+                fleet_vins,
+                resolved_prefixes,
+            ) or ""
         except Exception as err:
             _LOGGER.debug(
                 "Could not associate Fleet VIN %s with a BLE prefix: %s",
@@ -1260,7 +1266,11 @@ def _resolve_ble_prefix_for_vehicle(
             return ""
 
     # BLE-only and anonymous paths retain the first-prefix fallback.
-    return vehicle_ble_prefix(config, vehicle_vin) or DEFAULT_TESLA_BLE_ENTITY_PREFIX
+    return vehicle_ble_prefix(
+        config,
+        vehicle_vin,
+        resolved_prefixes=resolved_prefixes,
+    ) or DEFAULT_TESLA_BLE_ENTITY_PREFIX
 
 
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:

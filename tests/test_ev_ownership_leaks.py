@@ -519,6 +519,26 @@ def test_unmapped_multi_vehicle_setup_never_guesses_a_ble_bridge():
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == ""
 
 
+def test_single_vehicle_command_uses_unambiguous_autodetected_ble_bridge(monkeypatch):
+    monkeypatch.setattr(actions, "TESLA_EV_INTEGRATIONS", {"tesla_fleet"})
+    monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
+    hass = _Hass(
+        [
+            _State("sensor.garage_ble_charging_state", "Stopped"),
+            _State("binary_sensor.garage_ble_ble_status", "on"),
+        ]
+    )
+    hass.device_registry.devices = {
+        "fleet-a": SimpleNamespace(identifiers={("tesla_fleet", VIN_A)})
+    }
+    entry = _both_provider_entry("tesla_ble")
+
+    assert (
+        actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A)
+        == "garage_ble"
+    )
+
+
 def test_explicit_ble_mapping_is_independent_of_registry_and_prefix_order():
     hass = _two_fleet_vehicle_hass()
     entry = _both_provider_entry(

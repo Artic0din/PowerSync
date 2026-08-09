@@ -41,6 +41,7 @@ from ..solar_surplus_config import (
 )
 from ..tesla_ble_mapping import (
     configured_ble_prefixes,
+    resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
 from .ev_vehicle_capacity import (
@@ -333,7 +334,11 @@ def _configured_ble_prefixes(
         return [vehicle_vin[4:]]
 
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
-    prefixes = configured_ble_prefixes(opts)
+    prefixes = (
+        resolve_ble_prefixes(hass, opts)
+        if hass is not None
+        else configured_ble_prefixes(opts)
+    )
 
     if (
         hass is not None
@@ -361,7 +366,12 @@ def _configured_ble_prefixes(
                     seen_vins.add(candidate_key)
                     fleet_vins.append(candidate)
                 break
-        prefix = vehicle_ble_prefix(opts, vehicle_vin, fleet_vins)
+        prefix = vehicle_ble_prefix(
+            opts,
+            vehicle_vin,
+            fleet_vins,
+            prefixes,
+        )
         return [prefix] if prefix else []
 
     return prefixes
@@ -871,14 +881,20 @@ async def discover_all_tesla_vehicles(
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
     ev_provider = opts.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-        raw_prefix = opts.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
+        ble_prefixes = resolve_ble_prefixes(hass, opts)
         fleet_vins = [vehicle["vin"] for vehicle in vehicles]
         paired_prefixes = (
             {
                 prefix
                 for fleet_vin in fleet_vins
-                if (prefix := vehicle_ble_prefix(opts, fleet_vin, fleet_vins))
+                if (
+                    prefix := vehicle_ble_prefix(
+                        opts,
+                        fleet_vin,
+                        fleet_vins,
+                        ble_prefixes,
+                    )
+                )
             }
             if ev_provider == EV_PROVIDER_BOTH
             else set()
@@ -4091,12 +4107,19 @@ class AutoScheduleExecutor:
 
         # BLE vehicles follow fleet vehicles
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-            ble_prefixes = configured_ble_prefixes(config)
+            ble_prefixes = resolve_ble_prefixes(self.hass, config)
             paired_prefixes = (
                 {
                     prefix
                     for fleet_vin in fleet_vins
-                    if (prefix := vehicle_ble_prefix(config, fleet_vin, fleet_vins))
+                    if (
+                        prefix := vehicle_ble_prefix(
+                            config,
+                            fleet_vin,
+                            fleet_vins,
+                            ble_prefixes,
+                        )
+                    )
                 }
                 if ev_provider == EV_PROVIDER_BOTH
                 else set()
@@ -6940,10 +6963,22 @@ def _paired_ble_aliases_for_fleet_vins(
     if not fleet_vins:
         return set()
     opts = {**config_entry.data, **config_entry.options}
+    resolved_prefixes = _configured_ble_prefixes(
+        config_entry,
+        None,
+        hass=hass,
+    )
     return {
         f"ble_{prefix}"
         for fleet_vin in fleet_vins
-        if (prefix := vehicle_ble_prefix(opts, fleet_vin, fleet_vins))
+        if (
+            prefix := vehicle_ble_prefix(
+                opts,
+                fleet_vin,
+                fleet_vins,
+                resolved_prefixes,
+            )
+        )
     }
 
 
@@ -7649,10 +7684,22 @@ async def _resolve_unspecified_tesla_start_vin(
         if candidate and not candidate.startswith("ble_"):
             fleet_vins.append(candidate)
     opts = {**config_entry.data, **config_entry.options}
+    resolved_prefixes = _configured_ble_prefixes(
+        config_entry,
+        None,
+        hass=hass,
+    )
     paired_ble_to_fleet = {
         f"ble_{prefix}": fleet_vin
         for fleet_vin in fleet_vins
-        if (prefix := vehicle_ble_prefix(opts, fleet_vin, fleet_vins))
+        if (
+            prefix := vehicle_ble_prefix(
+                opts,
+                fleet_vin,
+                fleet_vins,
+                resolved_prefixes,
+            )
+        )
     }
 
     # Keep rows grouped by physical loadpoint before querying plug state.  If

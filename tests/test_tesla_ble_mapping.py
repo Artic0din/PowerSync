@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from power_sync.tesla_ble_mapping import (  # noqa: E402
     TeslaBleMappingError,
     ble_prefix_vehicle_pairs,
     parse_tesla_ble_vehicle_mapping,
+    resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
 
@@ -31,6 +33,19 @@ def _both_config(prefixes: str, mapping: str = "") -> dict[str, str]:
         "tesla_ble_entity_prefix": prefixes,
         "tesla_ble_vehicle_mapping": mapping,
     }
+
+
+def _hass(*entity_ids: str) -> SimpleNamespace:
+    states = {
+        entity_id: SimpleNamespace(entity_id=entity_id, state="on")
+        for entity_id in entity_ids
+    }
+    return SimpleNamespace(
+        states=SimpleNamespace(
+            get=states.get,
+            async_all=lambda: list(states.values()),
+        )
+    )
 
 
 def test_mapping_accepts_comma_and_newline_separators():
@@ -88,3 +103,33 @@ def test_mapping_to_an_unconfigured_bridge_fails_closed():
     config = _both_config("bridge_alpha", f"{VIN_A}=bridge_beta")
 
     assert vehicle_ble_prefix(config, VIN_A, [VIN_A]) is None
+
+
+def test_single_vehicle_inference_uses_unambiguous_resolved_prefix():
+    config = _both_config("tesla_ble")
+    resolved = resolve_ble_prefixes(
+        _hass("sensor.garage_ble_charging_state"),
+        config,
+    )
+
+    assert resolved == ["garage_ble"]
+    assert vehicle_ble_prefix(config, VIN_A, [VIN_A], resolved) == "garage_ble"
+    assert ble_prefix_vehicle_pairs(config, [VIN_A], resolved) == {
+        "garage_ble": VIN_A,
+    }
+
+
+def test_empty_prefix_falls_back_to_default_bridge():
+    assert resolve_ble_prefixes(_hass(), _both_config("")) == ["tesla_ble"]
+
+
+def test_ambiguous_autodetection_keeps_configured_prefix():
+    config = _both_config("tesla_ble")
+
+    assert resolve_ble_prefixes(
+        _hass(
+            "sensor.garage_ble_charging_state",
+            "sensor.driveway_ble_charging_state",
+        ),
+        config,
+    ) == ["tesla_ble"]
