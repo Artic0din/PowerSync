@@ -5664,17 +5664,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 battery_export_allowed,
                 priority_export_slots,
             )
+            post_solve_export_floor = self._merge_export_protection_floors(
+                reference_reserve_floor,
+                result.future_export_protection_floor_slots,
+                len(schedule.actions or []),
+            )
             if self._should_spread_export_schedule():
                 schedule = self._spread_export_schedule(
                     schedule,
                     battery_export_allowed,
-                    export_reserve_floor=reference_reserve_floor,
+                    export_reserve_floor=post_solve_export_floor,
                     export_prices=spread_export_prices,
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
                 export_prices,
-                authoritative_reserve_floor=reference_reserve_floor,
+                authoritative_reserve_floor=post_solve_export_floor,
             )
             self._last_update_time = dt_util.now()
 
@@ -5747,6 +5752,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
                 )
                 schedule = result.schedule
+                post_solve_export_floor = self._merge_export_protection_floors(
+                    applied_reserve_floor,
+                    result.future_export_protection_floor_slots,
+                    len(schedule.actions or []),
+                )
                 if self._should_spread_import_schedule():
                     schedule = self._spread_import_schedule(
                         schedule,
@@ -5760,13 +5770,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule = self._spread_export_schedule(
                         schedule,
                         battery_export_allowed,
-                        export_reserve_floor=applied_reserve_floor,
+                        export_reserve_floor=post_solve_export_floor,
                         export_prices=spread_export_prices,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
                     export_prices,
-                    authoritative_reserve_floor=applied_reserve_floor,
+                    authoritative_reserve_floor=post_solve_export_floor,
                 )
                 if self._should_apply_offgrid_overlay():
                     schedule = self._apply_offgrid_overlay(
@@ -6530,6 +6540,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and getattr(action, "action", None) in EXPORT_ACTIONS
             ):
                 setattr(action, "_optimizer_bridged_export_gap", True)
+
+    @staticmethod
+    def _merge_export_protection_floors(
+        base_floor: float | list[float] | None,
+        protection_floors: list[float] | None,
+        length: int,
+    ) -> float | list[float] | None:
+        """Merge solve-local export protection with the authoritative floor."""
+        if not protection_floors:
+            return base_floor
+        if isinstance(base_floor, list):
+            base = [
+                max(0.0, min(1.0, float(value or 0.0)))
+                for value in base_floor[:length]
+            ]
+            if len(base) < length:
+                base.extend([0.0] * (length - len(base)))
+        else:
+            scalar = max(0.0, min(1.0, float(base_floor or 0.0)))
+            base = [scalar] * length
+        return [
+            max(
+                base[idx],
+                max(0.0, min(1.0, float(protection_floors[idx] or 0.0)))
+                if idx < len(protection_floors)
+                else 0.0,
+            )
+            for idx in range(length)
+        ]
 
     def _bridge_short_export_gaps(
         self,

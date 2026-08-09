@@ -270,6 +270,7 @@ class OptimizerResult:
     modeled_backup_reserve: float | None = None
     modeled_export_reserve_floor: float | None = None
     modeled_export_reserve_floor_slots: list[float] | None = None
+    future_export_protection_floor_slots: list[float] | None = None
     free_import_command_slots: list[bool] = field(default_factory=list)
 
 
@@ -1320,6 +1321,70 @@ class BatteryOptimizer:
 
         return future_values
 
+    def _future_self_consumption_reservations(
+        self,
+        n: int,
+        import_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        dt_hours: float | list[float],
+        *,
+        block_battery_charge: list[bool] | None = None,
+        mode_slots: list[str | None] | None = None,
+    ) -> list[float]:
+        """Return stored kWh needed for later, higher-value household load.
+
+        The old guard reduced this question to a boolean and therefore blocked
+        every generic export whenever even a small amount of later load had a
+        higher import price.  This energy model reserves only the forecast kWh
+        that cannot be replenished beforehand by forecast solar. Grid charging
+        is deliberately not credited here: generic export may spend existing
+        stored surplus, but this guard must not create a charge-then-export loop.
+        """
+        if n <= 0:
+            return []
+
+        durations = (
+            [max(0.0, float(dt_hours))] * n
+            if isinstance(dt_hours, (int, float))
+            else [max(0.0, float(value)) for value in dt_hours[:n]]
+        )
+        if len(durations) < n:
+            durations.extend([self.dt_hours] * (n - len(durations)))
+        block_battery_charge = block_battery_charge or [False] * n
+        mode_slots = mode_slots or [None] * n
+
+        reservations = [0.0] * n
+        eff = max(self.efficiency, 1e-9)
+        cap = max(0.0, self.capacity_kwh)
+        for t in range(n):
+            required_stored_kwh = 0.0
+            threshold_price = import_prices[t] + 0.001
+            for idx in range(n - 1, t, -1):
+                duration = durations[idx]
+                net_load_kw = max(0.0, load[idx] - solar[idx])
+                if import_prices[idx] > threshold_price and net_load_kw > 0.05:
+                    required_stored_kwh += net_load_kw * duration / eff
+
+                if not block_battery_charge[idx] and mode_slots[idx] not in (
+                    "export",
+                    "idle",
+                ):
+                    solar_surplus_kw = max(0.0, solar[idx] - load[idx])
+                    solar_charge_kw = min(
+                        solar_surplus_kw,
+                        self._charge_limit_kw(load[idx], solar[idx], False),
+                    )
+                    required_stored_kwh -= solar_charge_kw * eff * duration
+
+                required_stored_kwh = max(
+                    0.0,
+                    min(cap, required_stored_kwh),
+                )
+            reservations[t] = required_stored_kwh
+
+        return reservations
+
     @staticmethod
     def _effective_export_acquisition_costs(
         n: int,
@@ -2292,6 +2357,14 @@ class BatteryOptimizer:
             acquisition_cost_kwh,
             p_grid_charge_allowed,
         )
+        cost_neutral_days = sorted(
+            {
+                day
+                for day in p_cost_neutral_days
+                if day is not None and day in cost_neutral_caps_by_day
+            }
+        )
+        cost_neutral_active = bool(cost_neutral_days)
 
         def _priority_export_slot(t: int) -> bool:
             export_value = p_export[t] + p_export_bonus[t]
@@ -2353,6 +2426,17 @@ class BatteryOptimizer:
 
         future_self_consumption_values = self._future_self_consumption_values(
             p_n, p_import, p_solar, p_load
+        )
+        future_self_consumption_reservations = (
+            self._future_self_consumption_reservations(
+                p_n,
+                p_import,
+                p_solar,
+                p_load,
+                p_dt,
+                block_battery_charge=p_block_charge,
+                mode_slots=p_mode,
+            )
         )
         grid_charge_soc_cap = max(
             0.0,
@@ -2469,6 +2553,47 @@ class BatteryOptimizer:
                         min(period_export_floor, reachable_cap),
                     )
 
+        # Protect only the forecast energy needed for later, higher-priced
+        # household load.  The binary constraints below activate this floor
+        # only when a generic battery export actually occurs, so an infeasible
+        # protection target can suppress export without forcing grid charging
+        # or blocking ordinary self-consumption.
+        future_reservation_periods = [
+            bool(
+                _profitable_export_slot(t)
+                and future_self_consumption_reservations[t] > 1e-6
+                and not _priority_export_slot(t)
+                and not _cost_neutral_export_slot(t)
+                and not p_block_charge[t]
+            )
+            for t in range(p_n)
+        ]
+        future_protected_energy_kwh = [0.0] * p_n
+        for t, active in enumerate(future_reservation_periods):
+            if not active:
+                continue
+            period_export_floor = max(
+                optimizer_reserve,
+                self._configured_export_reserve_floor_for_range(
+                    periods[t].start,
+                    periods[t].end,
+                ),
+            )
+            future_protected_energy_kwh[t] = min(
+                cap,
+                period_export_floor * cap
+                + future_self_consumption_reservations[t],
+            )
+        future_reservation_active = any(future_reservation_periods)
+        future_export_budget_kwh = max(
+            0.0,
+            (
+                soc_0 * cap
+                - max(future_protected_energy_kwh, default=0.0)
+            )
+            * eff,
+        )
+
         # Boundary-energy state model: power variables per period, battery energy
         # variables at period boundaries. This removes the dense cumulative SOC
         # rows that made the 48h/5min model expensive to build and solve.
@@ -2519,20 +2644,17 @@ class BatteryOptimizer:
         grid_charge_cap_binary_offset = next_offset
         if grid_charge_cap_active:
             next_offset += p_n
-        cost_neutral_days = sorted(
-            {
-                day
-                for day in p_cost_neutral_days
-                if day is not None and day in cost_neutral_caps_by_day
-            }
-        )
-        cost_neutral_active = bool(cost_neutral_days)
+        future_reservation_binary_offset = next_offset
+        if future_reservation_active:
+            next_offset += p_n
         economic_adjustment_active = (
             self.physical_round_trip_efficiency
             > self.economic_round_trip_efficiency + 1e-9
         )
         battery_to_grid_active = (
-            cost_neutral_active or economic_adjustment_active
+            cost_neutral_active
+            or economic_adjustment_active
+            or future_reservation_active
         )
         battery_to_grid_offset = next_offset
         if battery_to_grid_active:
@@ -2576,6 +2698,9 @@ class BatteryOptimizer:
 
         def grid_charge_cap_binary_var(t: int) -> int:
             return grid_charge_cap_binary_offset + t
+
+        def future_reservation_binary_var(t: int) -> int:
+            return future_reservation_binary_offset + t
 
         def battery_to_grid_var(t: int) -> int:
             return battery_to_grid_offset + t
@@ -2865,10 +2990,14 @@ class BatteryOptimizer:
             A_ub_rows += 5 * p_n
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
+        if future_reservation_active:
+            A_ub_rows += 2 * sum(future_reservation_periods)
         if battery_to_grid_active:
             # Four source-split rows per period identify the physical
             # intersection of battery discharge and grid export.
             A_ub_rows += 4 * p_n
+        if future_reservation_active:
+            A_ub_rows += 1
         if cost_neutral_active:
             A_ub_rows += len(cost_neutral_days)
         if (
@@ -2971,6 +3100,31 @@ class BatteryOptimizer:
             A_ub[len(b_ub), discharge_var(t)] = -1.0
             b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
+            if future_reservation_periods[t]:
+                # y=0 permits solar-surplus export only.  y=1 permits battery
+                # export but requires the period's total discharge to leave
+                # enough stored energy for the protected future household load.
+                solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                export_headroom_kw = max(
+                    0.0,
+                    self._grid_export_limit_kw_for_range(
+                        periods[t].start,
+                        periods[t].end,
+                        default_kw=100.0,
+                    )
+                    - solar_surplus_kw,
+                )
+                A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                A_ub[len(b_ub), future_reservation_binary_var(t)] = (
+                    -export_headroom_kw
+                )
+                b_ub.append(solar_surplus_kw)
+
+                A_ub[len(b_ub), discharge_var(t)] = p_dt[t] / eff
+                A_ub[len(b_ub), energy_var(t)] = -1.0
+                A_ub[len(b_ub), future_reservation_binary_var(t)] = cap
+                b_ub.append(cap - future_protected_energy_kwh[t])
+
             if battery_to_grid_active:
                 # Pin battery_to_grid to the physical intersection of battery
                 # discharge and grid export. Residual discharge may serve home
@@ -3004,6 +3158,16 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), grid_export_var(t)] = 1.0
                 A_ub[len(b_ub), grid_direction_var(t)] = slot_export_limit_kw
                 b_ub.append(slot_export_limit_kw)
+
+        if future_reservation_active:
+            # Across all protected generic-export periods, spend no more than
+            # the battery output that was already stored above the strongest
+            # protection floor when this solve began. This prevents an earlier
+            # grid-charge slot from replenishing an unlimited export loop.
+            for t, active in enumerate(future_reservation_periods):
+                if active:
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = p_dt[t]
+            b_ub.append(future_export_budget_kwh)
 
         if cost_neutral_active:
             for day in cost_neutral_days:
@@ -3240,6 +3404,46 @@ class BatteryOptimizer:
                 )
             return threshold
 
+        acquisition_blocked_periods = sum(
+            1
+            for t in range(p_n)
+            if p_allow_export[t]
+            and not _cost_neutral_export_slot(t)
+            and acquisition_cost_kwh > 0
+            and (p_export[t] + p_export_bonus[t])
+            < _export_acquisition_threshold(t)
+        )
+        active_export_constraint_reasons = []
+        if future_reservation_active:
+            active_export_constraint_reasons.append(
+                "future_self_consumption_energy_reservation"
+            )
+        if acquisition_blocked_periods:
+            active_export_constraint_reasons.append("acquisition_cost")
+        battery_export_constraints = {
+            "active_reasons": active_export_constraint_reasons,
+            "future_reservation_active": future_reservation_active,
+            "future_reservation_periods": sum(future_reservation_periods),
+            "future_reserved_kwh": round(
+                max(
+                    (
+                        future_self_consumption_reservations[t]
+                        for t in range(p_n)
+                        if future_reservation_periods[t]
+                    ),
+                    default=0.0,
+                ),
+                6,
+            ),
+            "future_protected_energy_kwh": round(
+                max(future_protected_energy_kwh, default=0.0),
+                6,
+            ),
+            "future_export_budget_kwh": round(future_export_budget_kwh, 6),
+            "future_planned_export_kwh": 0.0,
+            "acquisition_blocked_periods": acquisition_blocked_periods,
+        }
+
         bounds = []
         for t in range(p_n):
             bounds.append((0, max_grid_kw))  # grid_import
@@ -3253,17 +3457,7 @@ class BatteryOptimizer:
                 solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
                 bounds.append((0, min(max_grid_export_kw, solar_surplus_kw)))
                 continue
-            export_profitable_slot = _profitable_export_slot(t)
-            priority_export_slot = _priority_export_slot(t)
-            future_self_consumption_value = future_self_consumption_values[t]
-            suppress_generic_battery_export = (
-                export_profitable_slot
-                and future_self_consumption_value
-                and not priority_export_slot
-                and not _cost_neutral_export_slot(t)
-                and not p_block_charge[t]
-            )
-            if p_allow_export[t] and not suppress_generic_battery_export:
+            if p_allow_export[t]:
                 export_limit_kw = max_grid_export_kw
                 if self.max_battery_export_kw is not None:
                     solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
@@ -3336,19 +3530,8 @@ class BatteryOptimizer:
                 )
                 bounds.append((lower, upper))
                 continue
-            export_profitable_slot = _profitable_export_slot(t)
-            priority_export_slot = _priority_export_slot(t)
-            future_self_consumption_value = future_self_consumption_values[t]
-            suppress_generic_battery_export = (
-                export_profitable_slot
-                and future_self_consumption_value
-                and not priority_export_slot
-                and not _cost_neutral_export_slot(t)
-                and not p_block_charge[t]
-            )
             restrict_to_self_consumption = (
-                suppress_generic_battery_export
-                or not p_allow_export[t]
+                not p_allow_export[t]
                 or (
                     not _cost_neutral_export_slot(t)
                     and acquisition_cost_kwh > 0
@@ -3418,6 +3601,14 @@ class BatteryOptimizer:
             for _t in range(p_n):
                 bounds.append((0.0, 1.0))
 
+        if future_reservation_active:
+            for t in range(p_n):
+                bounds.append(
+                    (0.0, 1.0)
+                    if future_reservation_periods[t]
+                    else (0.0, 0.0)
+                )
+
         if battery_to_grid_active:
             for t in range(p_n):
                 bounds.append((
@@ -3475,6 +3666,13 @@ class BatteryOptimizer:
                     grid_charge_cap_binary_offset + p_n,
                 )
             )
+        if future_reservation_active:
+            integer_indices.extend(
+                range(
+                    future_reservation_binary_offset,
+                    future_reservation_binary_offset + p_n,
+                )
+            )
         if integer_indices:
             result = _solve_lp_highs(
                 *solve_args,
@@ -3501,6 +3699,7 @@ class BatteryOptimizer:
             "time_limit_s": LP_SOLVER_TIME_LIMIT_SECONDS,
             "status": getattr(result, "status", None),
             "message": getattr(result, "message", ""),
+            "battery_export_constraints": battery_export_constraints,
         }
 
         if not result.success:
@@ -3702,6 +3901,25 @@ class BatteryOptimizer:
             solar,
             load,
         )
+        if future_reservation_active:
+            protected_base_slots = {
+                idx
+                for period_idx, period in enumerate(periods)
+                if future_reservation_periods[period_idx]
+                for idx in range(period.start, period.end)
+            }
+            lp_stats["battery_export_constraints"][
+                "future_planned_export_kwh"
+            ] = round(
+                sum(
+                    max(0.0, schedule.battery_export_w[idx])
+                    / 1000.0
+                    * self.dt_hours
+                    for idx in protected_base_slots
+                    if idx < len(schedule.battery_export_w)
+                ),
+                6,
+            )
         if cost_neutral_plan is not None:
             lp_stats["cost_neutral_earnings_caps_by_day"] = {
                 day: round(value, 6)
@@ -3732,6 +3950,14 @@ class BatteryOptimizer:
                     6,
                 )
 
+        future_export_protection_floor_slots = [0.0] * n
+        for period_idx, period in enumerate(periods):
+            if not future_reservation_periods[period_idx]:
+                continue
+            protection_floor = future_protected_energy_kwh[period_idx] / cap
+            for idx in range(period.start, period.end):
+                future_export_protection_floor_slots[idx] = protection_floor
+
         return OptimizerResult(
             schedule=schedule,
             objective_value=result.fun,
@@ -3742,6 +3968,11 @@ class BatteryOptimizer:
             battery_to_grid_w=list(schedule.battery_export_w),
             lp_stats=lp_stats,
             reserve_recommendation=reserve_recommendation,
+            future_export_protection_floor_slots=(
+                future_export_protection_floor_slots
+                if future_reservation_active
+                else None
+            ),
             free_import_command_slots=free_import_command_slots,
         )
 
@@ -4253,6 +4484,49 @@ class BatteryOptimizer:
         optimizer_reserve = self.backup_reserve
         below_optimizer_reserve = soc_0 < optimizer_reserve
         self_consumption_floor = self._natural_self_consumption_floor(soc_0)
+        future_self_consumption_reservations = (
+            self._future_self_consumption_reservations(
+                n,
+                import_prices,
+                solar,
+                load,
+                dt,
+                block_battery_charge=block_battery_charge,
+            )
+        )
+
+        def _generic_future_reservation_slot(t: int) -> bool:
+            return bool(
+                allow_battery_export[t]
+                and not below_optimizer_reserve
+                and _economic_export_slot(t)
+                and future_self_consumption_reservations[t] > 1e-6
+                and not _priority_export_slot(t)
+                and not _cost_neutral_export_slot(t)
+                and not block_battery_charge[t]
+            )
+
+        def _future_export_protection_floor(t: int) -> float:
+            base_floor = max(
+                optimizer_reserve,
+                self._configured_export_reserve_floor_for_range(t, t + 1),
+            )
+            if not _generic_future_reservation_slot(t):
+                return base_floor
+            return min(
+                1.0,
+                base_floor + future_self_consumption_reservations[t] / cap,
+            )
+
+        future_reservation_slots = [
+            _generic_future_reservation_slot(t) for t in range(n)
+        ]
+        future_export_protection_floor_slots = [
+            _future_export_protection_floor(t)
+            if future_reservation_slots[t]
+            else 0.0
+            for t in range(n)
+        ]
         grid_charge_soc_cap = max(
             0.0,
             min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
@@ -4305,9 +4579,6 @@ class BatteryOptimizer:
             cost_neutral_export_slot = (
                 battery_export_allowed and _cost_neutral_export_slot(t)
             )
-            future_self_consumption_value = self._has_future_self_consumption_value(
-                t, n, import_prices, solar, load
-            )
             self_consumption_value_slot = (
                 not battery_export_allowed
                 and import_prices[t] > export_prices[t]
@@ -4319,17 +4590,12 @@ class BatteryOptimizer:
             if (
                 (
                     export_profitable_slot
-                    and (
-                        priority_export_slot
-                        or not future_self_consumption_value
-                    )
                 )
                 or cost_neutral_export_slot
                 or self_consumption_value_slot
             ):
                 forced_export_slot = cost_neutral_export_slot or (
                     export_profitable_slot
-                    and (priority_export_slot or not future_self_consumption_value)
                 )
                 # Profitable to discharge; cap to home load when battery export
                 # is not explicitly permitted or export is below acquisition cost.
@@ -4378,10 +4644,7 @@ class BatteryOptimizer:
                         max(0.0, net_load) + max(0.0, intentional_export_room_kw),
                     )
                 discharge_floor = (
-                    max(
-                        optimizer_reserve,
-                        self._configured_export_reserve_floor_for_range(t, t + 1),
-                    )
+                    _future_export_protection_floor(t)
                     if forced_export_slot
                     else self_consumption_floor
                 )
@@ -4570,12 +4833,7 @@ class BatteryOptimizer:
                     and allow_battery_export[idx]
                     and not below_optimizer_reserve
                 ):
-                    discharge_floor = max(
-                        optimizer_reserve,
-                        self._configured_export_reserve_floor_for_range(
-                            idx, idx + 1
-                        ),
-                    )
+                    discharge_floor = _future_export_protection_floor(idx)
                 discharge_kw = min(
                     max(0.0, discharge_kw),
                     max(
@@ -5222,6 +5480,15 @@ class BatteryOptimizer:
                 max_reachable - reachability_margin,
             )
 
+        future_export_budget_remaining_kwh = max(
+            0.0,
+            (
+                soc_0
+                - max(future_export_protection_floor_slots, default=0.0)
+            )
+            * cap
+            * eff,
+        )
         soc = soc_0
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
@@ -5240,16 +5507,8 @@ class BatteryOptimizer:
                     and _economic_export_slot(t)
                 )
                 priority_export_slot = battery_export_allowed and _priority_export_slot(t)
-                future_self_consumption_value = self._has_future_self_consumption_value(
-                    t, n, import_prices, solar, load
-                )
-                if priority_export_slot or (
-                    export_profitable_slot and not future_self_consumption_value
-                ):
-                    discharge_floor = max(
-                        optimizer_reserve,
-                        self._configured_export_reserve_floor_for_range(t, t + 1),
-                    )
+                if priority_export_slot or export_profitable_slot:
+                    discharge_floor = _future_export_protection_floor(t)
             original_discharge_kw = discharge_kw
             if (
                 pre_window_effective_target is not None
@@ -5280,6 +5539,18 @@ class BatteryOptimizer:
                 0.0, (soc - discharge_floor) * cap * eff / dt
             )
             discharge_kw = min(discharge_kw, max_discharge_room_kw)
+            if future_reservation_slots[t]:
+                net_home_kw = max(0.0, net_load)
+                discharge_kw = min(
+                    discharge_kw,
+                    net_home_kw
+                    + future_export_budget_remaining_kwh / max(dt, 1e-9),
+                )
+                future_export_budget_remaining_kwh = max(
+                    0.0,
+                    future_export_budget_remaining_kwh
+                    - max(0.0, discharge_kw - net_home_kw) * dt,
+                )
             if (
                 discharge_kw + 1e-6 < original_discharge_kw
                 and discharge_kw
@@ -5455,9 +5726,71 @@ class BatteryOptimizer:
             load,
         )
 
-        lp_stats: dict[str, Any] = {}
+        acquisition_blocked_slots = sum(
+            1
+            for t in range(n)
+            if allow_battery_export[t]
+            and not _cost_neutral_export_slot(t)
+            and acquisition_cost_kwh > 0
+            and effective_export_prices[t] < effective_acquisition_costs[t]
+        )
+        active_export_constraint_reasons = []
+        if any(future_reservation_slots):
+            active_export_constraint_reasons.append(
+                "future_self_consumption_energy_reservation"
+            )
+        if acquisition_blocked_slots:
+            active_export_constraint_reasons.append("acquisition_cost")
+        lp_stats: dict[str, Any] = {
+            "battery_export_constraints": {
+                "active_reasons": active_export_constraint_reasons,
+                "future_reservation_active": any(future_reservation_slots),
+                "future_reservation_periods": sum(future_reservation_slots),
+                "future_reserved_kwh": round(
+                    max(
+                        (
+                            future_self_consumption_reservations[t]
+                            for t in range(n)
+                            if future_reservation_slots[t]
+                        ),
+                        default=0.0,
+                    ),
+                    6,
+                ),
+                "future_protected_energy_kwh": round(
+                    max(future_export_protection_floor_slots, default=0.0) * cap,
+                    6,
+                ),
+                "future_export_budget_kwh": round(
+                    max(
+                        0.0,
+                        (
+                            soc_0
+                            - max(
+                                future_export_protection_floor_slots,
+                                default=0.0,
+                            )
+                        )
+                        * cap
+                        * eff,
+                    ),
+                    6,
+                ),
+                "future_planned_export_kwh": round(
+                    sum(
+                        max(0.0, schedule.battery_export_w[t])
+                        / 1000.0
+                        * dt
+                        for t in range(n)
+                        if future_reservation_slots[t]
+                    ),
+                    6,
+                ),
+                "acquisition_blocked_periods": acquisition_blocked_slots,
+            }
+        }
         if cost_neutral_plan is not None:
-            lp_stats = {
+            lp_stats.update({
                 "cost_neutral_earnings_caps_by_day": {
                     day: round(value, 6)
                     for day, value in effective_cost_neutral_caps.items()
@@ -5472,7 +5805,7 @@ class BatteryOptimizer:
                     day: round(value, 6)
                     for day, value in planned_cost_neutral_by_day.items()
                 },
-            }
+            })
             current_day = cost_neutral_plan.current_day
             if current_day in effective_cost_neutral_caps:
                 lp_stats.update({
@@ -5498,6 +5831,11 @@ class BatteryOptimizer:
             battery_to_grid_w=list(schedule.battery_export_w),
             lp_stats=lp_stats,
             reserve_recommendation=reserve_recommendation,
+            future_export_protection_floor_slots=(
+                future_export_protection_floor_slots
+                if any(future_reservation_slots)
+                else None
+            ),
             free_import_command_slots=free_import_command_slots,
         )
 
@@ -6492,6 +6830,12 @@ class BatteryOptimizer:
                 slot_floors = result.modeled_export_reserve_floor_slots
                 if slot_floors is not None and idx < len(slot_floors):
                     floor = max(float(floor or 0.0), float(slot_floors[idx] or 0.0))
+                protection_floors = result.future_export_protection_floor_slots
+                if protection_floors is not None and idx < len(protection_floors):
+                    floor = max(
+                        float(floor or 0.0),
+                        float(protection_floors[idx] or 0.0),
+                    )
                 return max(0.0, min(1.0, float(floor or 0.0)))
 
             restamped: list[ScheduleAction] = []
@@ -6724,6 +7068,19 @@ class BatteryOptimizer:
             )
             for idx, action in enumerate(schedule.actions[:n])
         ]
+        export_constraints = result.lp_stats.get("battery_export_constraints")
+        protection_floors = result.future_export_protection_floor_slots
+        if isinstance(export_constraints, dict) and protection_floors:
+            export_constraints["future_planned_export_kwh"] = round(
+                sum(
+                    result.battery_to_grid_w[idx]
+                    / 1000.0
+                    * self.dt_hours
+                    for idx in range(min(n, len(protection_floors)))
+                    if protection_floors[idx] > 0.0
+                ),
+                6,
+            )
         if cost_neutral_plan is not None:
             result.lp_stats["cost_neutral_earnings_caps_by_day"] = {
                 day: round(value, 6)

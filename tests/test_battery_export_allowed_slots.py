@@ -7835,6 +7835,56 @@ def test_bridge_short_export_gaps_rejects_two_floor_authorities(opt_module):
         )
 
 
+def test_future_export_protection_floor_blocks_post_solve_gap_bridge(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.35)
+    coordinator._config.backup_reserve = 0.20
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=1000,
+            battery_charge_w=0,
+            battery_discharge_w=1000,
+            soc=0.35,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=500,
+            battery_charge_w=0,
+            battery_discharge_w=500,
+            soc=0.34,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=1000,
+            battery_charge_w=0,
+            battery_discharge_w=1000,
+            soc=0.33,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    merged_floor = coordinator._merge_export_protection_floors(
+        0.20,
+        [0.0, 0.34, 0.0],
+        len(actions),
+    )
+
+    coordinator._bridge_short_export_gaps(
+        SimpleNamespace(actions=actions),
+        [0.45, 0.45, 0.45],
+        authoritative_reserve_floor=merged_floor,
+    )
+
+    assert merged_floor == [0.20, 0.34, 0.20]
+    assert actions[1].action == "self_consumption"
+    assert actions[1].battery_discharge_w == 500
+
+
 def test_single_slot_export_gap_respects_transient_export_floor(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.88)

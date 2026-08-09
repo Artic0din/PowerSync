@@ -3721,3 +3721,184 @@ def test_priority_export_bridge_nets_import_bonus_hd7(battery_optimizer_module):
         import_bonus_prices=[0.0, 0.0, 0.08, 0.0, 0.0, 0.0],
     )
     assert bonus_floors is None
+
+
+def test_generic_export_reserves_only_forecast_future_load_energy(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    n = 36
+    export_slots = 18
+    result = optimizer.optimize(
+        import_prices=[0.10] * export_slots + [0.50] * (n - export_slots),
+        export_prices=[0.40] * export_slots + [0.0] * (n - export_slots),
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * export_slots + [1.0] * 12 + [0.0] * 6,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+
+    planned_export_kwh = sum(result.battery_to_grid_w) / 1000.0 / 12.0
+    guard = result.lp_stats["battery_export_constraints"]
+
+    assert result.solver_used == "highs"
+    assert planned_export_kwh == pytest.approx(5.0, abs=0.02)
+    assert guard["active_reasons"] == [
+        "future_self_consumption_energy_reservation"
+    ]
+    assert guard["future_reserved_kwh"] == pytest.approx(1.0, abs=1e-6)
+    assert guard["future_protected_energy_kwh"] == pytest.approx(3.0, abs=1e-6)
+    assert guard["future_planned_export_kwh"] == pytest.approx(5.0, abs=0.02)
+    assert result.future_export_protection_floor_slots[:export_slots] == pytest.approx(
+        [0.30] * export_slots,
+        abs=1e-6,
+    )
+
+
+def test_future_load_reservation_blocks_only_export_not_current_home_use(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    n = 36
+    export_slots = 12
+    result = optimizer.optimize(
+        import_prices=[0.10] * export_slots + [0.50] * (n - export_slots),
+        export_prices=[0.40] * export_slots + [0.0] * (n - export_slots),
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.5] * export_slots + [3.0] * 24,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+
+    assert max(result.battery_to_grid_w[:export_slots]) <= 1e-6
+    assert any(
+        action.action == "self_consumption"
+        and action.battery_discharge_w > 100
+        for action in result.schedule.actions[:export_slots]
+    )
+    guard = result.lp_stats["battery_export_constraints"]
+    assert guard["future_reservation_active"] is True
+    assert guard["future_protected_energy_kwh"] == pytest.approx(8.0)
+    assert guard["future_planned_export_kwh"] == 0.0
+
+
+def test_future_load_reservation_never_blocks_direct_solar_export(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    n = 36
+    export_slots = 12
+    result = optimizer.optimize(
+        import_prices=[0.10] * export_slots + [0.50] * (n - export_slots),
+        export_prices=[0.40] * export_slots + [0.0] * (n - export_slots),
+        solar_forecast=[2.0] * export_slots + [0.0] * (n - export_slots),
+        load_forecast=[0.0] * export_slots + [4.0] * 24,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+
+    assert max(result.battery_to_grid_w[:export_slots]) <= 1e-6
+    assert max(result.grid_export_w[:export_slots]) == pytest.approx(2000.0)
+    assert result.lp_stats["battery_export_constraints"][
+        "future_export_budget_kwh"
+    ] == 0.0
+
+
+def test_greedy_generic_export_uses_same_future_energy_reservation(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    n = 36
+    export_slots = 18
+    result = optimizer._solve_greedy(
+        n,
+        [0.10] * export_slots + [0.50] * (n - export_slots),
+        [0.40] * export_slots + [0.0] * (n - export_slots),
+        [0.0] * n,
+        [0.0] * export_slots + [1.0] * 12 + [0.0] * 6,
+        0.80,
+        "cost",
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+
+    planned_export_kwh = sum(result.battery_to_grid_w) / 1000.0 / 12.0
+    guard = result.lp_stats["battery_export_constraints"]
+
+    assert result.solver_used == "greedy"
+    assert planned_export_kwh == pytest.approx(5.0, abs=0.02)
+    assert guard["future_reserved_kwh"] == pytest.approx(1.0, abs=1e-6)
+    assert guard["future_planned_export_kwh"] == pytest.approx(5.0, abs=0.02)
+
+
+def test_acquisition_cost_block_is_reported_separately_from_future_reservation(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.10] * 12,
+        export_prices=[0.30] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.0] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.40,
+        allow_battery_export=[True] * 12,
+        allow_grid_charge=False,
+    )
+
+    guard = result.lp_stats["battery_export_constraints"]
+    assert max(result.battery_to_grid_w) <= 1e-6
+    assert guard["active_reasons"] == ["acquisition_cost"]
+    assert guard["acquisition_blocked_periods"] > 0
