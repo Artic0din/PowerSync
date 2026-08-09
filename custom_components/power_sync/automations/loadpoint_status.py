@@ -361,6 +361,79 @@ def _merge_single_bridge_loadpoint(
     ]
 
 
+def _explicit_bridge_vehicle_id(observation: Mapping[str, Any]) -> str:
+    """Return the physical vehicle explicitly associated with a BLE bridge."""
+    for field in (
+        "bridge_vehicle_id",
+        "physical_vehicle_id",
+        "associated_vehicle_id",
+    ):
+        value = str(observation.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _observation_matches_vehicle_id(
+    observation: Mapping[str, Any],
+    vehicle_id: str,
+) -> bool:
+    target = _normal_key(vehicle_id)
+    return bool(target) and any(
+        _normal_key(observation.get(field)) == target
+        for field in ("vehicle_id", "vin")
+    )
+
+
+def _merge_explicit_ble_bridges(
+    observations: list[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], bool]:
+    """Merge BLE sources with an explicitly associated physical Tesla.
+
+    The association is supplied by provider discovery, which already owns the
+    Fleet/BLE pairing semantics.  Keeping that identity on the observation
+    avoids treating a Fleet-only second car as evidence that the BLE source is
+    a third physical loadpoint.
+    """
+    matched_ble_indexes: set[int] = set()
+    merged = list(observations)
+    had_explicit_association = False
+
+    for ble_index, observation in enumerate(observations):
+        if not _is_tesla_ble_observation(observation):
+            continue
+        vehicle_id = _explicit_bridge_vehicle_id(observation)
+        if not vehicle_id:
+            continue
+        had_explicit_association = True
+        candidates = [
+            index
+            for index, candidate in enumerate(merged)
+            if (
+                index != ble_index
+                and not _is_tesla_ble_observation(candidate)
+                and _is_physical_tesla_observation(candidate)
+                and _observation_matches_vehicle_id(candidate, vehicle_id)
+            )
+        ]
+        if len(candidates) != 1:
+            continue
+        target_index = candidates[0]
+        target = dict(merged[target_index])
+        _merge_observation_status(target, observation)
+        merged[target_index] = target
+        matched_ble_indexes.add(ble_index)
+
+    return (
+        [
+            observation
+            for index, observation in enumerate(merged)
+            if index not in matched_ble_indexes
+        ],
+        had_explicit_association,
+    )
+
+
 def coalesce_vehicle_observations(
     observed_vehicles: Iterable[Mapping[str, Any]] | None,
 ) -> list[Mapping[str, Any]]:
@@ -374,6 +447,9 @@ def coalesce_vehicle_observations(
         _merge_duplicate_generic_observations(
             list(observed_vehicles or [])
         )
+    )
+    observations, had_explicit_ble_association = _merge_explicit_ble_bridges(
+        observations
     )
     ble_indexes = [
         index for index, observation in enumerate(observations)
@@ -389,7 +465,11 @@ def coalesce_vehicle_observations(
         )
     ]
 
-    if len(ble_indexes) == 1 and len(candidates) == 1:
+    if (
+        not had_explicit_ble_association
+        and len(ble_indexes) == 1
+        and len(candidates) == 1
+    ):
         merged = [
             dict(observation) if index == candidates[0] else observation
             for index, observation in enumerate(observations)

@@ -1210,14 +1210,69 @@ def _resolve_ble_prefix_for_vehicle(
     """Get the correct BLE prefix for a specific vehicle.
 
     If vehicle_vin is a BLE identifier (ble_*), extract the prefix from it.
-    Otherwise fall back to the first configured BLE prefix.
+    In Fleet + BLE mode, associate deduplicated Fleet VINs and configured BLE
+    prefixes by the same positional contract used by vehicle discovery. A VIN
+    with no corresponding BLE prefix must return an empty string so commands
+    fall back to Fleet instead of controlling another car's first BLE bridge.
     """
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         return vehicle_vin[4:]  # "ble_joanna_model_3_local" → "joanna_model_3_local"
 
-    # Fall back to first configured prefix
-    raw = config_entry.options.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    config = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    raw = config.get(
+        CONF_TESLA_BLE_ENTITY_PREFIX,
+        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    )
     prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+
+    if (
+        vehicle_vin
+        and len(vehicle_vin) == 17
+        and vehicle_vin.isalnum()
+        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) == EV_PROVIDER_BOTH
+    ):
+        try:
+            device_registry = dr.async_get(hass)
+            fleet_vins: list[str] = []
+            seen_vins: set[str] = set()
+            for device in device_registry.devices.values():
+                for identifier in device.identifiers:
+                    if len(identifier) < 2 or identifier[0] not in TESLA_EV_INTEGRATIONS:
+                        continue
+                    candidate = str(identifier[1])
+                    candidate_key = candidate.strip().lower()
+                    if (
+                        len(candidate) == 17
+                        and not candidate.isdigit()
+                        and candidate_key not in seen_vins
+                    ):
+                        seen_vins.add(candidate_key)
+                        fleet_vins.append(candidate)
+                    break
+            target_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(fleet_vins)
+                    if candidate.strip().lower() == vehicle_vin.strip().lower()
+                ),
+                None,
+            )
+            if target_index is not None:
+                return prefixes[target_index] if target_index < len(prefixes) else ""
+            return ""
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not associate Fleet VIN %s with a BLE prefix: %s",
+                vehicle_vin,
+                err,
+            )
+            return ""
+
+    # BLE-only and anonymous single-vehicle paths retain the first-prefix
+    # fallback for backward compatibility.
     return prefixes[0] if prefixes else DEFAULT_TESLA_BLE_ENTITY_PREFIX
 
 
@@ -3858,23 +3913,29 @@ async def _action_start_ev_charging(
 
     charging_started = False
 
-    # Try Teslemetry Bluetooth first if configured
-    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        if _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _start_ev_charging_teslemetry_bt(hass, tbt_prefix)
-            if result:
-                charging_started = True
-            elif ev_provider == EV_PROVIDER_TESLEMETRY_BT:
-                return False
-
-    # Try ESPHome BLE if configured
-    if not charging_started and ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    # Prefer the free, explicitly paired ESPHome BLE control path.
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _start_ev_charging_ble(hass, ble_prefix)
             if result:
                 charging_started = True
             elif ev_provider == EV_PROVIDER_TESLA_BLE:
+                return False
+
+    # Teslemetry Bluetooth is the next local fallback. Its entity prefix is a
+    # VIN, so never apply one vehicle's bridge to a different requested VIN.
+    if not charging_started and ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        tbt_matches_vehicle = (
+            not vehicle_vin
+            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
+            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
+        )
+        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _start_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            if result:
+                charging_started = True
+            elif ev_provider == EV_PROVIDER_TESLEMETRY_BT:
                 return False
 
     # Use Fleet API
@@ -4059,19 +4120,24 @@ async def _action_stop_ev_charging(
                 _LOGGER.info("EV is not charging (state: %s) - treating stop as complete", state_lower)
                 return True
 
-    # Try Teslemetry Bluetooth first if configured
-    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        if _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _stop_ev_charging_teslemetry_bt(hass, tbt_prefix)
-            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
-                return result
-
-    # Try ESPHome BLE if configured
+    # Prefer the free, explicitly paired ESPHome BLE control path.
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _stop_ev_charging_ble(hass, ble_prefix)
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+
+    # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        tbt_matches_vehicle = (
+            not vehicle_vin
+            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
+            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
+        )
+        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _stop_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
                 return result
 
     # Use Fleet API
@@ -4274,22 +4340,7 @@ async def _action_set_ev_charging_amps(
     if configured_max_amps is not None:
         amps = min(configured_max_amps, amps)
 
-    # Try Teslemetry Bluetooth first if configured
-    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
-        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
-        if _is_teslemetry_bt_available(hass, tbt_prefix):
-            result = await _set_ev_charging_amps_teslemetry_bt(
-                hass,
-                tbt_prefix,
-                amps,
-                allow_stale_entity_max_override=allow_stale_entity_max_override,
-                configured_max_amps=configured_max_amps,
-                params=params,
-            )
-            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
-                return result
-
-    # Try ESPHome BLE if configured (BLE supports same 5-32A range as cloud API)
+    # Prefer the free, explicitly paired ESPHome BLE control path.
     ble_amps = amps
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
@@ -4302,6 +4353,26 @@ async def _action_set_ev_charging_amps(
                 params=params,
             )
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+
+    # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        tbt_matches_vehicle = (
+            not vehicle_vin
+            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
+            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
+        )
+        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _set_ev_charging_amps_teslemetry_bt(
+                hass,
+                tbt_prefix,
+                amps,
+                allow_stale_entity_max_override=allow_stale_entity_max_override,
+                configured_max_amps=configured_max_amps,
+                params=params,
+            )
+            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
                 return result
 
     # Use Fleet API

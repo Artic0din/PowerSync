@@ -314,11 +314,15 @@ def _usable_forecast_window(
 def _configured_ble_prefixes(
     config_entry: Optional["ConfigEntry"],
     vehicle_vin: Optional[str] = None,
+    *,
+    hass: Optional["HomeAssistant"] = None,
 ) -> List[str]:
     """Return Tesla BLE prefixes relevant to an optional BLE vehicle id."""
     from ..const import (
+        CONF_EV_PROVIDER,
         CONF_TESLA_BLE_ENTITY_PREFIX,
         DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        EV_PROVIDER_BOTH,
     )
 
     if vehicle_vin and vehicle_vin.startswith("ble_"):
@@ -327,7 +331,47 @@ def _configured_ble_prefixes(
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
     raw_prefix = opts.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
     prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
-    return prefixes or [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
+    prefixes = prefixes or [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
+
+    if (
+        hass is not None
+        and vehicle_vin
+        and len(vehicle_vin) == 17
+        and vehicle_vin.isalnum()
+        and opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+    ):
+        from homeassistant.helpers import device_registry as dr
+
+        device_registry = dr.async_get(hass)
+        fleet_vins: list[str] = []
+        seen_vins: set[str] = set()
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if len(identifier) < 2 or identifier[0] not in TESLA_INTEGRATIONS:
+                    continue
+                candidate = str(identifier[1])
+                candidate_key = candidate.strip().lower()
+                if (
+                    len(candidate) == 17
+                    and not candidate.isdigit()
+                    and candidate_key not in seen_vins
+                ):
+                    seen_vins.add(candidate_key)
+                    fleet_vins.append(candidate)
+                break
+        target_index = next(
+            (
+                index
+                for index, candidate in enumerate(fleet_vins)
+                if candidate.strip().lower() == vehicle_vin.strip().lower()
+            ),
+            None,
+        )
+        if target_index is None or target_index >= len(prefixes):
+            return []
+        return [prefixes[target_index]]
+
+    return prefixes
 
 
 def _valid_state(state: Any) -> bool:
@@ -727,7 +771,11 @@ async def get_ev_location(
     # Do not treat the charger switch entity merely existing as presence; HA keeps
     # entities around even when the BLE bridge cannot currently see the car.
     if location == "unknown":
-        for prefix in _configured_ble_prefixes(config_entry, vehicle_vin):
+        for prefix in _configured_ble_prefixes(
+            config_entry,
+            vehicle_vin,
+            hass=hass,
+        ):
             if _tesla_ble_presence_says_home(hass, prefix):
                 location = "home"
                 _LOGGER.debug("Tesla BLE %s has current presence/plug signal, assuming location=home", prefix)
@@ -1097,7 +1145,7 @@ async def is_ev_plugged_in(
         # only the first prefix, so if car1 was away and car2 plugged in at
         # home, this returned False incorrectly. Treat any-prefix-plugged-in
         # as "some vehicle is plugged in" for the no-VIN backward-compat path.
-        for prefix in _configured_ble_prefixes(config_entry, None):
+        for prefix in _configured_ble_prefixes(config_entry, None, hass=hass):
             if _tesla_ble_plugged_in_status(hass, prefix) is True:
                 return True
 
@@ -3552,6 +3600,10 @@ class AutoScheduleSettings:
         """
         return (self.min_charge_amps * self.voltage * self.phases) / 1000
 
+    def get_max_charge_power_kw(self) -> float:
+        """Return the configured AC charge ceiling in kW."""
+        return (self.max_charge_amps * self.voltage * self.phases) / 1000
+
     def get_effective_priority(self, weekday: int) -> "ChargingPriority":
         """Get the effective priority for a given weekday, falling back to global priority."""
         if weekday in self.departure_priorities:
@@ -3991,13 +4043,21 @@ class AutoScheduleExecutor:
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             from homeassistant.helpers import device_registry as dr
             device_registry = dr.async_get(self.hass)
+            seen_vins: set[str] = set()
             for device in device_registry.devices.values():
                 for identifier in device.identifiers:
                     if len(identifier) < 2:
                         continue
                     domain = identifier[0]
                     id_str = str(identifier[1])
-                    if domain in TESLA_INTEGRATIONS and len(id_str) == 17 and not id_str.isdigit():
+                    vin_key = id_str.strip().lower()
+                    if (
+                        domain in TESLA_INTEGRATIONS
+                        and len(id_str) == 17
+                        and not id_str.isdigit()
+                        and vin_key not in seen_vins
+                    ):
+                        seen_vins.add(vin_key)
                         vehicle_num += 1
                         if str(vehicle_num) == str(vehicle_id):
                             return id_str
@@ -4061,7 +4121,14 @@ class AutoScheduleExecutor:
         self._use_ml_optimization = enabled
         _LOGGER.info(f"Smart Optimization for EV charging: {'enabled' if enabled else 'disabled'}")
 
-    def _power_to_amps(self, power_w: float, voltage: int = 230, phases: int = 1, max_amps: int = 32) -> int:
+    def _power_to_amps(
+        self,
+        power_w: float,
+        voltage: int = 230,
+        phases: int = 1,
+        max_amps: int = 32,
+        min_amps: int = 5,
+    ) -> int:
         """
         Convert power in watts to charging amps.
 
@@ -4072,7 +4139,7 @@ class AutoScheduleExecutor:
             max_amps: Maximum charge amps for this vehicle's charger
 
         Returns:
-            Charging amps (clamped to 5-max_amps range)
+            Charging amps (clamped to the configured min/max range)
         """
         if power_w <= 0:
             return 0
@@ -4080,9 +4147,11 @@ class AutoScheduleExecutor:
         # P = V * I * phases (for AC charging)
         amps = power_w / (voltage * phases)
 
-        # Clamp to valid range (5A minimum for Tesla, per-vehicle max)
-        # Below 5A Tesla refuses to charge
-        amps = max(5, min(max_amps, int(amps)))
+        # Clamp to the configured per-vehicle current range. Different charger
+        # backends can have a minimum above Tesla's usual 5A floor.
+        # Apply the ceiling last so even malformed legacy data with min > max
+        # can never command above the configured maximum.
+        amps = min(max_amps, max(min_amps, int(amps)))
 
         return amps
 
@@ -4097,6 +4166,7 @@ class AutoScheduleExecutor:
             settings.voltage,
             settings.phases,
             settings.max_charge_amps,
+            settings.min_charge_amps,
         )
 
     async def _set_vehicle_charge_rate(
@@ -4851,11 +4921,29 @@ class AutoScheduleExecutor:
                 else {}
             )
             automation_store = entry_data.get("automation_store")
+            candidate_vehicle_ids = [vehicle_id]
+            resolved_vehicle_id = (
+                self._resolve_vehicle_vin(vehicle_id)
+                if str(vehicle_id).isdigit()
+                else None
+            )
+            if (
+                resolved_vehicle_id
+                and not any(
+                    _vehicle_config_matches(resolved_vehicle_id, candidate)
+                    for candidate in candidate_vehicle_ids
+                )
+            ):
+                candidate_vehicle_ids.append(resolved_vehicle_id)
+
             stores = [automation_store, self._store]
             for store in stores:
                 stored_data = getattr(store, '_data', {}) or {}
                 for vc in stored_data.get("vehicle_charging_configs", []):
-                    if _vehicle_config_matches(vehicle_id, vc.get("vehicle_id")):
+                    if any(
+                        _vehicle_config_matches(candidate, vc.get("vehicle_id"))
+                        for candidate in candidate_vehicle_ids
+                    ):
                         settings.apply_charger_config(vc)
                         opts = {
                             **getattr(self.config_entry, "data", {}),
@@ -5566,7 +5654,7 @@ class AutoScheduleExecutor:
                 target_time=target_time,
                 resolved_capacity=resolved_capacity,
                 priority=effective_priority,
-                charger_power_kw=(settings.max_charge_amps * settings.voltage * settings.phases) / 1000,
+                charger_power_kw=settings.get_max_charge_power_kw(),
             )
 
             state.current_plan = plan

@@ -645,6 +645,112 @@ def test_tesla_ble_bridge_stays_separate_when_vehicle_match_is_ambiguous():
     ]
 
 
+def test_tesla_ble_bridge_merges_with_associated_vehicle_not_fleet_only_sibling():
+    tessy_vin = "LRWYHCEK3PC907290"
+    werty_vin = "5YJ3E1EA7KF000001"
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": tessy_vin,
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "ev_soc": None,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": werty_vin,
+                "vehicle_name": "Werty",
+                "charger_type": "tesla",
+                "ev_power_kw": 2.4,
+                "ev_soc": 69,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "ble_teslable",
+                "bridge_vehicle_id": tessy_vin,
+                "vehicle_name": "Tesla BLE (teslable)",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "ev_soc": 78,
+                "is_connected": True,
+                "is_charging": False,
+            },
+        ],
+        last_commands={
+            "ble_teslable": {
+                "command": "ha_restart_recovery",
+                "reason": (
+                    "Cleared stale smart_schedule ownership after HA restart"
+                ),
+            },
+        },
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "TESSY",
+        "Werty",
+    ]
+    assert loadpoints[0]["loadpoint_id"] == tessy_vin
+    assert loadpoints[0]["soc"] == 78
+    assert loadpoints[1]["loadpoint_id"] == werty_vin
+    assert loadpoints[1]["soc"] == 69
+    assert all(
+        (loadpoint.get("last_command") or {}).get("command")
+        != "ha_restart_recovery"
+        for loadpoint in loadpoints
+    )
+
+
+def test_explicit_bridge_does_not_hide_a_real_standalone_second_ble_vehicle():
+    tessy_vin = "LRWYHCEK3PC907290"
+    werty_vin = "5YJ3E1EA7KF000001"
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": tessy_vin,
+                "vehicle_name": "TESSY",
+                "charger_type": "tesla",
+                "is_connected": True,
+            },
+            {
+                "vehicle_id": werty_vin,
+                "vehicle_name": "Werty",
+                "charger_type": "tesla",
+                "ev_soc": 69,
+                "is_connected": True,
+            },
+            {
+                "vehicle_id": "ble_tessy_bridge",
+                "bridge_vehicle_id": tessy_vin,
+                "vehicle_name": "Tesla BLE (TESSY bridge)",
+                "charger_type": "tesla",
+                "ev_soc": 78,
+                "is_connected": True,
+            },
+            {
+                "vehicle_id": "ble_real_second_car",
+                "vehicle_name": "Tesla BLE (real second car)",
+                "charger_type": "tesla",
+                "ev_soc": 44,
+                "is_connected": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "TESSY",
+        "Werty",
+        "Tesla BLE (real second car)",
+    ]
+    assert loadpoints[0]["soc"] == 78
+    assert loadpoints[2]["soc"] == 44
+
+
 def test_tesla_ble_bridge_does_not_merge_with_non_tesla_charger():
     loadpoints = build_loadpoint_status(
         {},

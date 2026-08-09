@@ -246,6 +246,35 @@ def test_byd_29_6_kwh_energy_uses_explicit_capacity_not_60_kwh_fallback():
     assert plan.battery_capacity_source == CAPACITY_SOURCE_PROVIDER
 
 
+def test_werty_86_kwh_at_ten_amps_requires_full_configured_energy_duration():
+    charger_power_kw = 10 * 240 * 1 / 1000
+    plan = asyncio.run(
+        _planner().plan_charging(
+            vehicle_id="5YJ3E1EA7KF000001",
+            current_soc=69,
+            target_soc=80,
+            target_time=None,
+            resolved_capacity=resolve_ev_battery_capacity(
+                manual_capacity_kwh=86,
+            ),
+            charger_power_kw=charger_power_kw,
+            priority=ChargingPriority.SOLAR_ONLY,
+        )
+    )
+
+    assert plan.energy_needed_kwh == pytest.approx(10.511111, rel=1e-5)
+    assert sum(
+        window.estimated_energy_kwh for window in plan.windows
+    ) == pytest.approx(plan.energy_needed_kwh)
+    assert (
+        plan.energy_needed_kwh / charger_power_kw
+    ) == pytest.approx(4.37963, rel=1e-5)
+    assert all(
+        window.estimated_power_kw <= charger_power_kw
+        for window in plan.windows
+    )
+
+
 def test_two_identified_vehicles_keep_independent_capacity_and_energy():
     planner = _planner()
     async def build_plans():

@@ -472,6 +472,79 @@ def test_power_to_amps_uses_vehicle_charger_phase_settings():
     assert executor._power_to_amps_for_settings(6900, three_phase) == 10
 
 
+def test_power_to_amps_uses_configured_vehicle_minimum():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    settings = ev_planner.AutoScheduleSettings(
+        min_charge_amps=8,
+        max_charge_amps=10,
+        voltage=240,
+        phases=1,
+    )
+
+    assert executor._power_to_amps_for_settings(1000, settings) == 8
+    assert executor._power_to_amps_for_settings(10000, settings) == 10
+
+    malformed_legacy = ev_planner.AutoScheduleSettings(
+        min_charge_amps=16,
+        max_charge_amps=10,
+        voltage=240,
+        phases=1,
+    )
+    assert executor._power_to_amps_for_settings(1000, malformed_legacy) == 10
+
+
+def test_legacy_numeric_schedule_uses_resolved_vehicle_current_and_capacity():
+    werty_vin = "5YJ3E1EA7KF000001"
+    automation_store = types.SimpleNamespace(
+        _data={
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": werty_vin,
+                    "display_name": "Werty",
+                    "charger_type": "tesla",
+                    "min_amps": 6,
+                    "max_amps": 10,
+                    "voltage": 240,
+                    "phases": 1,
+                    "battery_capacity_kwh": 86,
+                },
+            ],
+        },
+    )
+    hass = types.SimpleNamespace(
+        data={
+            ev_planner.DOMAIN: {
+                "entry-1": {"automation_store": automation_store},
+            },
+        },
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1", data={}, options={})
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+    executor._store = types.SimpleNamespace(_data={})
+    executor._resolve_vehicle_vin = lambda vehicle_id: (
+        werty_vin if vehicle_id == "2" else None
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="2",
+        min_charge_amps=5,
+        max_charge_amps=32,
+        voltage=230,
+        phases=1,
+    )
+
+    resolved = executor.resolve_vehicle_capacity("2", settings)
+
+    assert settings.min_charge_amps == 6
+    assert settings.max_charge_amps == 10
+    assert settings.voltage == 240
+    assert settings.phases == 1
+    assert settings.get_max_charge_power_kw() == 2.4
+    assert resolved.effective_battery_capacity_kwh == 86
+    assert resolved.battery_capacity_source == "manual"
+
+
 def test_stored_default_migrates_to_configured_generic_id():
     entry = types.SimpleNamespace(
         data={},

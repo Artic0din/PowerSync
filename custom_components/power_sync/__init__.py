@@ -1019,8 +1019,44 @@ def _ble_prefix_for_vehicle(hass, config: dict, vehicle_vin: str | None) -> str 
     """Get BLE prefix for a specific vehicle. Returns None if not a BLE vehicle."""
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         return vehicle_vin[4:]  # strip "ble_" prefix
-    # Fallback: first configured prefix (for Fleet API vehicles in "both" mode)
     prefixes = _resolve_ble_prefixes(hass, config)
+    if (
+        vehicle_vin
+        and len(vehicle_vin) == 17
+        and vehicle_vin.isalnum()
+        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) == EV_PROVIDER_BOTH
+    ):
+        device_registry = dr.async_get(hass)
+        fleet_vins: list[str] = []
+        seen_vins: set[str] = set()
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if len(identifier) < 2 or identifier[0] not in TESLA_INTEGRATIONS:
+                    continue
+                candidate = str(identifier[1])
+                candidate_key = candidate.strip().lower()
+                if (
+                    len(candidate) == 17
+                    and not candidate.isdigit()
+                    and candidate_key not in seen_vins
+                ):
+                    seen_vins.add(candidate_key)
+                    fleet_vins.append(candidate)
+                break
+        target_index = next(
+            (
+                index
+                for index, candidate in enumerate(fleet_vins)
+                if candidate.strip().lower() == vehicle_vin.strip().lower()
+            ),
+            None,
+        )
+        if target_index is None or target_index >= len(prefixes):
+            return None
+        return prefixes[target_index]
+
+    # BLE-only and anonymous single-vehicle paths retain the first-prefix
+    # fallback for backward compatibility.
     return prefixes[0] if prefixes else None
 
 
@@ -1516,6 +1552,12 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "is_charging": is_charging and ev_power_kw > 0.05,
         })
 
+    fleet_vehicle_ids = list(dict.fromkeys(
+        str(vehicle.get("vehicle_id"))
+        for vehicle in vehicles
+        if vehicle.get("vehicle_id")
+    ))
+
     # Supplement BLE-only vehicles. The BLE switch entity exists even when a
     # vehicle is away/asleep, so derive connection from charge_flap, charging
     # state, or measured charge power instead of switch existence.
@@ -1535,7 +1577,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ),
         })
 
-    for prefix in _resolve_ble_prefixes(hass, config):
+    ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+    for prefix_index, prefix in enumerate(_resolve_ble_prefixes(hass, config)):
         ble_vehicle_id = f"ble_{prefix}"
         if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
             continue
@@ -1573,14 +1616,25 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             except (ValueError, TypeError):
                 pass
 
-        vehicles.append({
+        ble_observation = {
             "vehicle_id": ble_vehicle_id,
             "vehicle_name": f"Tesla BLE ({prefix})",
             "ev_power_kw": ev_power_kw,
             "ev_soc": ev_soc,
             "is_connected": is_connected,
             "is_charging": ev_power_kw > 0.05,
-        })
+        }
+        # EVVehiclesView and the automation vehicle picker already define
+        # BOTH-provider prefixes positionally: Fleet vehicles first, then only
+        # standalone BLE prefixes beyond that count. Preserve that established
+        # association for loadpoint coalescing instead of emitting a phantom
+        # BLE loadpoint as soon as a Fleet-only second car is discovered.
+        if (
+            ev_provider == EV_PROVIDER_BOTH
+            and prefix_index < len(fleet_vehicle_ids)
+        ):
+            ble_observation["bridge_vehicle_id"] = fleet_vehicle_ids[prefix_index]
+        vehicles.append(ble_observation)
 
     # Supplement with Wall Connector sensors for better detection.
     # WC sensors stay awake even when the car is asleep, providing reliable
@@ -13864,6 +13918,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         # Fleet API vehicles first
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            seen_vins: set[str] = set()
             for device in device_registry.devices.values():
                 for identifier in device.identifiers:
                     if len(identifier) < 2:
@@ -13871,7 +13926,13 @@ class EVVehicleCommandView(HomeAssistantView):
                     domain = identifier[0]
                     identifier_value = str(identifier[1])
                     if domain in TESLA_INTEGRATIONS:
-                        if len(identifier_value) == 17 and not identifier_value.isdigit():
+                        vin_key = identifier_value.strip().lower()
+                        if (
+                            len(identifier_value) == 17
+                            and not identifier_value.isdigit()
+                            and vin_key not in seen_vins
+                        ):
+                            seen_vins.add(vin_key)
                             vehicle_num += 1
                             if str(vehicle_num) == str(vehicle_id):
                                 _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
@@ -13996,7 +14057,10 @@ class EVVehicleCommandView(HomeAssistantView):
 
         wake_sent = False
 
-        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        if (
+            ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH)
+            and ble_prefix
+        ):
             wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
             if self._hass.states.get(wake_entity):
                 try:
@@ -17639,6 +17703,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 observed_vehicles.append({
                     "vehicle_id": vehicle.get("vehicle_id"),
                     "vehicle_name": vehicle.get("vehicle_name"),
+                    "bridge_vehicle_id": vehicle.get("bridge_vehicle_id"),
                     "charger_type": "tesla",
                     "ev_power_kw": vehicle.get("ev_power_kw", 0),
                     "ev_soc": vehicle.get("ev_soc"),

@@ -482,6 +482,104 @@ VIN_A = "5YJ3E1EA7NF0000A1"
 VIN_B = "5YJ3E1EA7NF0000B2"
 
 
+def _both_provider_entry(prefixes: str):
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": prefixes,
+        },
+    )
+
+
+def _two_fleet_vehicle_hass() -> _Hass:
+    hass = _Hass()
+    hass.device_registry.devices = {
+        "fleet-a": SimpleNamespace(
+            identifiers={("tesla_fleet", VIN_A)},
+        ),
+        "teslemetry-a": SimpleNamespace(
+            identifiers={("teslemetry", VIN_A)},
+        ),
+        "fleet-b": SimpleNamespace(
+            identifiers={("tesla_fleet", VIN_B)},
+        ),
+    }
+    return hass
+
+
+def test_fleet_only_second_vehicle_never_uses_first_cars_ble_bridge():
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("tessy_bridge")
+
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "tessy_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == ""
+
+
+def test_second_ble_bridge_becomes_preferred_for_second_fleet_vehicle():
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "tessy_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "w3rt13_bridge"
+
+
+def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+    ble_start = AsyncMock(return_value=True)
+    tbt_start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: VIN_B)
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_teslemetry_bt", tbt_start)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            entry,
+            {"vehicle_vin": VIN_B, "charger_type": "tesla"},
+            {},
+        )
+    )
+
+    assert result is True
+    ble_start.assert_awaited_once_with(hass, "w3rt13_bridge")
+    tbt_start.assert_not_awaited()
+
+
+def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry("tessy_bridge,w3rt13_bridge")
+    ble_amps = AsyncMock(return_value=True)
+    tbt_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_set_ev_charging_amps_ble", ble_amps)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: VIN_B)
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_set_ev_charging_amps_teslemetry_bt", tbt_amps)
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            entry,
+            VIN_B,
+            16,
+            {
+                "vehicle_vin": VIN_B,
+                "charger_type": "tesla",
+                "max_charge_amps": 10,
+            },
+        )
+    )
+
+    assert result is True
+    assert ble_amps.await_args.args[:3] == (hass, "w3rt13_bridge", 10)
+    tbt_amps.assert_not_awaited()
+
+
 def _active_tesla_state(vin: str) -> dict:
     return {
         "active": True,

@@ -270,6 +270,106 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     assert vehicles[0]["ev_soc"] == 73
 
 
+def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
+    power_sync = _power_sync_module()
+    tessy_vin = "LRWYHCEK3PC907290"
+    werty_vin = "5YJ3E1EA7KF000001"
+    states = [
+        _State("sensor.tessy_battery_level", "78"),
+        _State("sensor.tessy_charging_state", "stopped"),
+        _State("binary_sensor.tessy_charge_cable", "on"),
+        _State("sensor.werty_battery_level", "69"),
+        _State("sensor.werty_charging_state", "charging"),
+        _State("binary_sensor.werty_charge_cable", "on"),
+        _State("sensor.werty_charger_power", "2.4", {"unit_of_measurement": "kW"}),
+        _State("binary_sensor.tessy_bridge_status", "on"),
+        _State("sensor.tessy_bridge_charge_level", "78"),
+        _State("sensor.tessy_bridge_charging_state", "stopped"),
+        _State("binary_sensor.tessy_bridge_charge_flap", "on"),
+    ]
+    registry_entities = {
+        state.entity_id: _entity(
+            state.entity_id,
+            "tessy-device" if "tessy_" in state.entity_id else "werty-device",
+        )
+        for state in states[:7]
+    }
+    hass = _Hass(
+        states,
+        registry_entities,
+        {
+            "tessy-device": SimpleNamespace(
+                id="tessy-device",
+                name="TESSY",
+                identifiers={("teslemetry", tessy_vin)},
+            ),
+            "werty-device": SimpleNamespace(
+                id="werty-device",
+                name="Werty",
+                identifiers={("tesla_fleet", werty_vin)},
+            ),
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": "tessy_bridge",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert [vehicle["vehicle_name"] for vehicle in vehicles] == ["TESSY", "Werty"]
+    assert [vehicle["vehicle_id"] for vehicle in vehicles] == [tessy_vin, werty_vin]
+    assert vehicles[0]["ev_soc"] == 78
+    assert vehicles[1]["ev_soc"] == 69
+    assert vehicles[1]["ev_power_kw"] == 2.4
+
+
+def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
+    power_sync = _power_sync_module()
+    tessy_vin = "LRWYHCEK3PC907290"
+    werty_vin = "5YJ3E1EA7KF000001"
+    hass = _Hass(
+        [],
+        devices={
+            "fleet-tessy": SimpleNamespace(
+                id="fleet-tessy",
+                name="TESSY",
+                identifiers={("tesla_fleet", tessy_vin)},
+            ),
+            "teslemetry-tessy": SimpleNamespace(
+                id="teslemetry-tessy",
+                name="TESSY",
+                identifiers={("teslemetry", tessy_vin)},
+            ),
+            "fleet-werty": SimpleNamespace(
+                id="fleet-werty",
+                name="Werty",
+                identifiers={("tesla_fleet", werty_vin)},
+            ),
+        },
+    )
+    one_bridge = {
+        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "tesla_ble_entity_prefix": "tessy_bridge",
+    }
+    two_bridges = {
+        **one_bridge,
+        "tesla_ble_entity_prefix": "tessy_bridge,w3rt13_bridge",
+    }
+    view = power_sync.EVVehicleCommandView(hass)
+    view._get_powersync_config = lambda: one_bridge
+
+    assert view._get_vin_from_vehicle_id("1") == tessy_vin
+    assert view._get_vin_from_vehicle_id("2") == werty_vin
+    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, tessy_vin) == "tessy_bridge"
+    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, werty_vin) is None
+    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, werty_vin) == "w3rt13_bridge"
+
+
 def test_external_tesla_power_uses_coalesced_charging_vehicle():
     power_sync = _power_sync_module()
     hass = _tesla_hass([

@@ -122,6 +122,7 @@ ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner
 
 
 VIN = "LRWYHCEK3PC907290"
+WERTY_VIN = "5YJ3E1EA7KF000001"
 BRISBANE_TZ = timezone(timedelta(hours=10))
 
 
@@ -154,6 +155,55 @@ class _RecordingPlanner:
             target_time=target_time.isoformat() if target_time else None,
             energy_needed_kwh=5.0,
         )
+
+
+def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
+    hass = _Hass()
+    hass.device_registry.devices = {
+        "fleet-tessy": SimpleNamespace(
+            identifiers={("tesla_fleet", VIN)},
+        ),
+        "teslemetry-tessy": SimpleNamespace(
+            identifiers={("teslemetry", VIN)},
+        ),
+        "fleet-werty": SimpleNamespace(
+            identifiers={("tesla_fleet", WERTY_VIN)},
+        ),
+    }
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "tessy_bridge",
+        },
+    )
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        entry,
+        planner=_RecordingPlanner(),
+    )
+
+    assert executor._resolve_vehicle_vin("1") == VIN
+    assert executor._resolve_vehicle_vin("2") == WERTY_VIN
+    assert executor._resolve_vehicle_vin("3") == "ble_tessy_bridge"
+    assert ev_planner._configured_ble_prefixes(
+        entry,
+        VIN,
+        hass=hass,
+    ) == ["tessy_bridge"]
+    assert ev_planner._configured_ble_prefixes(
+        entry,
+        WERTY_VIN,
+        hass=hass,
+    ) == []
+
+    entry.options["tesla_ble_entity_prefix"] = "tessy_bridge,w3rt13_bridge"
+    assert ev_planner._configured_ble_prefixes(
+        entry,
+        WERTY_VIN,
+        hass=hass,
+    ) == ["w3rt13_bridge"]
 
 
 def test_regenerate_plan_selects_ha_local_weekday_not_os_weekday(monkeypatch):
