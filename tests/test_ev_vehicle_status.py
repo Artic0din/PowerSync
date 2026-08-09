@@ -316,6 +316,7 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
         options={
             "ev_provider": power_sync.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "primary_ev_bridge",
+            "tesla_ble_vehicle_mapping": f"{primary_vin}=primary_ev_bridge",
         },
     )
 
@@ -355,10 +356,14 @@ def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
     one_bridge = {
         "ev_provider": power_sync.EV_PROVIDER_BOTH,
         "tesla_ble_entity_prefix": "primary_ev_bridge",
+        "tesla_ble_vehicle_mapping": f"{primary_vin}=primary_ev_bridge",
     }
     two_bridges = {
         **one_bridge,
-        "tesla_ble_entity_prefix": "primary_ev_bridge,secondary_ev_bridge",
+        "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+        "tesla_ble_vehicle_mapping": (
+            f"{primary_vin}=bridge_beta,{secondary_vin}=bridge_alpha"
+        ),
     }
     view = power_sync.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: one_bridge
@@ -367,7 +372,59 @@ def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
     assert view._get_vin_from_vehicle_id("2") == secondary_vin
     assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, primary_vin) == "primary_ev_bridge"
     assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, secondary_vin) is None
-    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, secondary_vin) == "secondary_ev_bridge"
+    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, primary_vin) == "bridge_beta"
+    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, secondary_vin) == "bridge_alpha"
+
+    partially_mapped = {
+        **two_bridges,
+        "tesla_ble_vehicle_mapping": f"{primary_vin}=bridge_beta",
+    }
+    view._get_powersync_config = lambda: partially_mapped
+    assert view._get_vin_from_vehicle_id("3") == "ble_bridge_alpha"
+
+
+def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
+    power_sync = _power_sync_module()
+    vin_a = "5YJTEST0000000001"
+    vin_b = "5YJTEST0000000002"
+    view = power_sync.EVVehiclesView(_Hass([]))
+    ble_vehicles = {
+        "bridge_alpha": {
+            "battery_level": 41,
+            "charging_state": "Stopped",
+            "is_online": True,
+        },
+        "bridge_beta": {
+            "battery_level": 82,
+            "charging_state": "Charging",
+            "is_online": True,
+        },
+    }
+    view._get_tesla_ble_vehicle = lambda prefix, vehicle_index=1: dict(
+        ble_vehicles[prefix]
+    )
+    vehicles = [
+        {"vin": vin_a, "battery_level": 60, "charging_state": "Stopped"},
+        {"vin": vin_b, "battery_level": 70, "charging_state": "Stopped"},
+    ]
+    config = {
+        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+        "tesla_ble_vehicle_mapping": (
+            f"{vin_a}=bridge_beta,{vin_b}=bridge_alpha"
+        ),
+    }
+
+    view._merge_tesla_ble_vehicles(
+        vehicles,
+        config,
+        ["bridge_alpha", "bridge_beta"],
+    )
+
+    assert len(vehicles) == 2
+    assert vehicles[0]["battery_level"] == 82
+    assert vehicles[0]["charging_state"] == "Charging"
+    assert vehicles[1]["battery_level"] == 41
 
 
 def test_external_tesla_power_uses_coalesced_charging_vehicle():

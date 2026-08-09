@@ -4875,6 +4875,9 @@ def test_price_level_pairs_all_fleet_ble_aliases_and_preserves_partial_mapping(
         options={
             "ev_provider": "both",
             "tesla_ble_entity_prefix": "garage_gateway,driveway_gateway",
+            "tesla_ble_vehicle_mapping": (
+                f"{fleet_a}=driveway_gateway,{fleet_b}=garage_gateway"
+            ),
         },
     )
     vehicles = [
@@ -5416,6 +5419,7 @@ def test_mixed_tesla_ble_keeps_second_configured_vehicle_actionable(
         options={
             "ev_provider": "both",
             "tesla_ble_entity_prefix": "garage_gateway,driveway_gateway",
+            "tesla_ble_vehicle_mapping": f"{VIN}=garage_gateway",
         },
     )
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)

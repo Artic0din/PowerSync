@@ -106,6 +106,7 @@ CONF_TESLA_EV_TELEMETRY_TOKEN = "tesla_ev_teslemetry_token"
 # Tesla BLE configuration (ESPHome Tesla BLE integration)
 CONF_TESLA_BLE_ENABLED = "tesla_ble_enabled"
 CONF_TESLA_BLE_ENTITY_PREFIX = "tesla_ble_entity_prefix"
+CONF_TESLA_BLE_VEHICLE_MAPPING = "tesla_ble_vehicle_mapping"
 DEFAULT_TESLA_BLE_ENTITY_PREFIX = "tesla_ble"
 
 # Tesla BLE entity patterns (based on esphome-tesla-ble)

@@ -191,7 +191,7 @@ def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
         entry,
         VIN,
         hass=hass,
-    ) == ["primary_ev_bridge"]
+    ) == []
     assert ev_planner._configured_ble_prefixes(
         entry,
         SECONDARY_VIN,
@@ -203,7 +203,17 @@ def test_legacy_vehicle_index_deduplicates_fleet_and_teslemetry_devices():
         entry,
         SECONDARY_VIN,
         hass=hass,
+    ) == []
+
+    entry.options["tesla_ble_vehicle_mapping"] = (
+        f"{VIN}=primary_ev_bridge,{SECONDARY_VIN}=secondary_ev_bridge"
+    )
+    assert ev_planner._configured_ble_prefixes(
+        entry,
+        SECONDARY_VIN,
+        hass=hass,
     ) == ["secondary_ev_bridge"]
+    assert executor._resolve_vehicle_vin("3") is None
 
 
 def test_regenerate_plan_selects_ha_local_weekday_not_os_weekday(monkeypatch):

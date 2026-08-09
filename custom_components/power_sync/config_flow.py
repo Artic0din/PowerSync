@@ -38,6 +38,11 @@ from .history_migration import (
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .powerwall_host import normalize_powerwall_gateway_host
+from .tesla_ble_mapping import (
+    TeslaBleMappingError,
+    configured_ble_prefixes,
+    parse_tesla_ble_vehicle_mapping,
+)
 from .settings_metadata import (
     merge_optimization_section_input,
     submitted_live_settings,
@@ -409,6 +414,7 @@ from .const import (
     EV_PROVIDER_BOTH,
     EV_PROVIDERS,
     CONF_TESLA_BLE_ENTITY_PREFIX,
+    CONF_TESLA_BLE_VEHICLE_MAPPING,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
     CONF_OCPP_ENABLED,
     CONF_OCPP_PORT,
@@ -13981,19 +13987,35 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step for EV Charging and OCPP configuration."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # Store EV data for potential zaptec_cloud step
-            self._ev_options_data = dict(user_input)
+            try:
+                vehicle_mapping = parse_tesla_ble_vehicle_mapping(
+                    user_input.get(CONF_TESLA_BLE_VEHICLE_MAPPING)
+                )
+                prefixes = configured_ble_prefixes(user_input)
+                if not set(vehicle_mapping.values()).issubset(prefixes):
+                    raise TeslaBleMappingError(
+                        "Every mapped BLE prefix must be configured"
+                    )
+            except TeslaBleMappingError:
+                errors[CONF_TESLA_BLE_VEHICLE_MAPPING] = (
+                    "invalid_tesla_ble_vehicle_mapping"
+                )
 
-            # If Zaptec standalone is being newly enabled, go to credentials step
-            was_standalone = self._get_option(CONF_ZAPTEC_STANDALONE_ENABLED, False)
-            now_standalone = user_input.get(CONF_ZAPTEC_STANDALONE_ENABLED, False)
-            has_credentials = bool(self._get_option(CONF_ZAPTEC_USERNAME, ""))
+            if not errors:
+                # Store EV data for potential zaptec_cloud step
+                self._ev_options_data = dict(user_input)
 
-            if now_standalone and (not was_standalone or not has_credentials):
-                return await self.async_step_zaptec_cloud_options()
+                # If Zaptec standalone is being newly enabled, go to credentials step
+                was_standalone = self._get_option(CONF_ZAPTEC_STANDALONE_ENABLED, False)
+                now_standalone = user_input.get(CONF_ZAPTEC_STANDALONE_ENABLED, False)
+                has_credentials = bool(self._get_option(CONF_ZAPTEC_USERNAME, ""))
 
-            return self._save_ev_options(user_input)
+                if now_standalone and (not was_standalone or not has_credentials):
+                    return await self.async_step_zaptec_cloud_options()
+
+                return self._save_ev_options(user_input)
 
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
@@ -14041,6 +14063,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(
                     CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
                 ),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_TESLA_BLE_VEHICLE_MAPPING,
+                default=self._get_option(CONF_TESLA_BLE_VEHICLE_MAPPING, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             # OCPP settings
             vol.Optional(
@@ -14193,6 +14219,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="ev_charging",
             data_schema=vol.Schema(schema_dict),
+            errors=errors,
         )
 
     def _save_ev_options(self, ev_input: dict[str, Any]) -> FlowResult:
@@ -14214,6 +14241,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_TESLA_BLE_ENTITY_PREFIX] = ev_input.get(
             CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
         )
+        final_data[CONF_TESLA_BLE_VEHICLE_MAPPING] = str(
+            ev_input.get(CONF_TESLA_BLE_VEHICLE_MAPPING, "") or ""
+        ).strip()
 
         # Add OCPP settings
         final_data[CONF_OCPP_ENABLED] = ev_input.get(CONF_OCPP_ENABLED, False)

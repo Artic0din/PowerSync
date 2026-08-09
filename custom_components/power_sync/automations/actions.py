@@ -62,6 +62,7 @@ from ..solar_surplus_config import (
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
 )
+from ..tesla_ble_mapping import vehicle_ble_prefix
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1210,23 +1211,20 @@ def _resolve_ble_prefix_for_vehicle(
     """Get the correct BLE prefix for a specific vehicle.
 
     If vehicle_vin is a BLE identifier (ble_*), extract the prefix from it.
-    In Fleet + BLE mode, associate deduplicated Fleet VINs and configured BLE
-    prefixes by the same positional contract used by vehicle discovery. A VIN
-    with no corresponding BLE prefix must return an empty string so commands
-    fall back to Fleet instead of controlling another car's first BLE bridge.
+    In Fleet + BLE mode, use an explicit VIN-to-prefix association. A safe
+    single-vehicle configuration may be inferred, but multi-vehicle setups
+    must never depend on registry discovery order.
     """
     if vehicle_vin and vehicle_vin.startswith("ble_"):
-        return vehicle_vin[4:]  # "ble_joanna_model_3_local" → "joanna_model_3_local"
+        return vehicle_vin[4:]  # "ble_vehicle_bridge" → "vehicle_bridge"
 
     config = {
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
     }
-    raw = config.get(
-        CONF_TESLA_BLE_ENTITY_PREFIX,
-        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
-    )
-    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+    explicitly_mapped_prefix = vehicle_ble_prefix(config, vehicle_vin)
+    if explicitly_mapped_prefix:
+        return explicitly_mapped_prefix
 
     if (
         vehicle_vin
@@ -1252,17 +1250,7 @@ def _resolve_ble_prefix_for_vehicle(
                         seen_vins.add(candidate_key)
                         fleet_vins.append(candidate)
                     break
-            target_index = next(
-                (
-                    index
-                    for index, candidate in enumerate(fleet_vins)
-                    if candidate.strip().lower() == vehicle_vin.strip().lower()
-                ),
-                None,
-            )
-            if target_index is not None:
-                return prefixes[target_index] if target_index < len(prefixes) else ""
-            return ""
+            return vehicle_ble_prefix(config, vehicle_vin, fleet_vins) or ""
         except Exception as err:
             _LOGGER.debug(
                 "Could not associate Fleet VIN %s with a BLE prefix: %s",
@@ -1271,9 +1259,8 @@ def _resolve_ble_prefix_for_vehicle(
             )
             return ""
 
-    # BLE-only and anonymous single-vehicle paths retain the first-prefix
-    # fallback for backward compatibility.
-    return prefixes[0] if prefixes else DEFAULT_TESLA_BLE_ENTITY_PREFIX
+    # BLE-only and anonymous paths retain the first-prefix fallback.
+    return vehicle_ble_prefix(config, vehicle_vin) or DEFAULT_TESLA_BLE_ENTITY_PREFIX
 
 
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
