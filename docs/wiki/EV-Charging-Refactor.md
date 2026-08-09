@@ -104,6 +104,10 @@ Adapters should translate each charger/provider into this model:
 - Zaptec standalone
 - Sigenergy EVAC / EVDC Modbus chargers
 
+When multiple Tesla Fleet vehicles use ESPHome BLE bridges in `Both` mode, configure each bridge explicitly as `VIN=prefix` in the EV charging settings.
+PowerSync may infer the bridge only when exactly one Fleet VIN and one BLE prefix are configured.
+Unmapped or ambiguous vehicles stay on Fleet control so telemetry and commands cannot be attached to another vehicle by discovery order.
+
 ## Coordinator Rules
 
 1. Read all loadpoint states.

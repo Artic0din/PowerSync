@@ -120,11 +120,12 @@ def test_active_charging_inferred_from_teslemetry_bt_power():
     ) is True
 
 
-def _both_entry(prefixes: str = "ble_a,ble_b") -> _Entry:
+def _both_entry(prefixes: str = "ble_a,ble_b", mapping: str = "") -> _Entry:
     entry = _Entry()
     entry.options = {
         "ev_provider": "both",
         "tesla_ble_entity_prefix": prefixes,
+        "tesla_ble_vehicle_mapping": mapping,
     }
     return entry
 
@@ -155,7 +156,10 @@ def test_active_charging_real_vin_uses_only_its_paired_ble_prefix():
     assert asyncio.run(
         ev_planner.is_ev_actively_charging(
             hass,
-            _both_entry(),
+            _both_entry(
+                "ble_b,ble_a",
+                f"{vin_a}=ble_a,{vin_b}=ble_b",
+            ),
             vehicle_vin=vin_a,
         )
     ) is False
@@ -166,7 +170,10 @@ def test_active_charging_real_vin_uses_only_its_paired_ble_prefix():
     assert asyncio.run(
         ev_planner.is_ev_actively_charging(
             hass,
-            _both_entry(),
+            _both_entry(
+                "ble_b,ble_a",
+                f"{vin_a}=ble_a,{vin_b}=ble_b",
+            ),
             vehicle_vin=vin_a,
         )
     ) is True
@@ -212,6 +219,58 @@ def test_active_charging_explicit_ble_vin_checks_exact_prefix():
     ) is False
 
 
+def test_discovery_hides_only_explicitly_paired_ble_duplicate():
+    _install_registry_stubs()
+    vin = "5YJTEST0000000001"
+    hass = _Hass(
+        [
+            _State("binary_sensor.bridge_alpha_status", "on"),
+            _State("binary_sensor.bridge_beta_status", "on"),
+        ],
+        devices=_fleet_devices(vin),
+    )
+    entry = _both_entry(
+        "bridge_alpha,bridge_beta",
+        f"{vin}=bridge_beta",
+    )
+
+    vehicles = asyncio.run(ev_planner.discover_all_tesla_vehicles(hass, entry))
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [vin, "ble_bridge_alpha"]
+
+
+def test_discovery_empty_prefix_uses_default_bridge():
+    _install_registry_stubs()
+    hass = _Hass([_State("binary_sensor.tesla_ble_status", "on")])
+
+    vehicles = asyncio.run(
+        ev_planner.discover_all_tesla_vehicles(hass, _both_entry(""))
+    )
+
+    assert [vehicle["vin"] for vehicle in vehicles] == ["ble_tesla_ble"]
+
+
+def test_discovery_pairs_unambiguous_autodetected_bridge_to_single_fleet_vin():
+    _install_registry_stubs()
+    vin = "5YJTEST0000000001"
+    hass = _Hass(
+        [
+            _State("sensor.garage_ble_charging_state", "Stopped"),
+            _State("binary_sensor.garage_ble_ble_status", "on"),
+        ],
+        devices=_fleet_devices(vin),
+    )
+
+    vehicles = asyncio.run(
+        ev_planner.discover_all_tesla_vehicles(
+            hass,
+            _both_entry("tesla_ble"),
+        )
+    )
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [vin]
+
+
 def test_default_tesla_start_coalesces_paired_fleet_and_ble(monkeypatch):
     vin = "5YJTEST0000000001"
     ble_vin = "ble_ble_a"
@@ -228,14 +287,10 @@ def test_default_tesla_start_coalesces_paired_fleet_and_ble(monkeypatch):
     monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered)
     monkeypatch.setattr(ev_planner, "get_ev_location", lambda *_args, **_kwargs: _async_home())
     monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged)
-    actions_stub = types.ModuleType("power_sync.automations.actions")
-    actions_stub._resolve_ble_prefix_for_vehicle = lambda *_args: "ble_a"
-    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions_stub)
-
     assert asyncio.run(
         ev_planner._resolve_unspecified_tesla_start_vin(
             _Hass([]),
-            _both_entry(),
+            _both_entry("ble_a"),
             None,
         )
     ) == vin

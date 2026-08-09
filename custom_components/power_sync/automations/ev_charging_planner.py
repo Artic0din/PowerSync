@@ -39,6 +39,11 @@ from ..solar_surplus_config import (
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
 )
+from ..tesla_ble_mapping import (
+    configured_ble_prefixes,
+    resolve_ble_prefixes,
+    vehicle_ble_prefix,
+)
 from .ev_vehicle_capacity import (
     CAPACITY_SOURCE_CHARGER_FALLBACK,
     CAPACITY_SOURCE_DEFAULT_ESTIMATE,
@@ -329,9 +334,11 @@ def _configured_ble_prefixes(
         return [vehicle_vin[4:]]
 
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
-    raw_prefix = opts.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-    prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
-    prefixes = prefixes or [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
+    prefixes = (
+        resolve_ble_prefixes(hass, opts)
+        if hass is not None
+        else configured_ble_prefixes(opts)
+    )
 
     if (
         hass is not None
@@ -359,17 +366,13 @@ def _configured_ble_prefixes(
                     seen_vins.add(candidate_key)
                     fleet_vins.append(candidate)
                 break
-        target_index = next(
-            (
-                index
-                for index, candidate in enumerate(fleet_vins)
-                if candidate.strip().lower() == vehicle_vin.strip().lower()
-            ),
-            None,
+        prefix = vehicle_ble_prefix(
+            opts,
+            vehicle_vin,
+            fleet_vins,
+            prefixes,
         )
-        if target_index is None or target_index >= len(prefixes):
-            return []
-        return [prefixes[target_index]]
+        return [prefix] if prefix else []
 
     return prefixes
 
@@ -816,7 +819,9 @@ async def discover_all_tesla_vehicles(
     The returned ``vin`` for a BLE vehicle is ``ble_{prefix}``, which
     downstream helpers (``_resolve_vehicle_vin``, ``is_ev_plugged_in``,
     ``get_ev_battery_level``, ``get_ev_location``) already handle via their
-    existing ``startswith("ble_")`` branches.
+    existing ``startswith("ble_")`` branches. In ``Both`` mode, an explicitly
+    or unambiguously paired BLE bridge is represented by its Fleet vehicle
+    instead of a duplicate BLE row.
 
     Args:
         hass: Home Assistant instance
@@ -876,10 +881,28 @@ async def discover_all_tesla_vehicles(
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
     ev_provider = opts.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-        raw_prefix = opts.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
+        ble_prefixes = resolve_ble_prefixes(hass, opts)
+        fleet_vins = [vehicle["vin"] for vehicle in vehicles]
+        paired_prefixes = (
+            {
+                prefix
+                for fleet_vin in fleet_vins
+                if (
+                    prefix := vehicle_ble_prefix(
+                        opts,
+                        fleet_vin,
+                        fleet_vins,
+                        ble_prefixes,
+                    )
+                )
+            }
+            if ev_provider == EV_PROVIDER_BOTH
+            else set()
+        )
         existing_vins = {v["vin"] for v in vehicles}
         for prefix in ble_prefixes:
+            if prefix in paired_prefixes:
+                continue
             ble_vin = f"ble_{prefix}"
             if ble_vin in existing_vins:
                 continue  # already reported (shouldn't happen, but defensive)
@@ -1247,8 +1270,8 @@ async def is_ev_actively_charging(
         ble_prefixes = [vehicle_vin[4:]]
     elif vehicle_vin:
         # A real Fleet VIN can use a BLE fallback only when the configured
-        # provider is BOTH, and then only through the positional VIN/prefix
-        # association.  Fleet-only (or an unknown VIN) must not probe stale
+        # provider is BOTH, and then only through an identity-safe VIN/prefix
+        # association. Fleet-only (or an unknown VIN) must not probe stale
         # BLE switches belonging to another vehicle.
         ble_prefixes = (
             _configured_ble_prefixes(config_entry, vehicle_vin, hass=hass)
@@ -4042,8 +4065,6 @@ class AutoScheduleExecutor:
             EV_PROVIDER_FLEET_API,
             EV_PROVIDER_BOTH,
             EV_PROVIDER_TESLA_BLE,
-            CONF_TESLA_BLE_ENTITY_PREFIX,
-            DEFAULT_TESLA_BLE_ENTITY_PREFIX,
         )
 
         # Already a BLE identifier or VIN — return as-is
@@ -4057,6 +4078,7 @@ class AutoScheduleExecutor:
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
         vehicle_num = 0
+        fleet_vins: list[str] = []
 
         # Fleet API vehicles numbered first (same order as EVVehiclesView)
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
@@ -4077,6 +4099,7 @@ class AutoScheduleExecutor:
                         and vin_key not in seen_vins
                     ):
                         seen_vins.add(vin_key)
+                        fleet_vins.append(id_str)
                         vehicle_num += 1
                         if str(vehicle_num) == str(vehicle_id):
                             return id_str
@@ -4084,9 +4107,26 @@ class AutoScheduleExecutor:
 
         # BLE vehicles follow fleet vehicles
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-            raw = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-            ble_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+            ble_prefixes = resolve_ble_prefixes(self.hass, config)
+            paired_prefixes = (
+                {
+                    prefix
+                    for fleet_vin in fleet_vins
+                    if (
+                        prefix := vehicle_ble_prefix(
+                            config,
+                            fleet_vin,
+                            fleet_vins,
+                            ble_prefixes,
+                        )
+                    )
+                }
+                if ev_provider == EV_PROVIDER_BOTH
+                else set()
+            )
             for prefix in ble_prefixes:
+                if prefix in paired_prefixes:
+                    continue
                 vehicle_num += 1
                 if str(vehicle_num) == str(vehicle_id):
                     return f"ble_{prefix}"
@@ -6911,10 +6951,8 @@ def _paired_ble_aliases_for_fleet_vins(
 ) -> set[str]:
     """Return every BLE discovery alias paired to a discovered Fleet VIN.
 
-    The command path owns the positional Fleet/BLE association in
-    ``_resolve_ble_prefix_for_vehicle``.  Reusing it here keeps price-level
-    duplicate suppression aligned with actual command routing, including
-    partial (fewer BLE prefixes than Fleet vehicles) configurations.
+    The shared identity resolver keeps price-level duplicate suppression
+    aligned with command routing, including partial mappings.
     """
     fleet_vins = [
         str(vehicle.get("vin") or "").strip()
@@ -6924,36 +6962,24 @@ def _paired_ble_aliases_for_fleet_vins(
     ]
     if not fleet_vins:
         return set()
-    try:
-        try:
-            from .actions import _resolve_ble_prefix_for_vehicle
-        except (ImportError, AttributeError):
-            _resolve_ble_prefix_for_vehicle = None
-
-        aliases: set[str] = set()
-        configured_prefixes = _configured_ble_prefixes(
-            config_entry,
-            None,
-            hass=hass,
-        )
-        for index, fleet_vin in enumerate(fleet_vins):
-            prefix = (
-                _resolve_ble_prefix_for_vehicle(hass, config_entry, fleet_vin)
-                if _resolve_ble_prefix_for_vehicle is not None
-                else ""
+    opts = {**config_entry.data, **config_entry.options}
+    resolved_prefixes = _configured_ble_prefixes(
+        config_entry,
+        None,
+        hass=hass,
+    )
+    return {
+        f"ble_{prefix}"
+        for fleet_vin in fleet_vins
+        if (
+            prefix := vehicle_ble_prefix(
+                opts,
+                fleet_vin,
+                fleet_vins,
+                resolved_prefixes,
             )
-            # Lightweight callers/tests may provide discovered Fleet rows
-            # without populating HA's device registry.  Preserve the same
-            # positional contract as discovery in that case; a partial BLE
-            # list naturally leaves later Fleet VINs without an alias.
-            if not prefix and index < len(configured_prefixes):
-                prefix = configured_prefixes[index]
-            if prefix:
-                aliases.add(f"ble_{prefix}")
-        return aliases
-    except Exception as err:
-        _LOGGER.debug("Tesla Fleet/BLE alias pairing unavailable: %s", err)
-        return set()
+        )
+    }
 
 
 def _can_stop_owned_loadpoint(
@@ -7638,7 +7664,7 @@ async def _resolve_unspecified_tesla_start_vin(
     """Resolve a default Tesla start to one physical home loadpoint.
 
     Discovery exposes a Fleet row and a BLE row for the same car in BOTH
-    mode.  Coalesce those positional aliases before counting candidates so a
+    mode. Coalesce explicitly paired aliases before counting candidates so a
     single Fleet vehicle does not become spuriously ambiguous.  Unpaired BLE
     rows remain independent loadpoints and therefore keep the fail-closed
     behaviour when more than one physical vehicle is plugged in.
@@ -7657,30 +7683,24 @@ async def _resolve_unspecified_tesla_start_vin(
         candidate = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
         if candidate and not candidate.startswith("ble_"):
             fleet_vins.append(candidate)
-    paired_ble_to_fleet: dict[str, str] = {}
-    if fleet_vins:
-        # Keep pairing in one place with the command path.  The helper uses
-        # the same deduplicated Fleet-device ordering as discovery.
-        try:
-            from .actions import _resolve_ble_prefix_for_vehicle
-
-            configured_prefixes = _configured_ble_prefixes(
-                config_entry,
-                None,
-                hass=hass,
+    opts = {**config_entry.data, **config_entry.options}
+    resolved_prefixes = _configured_ble_prefixes(
+        config_entry,
+        None,
+        hass=hass,
+    )
+    paired_ble_to_fleet = {
+        f"ble_{prefix}": fleet_vin
+        for fleet_vin in fleet_vins
+        if (
+            prefix := vehicle_ble_prefix(
+                opts,
+                fleet_vin,
+                fleet_vins,
+                resolved_prefixes,
             )
-            for index, fleet_vin in enumerate(fleet_vins):
-                prefix = _resolve_ble_prefix_for_vehicle(
-                    hass,
-                    config_entry,
-                    fleet_vin,
-                )
-                if not prefix and index < len(configured_prefixes):
-                    prefix = configured_prefixes[index]
-                if prefix:
-                    paired_ble_to_fleet[f"ble_{prefix}"] = fleet_vin
-        except Exception as err:
-            _LOGGER.debug("Tesla Fleet/BLE pairing unavailable: %s", err)
+        )
+    }
 
     # Keep rows grouped by physical loadpoint before querying plug state.  If
     # either a Fleet row or its paired BLE alias reports plugged-in, that

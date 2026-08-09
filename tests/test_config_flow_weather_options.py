@@ -378,6 +378,50 @@ def test_ev_charging_options_include_fallback_generic_soc_sensor():
     )
 
 
+def test_ev_charging_options_validate_and_save_tesla_ble_vehicle_mapping():
+    source = CONFIG_FLOW_PATH.read_text()
+    form_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_ev_charging")
+    )
+    save_source = ast.get_source_segment(
+        source, _options_flow_method("_save_ev_options")
+    )
+
+    assert form_source is not None
+    assert save_source is not None
+    assert "CONF_TESLA_BLE_VEHICLE_MAPPING" in form_source
+    assert "parse_tesla_ble_vehicle_mapping" in form_source
+    assert "configured_ble_prefixes" in form_source
+    assert '"invalid_tesla_ble_vehicle_mapping"' in form_source
+    assert "final_data[CONF_TESLA_BLE_VEHICLE_MAPPING]" in save_source
+
+
+def test_ev_charging_options_preserve_invalid_submitted_mapping():
+    source = CONFIG_FLOW_PATH.read_text()
+    form_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_ev_charging")
+    )
+
+    assert form_source is not None
+    assert "current_tesla_ble_vehicle_mapping" in form_source
+    assert "user_input.get(CONF_TESLA_BLE_VEHICLE_MAPPING" in form_source
+    assert "default=current_tesla_ble_vehicle_mapping" in form_source
+
+
+def test_ev_charging_tesla_ble_vehicle_mapping_is_translated():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        payload = json.loads(path.read_text())
+        assert "invalid_tesla_ble_vehicle_mapping" in payload["options"]["error"]
+        for step_name in ("ev_charging_setup", "ev_charging"):
+            step = payload["options"]["step"][step_name]
+            assert step["data"]["tesla_ble_vehicle_mapping"] == (
+                "Tesla VIN to BLE bridge mapping"
+            )
+            assert "VIN=prefix" in step["data_description"][
+                "tesla_ble_vehicle_mapping"
+            ]
+
+
 def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("_save_ev_options")

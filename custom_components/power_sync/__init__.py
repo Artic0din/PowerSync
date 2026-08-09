@@ -855,6 +855,11 @@ from .const import (
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
 )
+from .tesla_ble_mapping import (
+    ble_prefix_vehicle_pairs,
+    resolve_ble_prefixes as resolve_tesla_ble_prefixes,
+    vehicle_ble_prefix,
+)
 from .history_migration import (
     apply_history_relink,
     history_relink_applied_for_key,
@@ -975,38 +980,8 @@ def _current_capacity_from_soh_kwh(
 
 
 def _resolve_ble_prefixes(hass, config: dict) -> list[str]:
-    """Resolve Tesla BLE entity prefixes with auto-detection fallback.
-
-    Supports comma-separated prefixes for multiple BLE vehicles.
-    If a single configured prefix doesn't find a BLE status entity, scan for
-    a *_charging_state sensor whose prefix contains 'ble' and use that instead.
-    """
-    raw = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
-    if not prefixes:
-        prefixes = [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
-
-    resolved = []
-    for prefix in prefixes:
-        if get_tesla_ble_status_state(hass, prefix) is not None:
-            resolved.append(prefix)
-            continue
-        # Auto-detect fallback only for single-prefix configs
-        if len(prefixes) == 1:
-            for state in hass.states.async_all():
-                match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
-                if match and "ble" in match.group(1).lower():
-                    detected = match.group(1)
-                    _LOGGER.debug(
-                        "BLE prefix auto-detected as '%s' (configured: '%s')", detected, prefix
-                    )
-                    resolved.append(detected)
-                    break
-            else:
-                resolved.append(prefix)  # use as-is
-        else:
-            resolved.append(prefix)  # multi-prefix: trust user input
-    return resolved
+    """Resolve Tesla BLE prefixes through the shared identity-safe resolver."""
+    return resolve_tesla_ble_prefixes(hass, config)
 
 
 def _resolve_ble_prefix(hass, config: dict) -> str:
@@ -1019,7 +994,6 @@ def _ble_prefix_for_vehicle(hass, config: dict, vehicle_vin: str | None) -> str 
     """Get BLE prefix for a specific vehicle. Returns None if not a BLE vehicle."""
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         return vehicle_vin[4:]  # strip "ble_" prefix
-    prefixes = _resolve_ble_prefixes(hass, config)
     if (
         vehicle_vin
         and len(vehicle_vin) == 17
@@ -1043,21 +1017,16 @@ def _ble_prefix_for_vehicle(hass, config: dict, vehicle_vin: str | None) -> str 
                     seen_vins.add(candidate_key)
                     fleet_vins.append(candidate)
                 break
-        target_index = next(
-            (
-                index
-                for index, candidate in enumerate(fleet_vins)
-                if candidate.strip().lower() == vehicle_vin.strip().lower()
-            ),
-            None,
+        return vehicle_ble_prefix(
+            config,
+            vehicle_vin,
+            fleet_vins,
+            _resolve_ble_prefixes(hass, config),
         )
-        if target_index is None or target_index >= len(prefixes):
-            return None
-        return prefixes[target_index]
 
     # BLE-only and anonymous single-vehicle paths retain the first-prefix
     # fallback for backward compatibility.
-    return prefixes[0] if prefixes else None
+    return vehicle_ble_prefix(config, vehicle_vin)
 
 
 def _resolve_teslemetry_bt_prefix(hass) -> str | None:
@@ -1578,7 +1547,13 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         })
 
     ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-    for prefix_index, prefix in enumerate(_resolve_ble_prefixes(hass, config)):
+    ble_prefixes = _resolve_ble_prefixes(hass, config)
+    paired_prefixes = ble_prefix_vehicle_pairs(
+        config,
+        fleet_vehicle_ids,
+        ble_prefixes,
+    )
+    for prefix in ble_prefixes:
         ble_vehicle_id = f"ble_{prefix}"
         if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
             continue
@@ -1624,16 +1599,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "is_connected": is_connected,
             "is_charging": ev_power_kw > 0.05,
         }
-        # EVVehiclesView and the automation vehicle picker already define
-        # BOTH-provider prefixes positionally: Fleet vehicles first, then only
-        # standalone BLE prefixes beyond that count. Preserve that established
-        # association for loadpoint coalescing instead of emitting a phantom
-        # BLE loadpoint as soon as a Fleet-only second car is discovered.
-        if (
-            ev_provider == EV_PROVIDER_BOTH
-            and prefix_index < len(fleet_vehicle_ids)
-        ):
-            ble_observation["bridge_vehicle_id"] = fleet_vehicle_ids[prefix_index]
+        if ev_provider == EV_PROVIDER_BOTH and prefix in paired_prefixes:
+            ble_observation["bridge_vehicle_id"] = paired_prefixes[prefix]
         vehicles.append(ble_observation)
 
     # Supplement with Wall Connector sensors for better detection.
@@ -13054,12 +13021,17 @@ def _get_available_ev_vehicles(hass: HomeAssistant) -> list[dict]:
     # 2. Tesla BLE — resolve prefixes, check status entity exists
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         ble_prefixes = _resolve_ble_prefixes(hass, config)
-        for index, prefix in enumerate(ble_prefixes):
+        paired_prefixes = ble_prefix_vehicle_pairs(
+            config,
+            [vehicle["id"] for vehicle in vehicles if vehicle["source"] == "fleet_api"],
+            ble_prefixes,
+        )
+        for prefix in ble_prefixes:
             if get_tesla_ble_status_state(hass, prefix) is not None:
                 ble_id = f"ble_{prefix}"
-                if ev_provider == EV_PROVIDER_BOTH and index < len(vehicles):
+                if ev_provider == EV_PROVIDER_BOTH and prefix in paired_prefixes:
                     continue
-                # Keep only standalone BLE vehicles not covered positionally above.
+                # Keep only standalone BLE vehicles without a safe Fleet pair.
                 if not any(v["id"] == ble_id for v in vehicles):
                     friendly = prefix.replace("_", " ").title()
                     vehicles.append({
@@ -13258,6 +13230,41 @@ class EVVehiclesView(HomeAssistantView):
             "source": "tesla_ble",
             "brand": "tesla",
         }
+
+    def _merge_tesla_ble_vehicles(
+        self,
+        vehicles: list[dict],
+        config: dict,
+        ble_prefixes: list[str],
+    ) -> None:
+        """Merge BLE telemetry into its Fleet vehicle without guessing identity."""
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        fleet_vehicles_by_vin = {
+            str(vehicle.get("vin")): vehicle
+            for vehicle in vehicles
+            if vehicle.get("vin")
+        }
+        paired_prefixes = ble_prefix_vehicle_pairs(
+            config,
+            list(fleet_vehicles_by_vin),
+            ble_prefixes,
+        )
+        next_vehicle_index = len(vehicles) + 1
+
+        for prefix in ble_prefixes:
+            ble_vehicle = self._get_tesla_ble_vehicle(
+                prefix,
+                vehicle_index=next_vehicle_index,
+            )
+            if not ble_vehicle:
+                continue
+            paired_vin = paired_prefixes.get(prefix)
+            fleet_vehicle = fleet_vehicles_by_vin.get(str(paired_vin))
+            if ev_provider == EV_PROVIDER_BOTH and fleet_vehicle is not None:
+                self._supplement_fleet_with_ble(fleet_vehicle, ble_vehicle)
+            else:
+                vehicles.append(ble_vehicle)
+                next_vehicle_index += 1
 
     def _get_byd_vehicles(self, start_id: int = 1) -> list[dict]:
         """Get BYD vehicles from hass-byd-vehicle integration."""
@@ -13559,25 +13566,7 @@ class EVVehiclesView(HomeAssistantView):
             # Get/supplement with Tesla BLE data (supports multiple BLE prefixes)
             if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
                 ble_prefixes = _resolve_ble_prefixes(self._hass, config)
-
-                if ev_provider == EV_PROVIDER_BOTH and vehicles:
-                    # Supplement fleet vehicles with BLE data positionally
-                    for i, prefix in enumerate(ble_prefixes):
-                        ble_vehicle = self._get_tesla_ble_vehicle(prefix, vehicle_index=len(vehicles) + i + 1)
-                        if not ble_vehicle:
-                            continue
-                        if i < len(vehicles):
-                            # Supplement existing fleet vehicle with BLE data
-                            self._supplement_fleet_with_ble(vehicles[i], ble_vehicle)
-                        else:
-                            # Extra BLE vehicle beyond fleet count — add standalone
-                            vehicles.append(ble_vehicle)
-                else:
-                    # BLE-only mode: each prefix is a separate vehicle
-                    for i, prefix in enumerate(ble_prefixes):
-                        ble_vehicle = self._get_tesla_ble_vehicle(prefix, vehicle_index=len(vehicles) + i + 1)
-                        if ble_vehicle:
-                            vehicles.append(ble_vehicle)
+                self._merge_tesla_ble_vehicles(vehicles, config, ble_prefixes)
 
             # Discover BYD vehicles from hass-byd-vehicle integration
             byd_vehicles = self._get_byd_vehicles(start_id=len(vehicles) + 1)
@@ -13915,6 +13904,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         # Build list of vehicles in same order as EVVehiclesView.get()
         vehicle_num = 0
+        fleet_vins: list[str] = []
 
         # Fleet API vehicles first
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
@@ -13933,6 +13923,7 @@ class EVVehicleCommandView(HomeAssistantView):
                             and vin_key not in seen_vins
                         ):
                             seen_vins.add(vin_key)
+                            fleet_vins.append(identifier_value)
                             vehicle_num += 1
                             if str(vehicle_num) == str(vehicle_id):
                                 _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
@@ -13943,17 +13934,19 @@ class EVVehicleCommandView(HomeAssistantView):
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
             ble_prefixes = _resolve_ble_prefixes(self._hass, config)
             if ev_provider == EV_PROVIDER_BOTH:
-                # In "both" mode, BLE vehicles that supplement fleet vehicles
-                # share the fleet ID. Only extra BLE vehicles get new IDs.
-                fleet_count = vehicle_num
-                for i, prefix in enumerate(ble_prefixes):
-                    if i >= fleet_count:
-                        # This BLE vehicle is standalone (beyond fleet count)
-                        vehicle_num += 1
-                        if str(vehicle_num) == str(vehicle_id):
-                            ble_vid = f"ble_{prefix}"
-                            _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to BLE {ble_vid}")
-                            return ble_vid
+                paired_prefixes = ble_prefix_vehicle_pairs(
+                    config,
+                    fleet_vins,
+                    ble_prefixes,
+                )
+                for prefix in ble_prefixes:
+                    if prefix in paired_prefixes:
+                        continue
+                    vehicle_num += 1
+                    if str(vehicle_num) == str(vehicle_id):
+                        ble_vid = f"ble_{prefix}"
+                        _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to BLE {ble_vid}")
+                        return ble_vid
             else:
                 # BLE-only mode: each prefix is a separate vehicle
                 for prefix in ble_prefixes:

@@ -483,13 +483,14 @@ VIN_A = "5YJ3E1EA7NF0000A1"
 VIN_B = "5YJ3E1EA7NF0000B2"
 
 
-def _both_provider_entry(prefixes: str):
+def _both_provider_entry(prefixes: str, vehicle_mapping: str = ""):
     return SimpleNamespace(
         entry_id="entry-1",
         data={},
         options={
             "ev_provider": "both",
             "tesla_ble_entity_prefix": prefixes,
+            "tesla_ble_vehicle_mapping": vehicle_mapping,
         },
     )
 
@@ -510,25 +511,51 @@ def _two_fleet_vehicle_hass() -> _Hass:
     return hass
 
 
-def test_fleet_only_second_vehicle_never_uses_first_cars_ble_bridge():
+def test_unmapped_multi_vehicle_setup_never_guesses_a_ble_bridge():
     hass = _two_fleet_vehicle_hass()
     entry = _both_provider_entry("primary_ev_bridge")
 
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "primary_ev_bridge"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == ""
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == ""
 
 
-def test_second_ble_bridge_becomes_preferred_for_second_fleet_vehicle():
-    hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
+def test_single_vehicle_command_uses_unambiguous_autodetected_ble_bridge(monkeypatch):
+    monkeypatch.setattr(actions, "TESLA_EV_INTEGRATIONS", {"tesla_fleet"})
+    monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
+    hass = _Hass(
+        [
+            _State("sensor.garage_ble_charging_state", "Stopped"),
+            _State("binary_sensor.garage_ble_ble_status", "on"),
+        ]
+    )
+    hass.device_registry.devices = {
+        "fleet-a": SimpleNamespace(identifiers={("tesla_fleet", VIN_A)})
+    }
+    entry = _both_provider_entry("tesla_ble")
 
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "primary_ev_bridge"
-    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "secondary_ev_bridge"
+    assert (
+        actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A)
+        == "garage_ble"
+    )
+
+
+def test_explicit_ble_mapping_is_independent_of_registry_and_prefix_order():
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "bridge_beta"
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "bridge_alpha"
 
 
 def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
     ble_start = AsyncMock(return_value=True)
     tbt_start = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
@@ -547,13 +574,16 @@ def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     )
 
     assert result is True
-    ble_start.assert_awaited_once_with(hass, "secondary_ev_bridge")
+    ble_start.assert_awaited_once_with(hass, "bridge_alpha")
     tbt_start.assert_not_awaited()
 
 
 def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     hass = _two_fleet_vehicle_hass()
-    entry = _both_provider_entry("primary_ev_bridge,secondary_ev_bridge")
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
     ble_amps = AsyncMock(return_value=True)
     tbt_amps = AsyncMock(return_value=True)
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
@@ -577,7 +607,7 @@ def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     )
 
     assert result is True
-    assert ble_amps.await_args.args[:3] == (hass, "secondary_ev_bridge", 10)
+    assert ble_amps.await_args.args[:3] == (hass, "bridge_alpha", 10)
     tbt_amps.assert_not_awaited()
 
 
