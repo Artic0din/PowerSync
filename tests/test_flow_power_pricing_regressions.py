@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import math
 import sys
 import types
 from datetime import datetime, timezone
@@ -17,6 +18,70 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 TARIFF_CONVERTER_PATH = COMPONENT_ROOT / "tariff_converter.py"
+
+
+def test_cost_tracking_uses_live_provider_contract_without_tariff_schedule():
+    coordinator_path = COMPONENT_ROOT / "coordinator.py"
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "HomeAssistant": object,
+        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+        "math": math,
+    }
+    exec(
+        "from __future__ import annotations\n"
+        + _function_source(coordinator_path, "_get_current_prices"),
+        namespace,
+    )
+    contract = {
+        "prices": {
+            "import": {"c_per_kwh": 35.0},
+            "export": {"c_per_kwh": 15.0},
+        }
+    }
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "covau-entry": {
+                    "covau_quota_runtime": SimpleNamespace(
+                        contract=lambda: contract
+                    )
+                }
+            }
+        }
+    )
+
+    assert namespace["_get_current_prices"](hass, "covau-entry") == (0.35, 0.15)
+
+    valid_fallback = {
+        "prices": {
+            "import": {"c_per_kwh": 22.0},
+            "export": {"c_per_kwh": 8.0},
+        }
+    }
+    invalid_contracts = (
+        {"prices": {"import": {"c_per_kwh": 35.0}}},
+        {
+            "prices": {
+                "import": {"c_per_kwh": -1.0},
+                "export": {"c_per_kwh": 15.0},
+            }
+        },
+    )
+    for invalid_contract in invalid_contracts:
+        hass.data["power_sync"]["covau-entry"] = {
+            "covau_quota_runtime": SimpleNamespace(
+                contract=lambda value=invalid_contract: value
+            ),
+            "optimization_coordinator": SimpleNamespace(
+                get_provider_contract=lambda: valid_fallback
+            ),
+        }
+        assert namespace["_get_current_prices"](hass, "covau-entry") == (
+            0.22,
+            0.08,
+        )
 
 
 def test_flow_power_default_happy_hour_excludes_2130():

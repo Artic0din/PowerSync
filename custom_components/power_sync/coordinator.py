@@ -577,6 +577,57 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 # Negate so sell_price is positive when earning, negative when paying
                 return (buy_dollar, -sell_dollar)
 
+        # Provider contracts are the authoritative live price source for
+        # providers such as CovaU. Their optimizer path does not populate the
+        # legacy tariff_schedule bucket, so skipping this bridge leaves the
+        # shared energy accumulator with no prices and permanently-zero costs.
+        def _contract_prices(contract: Any) -> tuple[float, float] | None:
+            if not isinstance(contract, dict):
+                return None
+            prices = contract.get("prices") or {}
+            try:
+                buy_cents = float((prices.get("import") or {}).get("c_per_kwh"))
+                sell_cents = float((prices.get("export") or {}).get("c_per_kwh"))
+            except (TypeError, ValueError):
+                return None
+            if (
+                not math.isfinite(buy_cents)
+                or not math.isfinite(sell_cents)
+                or buy_cents < 0
+                or sell_cents < 0
+            ):
+                return None
+            return (buy_cents / 100.0, sell_cents / 100.0)
+
+        contract_sources = (
+            (
+                "provider",
+                getattr(entry_data.get("covau_quota_runtime"), "contract", None),
+            ),
+            (
+                "optimizer provider",
+                getattr(
+                    entry_data.get("optimization_coordinator"),
+                    "get_provider_contract",
+                    None,
+                ),
+            ),
+        )
+        for source_name, contract_getter in contract_sources:
+            if not callable(contract_getter):
+                continue
+            try:
+                contract_prices = _contract_prices(contract_getter())
+            except Exception as exc:
+                _LOGGER.debug(
+                    "%s contract unavailable for cost tracking: %s",
+                    source_name.capitalize(),
+                    exc,
+                )
+                continue
+            if contract_prices is not None:
+                return contract_prices
+
         # Both Flow Power market-price sources publish the same Amber-compatible
         # current-price shape. KWatch-only installs do not create the AEMO
         # coordinator, so cost tracking must use their KWatch coordinator.

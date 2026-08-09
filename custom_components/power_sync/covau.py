@@ -442,6 +442,63 @@ def import_price_c_per_kwh(snapshot: CovaUPlanSnapshot, timestamp: datetime) -> 
     raise ValueError(f"No CovaU import rate covers {local.isoformat()}")
 
 
+def covau_tariff_schedule(
+    snapshot: CovaUPlanSnapshot,
+    ledger: QuotaLedger,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return the live CovaU contract in the generic dashboard schedule shape."""
+    now = now or datetime.now().astimezone()
+    ledger.advance_to(now)
+    local_now = tariff_datetime(now, snapshot.timezone_token)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    timestamps = [day_start + timedelta(minutes=30 * slot) for slot in range(48)]
+    (
+        import_prices,
+        export_prices,
+        import_bonuses,
+        export_bonuses,
+        _,
+        _,
+    ) = covau_price_series(snapshot, timestamps, ledger)
+
+    buy_prices: dict[str, float] = {}
+    sell_prices: dict[str, float] = {}
+    for timestamp, import_price, export_price, import_bonus, export_bonus in zip(
+        timestamps,
+        import_prices,
+        export_prices,
+        import_bonuses,
+        export_bonuses,
+        strict=True,
+    ):
+        period_key = f"PERIOD_{timestamp.hour:02d}_{timestamp.minute:02d}"
+        buy_prices[period_key] = round(max(0.0, import_price - import_bonus), 6)
+        sell_prices[period_key] = round(export_price + export_bonus, 6)
+
+    import_remaining = ledger.remaining_kwh(COVAU_IMPORT_RULE_ID)
+    export_remaining = ledger.remaining_kwh(COVAU_EXPORT_RULE_ID)
+    refresh_key = ":".join(
+        (
+            str(ledger.state.tariff_day or local_now.date().isoformat()),
+            snapshot.content_hash,
+            ledger.state.confidence,
+            f"{import_remaining:.4f}",
+            f"{export_remaining:.4f}",
+        )
+    )
+    return {
+        "currency": "AUD",
+        "buy_prices": buy_prices,
+        "sell_prices": sell_prices,
+        "utility": "CovaU",
+        "plan_name": snapshot.display_name,
+        "price_source": "covau_aer_cdr",
+        "last_sync": refresh_key,
+    }
+
+
 def covau_provider_contract(
     snapshot: CovaUPlanSnapshot,
     ledger: QuotaLedger,
@@ -505,6 +562,7 @@ def covau_provider_contract(
                 "period": export_period,
             },
         },
+        "tariff_schedule": covau_tariff_schedule(snapshot, ledger, now=now),
         "tariff_day": ledger.state.tariff_day,
         "settlement_confidence": ledger.state.confidence,
         "settlement_reason": ledger.state.reason,

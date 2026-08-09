@@ -38,6 +38,7 @@ covau_plan_candidates = covau.covau_plan_candidates
 covau_price_series = covau.covau_price_series
 covau_provider_contract = covau.covau_provider_contract
 covau_quota_rules = covau.covau_quota_rules
+covau_tariff_schedule = covau.covau_tariff_schedule
 import_price_c_per_kwh = covau.import_price_c_per_kwh
 normalize_covau_plan = covau.normalize_covau_plan
 QuotaLedger = quota.QuotaLedger
@@ -240,6 +241,80 @@ def test_provider_contract_current_period_tracks_effective_price_at_window_bound
         now=datetime(2026, 7, 16, 13, 0, tzinfo=aest),
     )
     assert conservative["prices"]["import"]["period"] == "covau_base_import"
+
+
+def test_provider_contract_exposes_quota_aware_dashboard_tariff_schedule() -> None:
+    snapshot = normalize_covau_plan(
+        _raw("COV1117614MRE2@EME"),
+        "COV1117614MRE2@EME",
+        timezone_token="Australia/Brisbane",
+    )
+    ledger = QuotaLedger(
+        covau_quota_rules(snapshot),
+        QuotaLedgerState(
+            tariff_day="2026-07-16",
+            confidence="authoritative",
+        ),
+    )
+    contract = covau_provider_contract(
+        snapshot,
+        ledger,
+        now=datetime(2026, 7, 16, 18, 0, tzinfo=ZoneInfo("Australia/Brisbane")),
+    )
+
+    schedule = contract["tariff_schedule"]
+    assert schedule["currency"] == "AUD"
+    assert schedule["utility"] == "CovaU"
+    assert schedule["plan_name"] == snapshot.display_name
+    assert schedule["price_source"] == "covau_aer_cdr"
+    assert len(schedule["buy_prices"]) == 48
+    assert len(schedule["sell_prices"]) == 48
+    assert schedule["buy_prices"]["PERIOD_11_00"] == 0.0
+    assert schedule["sell_prices"]["PERIOD_17_30"] == 0.05
+    assert schedule["sell_prices"]["PERIOD_18_00"] == 0.15
+
+
+def test_dashboard_tariff_schedule_hides_bonuses_when_settlement_is_unknown() -> None:
+    snapshot = normalize_covau_plan(
+        _raw("COV1117614MRE2@EME"),
+        "COV1117614MRE2@EME",
+        timezone_token="Australia/Brisbane",
+    )
+    ledger = QuotaLedger(
+        covau_quota_rules(snapshot),
+        QuotaLedgerState(
+            tariff_day="2026-07-16",
+            confidence="unknown",
+        ),
+    )
+
+    schedule = covau_tariff_schedule(
+        snapshot,
+        ledger,
+        now=datetime(2026, 7, 16, 18, 0, tzinfo=ZoneInfo("Australia/Brisbane")),
+    )
+
+    assert schedule["buy_prices"]["PERIOD_11_00"] > 0.0
+    assert schedule["sell_prices"]["PERIOD_18_00"] == 0.05
+
+    exhausted = QuotaLedger(
+        covau_quota_rules(snapshot),
+        QuotaLedgerState(
+            tariff_day="2026-07-16",
+            confidence="authoritative",
+            settled_kwh={
+                COVAU_IMPORT_RULE_ID: snapshot.free_import_cap_kwh,
+                COVAU_EXPORT_RULE_ID: snapshot.premium_export_cap_kwh,
+            },
+        ),
+    )
+    exhausted_schedule = covau_tariff_schedule(
+        snapshot,
+        exhausted,
+        now=datetime(2026, 7, 16, 18, 0, tzinfo=ZoneInfo("Australia/Brisbane")),
+    )
+    assert exhausted_schedule["buy_prices"]["PERIOD_11_00"] > 0.0
+    assert exhausted_schedule["sell_prices"]["PERIOD_18_00"] == 0.05
 
 
 def test_postcode_filters_but_keeps_distributor_confirmation_candidates() -> None:

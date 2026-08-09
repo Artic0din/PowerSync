@@ -335,13 +335,32 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
                 "remaining_kwh": 21.25,
             },
         },
+        "tariff_schedule": {
+            "currency": "AUD",
+            "buy_prices": {"PERIOD_12_00": 0.0},
+            "sell_prices": {"PERIOD_12_00": 0.05},
+            "utility": "CovaU",
+            "plan_name": "SolarMax SA Residential TOU",
+            "price_source": "covau_aer_cdr",
+            "last_sync": "2026-05-03:authoritative",
+        },
     }
     coordinator = SimpleNamespace(get_provider_contract=lambda: contract)
     hass = SimpleNamespace(
         config=SimpleNamespace(currency="AUD"),
         data={
             sensor.DOMAIN: {
-                entry.entry_id: {"optimization_coordinator": coordinator}
+                entry.entry_id: {
+                    "covau_quota_runtime": SimpleNamespace(
+                        contract=lambda: (_ for _ in ()).throw(RuntimeError("stale"))
+                    ),
+                    "optimization_coordinator": coordinator,
+                    "tariff_schedule": {
+                        "buy_prices": {"PERIOD_12_00": 9.99},
+                        "sell_prices": {"PERIOD_12_00": 9.99},
+                        "last_sync": "stale-generic-schedule",
+                    },
+                }
             }
         },
     )
@@ -368,6 +387,7 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
         entry,
         sensor.COVAU_SENSOR_EXPORT_REMAINING,
     )
+    tariff_schedule = sensor.TariffScheduleSensor(hass, entry)
 
     assert import_price.native_value == 0.0
     assert export_price.native_value == 0.15
@@ -376,6 +396,40 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
     assert import_price.extra_state_attributes["quota"]["remaining_kwh"] == 42.5
     assert free_remaining.native_value == 42.5
     assert premium_remaining.native_value == 21.25
+    assert tariff_schedule.native_value == "PEAK (25.00c/kWh)"
+    assert tariff_schedule.extra_state_attributes["schedule"] == [
+        {
+            "time": "12:00",
+            "date": "2026-05-03",
+            "date_label": "Today",
+            "buy": 0.0,
+            "sell": 0.05,
+        }
+    ]
+
+    # An incomplete runtime contract must not hide a valid optimizer contract.
+    hass.data[sensor.DOMAIN][entry.entry_id]["covau_quota_runtime"] = (
+        SimpleNamespace(contract=lambda: {"prices": contract["prices"]})
+    )
+    assert tariff_schedule.native_value == "PEAK (25.00c/kWh)"
+    assert import_price.native_value == 0.0
+
+    # Malformed rates fail closed and never use a stale generic tariff.
+    malformed = {
+        **contract,
+        "prices": {
+            **contract["prices"],
+            "import": {"c_per_kwh": "oops"},
+        },
+    }
+    hass.data[sensor.DOMAIN][entry.entry_id]["covau_quota_runtime"] = (
+        SimpleNamespace(contract=lambda: malformed)
+    )
+    hass.data[sensor.DOMAIN][entry.entry_id]["optimization_coordinator"] = (
+        SimpleNamespace(get_provider_contract=lambda: malformed)
+    )
+    assert import_price.native_value is None
+    assert import_price.extra_state_attributes == {}
     assert free_remaining.extra_state_attributes["settlement_confidence"] == "authoritative"
     for quota_sensor in (free_remaining, premium_remaining):
         assert quota_sensor._attr_device_class == "energy"

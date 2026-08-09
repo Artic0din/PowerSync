@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import math
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -3993,17 +3994,39 @@ COVAU_SENSOR_EXPORT_REMAINING = "covau_premium_export_remaining"
 def _covau_provider_contract_for_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
+    *,
+    validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any] | None:
     """Read the live CovaU contract, with a conservative config fallback."""
+    def _accepted(contract: Any) -> bool:
+        if not isinstance(contract, dict):
+            return False
+        if validator is None:
+            return True
+        try:
+            return validator(contract)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
     runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
     quota_runtime = runtime.get("covau_quota_runtime")
     if quota_runtime is not None:
-        return quota_runtime.contract()
+        try:
+            contract = quota_runtime.contract()
+        except Exception as err:
+            _LOGGER.debug("CovaU quota contract unavailable: %s", err)
+        else:
+            if _accepted(contract):
+                return contract
     coordinator = runtime.get("optimization_coordinator")
     if coordinator is not None and hasattr(coordinator, "get_provider_contract"):
-        contract = coordinator.get_provider_contract()
-        if contract is not None:
-            return contract
+        try:
+            contract = coordinator.get_provider_contract()
+        except Exception as err:
+            _LOGGER.debug("CovaU optimizer contract unavailable: %s", err)
+        else:
+            if _accepted(contract):
+                return contract
 
     from .const import (
         CONF_COVAU_EXPORT_ENERGY_ENTITY,
@@ -4029,7 +4052,7 @@ def _covau_provider_contract_for_entry(
             raw,
             timezone_token=hass.config.time_zone,
         )
-        return covau_provider_contract(
+        contract = covau_provider_contract(
             snapshot,
             QuotaLedger(covau_quota_rules(snapshot)),
             import_energy_entity=entry.options.get(
@@ -4041,8 +4064,23 @@ def _covau_provider_contract_for_entry(
                 entry.data.get(CONF_COVAU_EXPORT_ENERGY_ENTITY),
             ),
         )
+        return contract if _accepted(contract) else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _covau_contract_price(
+    contract: dict[str, Any],
+    direction: str,
+) -> float | None:
+    """Return a validated CovaU contract price in cents per kWh."""
+    try:
+        price = float(contract["prices"][direction]["c_per_kwh"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price < 0:
+        return None
+    return price
 
 
 class CovaUProviderSensor(SensorEntity):
@@ -4217,6 +4255,34 @@ class TariffScheduleSensor(SensorEntity):
         if self._unsub_time_interval:
             self._unsub_time_interval()
 
+    def _tariff_data(self) -> dict[str, Any] | None:
+        """Return the stored schedule or a live provider-contract schedule."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        electricity_provider = self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        if electricity_provider == "covau":
+            contract = _covau_provider_contract_for_entry(
+                self.hass,
+                self._entry,
+                validator=lambda candidate: isinstance(
+                    candidate.get("tariff_schedule"),
+                    dict,
+                )
+                and bool(candidate["tariff_schedule"]),
+            )
+            if not isinstance(contract, dict):
+                return None
+            tariff_data = contract.get("tariff_schedule")
+            return (
+                tariff_data
+                if isinstance(tariff_data, dict) and tariff_data
+                else None
+            )
+        tariff_data = entry_data.get("tariff_schedule")
+        return tariff_data if isinstance(tariff_data, dict) and tariff_data else None
+
     def _refresh_price(self, tariff_data: dict) -> tuple[float, float, str]:
         """Compute current price once and cache on the instance for this write cycle."""
         result = get_current_price_from_tariff_schedule(tariff_data)
@@ -4386,7 +4452,7 @@ class TariffScheduleSensor(SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the state — current tariff period and price (recalculated in real-time)."""
-        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        tariff_data = self._tariff_data()
         if tariff_data:
             buy_price_cents, _, current_period = self._refresh_price(tariff_data)
             if current_period and current_period != "UNKNOWN":
@@ -4398,7 +4464,7 @@ class TariffScheduleSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the tariff schedule as attributes for visualization."""
-        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        tariff_data = self._tariff_data()
         if not tariff_data:
             return {}
 
@@ -4517,16 +4583,25 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
             self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
         )
         if electricity_provider == "covau":
-            contract = _covau_provider_contract_for_entry(self.hass, self._entry)
-            if contract:
-                direction = (
-                    "import"
-                    if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
-                    else "export"
+            direction = (
+                "import"
+                if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
+                else "export"
+            )
+            contract = _covau_provider_contract_for_entry(
+                self.hass,
+                self._entry,
+                validator=lambda candidate: _covau_contract_price(
+                    candidate,
+                    direction,
                 )
-                price = contract.get("prices", {}).get(direction, {}).get("c_per_kwh")
+                is not None,
+            )
+            if contract:
+                price = _covau_contract_price(contract, direction)
                 if price is not None:
-                    return round(float(price) / 100.0, 4)
+                    return round(price / 100.0, 4)
+            return None
 
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
@@ -4554,14 +4629,22 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
             self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
         )
         if electricity_provider == "covau":
-            contract = _covau_provider_contract_for_entry(self.hass, self._entry)
-            if not contract:
-                return {}
             direction = (
                 "import"
                 if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
                 else "export"
             )
+            contract = _covau_provider_contract_for_entry(
+                self.hass,
+                self._entry,
+                validator=lambda candidate: _covau_contract_price(
+                    candidate,
+                    direction,
+                )
+                is not None,
+            )
+            if not contract:
+                return {}
             price = contract.get("prices", {}).get(direction, {})
             quota = contract.get("quotas", {}).get(direction, {})
             return _entity_currency_attrs(
