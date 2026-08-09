@@ -19480,6 +19480,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_MONITORING_MODE, False),
         )
 
+    def _demand_grid_charging_protection_active(
+        now: datetime | None = None,
+    ) -> bool:
+        """Return whether Tesla grid charging must remain disabled now.
+
+        Demand tracking continues to use the exact ``[start, end)`` window.
+        This control-only policy additionally pre-arms one minute before the
+        next demand boundary so slow Tesla writes cannot cross into peak.
+        """
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if not isinstance(entry_data, dict):
+            return False
+        if entry_data.get("demand_allow_grid_charging", False):
+            return False
+
+        dc_coordinator = entry_data.get("demand_charge_coordinator")
+        if not dc_coordinator or not getattr(dc_coordinator, "enabled", False):
+            return False
+
+        current_time = now or dt_util.now()
+        return bool(
+            dc_coordinator._is_in_peak_period(current_time)
+            or dc_coordinator._is_in_peak_period(
+                current_time + timedelta(minutes=1)
+            )
+        )
+
+    demand_grid_charging_control_lock = asyncio.Lock()
+
+    async def _enforce_demand_grid_charging_protection(
+        ts_coordinator,
+    ) -> tuple[bool, bool]:
+        """Converge Tesla grid charging on the current demand boundary state.
+
+        A Tesla write can straddle the pre-arm or end boundary. Serialize the
+        automatic writers and re-read the policy after each confirmed write so
+        a stale enable/disable cannot win after the boundary has changed.
+
+        Returns ``(success, protection_active)`` for the stable state.
+        """
+        async with demand_grid_charging_control_lock:
+            latest_protection_active = (
+                _demand_grid_charging_protection_active()
+            )
+            for attempt in range(3):
+                protection_active = latest_protection_active
+                success = await ts_coordinator.set_grid_charging_enabled(
+                    not protection_active
+                )
+                latest_protection_active = (
+                    _demand_grid_charging_protection_active()
+                )
+                if latest_protection_active == protection_active:
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id][
+                            "grid_charging_disabled_for_demand"
+                        ] = protection_active
+                    return success, protection_active
+
+                _LOGGER.info(
+                    "Demand boundary changed during Tesla grid-charging write; "
+                    "converging on the new state (attempt %d/3)",
+                    attempt + 1,
+                )
+
+            _LOGGER.error(
+                "Demand grid-charging state did not stabilize during Tesla writes"
+            )
+            return False, latest_protection_active
+
     def _powersync_optimization_control_active() -> bool:
         """Return True when PowerSync Smart Optimization owns dispatch."""
         optimization_provider = entry.options.get(
@@ -21856,6 +21926,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _tesla_charge_kick_generation[0] == kick_generation
                 and _command_generation[0] == command_generation
                 and _tesla_operation_generation[0] == operation_generation
+                and not _demand_grid_charging_protection_active()
             )
 
         def _charge_kick_mode_owner_is_current() -> bool:
@@ -24949,26 +25020,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
             dc_coordinator = entry_data.get("demand_charge_coordinator")
             if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
-                current_time = dt_util.now()
-                in_peak = dc_coordinator._is_in_peak_period(current_time)
-
-                if in_peak:
-                    # Force disable grid charging during peak (even if we think it's already disabled)
-                    _LOGGER.info("⚡ Peak period - forcing grid charging OFF after TOU sync")
-                    gc_success = await tesla_coordinator.set_grid_charging_enabled(False)
+                if (
+                    _demand_grid_charging_protection_active()
+                    or entry_data.get("grid_charging_disabled_for_demand", False)
+                ):
+                    gc_success, protection_active = (
+                        await _enforce_demand_grid_charging_protection(
+                            tesla_coordinator
+                        )
+                    )
                     if gc_success:
-                        hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
-                        _LOGGER.info("🔋 Grid charging enforcement after TOU sync: disabled_for_peak")
+                        _LOGGER.info(
+                            "🔋 Grid charging enforcement after TOU sync: %s",
+                            (
+                                "disabled_for_peak"
+                                if protection_active
+                                else "enabled_outside_peak"
+                            ),
+                        )
                     else:
-                        _LOGGER.warning("⚠️ Grid charging enforcement failed after TOU sync")
-                else:
-                    # Outside peak - ensure grid charging is enabled if we had disabled it
-                    if entry_data.get("grid_charging_disabled_for_demand", False):
-                        _LOGGER.info("⚡ Outside peak period - re-enabling grid charging after TOU sync")
-                        gc_success = await tesla_coordinator.set_grid_charging_enabled(True)
-                        if gc_success:
-                            hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = False
-                            _LOGGER.info("🔋 Grid charging enforcement after TOU sync: enabled_outside_peak")
+                        _LOGGER.warning(
+                            "⚠️ Grid charging enforcement failed after TOU sync"
+                        )
         else:
             _LOGGER.error("Failed to sync TOU schedule")
 
@@ -30860,20 +30933,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 source,
             )
 
+        # Anchor the Tesla requested expiry before any API/setup awaits.  A
+        # slow site-info or tariff request must not extend the force-charge
+        # window across a demand boundary (or the optimizer's requested
+        # duration).
+        tesla_requested_expiry = dt_util.now() + timedelta(minutes=duration)
+
         _LOGGER.info(f"🔌 FORCE CHARGE: Activating for {duration} minutes (source={source})")
 
-        # Block force charge during demand peak periods (grid charging must stay off)
+        # Block force charge while demand protection is active, including the
+        # one-minute pre-arm before the exact demand window.
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         dc_coordinator = entry_data.get("demand_charge_coordinator")
-        if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
-            current_time = dt_util.now()
-            if dc_coordinator._is_in_peak_period(current_time):
-                _LOGGER.warning(
-                    "Force charge DENIED: currently in demand peak period (%s-%s). "
-                    "Grid charging is disabled to protect demand charges.",
-                    dc_coordinator.start_time, dc_coordinator.end_time,
-                )
-                return
+        if _demand_grid_charging_protection_active():
+            _LOGGER.warning(
+                "Force charge DENIED: demand grid-charging protection is active "
+                "(%s-%s). Grid charging is disabled to protect demand charges.",
+                getattr(dc_coordinator, "start_time", "unknown"),
+                getattr(dc_coordinator, "end_time", "unknown"),
+            )
+            return
 
         tesla_preflight_sites = _get_tesla_site_configs(hass, entry)
         if tesla_preflight_sites and not force_charge_state.get("active"):
@@ -30892,6 +30971,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     transitioning_from_force_discharge
                 ),
             )
+            if _demand_grid_charging_protection_active():
+                _LOGGER.warning(
+                    "Force charge DENIED: demand grid-charging protection "
+                    "activated during Tesla baseline setup; aborting before writes"
+                )
+                return
 
         # Cancel any pending expiry timers and advance the generation counter
         # synchronously — before any await — so that a queued restore callback
@@ -32029,8 +32114,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_configs,
                 True,
                 reason="force charge",
-                is_current=lambda: _command_generation[0] == _restore_gen,
+                is_current=lambda: (
+                    _command_generation[0] == _restore_gen
+                    and not _demand_grid_charging_protection_active()
+                ),
             )
+            if _demand_grid_charging_protection_active():
+                _LOGGER.warning(
+                    "Force charge aborted: demand grid-charging protection "
+                    "activated during Tesla grid enable; restoring partial state"
+                )
+                await _cleanup_failed_tesla_force_charge(
+                    "demand grid-charging protection activated during grid enable"
+                )
+                return {
+                    "success": False,
+                    "error": "demand grid-charging protection active",
+                }
             grid_confirmed = _tesla_force_result_all_confirmed(
                 grid_result,
                 site_configs,
@@ -32119,6 +32219,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     is_current=lambda: (
                         _command_generation[0] == _restore_gen
                         and _tesla_reserve_generation[0] == _reserve_gen
+                        and not _demand_grid_charging_protection_active()
                     ),
                 )
                 if not _tesla_force_result_all_confirmed(
@@ -32165,8 +32266,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # period-aligned tariff expiry. The TOU tariff window extends to
                 # the period boundary (Tesla API requirement) but the timer fires
                 # after the user's requested duration and restore_normal reverts.
-                requested_expiry = dt_util.now() + timedelta(minutes=duration)
-                force_charge_state["expires_at"] = requested_expiry.astimezone(dt_util.UTC)
+                force_charge_state["expires_at"] = tesla_requested_expiry.astimezone(dt_util.UTC)
                 force_charge_state["hardware_expires_at"] = actual_expiry.astimezone(dt_util.UTC)
                 _LOGGER.info(
                     "FORCE CHARGE ACTIVE%s: Tariff uploaded to %d gateway(s), "
@@ -33794,13 +33894,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _restore_superseded("mode/reserve restore"):
                     return
 
-            # Restore grid charging to the user's pre-force setting unless a
-            # demand peak period requires it to stay disabled.
+            # Restore grid charging to the user's pre-force setting unless
+            # demand protection (including its one-minute pre-arm) requires it
+            # to stay disabled.
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            dc_coordinator = entry_data.get("demand_charge_coordinator")
-            in_peak = False
-            if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
-                in_peak = dc_coordinator._is_in_peak_period(dt_util.now())
+            demand_grid_protection_active = (
+                _demand_grid_charging_protection_active()
+            )
 
             discharge_saved = force_discharge_state.get("saved_states") or {}
             charge_saved = force_charge_state.get("saved_states") or {}
@@ -33825,9 +33925,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _remember_tesla_grid_charging_preference(site_id, None)
                     )
 
-                if in_peak:
+                if demand_grid_protection_active:
                     _LOGGER.info(
-                        "Restore normal: still in demand peak period — keeping grid charging disabled"
+                        "Restore normal: demand grid-charging protection is active "
+                        "— keeping grid charging disabled"
                     )
                     target_grid_charging_enabled = False
                     hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
@@ -33846,6 +33947,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     prefer_local=(site_id == site_configs[0][0]),
                     is_current=lambda: (
                         _command_generation[0] == _restore_generation
+                        and (
+                            not target_grid_charging_enabled
+                            or not _demand_grid_charging_protection_active()
+                        )
                     ),
                 )
                 if _restore_superseded("grid charging restore"):
@@ -33868,7 +33973,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         site_id,
                     )
                 if restore_grid_confirmed:
-                    if not in_peak:
+                    if not demand_grid_protection_active:
                         hass.data[DOMAIN][entry.entry_id][
                             "grid_charging_disabled_for_demand"
                         ] = False
@@ -38466,48 +38571,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     return
 
-                # Skip grid charging control if user allows grid charging during demand windows
+                # Preserve the explicit user override: demand control must not
+                # issue any grid-charging writes while this option is enabled.
                 if entry_data.get("demand_allow_grid_charging", False):
                     return
 
-                # Check if we're in peak period using the coordinator's method
+                # Pre-arm one minute before the configured window.  The
+                # demand coordinator itself continues to track the exact
+                # [start, end) window; this lead only protects Tesla grid
+                # charging before the next minute boundary.
                 current_time = dt_util.now()
-                in_peak = dc_coordinator._is_in_peak_period(current_time)
+                demand_grid_protection_active = (
+                    _demand_grid_charging_protection_active(current_time)
+                )
                 currently_disabled = entry_data.get("grid_charging_disabled_for_demand", False)
 
-                if in_peak:
-                    # In peak period - force disable grid charging (even if we think it's already disabled)
-                    # This counteracts VPP overrides that may re-enable grid charging
-                    if not currently_disabled:
-                        _LOGGER.info("⚡ Entering demand peak period - disabling grid charging")
-                    else:
+                if demand_grid_protection_active or currently_disabled:
+                    # In or immediately before peak - force disable grid
+                    # charging (even if we think it's already disabled). This
+                    # counteracts VPP overrides that may re-enable charging.
+                    if demand_grid_protection_active and not currently_disabled:
+                        _LOGGER.info(
+                            "⚡ Demand grid-charging protection active - "
+                            "disabling grid charging",
+                        )
+                    elif demand_grid_protection_active:
                         _LOGGER.debug("⚡ Peak period - forcing grid charging OFF (VPP override protection)")
-                    success = await ts_coordinator.set_grid_charging_enabled(False)
-                    if success:
-                        hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
-                        if not currently_disabled:
-                            _LOGGER.info("✅ Grid charging DISABLED for demand period")
                     else:
-                        _LOGGER.error("❌ Failed to disable grid charging for demand period")
+                        _LOGGER.info(
+                            "Exiting demand peak period - re-enabling grid charging"
+                        )
 
-                elif not in_peak and currently_disabled:
-                    # Exiting peak period - re-enable grid charging
-                    _LOGGER.info("Exiting demand peak period - re-enabling grid charging")
-                    success = await ts_coordinator.set_grid_charging_enabled(True)
+                    success, applied_protection = (
+                        await _enforce_demand_grid_charging_protection(
+                            ts_coordinator
+                        )
+                    )
                     if success:
-                        hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = False
-                        _LOGGER.info("Grid charging re-enabled after demand period")
+                        if applied_protection and not currently_disabled:
+                            _LOGGER.info("✅ Grid charging DISABLED for demand period")
+                        elif not applied_protection:
+                            _LOGGER.info("Grid charging re-enabled after demand period")
                     else:
-                        _LOGGER.error("Failed to re-enable grid charging after demand period")
+                        _LOGGER.error(
+                            "Failed to enforce demand grid-charging protection"
+                        )
 
             except Exception as err:
                 _LOGGER.error("Error in demand period grid charging check: %s", err)
 
-        # Check every minute at :45 seconds (offset from AEMO check at :35)
+        # Check every minute on the minute so the one-minute safety lead is
+        # aligned to the configured demand boundary.
         demand_charging_cancel_timer = async_track_utc_time_change(
             hass,
             auto_demand_charging_check,
-            second=45,  # Every minute at :45 seconds
+            second=0,  # Every minute on the minute
         )
 
         # Store the demand charging cancel function

@@ -1102,12 +1102,13 @@ def test_optimizer_restore_restores_saved_grid_charging_after_handoff():
     assert "target_grid_charging_enabled," in grid_section
     assert "set_grid_charging_enabled(True)" not in grid_section
 
-    assert "if in_peak:" in grid_section
+    assert "if demand_grid_protection_active:" in grid_section
     assert "target_grid_charging_enabled = False" in grid_section
 
     assert "await _tesla_force_apply_grid_charging(" in grid_section
     assert 'reason="restore normal"' in grid_section
     assert "is_current=lambda:" in grid_section
+    assert "_demand_grid_charging_protection_active()" in grid_section
     assert '_restore_superseded("grid charging restore")' in grid_section
     assert "_tesla_force_result_all_confirmed(" in grid_section
     assert "grid charging restore failed for site" in grid_section

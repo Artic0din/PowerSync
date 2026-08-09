@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,11 +51,14 @@ def _find_async_setup_entry(module: ast.Module) -> ast.AsyncFunctionDef:
     raise AssertionError("async_setup_entry not found")
 
 
-def _find_closure(scope: ast.AST, func_name: str) -> ast.AsyncFunctionDef:
+def _find_closure(
+    scope: ast.AST, func_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
     candidates = [
         n
         for n in ast.walk(scope)
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == func_name
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == func_name
     ]
     assert len(candidates) == 1, (
         f"expected exactly one {func_name} closure, found {len(candidates)}"
@@ -72,6 +76,8 @@ def _locate():
         _find_closure(entry_fn, "auto_aemo_spike_check"),
         _find_closure(entry_fn, "auto_saving_session_check"),
         _find_closure(entry_fn, "auto_demand_charging_check"),
+        _find_closure(entry_fn, "_demand_grid_charging_protection_active"),
+        _find_closure(entry_fn, "_enforce_demand_grid_charging_protection"),
     )
 
 
@@ -80,6 +86,8 @@ def _locate():
     _AEMO_NODE,
     _SAVING_SESSION_NODE,
     _DEMAND_CHARGING_NODE,
+    _DEMAND_PROTECTION_NODE,
+    _DEMAND_ENFORCEMENT_NODE,
 ) = _locate()
 
 
@@ -107,7 +115,10 @@ def _base_ns(monitoring_mode: bool, **overrides) -> dict:
             data={},
         ),
         hass=SimpleNamespace(data={}),
-        dt_util=SimpleNamespace(now=lambda: None),
+        dt_util=SimpleNamespace(
+            now=lambda: datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+        ),
+        timedelta=timedelta,
     )
     ns.update(overrides)
 
@@ -121,6 +132,21 @@ def _base_ns(monitoring_mode: bool, **overrides) -> dict:
 
 
 def _run_closure(node: ast.AsyncFunctionDef, ns: dict):
+    if (
+        node is _DEMAND_CHARGING_NODE
+        and "_demand_grid_charging_protection_active" not in ns
+    ):
+        ns["_demand_grid_charging_protection_active"] = _run_sync_closure(
+            _DEMAND_PROTECTION_NODE, ns
+        )
+    if (
+        node is _DEMAND_CHARGING_NODE
+        and "_enforce_demand_grid_charging_protection" not in ns
+    ):
+        ns["demand_grid_charging_control_lock"] = asyncio.Lock()
+        ns["_enforce_demand_grid_charging_protection"] = (
+            _run_sync_closure(_DEMAND_ENFORCEMENT_NODE, ns)
+        )
     src = "\n".join(
         [
             _dedented_source(_SOURCE, node),
@@ -131,6 +157,20 @@ def _run_closure(node: ast.AsyncFunctionDef, ns: dict):
     exec(src, ns, exec_ns)
     closure = exec_ns["_result"]
     asyncio.run(closure(None))
+
+
+def _run_sync_closure(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, ns: dict
+):
+    src = "\n".join(
+        [
+            _dedented_source(_SOURCE, node),
+            f"_result = {node.name}",
+        ]
+    )
+    exec_ns: dict = {}
+    exec(src, ns, exec_ns)
+    return exec_ns["_result"]
 
 
 class _SpikeManagerRecorder:
@@ -180,8 +220,17 @@ def test_saving_session_check_blocked_by_monitoring_mode():
 
 
 class _DemandChargeCoordinator:
+    def __init__(self, *, peak_start=None, peak_end=None):
+        self.enabled = True
+        self.peak_start = peak_start
+        self.peak_end = peak_end
+        self.observed_times = []
+
     def _is_in_peak_period(self, now):
-        return True
+        self.observed_times.append(now)
+        if self.peak_start is None:
+            return True
+        return self.peak_start <= now < self.peak_end
 
 
 class _TeslaCoordinator:
@@ -236,3 +285,344 @@ def test_demand_charging_check_blocked_by_monitoring_mode():
     assert ts_coordinator.grid_charging_calls == [False], (
         "grid charging control must still work when monitoring mode is off"
     )
+
+
+def _demand_callback_namespace(
+    now,
+    *,
+    currently_disabled=False,
+    peak_start=None,
+    peak_end=None,
+):
+    peak_start = peak_start or (now + timedelta(minutes=1))
+    peak_end = peak_end or (now + timedelta(minutes=21))
+    dc_coordinator = _DemandChargeCoordinator(
+        peak_start=peak_start,
+        peak_end=peak_end,
+    )
+    ts_coordinator = _TeslaCoordinator()
+    entry_id = "entry-1"
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                entry_id: {
+                    "demand_charge_coordinator": dc_coordinator,
+                    "tesla_coordinator": ts_coordinator,
+                    "grid_charging_disabled_for_demand": currently_disabled,
+                }
+            }
+        }
+    )
+    ns = _base_ns(
+        monitoring_mode=False,
+        hass=hass,
+        dt_util=SimpleNamespace(now=lambda: now),
+        entry=SimpleNamespace(entry_id=entry_id, options={}, data={}),
+        DOMAIN="power_sync",
+    )
+    return ns, dc_coordinator, ts_coordinator
+
+
+def test_demand_charging_prearms_one_minute_before_peak_without_widening_tracking():
+    now = datetime(2026, 8, 9, 14, 54, tzinfo=timezone.utc)
+    ns, dc_coordinator, ts_coordinator = _demand_callback_namespace(now)
+
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+
+    assert ts_coordinator.grid_charging_calls == [False]
+    assert set(dc_coordinator.observed_times) == {
+        now,
+        now + timedelta(minutes=1),
+    }
+
+
+def test_demand_grid_charging_protection_policy_honors_disabled_and_allow_gates():
+    now = datetime(2026, 8, 9, 14, 54, tzinfo=timezone.utc)
+    ns, dc_coordinator, _ = _demand_callback_namespace(now)
+    protection_active = _run_sync_closure(_DEMAND_PROTECTION_NODE, ns)
+
+    assert protection_active(now) is True
+    dc_coordinator.enabled = False
+    assert protection_active(now) is False
+    dc_coordinator.enabled = True
+    ns["hass"].data["power_sync"]["entry-1"][
+        "demand_allow_grid_charging"
+    ] = True
+    assert protection_active(now) is False
+
+
+def test_demand_charging_only_reenables_after_true_peak_end():
+    before_start = datetime(2026, 8, 9, 14, 54, tzinfo=timezone.utc)
+    ns, _, ts_coordinator = _demand_callback_namespace(
+        before_start, currently_disabled=True
+    )
+
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+
+    # A callback one minute before the start must not re-enable charging.
+    assert ts_coordinator.grid_charging_calls == [False]
+
+    at_end = datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc)
+    ns, _, ts_coordinator = _demand_callback_namespace(
+        at_end,
+        currently_disabled=True,
+        peak_start=datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc),
+        peak_end=at_end,
+    )
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+
+    assert ts_coordinator.grid_charging_calls == [True]
+
+
+def test_demand_grid_charging_write_converges_when_boundary_changes_mid_call():
+    async def run_case(now_before, now_after, expected_calls, expected_active):
+        now_ref = [now_before]
+        ns, _, ts_coordinator = _demand_callback_namespace(
+            now_before,
+            currently_disabled=not expected_calls[0],
+            peak_start=datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc),
+            peak_end=datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc),
+        )
+        ns["dt_util"] = SimpleNamespace(now=lambda: now_ref[0])
+
+        original_write = ts_coordinator.set_grid_charging_enabled
+
+        async def boundary_changing_write(enabled):
+            result = await original_write(enabled)
+            if len(ts_coordinator.grid_charging_calls) == 1:
+                now_ref[0] = now_after
+            return result
+
+        ts_coordinator.set_grid_charging_enabled = boundary_changing_write
+        ns["_demand_grid_charging_protection_active"] = _run_sync_closure(
+            _DEMAND_PROTECTION_NODE, ns
+        )
+        ns["demand_grid_charging_control_lock"] = asyncio.Lock()
+        enforce = _run_sync_closure(_DEMAND_ENFORCEMENT_NODE, ns)
+
+        success, protection_active = await enforce(ts_coordinator)
+
+        assert success is True
+        assert protection_active is expected_active
+        assert ts_coordinator.grid_charging_calls == expected_calls
+        assert ns["hass"].data["power_sync"]["entry-1"][
+            "grid_charging_disabled_for_demand"
+        ] is expected_active
+
+    asyncio.run(
+        run_case(
+            datetime(2026, 8, 9, 14, 53, 59, tzinfo=timezone.utc),
+            datetime(2026, 8, 9, 14, 54, tzinfo=timezone.utc),
+            [True, False],
+            True,
+        )
+    )
+    asyncio.run(
+        run_case(
+            datetime(2026, 8, 9, 15, 14, 59, tzinfo=timezone.utc),
+            datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc),
+            [False, True],
+            False,
+        )
+    )
+
+
+def test_tou_sync_uses_boundary_rechecking_demand_enforcement():
+    module = ast.parse(_SOURCE)
+    sync_tou = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_handle_sync_tou_internal"
+    )
+    sync_source = ast.get_source_segment(_SOURCE, sync_tou)
+    assert sync_source is not None
+    assert "await _enforce_demand_grid_charging_protection(" in sync_source
+    assert ".set_grid_charging_enabled(" not in sync_source
+
+
+def _find_demand_timer_call(entry_fn: ast.AsyncFunctionDef) -> ast.Call:
+    for node in ast.walk(entry_fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "async_track_utc_time_change"
+        ):
+            continue
+        if any(
+            isinstance(arg, ast.Name) and arg.id == "auto_demand_charging_check"
+            for arg in node.args
+        ):
+            return node
+    raise AssertionError("demand charging timer registration not found")
+
+
+def test_demand_charging_enforcement_is_minute_aligned():
+    module = ast.parse(_SOURCE)
+    timer_call = _find_demand_timer_call(_find_async_setup_entry(module))
+    second = next(
+        keyword.value
+        for keyword in timer_call.keywords
+        if keyword.arg == "second"
+    )
+    assert isinstance(second, ast.Constant)
+    assert second.value == 0
+
+
+def test_tesla_force_charge_expiry_is_anchored_before_setup_awaits():
+    module = ast.parse(_SOURCE)
+    handler = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_force_charge"
+    )
+
+    anchor = next(
+        node
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "tesla_requested_expiry"
+            for target in node.targets
+        )
+    )
+    assert isinstance(anchor.value, ast.BinOp)
+    assert isinstance(anchor.value.left, ast.Call)
+    assert isinstance(anchor.value.left.func, ast.Attribute)
+    assert isinstance(anchor.value.left.func.value, ast.Name)
+    assert anchor.value.left.func.value.id == "dt_util"
+    assert anchor.value.left.func.attr == "now"
+
+    setup_await = next(
+        node
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_require_tesla_force_grid_charging_baselines"
+    )
+    assert anchor.lineno < setup_await.lineno
+
+    expiry_use = next(
+        node
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "astimezone"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "tesla_requested_expiry"
+    )
+    assert anchor.lineno < expiry_use.lineno
+
+
+def test_tesla_force_charge_and_delayed_kick_honor_demand_race_guards():
+    module = ast.parse(_SOURCE)
+    functions = {
+        node.name: node
+        for node in ast.walk(module)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in {
+            "handle_force_charge",
+            "handle_restore_normal",
+            "_tesla_charge_kick",
+            "_charge_kick_is_current",
+        }
+    }
+    force_charge = functions["handle_force_charge"]
+    force_source = ast.get_source_segment(_SOURCE, force_charge)
+    assert force_source is not None
+
+    baseline_await = next(
+        node
+        for node in ast.walk(force_charge)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_require_tesla_force_grid_charging_baselines"
+    )
+    protection_checks_after_baseline = [
+        node
+        for node in ast.walk(force_charge)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_demand_grid_charging_protection_active"
+        and node.lineno > baseline_await.lineno
+    ]
+    assert protection_checks_after_baseline, (
+        "force charge must re-check demand protection after slow Tesla baseline setup"
+    )
+
+    grid_apply = next(
+        node
+        for node in ast.walk(force_charge)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_tesla_force_apply_grid_charging"
+        and any(keyword.arg == "is_current" for keyword in node.keywords)
+    )
+    grid_guard = next(
+        keyword.value
+        for keyword in grid_apply.keywords
+        if keyword.arg == "is_current"
+    )
+    assert isinstance(grid_guard, ast.Lambda)
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_demand_grid_charging_protection_active"
+        for node in ast.walk(grid_guard)
+    )
+    grid_guard_source = ast.get_source_segment(_SOURCE, grid_guard)
+    assert grid_guard_source is not None
+    grid_guard_ns = {
+        "_command_generation": [1],
+        "_restore_gen": 1,
+        "_demand_grid_charging_protection_active": lambda: True,
+    }
+    grid_guard_fn = eval(grid_guard_source, grid_guard_ns)
+    assert grid_guard_fn() is False
+    grid_guard_ns["_demand_grid_charging_protection_active"] = lambda: False
+    assert grid_guard_fn() is True
+
+    reserve_apply = next(
+        node
+        for node in ast.walk(force_charge)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_tesla_force_apply_backup_reserve"
+    )
+    grid_to_reserve = force_source.splitlines()[
+        grid_apply.lineno - force_charge.lineno : reserve_apply.lineno - force_charge.lineno
+    ]
+    assert any("_cleanup_failed_tesla_force_charge" in line for line in grid_to_reserve)
+
+    kick_current = functions["_charge_kick_is_current"]
+    kick_current_source = _dedented_source(_SOURCE, kick_current)
+    assert "_demand_grid_charging_protection_active()" in kick_current_source
+    kick_ns = {
+        "_tesla_charge_kick_generation": [1],
+        "_command_generation": [1],
+        "_tesla_operation_generation": [1],
+        "kick_generation": 1,
+        "command_generation": 1,
+        "operation_generation": 1,
+        "_demand_grid_charging_protection_active": lambda: True,
+    }
+    kick_exec_ns: dict = {}
+    exec(
+        "\n".join(
+            [kick_current_source, "_result = _charge_kick_is_current()"]
+        ),
+        kick_ns,
+        kick_exec_ns,
+    )
+    assert kick_exec_ns["_result"] is False
+
+    restore_source = ast.get_source_segment(_SOURCE, functions["handle_restore_normal"])
+    assert restore_source is not None
+    assert "demand_grid_protection_active" in restore_source
+    assert "_demand_grid_charging_protection_active()" in restore_source
