@@ -908,6 +908,92 @@ def test_dual_sungrow_requires_both_coordinators_to_be_ready():
         restore()
 
 
+def test_dual_sungrow_force_charge_clamps_skewed_split_to_inverter_limit():
+    """A skewed SOC split must not send one inverter more than its own limit.
+
+    force_discharge already guarded against this (see the max_split checks
+    below); force_charge did not, so a heavily-skewed SOC pair could ask the
+    emptier inverter for more power than its battery_max_charge_power_w.
+    """
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        def __init__(self, battery_level, max_charge_power_w):
+            self.data = {
+                "battery_level": battery_level,
+                "battery_max_charge_power_w": max_charge_power_w,
+            }
+            self.force_charge_power_w: list[float] = []
+            self.force_discharge_power_w: list[float] = []
+
+        async def force_charge(self, duration_minutes, power_w=0.0):
+            self.force_charge_power_w.append(power_w)
+            return True
+
+        async def force_discharge(self, duration_minutes, power_w=0.0):
+            self.force_discharge_power_w.append(power_w)
+            return True
+
+    async def run_checks():
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        # inv1 is nearly empty (gets the larger proportional share) but has
+        # a much smaller hardware charge limit than inv2.
+        coordinator._coord1 = Child(battery_level=5, max_charge_power_w=5000)
+        coordinator._coord2 = Child(battery_level=95, max_charge_power_w=15000)
+        coordinator._cap1 = 10.0
+        coordinator._cap2 = 10.0
+
+        # Requested total (9 kW) is below the combined limit (20 kW), so the
+        # discharge-style "request >= combined limit" shortcut alone would
+        # not catch this — only the per-leg clamp in _split_power does.
+        result = await coordinator.force_charge(duration_minutes=30, power_w=9000)
+        return result, coordinator
+
+    try:
+        result, coordinator = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert result is True
+    assert coordinator._coord1.force_charge_power_w == [5000]
+    assert coordinator._coord2.force_charge_power_w[0] <= 15000
+
+
+def test_dual_sungrow_force_charge_uses_full_limits_above_combined_capacity():
+    """Requesting at/above combined capacity should saturate both inverters."""
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        def __init__(self, battery_level, max_charge_power_w):
+            self.data = {
+                "battery_level": battery_level,
+                "battery_max_charge_power_w": max_charge_power_w,
+            }
+            self.force_charge_power_w: list[float] = []
+
+        async def force_charge(self, duration_minutes, power_w=0.0):
+            self.force_charge_power_w.append(power_w)
+            return True
+
+    async def run_checks():
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        coordinator._coord1 = Child(battery_level=5, max_charge_power_w=5000)
+        coordinator._coord2 = Child(battery_level=95, max_charge_power_w=15000)
+        coordinator._cap1 = 10.0
+        coordinator._cap2 = 10.0
+
+        return await coordinator.force_charge(duration_minutes=30, power_w=20000), coordinator
+
+    try:
+        result, coordinator = asyncio.run(run_checks())
+    finally:
+        restore()
+
+    assert result is True
+    assert coordinator._coord1.force_charge_power_w == [5000]
+    assert coordinator._coord2.force_charge_power_w == [15000]
+
+
 def test_sungrow_failed_poll_marks_cached_telemetry_not_ready():
     """A disconnected poll may preserve values, but never control readiness."""
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()

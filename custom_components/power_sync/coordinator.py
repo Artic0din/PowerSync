@@ -6664,6 +6664,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
 
         prefer_lower_soc=True for charging (fill the emptier one faster).
         prefer_lower_soc=False for discharging (drain the fuller one faster).
+        Each leg is clamped to that inverter's own power limit, since a
+        skewed SOC split can otherwise assign one inverter more than its
+        hardware allows even while the combined total stays within range.
         Returns (power_kw_for_coord1, power_kw_for_coord2).
         """
         soc1 = (self._coord1.data or {}).get("battery_level", 50) or 50
@@ -6672,22 +6675,30 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         total_cap = self._cap1 + self._cap2
 
         if abs(soc1 - soc2) < 2:
-            return total_kw * self._cap1 / total_cap, total_kw * self._cap2 / total_cap
-
-        if prefer_lower_soc:
-            w1 = max(1, 100 - soc1) * self._cap1
-            w2 = max(1, 100 - soc2) * self._cap2
+            p1, p2 = total_kw * self._cap1 / total_cap, total_kw * self._cap2 / total_cap
         else:
-            w1 = max(1, soc1) * self._cap1
-            w2 = max(1, soc2) * self._cap2
+            if prefer_lower_soc:
+                w1 = max(1, 100 - soc1) * self._cap1
+                w2 = max(1, 100 - soc2) * self._cap2
+            else:
+                w1 = max(1, soc1) * self._cap1
+                w2 = max(1, soc2) * self._cap2
 
-        total_w = w1 + w2
-        p1 = total_kw * w1 / total_w
-        p2 = total_kw * w2 / total_w
-        _LOGGER.debug(
-            "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%, cap=%.1f), inv2=%.2f kW (soc=%.0f%%, cap=%.1f), prefer_lower=%s",
-            total_kw, p1, soc1, self._cap1, p2, soc2, self._cap2, prefer_lower_soc,
-        )
+            total_w = w1 + w2
+            p1 = total_kw * w1 / total_w
+            p2 = total_kw * w2 / total_w
+            _LOGGER.debug(
+                "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%, cap=%.1f), inv2=%.2f kW (soc=%.0f%%, cap=%.1f), prefer_lower=%s",
+                total_kw, p1, soc1, self._cap1, p2, soc2, self._cap2, prefer_lower_soc,
+            )
+
+        direction = "charge" if prefer_lower_soc else "discharge"
+        limit1 = self._power_limit_kw(self._coord1.data or {}, direction)
+        limit2 = self._power_limit_kw(self._coord2.data or {}, direction)
+        if limit1 is not None:
+            p1 = min(p1, limit1)
+        if limit2 is not None:
+            p2 = min(p2, limit2)
         return p1, p2
 
     @staticmethod
@@ -6835,7 +6846,11 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
     async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Force charge on both inverters with SOC-proportional power split."""
         if power_w > 0:
-            p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=True)
+            max_split = self._max_split_kw("charge")
+            if max_split and (power_w / 1000.0) >= sum(max_split):
+                p1, p2 = max_split
+            else:
+                p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=True)
             r1 = await self._coord1.force_charge(duration_minutes, power_w=p1 * 1000)
             r2 = await self._coord2.force_charge(duration_minutes, power_w=p2 * 1000)
         else:
