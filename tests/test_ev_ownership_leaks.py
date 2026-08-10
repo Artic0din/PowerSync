@@ -495,6 +495,18 @@ def _both_provider_entry(prefixes: str, vehicle_mapping: str = ""):
     )
 
 
+def _cloud_telemetry_ble_entry(prefixes: str, vehicle_mapping: str = ""):
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "cloud_telemetry_ble",
+            "tesla_ble_entity_prefix": prefixes,
+            "tesla_ble_vehicle_mapping": vehicle_mapping,
+        },
+    )
+
+
 def _two_fleet_vehicle_hass() -> _Hass:
     hass = _Hass()
     hass.device_registry.devices = {
@@ -609,6 +621,118 @@ def test_both_provider_amp_command_uses_paired_ble_and_vehicle_cap(monkeypatch):
     assert result is True
     assert ble_amps.await_args.args[:3] == (hass, "bridge_alpha", 10)
     tbt_amps.assert_not_awaited()
+
+
+def test_cloud_telemetry_ble_start_uses_ble_without_cloud_fallback(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _cloud_telemetry_ble_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_start = AsyncMock(return_value=False)
+    tbt_start = AsyncMock(return_value=True)
+    cloud_entity = AsyncMock(return_value="switch.cloud_charge")
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: VIN_B)
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_teslemetry_bt", tbt_start)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", cloud_entity)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            entry,
+            {"vehicle_vin": VIN_B, "charger_type": "tesla"},
+            {},
+        )
+    )
+
+    assert result is False
+    ble_start.assert_awaited_once_with(hass, "bridge_alpha")
+    tbt_start.assert_not_awaited()
+    cloud_entity.assert_not_awaited()
+
+
+def test_cloud_telemetry_ble_stop_uses_ble_without_cloud_fallback(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _cloud_telemetry_ble_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_stop = AsyncMock(return_value=False)
+    cloud_entity = AsyncMock(side_effect=[None, "switch.cloud_charge"])
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_stop_ev_charging_ble", ble_stop)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", cloud_entity)
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass,
+            entry,
+            {"vehicle_vin": VIN_A, "charger_type": "tesla"},
+        )
+    )
+
+    assert result is False
+    ble_stop.assert_awaited_once_with(hass, "bridge_beta")
+    assert cloud_entity.await_count == 1
+
+
+def test_cloud_telemetry_ble_charge_limit_never_uses_cloud(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _cloud_telemetry_ble_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_limit = AsyncMock(return_value=True)
+    cloud_entity = AsyncMock(return_value="number.cloud_charge_limit")
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_set_ev_charge_limit_ble", ble_limit)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", cloud_entity)
+
+    result = asyncio.run(
+        actions._action_set_ev_charge_limit(
+            hass,
+            entry,
+            {
+                "vehicle_vin": VIN_A,
+                "charger_type": "tesla",
+                "percent": 80,
+            },
+        )
+    )
+
+    assert result is True
+    ble_limit.assert_awaited_once_with(hass, "bridge_beta", 80)
+    cloud_entity.assert_not_awaited()
+
+
+def test_cloud_telemetry_ble_amp_command_never_uses_cloud(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _cloud_telemetry_ble_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_amps = AsyncMock(return_value=True)
+    cloud_entity = AsyncMock(return_value="number.cloud_charge_current")
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_set_ev_charging_amps_ble", ble_amps)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", cloud_entity)
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            entry,
+            VIN_B,
+            16,
+            {"vehicle_vin": VIN_B, "charger_type": "tesla"},
+        )
+    )
+
+    assert result is True
+    assert ble_amps.await_args.args[:3] == (hass, "bridge_alpha", 16)
+    cloud_entity.assert_not_awaited()
 
 
 def _active_tesla_state(vin: str) -> dict:

@@ -46,6 +46,10 @@ from ..const import (
     EV_PROVIDER_TESLA_BLE,
     EV_PROVIDER_TESLEMETRY_BT,
     EV_PROVIDER_BOTH,
+    EV_PROVIDERS_WITH_CLOUD_CONTROL,
+    EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL,
+    EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL,
+    EV_PROVIDERS_WITH_VIN_BLE_PAIRING,
     CONF_TESLA_BLE_ENTITY_PREFIX,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
     TESLA_BLE_SWITCH_CHARGER,
@@ -1211,9 +1215,9 @@ def _resolve_ble_prefix_for_vehicle(
     """Get the correct BLE prefix for a specific vehicle.
 
     If vehicle_vin is a BLE identifier (ble_*), extract the prefix from it.
-    In Fleet + BLE mode, use an explicit VIN-to-prefix association. A safe
-    single-vehicle configuration may be inferred, but multi-vehicle setups
-    must never depend on registry discovery order.
+    In a VIN-paired BLE mode, use an explicit VIN-to-prefix association. A
+    safe single-vehicle configuration may be inferred, but multi-vehicle
+    setups must never depend on registry discovery order.
     """
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         return vehicle_vin[4:]  # "ble_vehicle_bridge" → "vehicle_bridge"
@@ -1231,7 +1235,8 @@ def _resolve_ble_prefix_for_vehicle(
         vehicle_vin
         and len(vehicle_vin) == 17
         and vehicle_vin.isalnum()
-        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) == EV_PROVIDER_BOTH
+        and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        in EV_PROVIDERS_WITH_VIN_BLE_PAIRING
     ):
         try:
             device_registry = dr.async_get(hass)
@@ -3935,12 +3940,12 @@ async def _action_start_ev_charging(
     charging_started = False
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL:
         if _is_ble_available(hass, ble_prefix):
             result = await _start_ev_charging_ble(hass, ble_prefix)
             if result:
                 charging_started = True
-            elif ev_provider == EV_PROVIDER_TESLA_BLE:
+            elif ev_provider in EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL:
                 return False
 
     # Teslemetry Bluetooth is the next local fallback. Its entity prefix is a
@@ -3960,7 +3965,7 @@ async def _action_start_ev_charging(
                 return False
 
     # Use Fleet API
-    if not charging_started and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    if not charging_started and ev_provider in EV_PROVIDERS_WITH_CLOUD_CONTROL:
         # Tesla Fleet uses switch.X_charge, not button.X_charge_start
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
@@ -4159,10 +4164,10 @@ async def _action_stop_ev_charging(
                 return True
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL:
         if _is_ble_available(hass, ble_prefix):
             result = await _stop_ev_charging_ble(hass, ble_prefix)
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+            if result or ev_provider in EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL:
                 return result
 
     # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
@@ -4179,7 +4184,7 @@ async def _action_stop_ev_charging(
                 return result
 
     # Use Fleet API
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_CLOUD_CONTROL:
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
             _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
@@ -4253,14 +4258,17 @@ async def _action_set_ev_charge_limit(
     # Teslemetry BT doesn't support charge limit — skip to BLE/Fleet API
 
     # Try ESPHome BLE if configured
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL:
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charge_limit_ble(hass, ble_prefix, percent)
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+            if result or ev_provider in EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL:
                 return result
 
     # Use Fleet API (also fallback for Teslemetry BT which lacks charge limit)
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+    if (
+        ev_provider == EV_PROVIDER_TESLEMETRY_BT
+        or ev_provider in EV_PROVIDERS_WITH_CLOUD_CONTROL
+    ):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
             _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
@@ -4380,7 +4388,7 @@ async def _action_set_ev_charging_amps(
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
     ble_amps = amps
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL:
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charging_amps_ble(
                 hass,
@@ -4390,7 +4398,7 @@ async def _action_set_ev_charging_amps(
                 configured_max_amps=configured_max_amps,
                 params=params,
             )
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+            if result or ev_provider in EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL:
                 return result
 
     # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
@@ -4414,7 +4422,7 @@ async def _action_set_ev_charging_amps(
                 return result
 
     # Use Fleet API
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    if ev_provider in EV_PROVIDERS_WITH_CLOUD_CONTROL:
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
             _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")

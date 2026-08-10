@@ -541,3 +541,94 @@ def test_automation_ev_state_prefers_targetable_ble_when_activity_ties():
 
     assert state["is_charging"] is True
     assert state["vehicle_id"] == "ble_tesla_flinn"
+
+
+def test_cloud_telemetry_ble_automation_state_ignores_local_vehicle_data(
+    monkeypatch,
+):
+    """Command-only local transports must not become automation telemetry."""
+    power_sync = ModuleType("power_sync")
+    power_sync.__path__ = []
+    const = ModuleType("power_sync.const")
+    const.CONF_EV_PROVIDER = "ev_provider"
+    const.CONF_ZAPTEC_STANDALONE_ENABLED = "zaptec_standalone_enabled"
+    const.CONF_ZAPTEC_USERNAME = "zaptec_username"
+    const.DOMAIN = "power_sync"
+    const.EV_PROVIDER_CLOUD_TELEMETRY_BLE = "cloud_telemetry_ble"
+    monkeypatch.setitem(sys.modules, "power_sync", power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+
+    class _States:
+        def __init__(self):
+            states = [
+                SimpleNamespace(
+                    entity_id="sensor.cloud_vehicle_charging_state",
+                    state="Stopped",
+                ),
+                SimpleNamespace(
+                    entity_id="binary_sensor.cloud_vehicle_charge_cable",
+                    state="on",
+                ),
+                SimpleNamespace(
+                    entity_id="sensor.cloud_vehicle_battery_level",
+                    state="80",
+                ),
+                SimpleNamespace(
+                    entity_id="device_tracker.cloud_vehicle_location",
+                    state="home",
+                ),
+                SimpleNamespace(
+                    entity_id="sensor.bridge_alpha_charging_state",
+                    state="Charging",
+                ),
+                SimpleNamespace(
+                    entity_id="binary_sensor.bridge_alpha_ble_status",
+                    state="on",
+                ),
+                SimpleNamespace(
+                    entity_id="binary_sensor.bridge_alpha_charge_flap",
+                    state="off",
+                ),
+                SimpleNamespace(
+                    entity_id="sensor.bridge_alpha_charge_level",
+                    state="41",
+                ),
+            ]
+            self._states = {state.entity_id: state for state in states}
+
+        def async_all(self):
+            return list(self._states.values())
+
+        def get(self, entity_id):
+            return self._states.get(entity_id)
+
+    engine_class = _load_engine_method(
+        "_async_get_ev_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._config_entry = SimpleNamespace(
+        data={},
+        options={"ev_provider": "cloud_telemetry_ble"},
+    )
+    engine._hass = SimpleNamespace(
+        states=_States(),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+        data={},
+    )
+
+    state = asyncio.run(engine._async_get_ev_state())
+
+    assert state == {
+        "is_plugged_in": True,
+        "is_charging": False,
+        "battery_level": 80,
+        "charging_state": "stopped",
+        "location": "home",
+        "vehicle_id": None,
+    }

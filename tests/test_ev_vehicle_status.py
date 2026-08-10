@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components"
@@ -467,6 +469,217 @@ def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
     assert vehicles[0]["battery_level"] == 82
     assert vehicles[0]["charging_state"] == "Charging"
     assert vehicles[1]["battery_level"] == 41
+
+
+def test_cloud_telemetry_ble_mode_keeps_cloud_vehicle_data_authoritative():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    view = power_sync.EVVehiclesView(_Hass([]))
+    view._get_tesla_ble_vehicle = lambda prefix, vehicle_index=1: {
+        "battery_level": 41,
+        "charging_state": "Charging",
+        "is_plugged_in": False,
+        "charger_power": 7.0,
+        "is_online": True,
+    }
+    vehicles = [{
+        "vin": vin,
+        "battery_level": 80,
+        "charging_state": "Stopped",
+        "is_plugged_in": True,
+        "charger_power": None,
+    }]
+    config = {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha",
+        "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+    }
+
+    view._merge_tesla_ble_vehicles(vehicles, config, ["bridge_alpha"])
+
+    assert vehicles == [{
+        "vin": vin,
+        "battery_level": 80,
+        "charging_state": "Stopped",
+        "is_plugged_in": True,
+        "charger_power": None,
+    }]
+
+
+def test_cloud_telemetry_ble_status_ignores_conflicting_ble_telemetry():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    cloud_states = [
+        _State("sensor.primary_ev_battery_level", "80"),
+        _State("sensor.primary_ev_charging_state", "stopped"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+    ]
+    hass = _Hass(
+        [
+            *cloud_states,
+            _State("binary_sensor.bridge_alpha_status", "on"),
+            _State("sensor.bridge_alpha_charge_level", "41"),
+            _State("sensor.bridge_alpha_charging_state", "Charging"),
+            _State("binary_sensor.bridge_alpha_charge_flap", "off"),
+            _State(
+                "sensor.bridge_alpha_charge_power",
+                "7.0",
+                {"unit_of_measurement": "kW"},
+            ),
+        ],
+        {
+            state.entity_id: _entity(state.entity_id, "primary_ev-device")
+            for state in cloud_states
+        },
+        {
+            "primary_ev-device": SimpleNamespace(
+                id="primary_ev-device",
+                name="PRIMARY EV",
+                identifiers={("teslemetry", vin)},
+            )
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "cloud_telemetry_ble",
+            "tesla_ble_entity_prefix": "bridge_alpha",
+            "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert vehicles == [{
+        "vehicle_id": vin,
+        "vehicle_name": "PRIMARY EV",
+        "ev_power_kw": 0.0,
+        "ev_soc": 80,
+        "is_connected": True,
+        "is_charging": False,
+    }]
+
+
+def test_cloud_telemetry_ble_summary_and_schedule_soc_ignore_local_sources():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    cloud_states = [
+        _State("sensor.primary_ev_battery_level", "80"),
+        _State("sensor.primary_ev_charging_state", "Stopped"),
+    ]
+    hass = _Hass(
+        [
+            *cloud_states,
+            _State("binary_sensor.bridge_alpha_status", "on"),
+            _State("sensor.bridge_alpha_charge_level", "41"),
+            _State("sensor.bridge_alpha_charging_state", "Charging"),
+            _State(f"sensor.{vin}_battery_level", "69"),
+            _State(f"sensor.{vin}_charging_state", "Charging"),
+            _State(f"switch.{vin}_charge", "on"),
+        ],
+        {
+            state.entity_id: _entity(state.entity_id, "primary_ev-device")
+            for state in cloud_states
+        },
+        {
+            "primary_ev-device": SimpleNamespace(
+                id="primary_ev-device",
+                name="PRIMARY EV",
+                identifiers={("teslemetry", vin)},
+            )
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "cloud_telemetry_ble",
+            "tesla_ble_entity_prefix": "bridge_alpha",
+            "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+        },
+    )
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [entry] if domain == "power_sync" else []
+    )
+
+    summary = power_sync._get_ev_vehicle_status(hass, entry)
+    schedule_soc = asyncio.run(
+        power_sync.ChargingScheduleView(hass)._get_vehicle_soc(vin)
+    )
+
+    assert summary == {"ev_power_kw": 0.0, "ev_soc": 80}
+    assert schedule_soc == 80
+
+
+def test_cloud_telemetry_ble_plug_check_ignores_ble_cache():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    cached_at = datetime.now(timezone.utc)
+    hass = _Hass([_State("binary_sensor.cloud_charge_cable", "off")])
+    hass.data["power_sync"]["_ev_cache"] = {
+        "ev_ble_plug_cache_bridge_alpha": {
+            "cached_at": cached_at,
+            "is_plugged_in": True,
+        }
+    }
+    view = power_sync.EVVehicleCommandView(hass)
+    view._get_powersync_config = lambda: {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha",
+        "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+    }
+    view._get_tesla_ev_entity = AsyncMock(
+        side_effect=[None, "binary_sensor.cloud_charge_cable", None]
+    )
+
+    plugged = asyncio.run(view._is_vehicle_plugged_in(vin))
+
+    assert plugged is False
+
+
+def test_cloud_telemetry_ble_wake_uses_only_mapped_ble_bridge():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+
+    class Services:
+        def __init__(self):
+            self.calls = []
+
+        async def async_call(self, domain, service, data, blocking=True):
+            self.calls.append((domain, service, data, blocking))
+
+    hass = _Hass(
+        [_State("button.bridge_alpha_wake_up", "unknown")],
+        devices={
+            "fleet": SimpleNamespace(
+                id="fleet",
+                name="PRIMARY EV",
+                identifiers={("teslemetry", vin)},
+            )
+        },
+    )
+    hass.services = Services()
+    view = power_sync.EVVehicleCommandView(hass)
+    view._get_powersync_config = lambda: {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha",
+        "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+    }
+    view._is_vehicle_asleep = AsyncMock(return_value=True)
+    view._wait_for_vehicle_awake = AsyncMock(return_value=True)
+    view._get_tesla_ev_entity = AsyncMock(return_value="button.cloud_wake")
+
+    result = asyncio.run(view._wake_vehicle(vin))
+
+    assert result is True
+    assert hass.services.calls == [(
+        "button",
+        "press",
+        {"entity_id": "button.bridge_alpha_wake_up"},
+        True,
+    )]
+    view._get_tesla_ev_entity.assert_not_awaited()
 
 
 def test_external_tesla_power_uses_coalesced_charging_vehicle():

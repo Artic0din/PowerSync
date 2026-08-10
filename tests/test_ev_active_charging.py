@@ -271,6 +271,89 @@ def test_discovery_pairs_unambiguous_autodetected_bridge_to_single_fleet_vin():
     assert [vehicle["vin"] for vehicle in vehicles] == [vin]
 
 
+def test_cloud_telemetry_ble_discovery_excludes_ble_vehicle_duplicates():
+    _install_registry_stubs()
+    vin_a = "5YJTEST0000000001"
+    vin_b = "5YJTEST0000000002"
+    hass = _Hass(
+        [
+            _State("binary_sensor.bridge_alpha_status", "on"),
+            _State("binary_sensor.bridge_beta_status", "on"),
+        ],
+        devices=_fleet_devices(vin_a, vin_b),
+    )
+    entry = _Entry()
+    entry.options = {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+        "tesla_ble_vehicle_mapping": (
+            f"{vin_a}=bridge_alpha,{vin_b}=bridge_beta"
+        ),
+    }
+
+    vehicles = asyncio.run(ev_planner.discover_all_tesla_vehicles(hass, entry))
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [vin_a, vin_b]
+    assert [vehicle["source"] for vehicle in vehicles] == [
+        "fleet_api",
+        "fleet_api",
+    ]
+
+
+def test_cloud_telemetry_ble_planner_ignores_all_local_telemetry():
+    _install_registry_stubs()
+    cloud_states = [
+        _State("sensor.cloud_charging", "Disconnected"),
+        _State("binary_sensor.cloud_charge_cable", "off"),
+        _State("device_tracker.cloud_location", "not_home"),
+        _State("sensor.cloud_battery_level", "80"),
+    ]
+    local_states = [
+        _State(f"sensor.{VIN}_charging_state", "Charging"),
+        _State(f"switch.{VIN}_charge", "on"),
+        _State(f"device_tracker.{VIN}_location", "home"),
+        _State("binary_sensor.bridge_alpha_status", "on"),
+        _State("binary_sensor.bridge_alpha_charge_flap", "on"),
+        _State("switch.bridge_alpha_charger", "on"),
+        _State("sensor.bridge_alpha_battery_level", "41"),
+    ]
+    hass = _Hass(
+        [*cloud_states, *local_states],
+        registry_entities={
+            state.entity_id: SimpleNamespace(
+                entity_id=state.entity_id,
+                device_id="device-0",
+                domain=state.entity_id.split(".", 1)[0],
+            )
+            for state in cloud_states
+        },
+        devices=_fleet_devices(VIN),
+    )
+    hass.data = {}
+    entry = _Entry()
+    entry.options = {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha",
+        "tesla_ble_vehicle_mapping": f"{VIN}=bridge_alpha",
+    }
+
+    observed = {
+        "location": asyncio.run(ev_planner.get_ev_location(hass, entry, VIN)),
+        "plugged": asyncio.run(ev_planner.is_ev_plugged_in(hass, entry, VIN)),
+        "charging": asyncio.run(
+            ev_planner.is_ev_actively_charging(hass, entry, VIN)
+        ),
+        "soc": asyncio.run(ev_planner.get_ev_battery_level(hass, entry)),
+    }
+
+    assert observed == {
+        "location": "not_home",
+        "plugged": False,
+        "charging": False,
+        "soc": 80.0,
+    }
+
+
 def test_default_tesla_start_coalesces_paired_fleet_and_ble(monkeypatch):
     vin = "5YJTEST0000000001"
     ble_vin = "ble_ble_a"

@@ -86,6 +86,23 @@ def test_explicit_mapping_does_not_depend_on_prefix_or_vin_order():
     }
 
 
+def test_cloud_telemetry_ble_control_uses_identity_safe_mapping():
+    config = {
+        "ev_provider": "cloud_telemetry_ble",
+        "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+        "tesla_ble_vehicle_mapping": (
+            f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha"
+        ),
+    }
+
+    assert vehicle_ble_prefix(config, VIN_A, [VIN_B, VIN_A]) == "bridge_beta"
+    assert vehicle_ble_prefix(config, VIN_B, [VIN_A, VIN_B]) == "bridge_alpha"
+    assert ble_prefix_vehicle_pairs(config, [VIN_B, VIN_A]) == {
+        "bridge_alpha": VIN_B,
+        "bridge_beta": VIN_A,
+    }
+
+
 def test_unmapped_multi_vehicle_configuration_fails_closed():
     config = _both_config("bridge_alpha,bridge_beta")
 

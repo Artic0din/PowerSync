@@ -108,6 +108,11 @@ When multiple Tesla Fleet vehicles use ESPHome BLE bridges in `Both` mode, confi
 PowerSync may infer the bridge only when exactly one Fleet VIN and one BLE prefix are configured.
 Unmapped or ambiguous vehicles stay on Fleet control so telemetry and commands cannot be attached to another vehicle by discovery order.
 
+The `Cloud telemetry + ESPHome BLE control` mode keeps Tesla Fleet or Teslemetry entities authoritative for vehicle discovery, state of charge, plug state, charging state, and power.
+It uses the identity-safe ESPHome BLE bridge pairing only for wake, start, stop, current, and charge-limit commands.
+The pairing may be inferred only when exactly one cloud VIN and one BLE prefix exist; multiple vehicles require explicit mappings.
+Missing or ambiguous pairings and failed BLE commands fail closed without falling back to cloud control.
+
 ## Coordinator Rules
 
 1. Read all loadpoint states.

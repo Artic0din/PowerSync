@@ -327,7 +327,7 @@ def _configured_ble_prefixes(
         CONF_EV_PROVIDER,
         CONF_TESLA_BLE_ENTITY_PREFIX,
         DEFAULT_TESLA_BLE_ENTITY_PREFIX,
-        EV_PROVIDER_BOTH,
+        EV_PROVIDERS_WITH_VIN_BLE_PAIRING,
     )
 
     if vehicle_vin and vehicle_vin.startswith("ble_"):
@@ -345,7 +345,7 @@ def _configured_ble_prefixes(
         and vehicle_vin
         and len(vehicle_vin) == 17
         and vehicle_vin.isalnum()
-        and opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+        and opts.get(CONF_EV_PROVIDER) in EV_PROVIDERS_WITH_VIN_BLE_PAIRING
     ):
         from homeassistant.helpers import device_registry as dr
 
@@ -375,6 +375,22 @@ def _configured_ble_prefixes(
         return [prefix] if prefix else []
 
     return prefixes
+
+
+def _uses_cloud_only_ev_telemetry(
+    config_entry: object | None,
+) -> bool:
+    """Return whether local Tesla transports are command-only."""
+    from ..const import (
+        CONF_EV_PROVIDER,
+        EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+    )
+
+    config = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    return config.get(CONF_EV_PROVIDER) == EV_PROVIDER_CLOUD_TELEMETRY_BLE
 
 
 def _valid_state(state: Any) -> bool:
@@ -694,6 +710,7 @@ async def get_ev_location(
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
     location = "unknown"
+    cloud_only_telemetry = _uses_cloud_only_ev_telemetry(config_entry)
 
     # Zaptec standalone — charger is at home by definition
     if config_entry:
@@ -711,7 +728,10 @@ async def get_ev_location(
 
     # Method 0: Teslemetry Bluetooth - has real device_tracker with location
     import re
-    for state in hass.states.async_all():
+    local_telemetry_states = (
+        [] if cloud_only_telemetry else hass.states.async_all()
+    )
+    for state in local_telemetry_states:
         match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
         if match:
             candidate = match.group(1)
@@ -773,7 +793,7 @@ async def get_ev_location(
     # Method 2 (fallback): Tesla BLE - only current presence/plug signals imply home.
     # Do not treat the charger switch entity merely existing as presence; HA keeps
     # entities around even when the BLE bridge cannot currently see the car.
-    if location == "unknown":
+    if location == "unknown" and not cloud_only_telemetry:
         for prefix in _configured_ble_prefixes(
             config_entry,
             vehicle_vin,
@@ -957,6 +977,7 @@ async def is_ev_plugged_in(
         CONF_SIGENERGY_CHARGER_ENABLED,
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
+    cloud_only_telemetry = _uses_cloud_only_ev_telemetry(config_entry)
 
     # Sigenergy EVAC/EVDC exposes its own Modbus connection state. Check it
     # before OCPP/generic paths, because those can return False early when both
@@ -1084,7 +1105,10 @@ async def is_ev_plugged_in(
 
     # Method 0: Teslemetry Bluetooth — check sensor.*_charging_state
     import re as _re
-    for state in hass.states.async_all():
+    local_telemetry_states = (
+        [] if cloud_only_telemetry else hass.states.async_all()
+    )
+    for state in local_telemetry_states:
         match = _re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
         if match:
             candidate = match.group(1)
@@ -1154,6 +1178,9 @@ async def is_ev_plugged_in(
                         return True
 
     # Method 2 (fallback): Tesla BLE
+    if cloud_only_telemetry:
+        return False
+
     if vehicle_vin and vehicle_vin.startswith("ble_"):
         ble_prefix = vehicle_vin[4:]
         plugged = _tesla_ble_plugged_in_status(hass, ble_prefix)
@@ -1196,9 +1223,13 @@ async def is_ev_actively_charging(
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
     import re as _re
+    cloud_only_telemetry = _uses_cloud_only_ev_telemetry(config_entry)
 
     # Method 0: Teslemetry Bluetooth — sensor.{prefix}_charging_state
-    for state in hass.states.async_all():
+    local_telemetry_states = (
+        [] if cloud_only_telemetry else hass.states.async_all()
+    )
+    for state in local_telemetry_states:
         match = _re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
         if not match:
             continue
@@ -1261,6 +1292,9 @@ async def is_ev_actively_charging(
                     return True
 
     # Method 2: Tesla BLE — switch.{prefix}_charger state
+    if cloud_only_telemetry:
+        return False
+
     config = {
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
@@ -1339,7 +1373,8 @@ async def get_ev_battery_level(
                 return level
 
     # Method 1: Tesla BLE
-    if vehicle_vin and vehicle_vin.startswith("ble_"):
+    cloud_only_telemetry = _uses_cloud_only_ev_telemetry(config_entry)
+    if not cloud_only_telemetry and vehicle_vin and vehicle_vin.startswith("ble_"):
         # Vehicle-specific BLE — extract prefix from BLE identifier
         ble_prefix = vehicle_vin[4:]
         ble_battery_entity = f"sensor.{ble_prefix}_battery_level"
@@ -1351,7 +1386,7 @@ async def get_ev_battery_level(
                 pass
         return None  # BLE vehicle but no data — don't fall through to Fleet API
 
-    if vehicle_vin is None:
+    if not cloud_only_telemetry and vehicle_vin is None:
         config = dict(config_entry.options) if config_entry else {}
         raw_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
         # Scan ALL configured BLE prefixes rather than only the first. Return
@@ -4065,6 +4100,7 @@ class AutoScheduleExecutor:
             EV_PROVIDER_FLEET_API,
             EV_PROVIDER_BOTH,
             EV_PROVIDER_TESLA_BLE,
+            EV_PROVIDERS_WITH_CLOUD_TELEMETRY,
         )
 
         # Already a BLE identifier or VIN — return as-is
@@ -4081,7 +4117,7 @@ class AutoScheduleExecutor:
         fleet_vins: list[str] = []
 
         # Fleet API vehicles numbered first (same order as EVVehiclesView)
-        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        if ev_provider in EV_PROVIDERS_WITH_CLOUD_TELEMETRY:
             from homeassistant.helpers import device_registry as dr
             device_registry = dr.async_get(self.hass)
             seen_vins: set[str] = set()

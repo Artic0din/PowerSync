@@ -11,7 +11,7 @@ from .const import (
     CONF_TESLA_BLE_ENTITY_PREFIX,
     CONF_TESLA_BLE_VEHICLE_MAPPING,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
-    EV_PROVIDER_BOTH,
+    EV_PROVIDERS_WITH_VIN_BLE_PAIRING,
 )
 
 _BLE_PREFIX_PATTERN = re.compile(r"^[a-z0-9_]+$")
@@ -135,7 +135,7 @@ def vehicle_ble_prefix(
         vehicle_vin
         and len(vehicle_vin) == 17
         and vehicle_vin.isalnum()
-        and config.get(CONF_EV_PROVIDER) == EV_PROVIDER_BOTH
+        and config.get(CONF_EV_PROVIDER) in EV_PROVIDERS_WITH_VIN_BLE_PAIRING
     ):
         return prefixes[0] if prefixes else None
 
