@@ -43,7 +43,25 @@ _AUTHORIZED_STATE_CODES = {
     "VERIFIED": 3,
     "REMOVED": 4,
 }
-_ISLANDED_GRID_STATES = {"SystemIslandedActive", "SystemIslandedReady"}
+_CONNECTED_GRID_STATES = {"active", "systemgridconnected"}
+_OFF_GRID_STATES = {
+    "inactive",
+    "islanded",
+    "off-grid",
+    "systemislandedactive",
+}
+
+
+def _grid_status_is_off_grid(value: Any) -> bool | None:
+    """Classify only terminal grid states; preserve transitions as unknown."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in _CONNECTED_GRID_STATES:
+        return False
+    if normalized in _OFF_GRID_STATES:
+        return True
+    return None
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -409,8 +427,10 @@ class PowerwallLocalClient:
             except Exception as err:
                 _LOGGER.debug("grid-state readback failed while waiting: %s", err)
             else:
-                is_off_grid = snapshot.grid_status in _ISLANDED_GRID_STATES
-                if is_off_grid == off_grid:
+                is_off_grid = _grid_status_is_off_grid(
+                    getattr(snapshot, "grid_status", None)
+                )
+                if is_off_grid is not None and is_off_grid == off_grid:
                     return True
             if time.monotonic() >= deadline:
                 return False
@@ -825,14 +845,11 @@ def _snapshot_from_dcq(
     else:
         soc_pct = None
 
-    # Grid status: prefer customerIslandMode mapping, fall back to gridOK bool.
+    # Grid status is terminal only when customerIslandMode is a recognized
+    # DCQ contract value. gridOK is advisory during transitions and faults.
     islanding = control.get("islanding") or {}
     island_mode = islanding.get("customerIslandMode")
-    grid_status = _DCQ_ISLAND_MODE_TO_GRID_STATUS.get(island_mode) if island_mode else None
-    if grid_status is None:
-        grid_ok = islanding.get("gridOK")
-        if isinstance(grid_ok, bool):
-            grid_status = "SystemGridConnected" if grid_ok else "SystemIslandedActive"
+    grid_status = _DCQ_ISLAND_MODE_TO_GRID_STATUS.get(island_mode)
 
     # Operation mode + backup reserve from config.json (RSA-read, same
     # transport, fired in parallel).

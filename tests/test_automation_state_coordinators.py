@@ -9,7 +9,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -194,6 +194,139 @@ def test_automation_current_state_consumes_coordinator_power_values_as_kw(monkey
     assert state["grid_export_kw"] == 10.0
     assert state["battery_charge_kw"] == 0
     assert state["battery_discharge_kw"] == 2.5
+
+
+def test_automation_current_state_normalizes_only_known_grid_statuses(monkeypatch):
+    """Missing or unsupported outage telemetry must remain unknown."""
+    power_sync = ModuleType("power_sync")
+    power_sync.__path__ = []
+    const = ModuleType("power_sync.const")
+    const.DOMAIN = "power_sync"
+    const.CONF_AEMO_REGION = "aemo_region"
+    monkeypatch.setitem(sys.modules, "power_sync", power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+
+    engine_class = _load_engine_method(
+        "_async_get_current_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "datetime": datetime,
+            "timezone": timezone,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    coordinator_data = {
+        "battery_level": 73,
+        "solar_power": 1.0,
+        "grid_power": 0.0,
+        "battery_power": 0.0,
+        "load_power": 1.0,
+    }
+    engine = object.__new__(engine_class)
+    engine._config_entry = SimpleNamespace(entry_id="entry", options={}, data={})
+    engine._hass = SimpleNamespace(
+        config=SimpleNamespace(time_zone="UTC"),
+        data={
+            "power_sync": {
+                "entry": {
+                    "tesla_coordinator": SimpleNamespace(data=coordinator_data),
+                    "amber_coordinator": SimpleNamespace(data={"current": []}),
+                    "force_charge_state": {},
+                    "force_discharge_state": {},
+                }
+            }
+        },
+    )
+
+    cases = (
+        ("Active", "on_grid"),
+        ("SystemGridConnected", "on_grid"),
+        ("Inactive", "off_grid"),
+        ("Islanded", "off_grid"),
+        ("Off-Grid", "off_grid"),
+        ("SystemIslandedActive", "off_grid"),
+        ("SystemIslandedReady", "unknown"),
+        ("SystemTransitionToGrid", "unknown"),
+        ("SystemTransitionToIsland", "unknown"),
+        ("SystemMicroGridFaulted", "unknown"),
+        ("SystemWaitForUser", "unknown"),
+        ("On-Grid", "unknown"),
+        ("", "unknown"),
+        (None, "unknown"),
+        ("unsupported-provider-state", "unknown"),
+    )
+    for raw_status, expected in cases:
+        if raw_status is None:
+            coordinator_data.pop("grid_status", None)
+        else:
+            coordinator_data["grid_status"] = raw_status
+
+        state = asyncio.run(engine._async_get_current_state())
+
+        assert state["grid_status"] == expected
+
+
+def test_grid_trigger_ignores_unknown_without_synthesizing_recovery():
+    """An unknown sample must not replace the last known grid transition state."""
+
+    class _Store:
+        def __init__(self):
+            self.value = 1.0
+            self.updates = []
+
+        def update_trigger_state(self, automation_id, value):
+            self.value = value
+            self.updates.append((automation_id, value))
+
+    evaluate_grid_trigger = _load_trigger_function(
+        "_evaluate_grid_trigger",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "Optional": Optional,
+            "TriggerResult": SimpleNamespace,
+        },
+    )
+    store = _Store()
+    trigger = {"grid_condition": "on_grid"}
+
+    unknown_result = evaluate_grid_trigger(
+        trigger,
+        {"grid_status": "unknown"},
+        store.value,
+        store,
+        17,
+    )
+    recovered_result = evaluate_grid_trigger(
+        trigger,
+        {"grid_status": "on_grid"},
+        store.value,
+        store,
+        17,
+    )
+
+    assert unknown_result.triggered is False
+    assert unknown_result.reason == "Grid status unavailable"
+    assert store.updates == [(17, 1.0)]
+    assert recovered_result.triggered is False
+
+
+def test_grid_condition_does_not_default_missing_status_to_on_grid():
+    evaluate_grid_condition = _load_trigger_function(
+        "_evaluate_grid_condition",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "TriggerResult": SimpleNamespace,
+        },
+    )
+
+    result = evaluate_grid_condition({"grid_condition": "on_grid"}, {})
+
+    assert result.triggered is False
+    assert result.reason == "Grid status unavailable"
 
 
 def test_automation_stop_context_preserves_triggered_ble_vehicle():

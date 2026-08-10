@@ -656,6 +656,125 @@ def test_home_load_sensor_never_publishes_negative_history_value():
     assert desc.value_fn({"load_power": 1.234}) == 1.234
 
 
+def test_grid_status_sensor_requires_provider_reported_status():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "grid_status")
+
+    assert desc.value_fn({"grid_power": 0.001, "solar_power": 0.0}) is None
+    unknown_statuses = (
+        None,
+        "",
+        "unavailable",
+        "unexpected-status",
+        "connected",
+        "on-grid",
+        "off grid",
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+    )
+    for status in unknown_statuses:
+        assert desc.value_fn({"grid_status": status}) is None
+
+
+def test_grid_status_sensor_preserves_provider_reported_status():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "grid_status")
+
+    recognized_statuses = (
+        "Active",
+        "SystemGridConnected",
+        "Inactive",
+        "Islanded",
+        "Off-Grid",
+        "SystemIslandedActive",
+    )
+    for status in recognized_statuses:
+        assert desc.value_fn({"grid_status": status}) == status
+
+
+def test_fresh_local_grid_status_does_not_fall_back_to_cloud_when_unknown():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "grid_status")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+        options={},
+    )
+    local_coord = SimpleNamespace(
+        data=SimpleNamespace(grid_status="SystemIslandedReady"),
+        last_success_monotonic=time.monotonic(),
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"grid_status": "Active"}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {"powerwall_local": {"coordinator": local_coord}},
+            },
+        },
+    )
+
+    for status in (
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        "Unknown",
+        None,
+    ):
+        local_coord.data.grid_status = status
+        assert entity.native_value is None
+    local_coord.data = SimpleNamespace()
+    assert entity.native_value is None
+
+
+def test_fresh_local_grid_status_maps_recognized_states_explicitly():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "grid_status")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+        options={},
+    )
+    local_coord = SimpleNamespace(
+        data=SimpleNamespace(grid_status="SystemGridConnected"),
+        last_success_monotonic=time.monotonic(),
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"grid_status": "Inactive"}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {"powerwall_local": {"coordinator": local_coord}},
+            },
+        },
+    )
+
+    expected_by_status = {
+        "Active": "Active",
+        "SystemGridConnected": "Active",
+        "Inactive": "Off-Grid",
+        "Islanded": "Off-Grid",
+        "Off-Grid": "Off-Grid",
+        "SystemIslandedActive": "Off-Grid",
+    }
+    for status, expected in expected_by_status.items():
+        local_coord.data.grid_status = status
+        assert entity.native_value == expected
+
+
 def test_neovolt_surplus_balancer_sensor_exposes_status_and_attributes():
     sensor = _sensor_module()
     desc = next(d for d in sensor.NEOVOLT_SENSORS if d.key == "neovolt_surplus_balancer")

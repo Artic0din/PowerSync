@@ -1080,6 +1080,25 @@ import {
     return Math.max(0, rawLoadPower - Math.max(0, evDrawPower));
   }
 
+  function gridConnectionState(rawState) {
+    const state = String(rawState ?? '').trim().toLowerCase();
+    if ([
+      'active',
+      'systemgridconnected'
+    ].includes(state)) {
+      return 'connected';
+    }
+    if ([
+      'inactive',
+      'islanded',
+      'off-grid',
+      'systemislandedactive'
+    ].includes(state)) {
+      return 'off_grid';
+    }
+    return null;
+  }
+
   function toPct(entityState, fallback = 0) {
     if (!entityState) return fallback;
     const candidates = [
@@ -2239,12 +2258,11 @@ import {
       if (gridStatusEl) {
         const gridStatusEntity = cfg.entities.grid_status;
         const gridStatusState = gridStatusEntity ? this._entityState(gridStatusEntity) : null;
-        const gs = gridStatusState ? gridStatusState.state.toLowerCase() : '';
-        const isOffGrid = gs.includes('island') || gs === 'inactive';
-        if (!hasGridStatusPosition) {
+        const gridState = gridStatusState ? gridConnectionState(gridStatusState.state) : null;
+        if (!hasGridStatusPosition || !gridState) {
           this._setText('#flow-grid-status', '');
           gridStatusEl.style.display = 'none';
-        } else if (isOffGrid) {
+        } else if (gridState === 'off_grid') {
           this._setText('#flow-grid-status', this._t('card.status.off_grid', 'OFF GRID'));
           gridStatusEl.style.fill = '#ff5d73';
           gridStatusEl.style.display = 'inline';

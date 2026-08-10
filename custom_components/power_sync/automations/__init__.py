@@ -603,7 +603,7 @@ class AutomationEngine:
             "battery_discharge_kw": None,
             "import_price": None,
             "export_price": None,
-            "grid_status": "on_grid",
+            "grid_status": "unknown",
             "weather": None,
             "current_time": current_time_local,
             "user_timezone": user_timezone,
@@ -698,9 +698,27 @@ class AutomationEngine:
                     state["battery_charge_kw"] = abs(battery_kw)
                     state["battery_discharge_kw"] = 0
 
-                # Grid status
-                grid_status = coord_data.get("grid_status", "Active")
-                state["grid_status"] = "off_grid" if grid_status == "Islanded" else "on_grid"
+                # Grid status must come from explicit provider telemetry. Do
+                # not infer a healthy grid while a coordinator is warming up
+                # or when a provider reports an unsupported state.
+                raw_grid_status = coord_data.get("grid_status")
+                normalized_grid_status = (
+                    raw_grid_status.strip().lower()
+                    if isinstance(raw_grid_status, str)
+                    else ""
+                )
+                if normalized_grid_status in {
+                    "active",
+                    "systemgridconnected",
+                }:
+                    state["grid_status"] = "on_grid"
+                elif normalized_grid_status in {
+                    "inactive",
+                    "islanded",
+                    "off-grid",
+                    "systemislandedactive",
+                }:
+                    state["grid_status"] = "off_grid"
 
                 # Get prices for price-based triggers (settled prices from WebSocket or REST API)
                 # - Amber users: Amber API prices

@@ -17,6 +17,7 @@ bypasses *only* the "not active" early-return, while leaving default
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import sys
@@ -28,6 +29,21 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 POWERWALL_LOCAL_ROOT = COMPONENT_ROOT / "powerwall_local"
+OPTIMIZATION_COORDINATOR_PATH = COMPONENT_ROOT / "optimization" / "coordinator.py"
+
+
+def _standalone_function(path: Path, name: str):
+    module = ast.parse(path.read_text())
+    function = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    namespace = {}
+    standalone = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(standalone)
+    exec(compile(standalone, str(path), "exec"), namespace)
+    return namespace[name]
 
 
 def _load_curtailment_fallback_module():
@@ -208,3 +224,28 @@ def test_release_without_force_is_unchanged_noop_when_not_active():
         assert client.reconnect_calls == 0
     finally:
         restore()
+
+
+def test_startup_orphan_cleanup_requires_terminal_off_grid_status():
+    is_terminal_off_grid = _standalone_function(
+        OPTIMIZATION_COORDINATOR_PATH,
+        "_grid_status_is_terminal_off_grid",
+    )
+
+    for status in ("Inactive", "Islanded", "Off-Grid", "SystemIslandedActive"):
+        assert is_terminal_off_grid(status) is True
+    for status in (
+        "Active",
+        "SystemGridConnected",
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        None,
+        "unexpected-status",
+    ):
+        assert is_terminal_off_grid(status) is False
+
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    assert "if _grid_status_is_terminal_off_grid(gs):" in source

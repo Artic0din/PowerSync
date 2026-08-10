@@ -438,6 +438,68 @@ def _bare_client() -> object:
     return client
 
 
+@pytest.mark.parametrize(
+    ("grid_status", "off_grid", "expected"),
+    [
+        ("Active", False, True),
+        ("Active", True, False),
+        ("SystemGridConnected", False, True),
+        ("SystemGridConnected", True, False),
+        ("Inactive", True, True),
+        ("Inactive", False, False),
+        ("Islanded", True, True),
+        ("Islanded", False, False),
+        ("Off-Grid", True, True),
+        ("Off-Grid", False, False),
+        ("SystemIslandedActive", True, True),
+        ("SystemIslandedActive", False, False),
+        ("SystemIslandedReady", False, False),
+        ("SystemIslandedReady", True, False),
+        ("SystemTransitionToGrid", False, False),
+        ("SystemTransitionToGrid", True, False),
+        ("SystemTransitionToIsland", True, False),
+        ("SystemTransitionToIsland", False, False),
+        ("SystemMicroGridFaulted", True, False),
+        ("SystemMicroGridFaulted", False, False),
+        ("SystemWaitForUser", True, False),
+        ("SystemWaitForUser", False, False),
+        (None, False, False),
+        (None, True, False),
+        ("unexpected-status", False, False),
+        ("unexpected-status", True, False),
+    ],
+)
+@async_test
+async def test_wait_for_grid_state_confirms_only_matching_terminal_state(
+    grid_status,
+    off_grid,
+    expected,
+):
+    client = _bare_client()
+    client.get_snapshot = AsyncMock(
+        return_value=SimpleNamespace(grid_status=grid_status)
+    )
+
+    assert await client._wait_for_grid_state(off_grid=off_grid, timeout=0) is expected
+
+
+@async_test
+async def test_wait_for_grid_state_keeps_polling_after_unknown(monkeypatch):
+    client = _bare_client()
+    client.get_snapshot = AsyncMock(
+        side_effect=[
+            SimpleNamespace(grid_status="SystemIslandedReady"),
+            SimpleNamespace(grid_status="SystemGridConnected"),
+        ]
+    )
+    sleep = AsyncMock(return_value=None)
+    monkeypatch.setattr(client_mod.asyncio, "sleep", sleep)
+
+    assert await client._wait_for_grid_state(off_grid=False, timeout=1) is True
+    assert client.get_snapshot.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+
+
 @async_test
 async def test_client_grid_import_export_writes_both_settings_atomically():
     client = _bare_client()

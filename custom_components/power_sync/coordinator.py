@@ -86,6 +86,31 @@ LIFETIME_TOTAL_KEYS = (
 )
 
 
+_TERMINAL_GRID_STATUS_VALUES = {
+    "active": "Active",
+    "systemgridconnected": "SystemGridConnected",
+    "inactive": "Inactive",
+    "islanded": "Islanded",
+    "off-grid": "Off-Grid",
+    "systemislandedactive": "SystemIslandedActive",
+}
+
+
+def _terminal_grid_status(value: Any) -> str | None:
+    """Return a canonical terminal grid status, or None while state is unknown."""
+    if not isinstance(value, str):
+        return None
+    return _TERMINAL_GRID_STATUS_VALUES.get(value.strip().lower())
+
+
+def _grid_status_is_off_grid(value: Any) -> bool | None:
+    """Return the terminal grid mode without collapsing unknown transitions."""
+    status = _terminal_grid_status(value)
+    if status is None:
+        return None
+    return status in {"Inactive", "Islanded", "Off-Grid", "SystemIslandedActive"}
+
+
 def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
     """Normalize custom HA power telemetry to finite kW."""
     if value is None:
@@ -2083,7 +2108,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._vpp_programs_cache: list[dict] | None = None
 
         # Grid status tracking (off-grid / islanding detection)
-        self._last_grid_status: str = "Active"  # "Active" or "Islanded"
+        self._last_grid_status: str | None = None
 
         # Tesla server outage tracking
         self._consecutive_failures: int = 0
@@ -2352,8 +2377,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
         self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0)
 
-        raw_grid_status = str(getattr(snap, "grid_status", "") or "")
-        grid_status = "Off-Grid" if "island" in raw_grid_status.lower() else "Active"
+        local_is_off_grid = _grid_status_is_off_grid(
+            getattr(snap, "grid_status", None)
+        )
+        grid_status = (
+            None
+            if local_is_off_grid is None
+            else "Off-Grid" if local_is_off_grid else "Active"
+        )
         soc_pct = getattr(snap, "soc", None)
         if soc_pct is not None:
             try:
@@ -2644,19 +2675,23 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 except Exception:
                     pass  # Non-critical, don't fail the update
 
-            # Grid status: "Active" (on-grid) or "Islanded" (off-grid/blackout)
-            grid_status = live_status.get("grid_status", "Active")
+            grid_status = _terminal_grid_status(live_status.get("grid_status"))
 
             # Detect grid status transitions and send push notifications.
-            # Tesla API returns grid_status "Active" (on-grid) or "Inactive"
-            # (off-grid). Only notify on real transitions, not initial load.
-            is_on_grid = grid_status == "Active"
-            prev_status = self._last_grid_status
-            self._last_grid_status = grid_status
-            if prev_status is not None and grid_status != prev_status:
+            # Unknown/intermediate states neither notify nor replace the last
+            # terminal state. The first terminal sample establishes baseline.
+            is_off_grid = _grid_status_is_off_grid(grid_status)
+            prev_is_off_grid = _grid_status_is_off_grid(self._last_grid_status)
+            if grid_status is not None:
+                self._last_grid_status = grid_status
+            if (
+                is_off_grid is not None
+                and prev_is_off_grid is not None
+                and is_off_grid != prev_is_off_grid
+            ):
                 try:
                     from .automations.actions import _send_expo_push
-                    if not is_on_grid:
+                    if is_off_grid:
                         _LOGGER.warning(
                             "Grid outage detected — Powerwall off-grid (site %s)",
                             self.site_id,

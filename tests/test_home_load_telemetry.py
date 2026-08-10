@@ -24,6 +24,7 @@ from pathlib import Path
 import sys
 import time
 import types
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -217,6 +218,48 @@ def test_tesla_local_powerwall_fallback_clamps_load_at_zero_and_defaults_ev_to_z
     assert data is not None
     assert data["load_power"] == pytest.approx(0.5)
     assert data["ev_power"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected"),
+    [
+        ("Active", "Active"),
+        ("SystemGridConnected", "Active"),
+        ("Inactive", "Off-Grid"),
+        ("Islanded", "Off-Grid"),
+        ("Off-Grid", "Off-Grid"),
+        ("SystemIslandedActive", "Off-Grid"),
+        ("SystemIslandedReady", None),
+        ("SystemTransitionToGrid", None),
+        ("SystemTransitionToIsland", None),
+        ("SystemMicroGridFaulted", None),
+        ("SystemWaitForUser", None),
+        (None, None),
+        ("unexpected-status", None),
+    ],
+)
+def test_tesla_local_powerwall_fallback_grid_status_is_terminal_only(
+    raw_status,
+    expected,
+):
+    snap = types.SimpleNamespace(
+        solar_w=0.0,
+        grid_w=0.0,
+        battery_w=0.0,
+        load_w=500.0,
+        grid_status=raw_status,
+        soc=40.0,
+        total_pack_full_wh=None,
+        total_pack_remaining_wh=None,
+    )
+    coordinator = _new_tesla_coordinator(
+        _FakeLocalPowerwallCoordinator(snap, ev_power_w=0.0)
+    )
+
+    data = coordinator._local_powerwall_energy_data()
+
+    assert data is not None
+    assert data["grid_status"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +554,112 @@ def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
     repeated = asyncio.run(coordinator._async_update_data())
     assert repeated is result
     assert len(coordinator._energy_acc.updates) == 1
+
+
+def test_tesla_coordinator_ignores_non_terminal_grid_status_transitions():
+    unknown_statuses = (
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        None,
+        "unexpected-status",
+    )
+    for raw_status in unknown_statuses:
+        coordinator = _new_stream_tesla_coordinator()
+
+        async def _request_refresh() -> None:
+            return None
+
+        coordinator.async_request_refresh = _request_refresh
+        coordinator._get_current_token = lambda: (_ for _ in ()).throw(
+            AssertionError("Healthy SSE data must not fetch a REST token")
+        )
+        event = {
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "site_id": "12345",
+            "live_status": {
+                "solar_power": 0,
+                "grid_power": 0,
+                "battery_power": 0,
+                "load_power": 500,
+                "percentage_charged": 82.5,
+                "grid_status": raw_status,
+            },
+        }
+
+        asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+        result = asyncio.run(coordinator._async_update_data())
+
+        assert result["grid_status"] is None
+        assert coordinator._last_grid_status == "Active"
+
+
+def test_tesla_coordinator_notifies_only_terminal_class_changes(monkeypatch):
+    coordinator = _new_stream_tesla_coordinator()
+    coordinator._last_grid_status = None
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    coordinator._get_current_token = lambda: (_ for _ in ()).throw(
+        AssertionError("Healthy SSE data must not fetch a REST token")
+    )
+    send_push = AsyncMock()
+    automations_package = types.ModuleType("power_sync.automations")
+    automations_package.__path__ = []
+    actions_module = types.ModuleType("power_sync.automations.actions")
+    actions_module._send_expo_push = send_push
+    monkeypatch.setitem(sys.modules, "power_sync.automations", automations_package)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions_module)
+
+    async def _publish(raw_status, created_at):
+        event = {
+            "createdAt": created_at,
+            "site_id": "12345",
+            "live_status": {
+                "solar_power": 0,
+                "grid_power": 0,
+                "battery_power": 0,
+                "load_power": 500,
+                "percentage_charged": 82.5,
+                "grid_status": raw_status,
+            },
+        }
+        await coordinator._async_handle_teslemetry_stream_event(event)
+        result = await coordinator._async_update_data()
+        coordinator.data = result
+        return result
+
+    first = asyncio.run(_publish("Inactive", "2026-07-08T00:59:30+00:00"))
+    assert first["grid_status"] == "Inactive"
+    assert coordinator._last_grid_status == "Inactive"
+    send_push.assert_not_awaited()
+
+    restored = asyncio.run(_publish("Active", "2026-07-08T00:59:31+00:00"))
+    assert restored["grid_status"] == "Active"
+    send_push.assert_awaited_once_with(
+        coordinator.hass,
+        "Grid Power Restored",
+        "Grid power has been restored. Your Powerwall is back on-grid.",
+    )
+
+    asyncio.run(
+        _publish("SystemGridConnected", "2026-07-08T00:59:32+00:00")
+    )
+    assert send_push.await_count == 1
+
+    asyncio.run(
+        _publish("SystemIslandedActive", "2026-07-08T00:59:33+00:00")
+    )
+    assert send_push.await_count == 2
+    assert send_push.await_args.args == (
+        coordinator.hass,
+        "Grid Outage Detected",
+        "Your Powerwall is running off-grid. Grid power is unavailable.",
+    )
 
 
 def test_tesla_explicit_zero_wall_connector_power_suppresses_vehicle_fallback(

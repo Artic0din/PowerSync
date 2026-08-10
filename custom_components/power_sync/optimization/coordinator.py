@@ -135,6 +135,18 @@ GLOBIRD_QUOTA_IMPORT_RULE_ID = "globird_zerocharge_import"
 COST_NEUTRAL_OPTION = "cost_neutral_enabled"
 
 
+def _grid_status_is_terminal_off_grid(value: Any) -> bool:
+    """Return True only for a confirmed terminal off-grid state."""
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in {
+        "inactive",
+        "islanded",
+        "off-grid",
+        "systemislandedactive",
+    }
+
+
 def sigenergy_capped_optimizer_limit_w(
     raw_limit_w: Any,
     configured_cap_kw: Any,
@@ -4836,8 +4848,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _pw_local = _og_data.get("powerwall_local", {})
                     _coord = _pw_local.get("coordinator")
                     if _coord and _coord.data and hasattr(_coord.data, "grid_status"):
-                        gs = _coord.data.grid_status or ""
-                        if "island" in gs.lower():
+                        gs = _coord.data.grid_status
+                        if _grid_status_is_terminal_off_grid(gs):
                             _LOGGER.warning(
                                 "Optimizer startup: Powerwall is off-grid "
                                 "(grid_status=%s) without active curtailment "

@@ -874,7 +874,10 @@ def _evaluate_grid_trigger(
     if not condition:
         return TriggerResult(triggered=False, reason="No grid condition set")
 
-    current_status = current_state.get("grid_status", "on_grid")
+    current_status = current_state.get("grid_status")
+    if current_status not in {"on_grid", "off_grid"}:
+        return TriggerResult(triggered=False, reason="Grid status unavailable")
+
     current_value = 1.0 if current_status == "on_grid" else 0.0
 
     if condition == "off_grid":
@@ -1430,7 +1433,9 @@ def _evaluate_price_condition(condition: Dict[str, Any], current_state: Dict[str
 def _evaluate_grid_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
     """Evaluate grid status condition."""
     required_status = condition.get("grid_condition", "on_grid")
-    current_status = current_state.get("grid_status", "on_grid")
+    current_status = current_state.get("grid_status")
+    if current_status not in {"on_grid", "off_grid"}:
+        return TriggerResult(triggered=False, reason="Grid status unavailable")
 
     if current_status == required_status:
         return TriggerResult(triggered=True, reason=f"Grid is {current_status}")

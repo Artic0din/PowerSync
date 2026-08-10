@@ -101,3 +101,47 @@ def test_energy_flow_can_remove_generic_ev_draw_from_reported_home_load():
       }
     """
     subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
+
+
+def test_energy_flow_grid_status_requires_known_state():
+    source = ENERGY_FLOW_PATH.read_text()
+    assert (
+        "const gridState = gridStatusState ? gridConnectionState(gridStatusState.state) : null;"
+        in source
+    )
+    assert "if (!hasGridStatusPosition || !gridState)" in source
+    helper = re.search(
+        r"function gridConnectionState\([^)]*\) \{.*?\n  \}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+
+    checks = """
+      const cases = [
+        ['Active', 'connected'],
+        ['SystemGridConnected', 'connected'],
+        ['Inactive', 'off_grid'],
+        ['Islanded', 'off_grid'],
+        ['Off-Grid', 'off_grid'],
+        ['SystemIslandedActive', 'off_grid'],
+        ['SystemIslandedReady', null],
+        ['SystemTransitionToGrid', null],
+        ['SystemTransitionToIsland', null],
+        ['SystemMicroGridFaulted', null],
+        ['SystemWaitForUser', null],
+        ['connected', null],
+        ['on-grid', null],
+        ['off grid', null],
+        ['unknown', null],
+        ['unavailable', null],
+        ['', null],
+        [null, null],
+        ['unexpected-status', null],
+      ];
+      for (const [raw, expected] of cases) {
+        const actual = gridConnectionState(raw);
+        if (actual !== expected) throw new Error(`${raw}: ${actual}`);
+      }
+    """
+    subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)

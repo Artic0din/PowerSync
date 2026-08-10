@@ -46,6 +46,16 @@ _ha_components.switch = _ha_switch
 _ha_root.components = _ha_components
 sys.modules["homeassistant.components.switch"] = _ha_switch
 
+_ha_binary_sensor = types.ModuleType("homeassistant.components.binary_sensor")
+_ha_binary_sensor.BinarySensorEntity = type("BinarySensorEntity", (), {})
+_ha_binary_sensor.BinarySensorDeviceClass = types.SimpleNamespace(
+    PROBLEM="problem",
+    RUNNING="running",
+    SAFETY="safety",
+)
+_ha_components.binary_sensor = _ha_binary_sensor
+sys.modules["homeassistant.components.binary_sensor"] = _ha_binary_sensor
+
 _ha_config_entries = types.ModuleType("homeassistant.config_entries")
 _ha_config_entries.ConfigEntry = object
 sys.modules["homeassistant.config_entries"] = _ha_config_entries
@@ -55,6 +65,7 @@ _ha_const = types.ModuleType("homeassistant.const")
 
 class _EntityCategory:
     CONFIG = "config"
+    DIAGNOSTIC = "diagnostic"
 
 
 _ha_const.EntityCategory = _EntityCategory
@@ -102,8 +113,11 @@ _ps_const.CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_
 _ps_const.CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 _ps_const.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
 _ps_const.CONF_SIGENERGY_STATION_ID = "sigenergy_station_id"
+_ps_const.CONF_SUNGROW_CONNECTION_TYPE = "sungrow_connection_type"
 _ps_const.CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 _ps_const.BATTERY_SYSTEM_TESLA = "tesla"
+_ps_const.SUNGROW_CONNECTION_DIRECT = "direct"
+_ps_const.SUNGROW_CONNECTION_IHOMEMANAGER = "ihomemanager"
 _ps_const.OPT_PROVIDER_POWERSYNC = "powersync"
 _ps_const.TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     "goodwe", "sigenergy", "sungrow", "foxess",
@@ -119,6 +133,7 @@ _ps_const.SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 _ps_const.SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 _ps_const.SWITCH_TYPE_AWAY_MODE = "away_mode"
 _ps_const.SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
+_ps_const.SWITCH_TYPE_COST_NEUTRAL = "cost_neutral"
 _ps_const.SWITCH_TYPE_CHARGE_BY_TIME = "charge_by_time"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
@@ -132,6 +147,7 @@ _ps_const.ATTR_SYNC_STATUS = "sync_status"
 _ps_const.SENSOR_FAMILY_LP_OPTIMIZER = "lp_optimizer"
 _ps_const.SENSOR_FAMILY_BATTERY = "battery"
 _ps_const.SENSOR_FAMILY_CONTROLS = "controls"
+_ps_const.SENSOR_FAMILY_GRID_HOME = "grid_home"
 _ps_const.TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 30
 _ps_const.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 _ps_const.TESLA_CAPABILITY_WAIT_SECONDS = 30.0
@@ -139,11 +155,16 @@ _ps_const.POWERWALL_LOCAL_POLL_INTERVAL = 2
 _ps_const.family_device_info = lambda entry_id, family: {
     "identifiers": {("power_sync", entry_id, family)}
 }
+_ps_const.powerwall_device_info = lambda entry_id: {
+    "identifiers": {("power_sync", entry_id, "powerwall")}
+}
 _ps_const.supports_no_idle_mode_provider = lambda provider: False
 sys.modules["power_sync.const"] = _ps_const
 
 sys.modules.pop("power_sync.switch", None)
 switch = importlib.import_module("power_sync.switch")
+sys.modules.pop("power_sync.binary_sensor", None)
+binary_sensor = importlib.import_module("power_sync.binary_sensor")
 
 
 class _State:
@@ -208,16 +229,77 @@ def _switches(grid_status: str | None = "SystemGridConnected"):
 
 
 def test_grid_mode_switches_are_mutually_exclusive_from_actual_state():
-    off_grid, on_grid, hass = _switches("SystemGridConnected")
+    for grid_status in ("Active", "SystemGridConnected"):
+        off_grid, on_grid, _hass = _switches(grid_status)
+        assert off_grid.is_on is False
+        assert on_grid.is_on is True
 
-    assert off_grid.is_on is False
-    assert on_grid.is_on is True
+    for grid_status in (
+        "Inactive",
+        "Islanded",
+        "Off-Grid",
+        "SystemIslandedActive",
+    ):
+        off_grid, on_grid, _hass = _switches(grid_status)
+        assert off_grid.is_on is True
+        assert on_grid.is_on is False
 
-    coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
-    coord.data.grid_status = "SystemIslandedActive"
 
-    assert off_grid.is_on is True
-    assert on_grid.is_on is False
+def test_grid_mode_switches_keep_non_terminal_states_unknown():
+    for grid_status in (
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        None,
+        "",
+        "unexpected-status",
+    ):
+        off_grid, on_grid, _hass = _switches(grid_status)
+
+        assert off_grid.is_on is None
+        assert on_grid.is_on is None
+
+
+def test_powerwall_islanded_binary_sensor_keeps_non_terminal_states_unknown():
+    for grid_status in ("Active", "SystemGridConnected"):
+        hass = _Hass(grid_status)
+        entity = binary_sensor.PowerwallLocalIslandedBinarySensor(hass, _entry())
+        assert entity.is_on is False
+    for grid_status in (
+        "Inactive",
+        "Islanded",
+        "Off-Grid",
+        "SystemIslandedActive",
+    ):
+        hass = _Hass(grid_status)
+        entity = binary_sensor.PowerwallLocalIslandedBinarySensor(hass, _entry())
+        assert entity.is_on is True
+    for grid_status in (
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        None,
+        "",
+        "unexpected-status",
+    ):
+        hass = _Hass(grid_status)
+        hass.states._states["sensor.power_sync_grid_status"] = _State("Active")
+        entity = binary_sensor.PowerwallLocalIslandedBinarySensor(hass, _entry())
+        assert entity.is_on is None
+
+    hass = _Hass(None)
+    hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"].data = None
+    entity = binary_sensor.PowerwallLocalIslandedBinarySensor(hass, _entry())
+    hass.states._states["sensor.power_sync_grid_status"] = _State("SystemGridConnected")
+    assert entity.is_on is False
+    hass.states._states["sensor.power_sync_grid_status"] = _State("Off-Grid")
+    assert entity.is_on is True
+    hass.states._states["sensor.power_sync_grid_status"] = _State("unexpected-status")
+    assert entity.is_on is None
 
 
 def test_off_grid_command_shares_pending_state_across_both_switches():
@@ -230,6 +312,17 @@ def test_off_grid_command_shares_pending_state_across_both_switches():
     ]
     assert off_grid.is_on is True
     assert on_grid.is_on is False
+
+
+def test_grid_mode_pending_state_does_not_mask_transition_telemetry():
+    off_grid, on_grid, hass = _switches("SystemGridConnected")
+
+    asyncio.run(off_grid.async_turn_on())
+    coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
+    coord.data.grid_status = "SystemTransitionToIsland"
+
+    assert off_grid.is_on is None
+    assert on_grid.is_on is None
 
 
 def test_on_grid_command_reconnects_and_shares_pending_state():

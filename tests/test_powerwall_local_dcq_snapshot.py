@@ -647,6 +647,46 @@ def test_snapshot_from_dcq_off_grid_mode():
     assert snap.grid_status == "SystemIslandedActive"
 
 
+def test_snapshot_from_dcq_keeps_established_mode_aliases():
+    expected_by_mode = {
+        "OnGrid": "SystemGridConnected",
+        "Normal": "SystemGridConnected",
+        "OffGrid": "SystemIslandedActive",
+        "Backup": "SystemIslandedActive",
+    }
+    for mode, expected in expected_by_mode.items():
+        dcq = _sample_dcq()
+        dcq["control"]["islanding"]["customerIslandMode"] = mode
+
+        snap = client_mod._snapshot_from_dcq(dcq, _sample_cfg())
+
+        assert snap.grid_status == expected
+
+
+def test_snapshot_from_dcq_does_not_infer_terminal_state_from_unknown_mode():
+    for mode in (
+        "ISLAND_MODE_UNKNOWN",
+        "SystemIslandedReady",
+        "SystemTransitionToGrid",
+        "SystemTransitionToIsland",
+        "SystemMicroGridFaulted",
+        "SystemWaitForUser",
+        "unexpected-status",
+        "",
+        None,
+    ):
+        dcq = _sample_dcq()
+        if mode is None:
+            dcq["control"]["islanding"].pop("customerIslandMode")
+        else:
+            dcq["control"]["islanding"]["customerIslandMode"] = mode
+        dcq["control"]["islanding"]["gridOK"] = True
+
+        snap = client_mod._snapshot_from_dcq(dcq, _sample_cfg())
+
+        assert snap.grid_status is None
+
+
 def test_snapshot_from_dcq_zero_full_pack_energy():
     """SOC must stay None when full-pack energy is missing or zero."""
     dcq = _sample_dcq()

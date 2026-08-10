@@ -29,6 +29,23 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _grid_status_is_off_grid(value: Any) -> bool | None:
+    """Classify only terminal grid states; preserve transitions as unknown."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"active", "systemgridconnected"}:
+        return False
+    if normalized in {
+        "inactive",
+        "islanded",
+        "off-grid",
+        "systemislandedactive",
+    }:
+        return True
+    return None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -417,12 +434,9 @@ class PowerwallLocalIslandedBinarySensor(_TeslaBinarySensorBase):
         coord = runtime.get("coordinator")
         if coord is not None:
             snap = coord.data
-            if snap is not None and snap.grid_status is not None:
-                return "island" in snap.grid_status.lower()
+            if snap is not None:
+                return _grid_status_is_off_grid(getattr(snap, "grid_status", None))
 
         # Fall back to cloud grid_status sensor
         state = self.hass.states.get("sensor.power_sync_grid_status")
-        if state is not None and state.state not in (None, "unknown", "unavailable"):
-            return state.state.lower() != "active"
-
-        return None
+        return _grid_status_is_off_grid(getattr(state, "state", None))

@@ -696,6 +696,31 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+
+_SUPPORTED_GRID_STATUS_VALUES = frozenset(
+    {
+        "active",
+        "systemgridconnected",
+        "inactive",
+        "islanded",
+        "off-grid",
+        "systemislandedactive",
+    }
+)
+
+
+def _grid_status_value(data: dict[str, Any] | None) -> str | None:
+    """Return only a recognized provider-reported grid status."""
+    if not data:
+        return None
+    raw_status = data.get("grid_status")
+    if not isinstance(raw_status, str):
+        return None
+    if raw_status.strip().lower() not in _SUPPORTED_GRID_STATUS_VALUES:
+        return None
+    return raw_status
+
+
 ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLAR_POWER,
@@ -719,7 +744,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         key=SENSOR_TYPE_GRID_STATUS,
         name="Grid Status",
         icon="mdi:transmission-tower",
-        value_fn=lambda data: data.get("grid_status", "Active") if data else None,
+        value_fn=_grid_status_value,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_POWER,
@@ -2761,13 +2786,12 @@ class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumeri
 
 
 _LOCAL_GRID_STATUS_TO_CLOUD = {
+    "Active": "Active",
     "SystemGridConnected": "Active",
-    "SystemIslandedReady": "Active",
-    "SystemTransitionToGrid": "Active",
-    "SystemTransitionToIsland": "Off-Grid",
+    "Inactive": "Off-Grid",
+    "Islanded": "Off-Grid",
+    "Off-Grid": "Off-Grid",
     "SystemIslandedActive": "Off-Grid",
-    "SystemMicroGridFaulted": "Off-Grid",
-    "SystemWaitForUser": "Off-Grid",
 }
 
 
@@ -2779,8 +2803,9 @@ def _local_value_for(
 ) -> Any:
     """Map a sensor key to its equivalent on the local PowerwallSnapshot.
 
-    Returns the locally-derived value (in the same units the cloud value_fn
-    produces) or ``None`` to indicate "no local equivalent — fall through to cloud".
+    Returns the locally-derived value in the same units as the cloud value.
+    ``None`` normally means no local equivalent; fresh grid status treats it
+    as authoritative uncertainty instead of falling through to cloud.
     """
     if snap is None:
         return None
@@ -2800,9 +2825,10 @@ def _local_value_for(
     if sensor_key == SENSOR_TYPE_BATTERY_LEVEL:
         return snap.soc
     if sensor_key == SENSOR_TYPE_GRID_STATUS:
-        if snap.grid_status is None:
+        raw_grid_status = getattr(snap, "grid_status", None)
+        if raw_grid_status is None:
             return None
-        return _LOCAL_GRID_STATUS_TO_CLOUD.get(snap.grid_status, "Active")
+        return _LOCAL_GRID_STATUS_TO_CLOUD.get(raw_grid_status)
     return None
 
 
@@ -2938,6 +2964,8 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                         (self.coordinator.data or {}).get("ev_power", 0.0) or 0.0
                     ),
                 )
+                if self.entity_description.key == SENSOR_TYPE_GRID_STATUS:
+                    return local_v
                 if local_v is not None:
                     return local_v
         if self.entity_description.value_fn:

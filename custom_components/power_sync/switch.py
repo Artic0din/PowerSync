@@ -81,6 +81,23 @@ PROVIDERS_WITH_TOU_SYNC = {"amber", "octopus", "flow_power"}
 _LOGGER = logging.getLogger(__name__)
 
 
+def _grid_status_is_off_grid(value: Any) -> bool | None:
+    """Classify only terminal grid states; preserve transitions as unknown."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"active", "systemgridconnected"}:
+        return False
+    if normalized in {
+        "inactive",
+        "islanded",
+        "off-grid",
+        "systemislandedactive",
+    }:
+        return True
+    return None
+
+
 def _fresh_powerwall_local_snapshot(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> Any | None:
@@ -1900,15 +1917,12 @@ class _PowerwallGridModeSwitch(SwitchEntity):
         coord = runtime.get("coordinator")
         if coord is not None:
             snap = coord.data
-            if snap is not None and snap.grid_status is not None:
-                return "island" in snap.grid_status.lower()
+            if snap is not None:
+                return _grid_status_is_off_grid(getattr(snap, "grid_status", None))
 
         # Fall back to cloud grid_status sensor
         state = self.hass.states.get("sensor.power_sync_grid_status")
-        if state is not None and state.state not in (None, "unknown", "unavailable"):
-            return state.state.lower() != "active"
-
-        return None
+        return _grid_status_is_off_grid(getattr(state, "state", None))
 
     def _pending_state(self) -> tuple[bool | None, datetime | None]:
         pending = self._entry_data().get("powerwall_grid_mode_pending") or {}
@@ -1933,8 +1947,10 @@ class _PowerwallGridModeSwitch(SwitchEntity):
         pending_is_off_grid, pending_expires_at = self._pending_state()
         if pending_is_off_grid is None:
             return actual
+        if actual is None:
+            return None
 
-        if actual is not None and actual == pending_is_off_grid:
+        if actual == pending_is_off_grid:
             self._clear_pending_state()
             return actual
 
