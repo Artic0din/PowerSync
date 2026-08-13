@@ -2083,6 +2083,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_cache = None  # Cache site_info (normally refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
         self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
+        self._site_info_lock = asyncio.Lock()  # Single-flight guard for concurrent fetches
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
         self._last_valid_battery_level_pct: float | None = None
@@ -2914,7 +2915,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else max(0, float(max_age))
         )
 
-        # Return cached value if still fresh.
+        # Return cached value if still fresh. Checked before acquiring the lock
+        # so the common case (fresh cache) never pays for lock contention.
         if (
             self._site_info_cache
             and (time.monotonic() - self._site_info_last_fetch) <= cache_ttl
@@ -2926,121 +2928,137 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         if self._site_info_fetch_failed:
             return None
 
-        current_token = self._get_current_token()
-        headers = self._tesla_headers(current_token)
+        # Coalesce concurrent callers into a single in-flight request. Multiple
+        # setup/refresh paths can all observe a cold cache at once; without this
+        # lock each one issues its own HTTP call to the same site_info endpoint.
+        async with self._site_info_lock:
+            # Re-check now that we hold the lock: another caller may have
+            # already populated the cache (or recorded a failure) while we
+            # were waiting, in which case there is nothing left to fetch.
+            if (
+                self._site_info_cache
+                and (time.monotonic() - self._site_info_last_fetch) <= cache_ttl
+            ):
+                _LOGGER.debug("Returning cached site_info (fetched by a concurrent caller)")
+                return self._site_info_cache
+            if self._site_info_fetch_failed:
+                return None
 
-        try:
-            _LOGGER.info(f"Fetching site_info for site {self.site_id}")
+            current_token = self._get_current_token()
+            headers = self._tesla_headers(current_token)
 
-            data = await _fetch_with_retry(
-                self.session,
-                f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/site_info",
-                headers,
-                max_retries=3,
-                timeout_seconds=60,
-                raise_auth_failed=self.api_provider != TESLA_PROVIDER_FLEET_API,
-            )
+            try:
+                _LOGGER.info(f"Fetching site_info for site {self.site_id}")
 
-            site_info = data.get("response", {})
-
-            # Log timezone info for debugging
-            installation_tz = site_info.get("installation_time_zone")
-            if installation_tz:
-                _LOGGER.info(f"Found Powerwall timezone: {installation_tz}")
-            else:
-                _LOGGER.warning("No installation_time_zone in site_info response")
-
-            # Log battery capacity info for debugging
-            _LOGGER.debug(f"Site info keys: {list(site_info.keys())}")
-            components = site_info.get("components", {})
-            if components:
-                _LOGGER.debug(f"Site info components keys: {list(components.keys())}")
-                # Log battery-related fields
-                battery_fields = {k: v for k, v in site_info.items()
-                                 if 'battery' in k.lower() or 'pack' in k.lower() or 'energy' in k.lower() or 'power' in k.lower()}
-                if battery_fields:
-                    _LOGGER.debug(f"Site info battery fields: {battery_fields}")
-                component_battery = {k: v for k, v in components.items()
-                                    if 'battery' in k.lower() or 'nameplate' in k.lower()}
-                if component_battery:
-                    _LOGGER.debug(f"Components battery fields: {component_battery}")
-
-            # Extract firmware version
-            gateways = components.get("gateways", []) or site_info.get("gateways", [])
-            if gateways:
-                gateway = gateways[0]
-                _LOGGER.info("Gateway keys: %s", list(gateway.keys()))
-                fw_version = (
-                    gateway.get("firmware_version")
-                    or gateway.get("version")
-                    or gateway.get("gateway_firmware_version")
-                    or gateway.get("fw_version")
-                    or ""
+                data = await _fetch_with_retry(
+                    self.session,
+                    f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/site_info",
+                    headers,
+                    max_retries=3,
+                    timeout_seconds=60,
+                    raise_auth_failed=self.api_provider != TESLA_PROVIDER_FLEET_API,
                 )
-                if fw_version:
-                    self._firmware = fw_version
-                    _LOGGER.info("Firmware version: %s", fw_version)
+
+                site_info = data.get("response", {})
+
+                # Log timezone info for debugging
+                installation_tz = site_info.get("installation_time_zone")
+                if installation_tz:
+                    _LOGGER.info(f"Found Powerwall timezone: {installation_tz}")
                 else:
-                    _LOGGER.info("No firmware key found in gateway: %s", gateway)
+                    _LOGGER.warning("No installation_time_zone in site_info response")
 
-            # Extract country (used for region-gating; Tesla reports ISO country code
-            # in site_info for Energy Sites, though the key has varied historically).
-            self._site_country = (
-                site_info.get("country")
-                or site_info.get("installation_country")
-                or components.get("country")
-            )
+                # Log battery capacity info for debugging
+                _LOGGER.debug(f"Site info keys: {list(site_info.keys())}")
+                components = site_info.get("components", {})
+                if components:
+                    _LOGGER.debug(f"Site info components keys: {list(components.keys())}")
+                    # Log battery-related fields
+                    battery_fields = {k: v for k, v in site_info.items()
+                                     if 'battery' in k.lower() or 'pack' in k.lower() or 'energy' in k.lower() or 'power' in k.lower()}
+                    if battery_fields:
+                        _LOGGER.debug(f"Site info battery fields: {battery_fields}")
+                    component_battery = {k: v for k, v in components.items()
+                                        if 'battery' in k.lower() or 'nameplate' in k.lower()}
+                    if component_battery:
+                        _LOGGER.debug(f"Components battery fields: {component_battery}")
 
-            # Opportunistically capture current state for new energy-site controls.
-            # Tesla returns these in site_info when available; otherwise we fall back
-            # to explicit GET calls during the capability probe.
-            if "off_grid_vehicle_charging_reserve_percent" in site_info:
-                self._off_grid_reserve_percent = site_info.get(
-                    "off_grid_vehicle_charging_reserve_percent"
-                )
-            elif "off_grid_vehicle_charging_reserve_percent" in components:
-                self._off_grid_reserve_percent = components.get(
-                    "off_grid_vehicle_charging_reserve_percent"
-                )
+                # Extract firmware version
+                gateways = components.get("gateways", []) or site_info.get("gateways", [])
+                if gateways:
+                    gateway = gateways[0]
+                    _LOGGER.info("Gateway keys: %s", list(gateway.keys()))
+                    fw_version = (
+                        gateway.get("firmware_version")
+                        or gateway.get("version")
+                        or gateway.get("gateway_firmware_version")
+                        or gateway.get("fw_version")
+                        or ""
+                    )
+                    if fw_version:
+                        self._firmware = fw_version
+                        _LOGGER.info("Firmware version: %s", fw_version)
+                    else:
+                        _LOGGER.info("No firmware key found in gateway: %s", gateway)
 
-            storm_mode_active = (
-                site_info.get("storm_mode_active")
-                if "storm_mode_active" in site_info
-                else components.get("storm_mode_active")
-            )
-            storm_mode_enabled = (
-                site_info.get("user_settings", {}).get("storm_mode_enabled")
-                if isinstance(site_info.get("user_settings"), dict)
-                else None
-            )
-            if storm_mode_enabled is not None:
-                self._storm_mode_enabled = bool(storm_mode_enabled)
-            elif storm_mode_active is not None:
-                self._storm_mode_enabled = bool(storm_mode_active)
-
-            # Cache the result with timestamp
-            self._site_info_cache = site_info
-            self._site_info_last_fetch = time.monotonic()
-
-            # Schedule one-shot capability probe on first successful fetch.
-            # Runs in background to avoid blocking the main fetch path.
-            if not self._capabilities_probed:
-                self._capabilities_probed = True
-                self.hass.async_create_task(
-                    self._async_probe_tesla_capabilities(),
-                    name=f"{DOMAIN}_tesla_capability_probe",
+                # Extract country (used for region-gating; Tesla reports ISO country code
+                # in site_info for Energy Sites, though the key has varied historically).
+                self._site_country = (
+                    site_info.get("country")
+                    or site_info.get("installation_country")
+                    or components.get("country")
                 )
 
-            return site_info
+                # Opportunistically capture current state for new energy-site controls.
+                # Tesla returns these in site_info when available; otherwise we fall back
+                # to explicit GET calls during the capability probe.
+                if "off_grid_vehicle_charging_reserve_percent" in site_info:
+                    self._off_grid_reserve_percent = site_info.get(
+                        "off_grid_vehicle_charging_reserve_percent"
+                    )
+                elif "off_grid_vehicle_charging_reserve_percent" in components:
+                    self._off_grid_reserve_percent = components.get(
+                        "off_grid_vehicle_charging_reserve_percent"
+                    )
 
-        except UpdateFailed as err:
-            _LOGGER.warning("Failed to fetch site_info: %s (will not retry until next restart)", err)
-            self._site_info_fetch_failed = True
-            return None
-        except Exception as err:
-            _LOGGER.warning("Unexpected error fetching site_info: %s (will not retry until next restart)", err)
-            self._site_info_fetch_failed = True
-            return None
+                storm_mode_active = (
+                    site_info.get("storm_mode_active")
+                    if "storm_mode_active" in site_info
+                    else components.get("storm_mode_active")
+                )
+                storm_mode_enabled = (
+                    site_info.get("user_settings", {}).get("storm_mode_enabled")
+                    if isinstance(site_info.get("user_settings"), dict)
+                    else None
+                )
+                if storm_mode_enabled is not None:
+                    self._storm_mode_enabled = bool(storm_mode_enabled)
+                elif storm_mode_active is not None:
+                    self._storm_mode_enabled = bool(storm_mode_active)
+
+                # Cache the result with timestamp
+                self._site_info_cache = site_info
+                self._site_info_last_fetch = time.monotonic()
+
+                # Schedule one-shot capability probe on first successful fetch.
+                # Runs in background to avoid blocking the main fetch path.
+                if not self._capabilities_probed:
+                    self._capabilities_probed = True
+                    self.hass.async_create_task(
+                        self._async_probe_tesla_capabilities(),
+                        name=f"{DOMAIN}_tesla_capability_probe",
+                    )
+
+                return site_info
+
+            except UpdateFailed as err:
+                _LOGGER.warning("Failed to fetch site_info: %s (will not retry until next restart)", err)
+                self._site_info_fetch_failed = True
+                return None
+            except Exception as err:
+                _LOGGER.warning("Unexpected error fetching site_info: %s (will not retry until next restart)", err)
+                self._site_info_fetch_failed = True
+                return None
 
     def invalidate_site_info_cache(self) -> None:
         """Force the next async_get_site_info() call to re-fetch from Tesla.
