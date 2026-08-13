@@ -9,17 +9,29 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: issue-investigation-${{ inputs.issue_number }}
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   contents: read
   issues: read
   pull-requests: read
   actions: read
 
-network: defaults
+strict: false
+
+network:
+  allowed:
+    - defaults
+    - github
+    - github-production-user-asset-6210df.s3.amazonaws.com
 
 engine: copilot
 
 safe-outputs:
+  github-token: ${{ secrets.GITHUB_TOKEN }}
   create-pull-request:
     draft: false
     labels: [automation]
@@ -68,6 +80,7 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 ## Required investigation order
 
 1. Read the complete issue and comment history. Stop without any output if `safe evidence` is absent or `unsafe evidence` is present.
+   Read each attached support bundle only with `python -m scripts.read_support_bundle 'ATTACHMENT_URL'`; stop if the deterministic reader rejects it.
 2. Independently confirm every bug evidence gate passed; do not rely on the triage workflow's conclusion.
 3. Check the reported installed version first and compare it with `custom_components/power_sync/manifest.json` and relevant repository history.
 4. Validate that the sanitised logs cover the reported local-time window before, during, and after the event.

@@ -22,7 +22,13 @@ permissions:
   contents: read
   issues: read
 
-network: defaults
+strict: false
+
+network:
+  allowed:
+    - defaults
+    - github
+    - github-production-user-asset-6210df.s3.amazonaws.com
 
 engine: copilot
 
@@ -52,6 +58,7 @@ jobs:
         run: python -m scripts.revalidate_support_snapshot
 
 safe-outputs:
+  github-token: ${{ secrets.GITHUB_TOKEN }}
   dispatch-workflow:
     workflows:
       - issue-investigation
@@ -87,6 +94,8 @@ safe-outputs:
     max: 1
 
 tools:
+  bash:
+    - "python:*"
   github:
     toolsets: [repos]
     min-integrity: none
@@ -134,7 +143,7 @@ If every gate is satisfied:
 - Add `needs investigation`.
 - Remove `needs triage` and `needs information` if present.
 - Do not add a comment unless a strong duplicate was found.
-- Dispatch `issue-investigation` with `issue_number` set to `${{ github.event.inputs.issue_number }}`.
+- Call `dispatch_workflow` with `workflow_name` set to `issue-investigation` and `inputs` set to `{"issue_number":"${{ github.event.inputs.issue_number }}"}`.
 
 ## Feature request evidence gates
 
@@ -142,7 +151,7 @@ Require a category, a specific current problem, who is affected, and a proposed 
 Alternatives and additional context are optional.
 
 If required information is missing, add `needs information`, remove `needs triage` and `needs investigation`, and ask once for all missing details.
-If the request is complete, remove `needs triage`, `needs information`, and `needs investigation` if present, then dispatch `feature-assessment` with `issue_number` set to `${{ github.event.inputs.issue_number }}`.
+If the request is complete, remove `needs triage`, `needs information`, and `needs investigation` if present, then call `dispatch_workflow` with `workflow_name` set to `feature-assessment` and `inputs` set to `{"issue_number":"${{ github.event.inputs.issue_number }}"}`.
 Do not decide that the feature is approved and do not assign an agent.
 
 ## Other classifications

@@ -9,6 +9,11 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: feature-assessment-${{ inputs.issue_number }}
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   contents: read
   issues: read
@@ -18,6 +23,7 @@ network: defaults
 engine: copilot
 
 safe-outputs:
+  github-token: ${{ secrets.GITHUB_TOKEN }}
   add-labels:
     allowed: [feature assessed]
     max: 1
