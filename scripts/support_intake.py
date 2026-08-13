@@ -28,16 +28,19 @@ ALLOWED_EXTENSIONS = frozenset(
         ".debug",
     }
 )
-ATTACHMENT_PATTERN = re.compile(
+ATTACHMENT_URL_PATTERN = re.compile(
+    r"https://github\.com/user-attachments/[^\s<>\"')]+"
+)
+MARKDOWN_ATTACHMENT_PATTERN = re.compile(
     r"!?\[([^\]]*)\]\((https://github\.com/user-attachments/[^)\s]+)\)"
 )
 SECRET_PATTERNS = (
     re.compile(r"(?i)authorization\s*:\s*(?:bearer|basic)\s+\S+"),
     re.compile(r"(?i)(?:set-cookie|cookie)\s*:\s*[^\r\n]+"),
     re.compile(
-        r"(?i)(?:password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
+        r"(?i)[\"']?(?:password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
         r"id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{8,}"
+        r"[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{8,}"
     ),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -46,6 +49,18 @@ SECRET_PATTERNS = (
     re.compile(
         r"https://(?:discord(?:app)?\.com/api/webhooks|hooks\.slack\.com/services)/\S+"
     ),
+)
+IDENTIFIER_PATTERNS = (
+    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b"
+    ),
+    re.compile(r"\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b", re.IGNORECASE),
+    re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b"),
+    re.compile(r"/(?:Users|home)/[^/\s]+"),
+    re.compile(r"[A-Z]:\\Users\\[^\\\s]+", re.IGNORECASE),
+    re.compile(r"(?i)(?:serial|device[_ -]?id)\s*[:=]\s*[A-Za-z0-9_-]{5,}"),
+    re.compile(r"(?i)(?:user(?:name)?|login)\s*[:=]\s*[A-Za-z0-9_.@-]{3,}"),
 )
 
 
@@ -67,6 +82,13 @@ class IntakeDecision:
 
 
 @dataclass(frozen=True)
+class IntakeSnapshot:
+    decision: IntakeDecision
+    content: str
+    labels: frozenset[str]
+
+
+@dataclass(frozen=True)
 class Attachment:
     name: str
     url: str
@@ -79,11 +101,26 @@ class SupportIntake:
         self._client = client
 
     def inspect(self, repository: str, issue_number: int) -> IntakeDecision:
+        snapshot = self.evaluate(repository, issue_number)
+        if snapshot.decision.safe:
+            self._record_safe(repository, issue_number)
+        else:
+            self._record_unsafe(
+                repository,
+                issue_number,
+                snapshot.content,
+                snapshot.decision.reasons,
+            )
+        return snapshot.decision
+
+    def evaluate(self, repository: str, issue_number: int) -> IntakeSnapshot:
+        """Capture and inspect the exact evidence revision a model may read."""
+
         issue_path = f"/repos/{repository}/issues/{issue_number}"
         issue = self._client.request("GET", issue_path)
-        comments, comment_limit_reached = self._load_comments(issue_path)
         if not isinstance(issue, dict):
             raise ValueError("GitHub returned invalid issue evidence")
+        comments, comment_limit_reached = self._load_comments(issue_path)
 
         text_parts = [str(issue.get("title", "")), str(issue.get("body", ""))]
         text_parts.extend(str(comment.get("body", "")) for comment in comments)
@@ -91,15 +128,40 @@ class SupportIntake:
         reasons = self._inspect_text(combined_text)
         if comment_limit_reached:
             reasons.append("issue exceeds the support comment limit")
-        reasons.extend(self._inspect_attachments(combined_text))
+        attachment_reasons, attachment_contents = self._inspect_attachments(
+            combined_text
+        )
+        reasons.extend(attachment_reasons)
         decision = IntakeDecision(
             safe=not reasons, reasons=tuple(dict.fromkeys(reasons))
         )
-        if decision.safe:
-            self._record_safe(repository, issue_number)
-        else:
-            self._record_unsafe(repository, issue_number, comments, decision.reasons)
-        return decision
+        labels = frozenset(
+            str(label.get("name", ""))
+            for label in issue.get("labels", [])
+            if isinstance(label, dict)
+        )
+        snapshot_parts = [
+            f"# PowerSync support issue #{issue_number}",
+            f"Author: {self._author_login(issue)}",
+            f"Labels: {', '.join(sorted(labels))}",
+            f"Title: {issue.get('title', '')}",
+            "## Issue body",
+            str(issue.get("body", "")),
+        ]
+        for comment in comments:
+            snapshot_parts.extend(
+                (
+                    f"## Comment by {self._author_login(comment)}",
+                    str(comment.get("body", "")),
+                )
+            )
+        for attachment, content in attachment_contents:
+            snapshot_parts.extend((f"## Attachment: {attachment.name}", content))
+        return IntakeSnapshot(
+            decision=decision,
+            content="\n\n".join(snapshot_parts),
+            labels=labels,
+        )
 
     def _load_comments(self, issue_path: str) -> tuple[list[dict[str, Any]], bool]:
         comments: list[dict[str, Any]] = []
@@ -123,14 +185,19 @@ class SupportIntake:
             reasons.append("issue text exceeds the support evidence size limit")
         if any(pattern.search(text) for pattern in SECRET_PATTERNS):
             reasons.append("possible credential in issue text")
+        if any(pattern.search(text) for pattern in IDENTIFIER_PATTERNS):
+            reasons.append("personal identifier in issue text")
         return reasons
 
-    def _inspect_attachments(self, text: str) -> list[str]:
+    def _inspect_attachments(
+        self, text: str
+    ) -> tuple[list[str], list[tuple[Attachment, str]]]:
         attachments = self._attachments(text)
         if len(attachments) > MAX_ATTACHMENTS:
-            return [f"more than {MAX_ATTACHMENTS} attachments were supplied"]
+            return [f"more than {MAX_ATTACHMENTS} attachments were supplied"], []
 
         reasons: list[str] = []
+        contents: list[tuple[Attachment, str]] = []
         total_bytes = 0
         for attachment in attachments:
             extension = self._extension(attachment.name)
@@ -161,16 +228,31 @@ class SupportIntake:
                 reasons.append(
                     f"{attachment.name} still contains a possible credential"
                 )
+            if any(pattern.search(decoded) for pattern in IDENTIFIER_PATTERNS):
+                reasons.append(
+                    f"{attachment.name} still contains a personal identifier"
+                )
             if self._excessively_nested(decoded, extension):
                 reasons.append(f"{attachment.name} exceeds the supported nesting depth")
-        return reasons
+            contents.append((attachment, decoded))
+        return reasons, contents
+
+    @staticmethod
+    def _author_login(item: dict[str, Any]) -> str:
+        user = item.get("user")
+        if isinstance(user, dict) and isinstance(user.get("login"), str):
+            return user["login"]
+        return "unknown"
 
     @staticmethod
     def _attachments(text: str) -> list[Attachment]:
+        markdown_names = {
+            url: name.strip() for name, url in MARKDOWN_ATTACHMENT_PATTERN.findall(text)
+        }
         found: dict[str, Attachment] = {}
-        for name, url in ATTACHMENT_PATTERN.findall(text):
+        for url in ATTACHMENT_URL_PATTERN.findall(text):
             url_name = urlparse(url).path.rsplit("/", 1)[-1]
-            resolved_name = name.strip()
+            resolved_name = markdown_names.get(url, "")
             if not SupportIntake._extension(resolved_name):
                 resolved_name = url_name
             found[url] = Attachment(name=resolved_name, url=url)
@@ -217,7 +299,7 @@ class SupportIntake:
         self,
         repository: str,
         issue_number: int,
-        comments: list[dict[str, Any]],
+        evidence_text: str,
         reasons: tuple[str, ...],
     ) -> None:
         issue_path = f"/repos/{repository}/issues/{issue_number}"
@@ -228,7 +310,7 @@ class SupportIntake:
             self._client.request(
                 "DELETE", f"{issue_path}/labels/{quote(label, safe='')}"
             )
-        if any(WARNING_MARKER in str(comment.get("body", "")) for comment in comments):
+        if WARNING_MARKER in evidence_text:
             return
         reason_list = "\n".join(f"- {reason}" for reason in reasons)
         body = (

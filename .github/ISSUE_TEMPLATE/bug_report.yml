@@ -11,7 +11,7 @@ body:
         Thank you for helping us improve PowerSync.
         Search existing issues before submitting a new report.
         GitHub uploads attachments immediately, so never attach a raw log.
-        Create a checked bundle first at https://plaintext-lab.github.io/PowerSync/.
+        Create a checked bundle first at https://plaintext-lab.github.io/PowerSync/support-bundle/.
 
   - type: input
     id: version
