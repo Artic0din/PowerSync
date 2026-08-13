@@ -11,26 +11,28 @@ Keep the fork trial isolated from production systems until every transition has 
 GitHub uploads an attachment as soon as it is added to an issue editor, before the issue or comment is submitted.
 Do not attach raw logs, credentials, archives, screenshots, or other binary evidence.
 
-Use the [PowerSync support-bundle tool](https://plaintext-lab.github.io/PowerSync/) locally in the browser.
+Use the [PowerSync support-bundle tool](https://plaintext-lab.github.io/PowerSync/support-bundle/) locally in the browser.
 It removes credentials and consistently pseudonymises identifiers without sending the source log to a service.
+Its opaque identifiers are scoped to one bundle and cannot be reversed from a deterministic hash.
 Its output starts with `PowerSync sanitised support bundle v1`.
 
 The deterministic intake workflow runs on public issue creation, edits, reopening, and new or edited replies.
 It scans the complete current issue, comments, and linked GitHub attachments before Copilot is dispatched.
 It accepts at most five UTF-8 text attachments, 512 KB each and 1 MB combined, in the documented text formats.
-It rejects binary content, archives, unsupported formats, excessive structured-data nesting, missing bundle markers, oversized evidence, and credential patterns.
+It rejects binary content, archives, unsupported formats, excessive structured-data nesting, missing bundle markers, oversized evidence, credential patterns, and raw personal identifiers.
 
 Unsafe evidence receives `unsafe evidence` and never reaches a model.
 The warning explains how to replace it and instructs the reporter to revoke or rotate any credential that may already have been uploaded.
 Removing an attachment link is not a confidentiality guarantee.
 
 Evidence that passes receives `safe evidence`, and the intake workflow dispatches triage with the issue number.
-Triage and investigation read a linked bundle only through the bounded support-bundle reader, which rechecks the GitHub attachment URL, 512 KB limit, UTF-8 text, marker, binary content, and credential patterns before returning evidence to the agent.
-The workflow firewall permits only GitHub's domains and the exact GitHub production user-attachment bucket required by the download redirect.
+Immediately before each model starts, a deterministic pre-agent step refetches and rechecks the current issue, every comment, and every attachment.
+It writes one immutable, locally excluded evidence snapshot only after the URL, size, format, marker, binary, credential, and identifier gates pass.
+The workflow instructs the agent to read only that snapshot; later issue edits or attachments require a new intake run.
 
 ## Automated triage and routing
 
-The Copilot triage workflow reads the complete current issue and verifies `safe evidence` independently.
+The Copilot triage workflow reads the immutable inspected snapshot and verifies `safe evidence` independently.
 It checks the installed version first, then the system profile, problem and reproduction, monitoring mode, and sanitised log window.
 It reads existing replies before asking for evidence so it does not repeat an earlier request.
 Dispatched triage, assessment, and investigation runs use per-issue concurrency groups so separate reports cannot replace one another in the pending queue.
@@ -70,8 +72,8 @@ The release workflow dispatches deterministic support reconciliation because ord
 Manual published releases also trigger reconciliation directly.
 
 Reconciliation compares the new release with the previous published release, discovers associated merged pull requests, and accepts only explicit same-repository `Refs #123` links.
-It verifies every page of the pull request head's latest check runs and requires the release publication time to be strictly after the merge time.
-Valid linked issues receive `awaiting confirmation` and an audit comment containing the pull request and release links.
+It ignores `Refs` examples inside HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
+Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing the pull request and release links, so a later fix produces a fresh confirmation request.
 
 The issue author or a write-level maintainer confirms the released result with one exact comment:
 
