@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  support-intake-tests:
+  support-automation-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
@@ -27,6 +27,8 @@ jobs:
           tests/test_support_workflows.py
           tests/test_validate_support_fix.py
           -q
+      - name: Test support issue transitions
+        run: python -m pytest tests/test_support_issue_state.py -q
       - name: Test browser sanitiser
         run: node --test tests/support_bundle_sanitizer.test.mjs
       - name: Install pinned agentic workflow compiler
@@ -48,11 +50,10 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # issues: issue tracking is Discord-only by policy; GitHub Issues stay disabled.
           # license: the repo IS licensed (PolyForm Noncommercial 1.0.0, see LICENSE),
           # but GitHub's license detector does not recognize PolyForm, so the HACS
           # check reads SPDX NOASSERTION and can never pass.
-          ignore: issues license
+          ignore: license
 
   validate-hassfest:
     runs-on: ubuntu-latest
