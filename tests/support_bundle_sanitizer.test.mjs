@@ -80,6 +80,17 @@ test("namespaced integration credentials are removed", async () => {
   assert.match(result, /"timezone_token":"AEST"/);
 });
 
+test("all repository credential key suffixes are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"foxess_cloud_password":"foxess-secret","enphase_password":"enphase-secret","openweathermap_api_key":"weather-secret","powerwall_local_private_key_pem":"private-material"}',
+  );
+
+  assert.doesNotMatch(
+    result,
+    /foxess-secret|enphase-secret|weather-secret|private-material/,
+  );
+});
+
 test("quoted JSON authentication headers are removed", async () => {
   const result = await sanitizeSupportBundle(
     '{"Authorization":"Bearer super-secret-token","Set-Cookie":"session=customer-secret"}',
@@ -123,6 +134,18 @@ test("PowerSync site and gateway identifiers are pseudonymised", async () => {
     /gateway-0123456789abcdef|12345678-1234-1234-1234-123456789abc|01KAR0YMB7JQDVZ10SN1SGA0CV|DIN0123456789ABC/,
   );
   assert.equal((result.match(/\[DEVICE_\d+\]/g) ?? []).length, 4);
+});
+
+test("namespaced and customer identifiers are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"amber_site_id":"amber-site","tesla_energy_site_id":"tesla-site","sigenergy_device_id":"sig-device","accountNumber":"customer-account","siteAddress":"1 Main Street"}',
+  );
+
+  assert.doesNotMatch(
+    result,
+    /amber-site|tesla-site|sig-device|customer-account|1 Main Street/,
+  );
+  assert.equal((result.match(/\[(?:USER|DEVICE)_\d+\]/g) ?? []).length, 5);
 });
 
 test("PowerSync identifiers in log phrases and URLs are pseudonymised", async () => {

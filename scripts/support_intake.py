@@ -11,6 +11,7 @@ from urllib.parse import quote, urlparse
 
 SANITISED_MARKER = "PowerSync sanitised support bundle v1"
 WARNING_MARKER = "<!-- powersync-intake:v1:unsafe -->"
+WORKFLOW_BOT_LOGIN = "github-actions[bot]"
 MAX_ATTACHMENT_BYTES = 512 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 MAX_ATTACHMENTS = 5
@@ -62,10 +63,10 @@ SECRET_PATTERNS = (
     ),
 )
 KEYED_SECRET_PATTERN = re.compile(
-    r"(?i)(?<![A-Z0-9_-])[\"']?(?:alphaess[_ -]?cloud[_ -]?app[_ -]?secret|"
-    r"sigenergy[_ -]?pass[_ -]?enc|teslemetry[_ -]?api[_ -]?token|"
-    r"password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
-    r"id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)[\"']?\s*[:=]\s*"
+    r"(?i)(?<![A-Z0-9_-])[\"']?(?!timezone[_ -]?token[\"']?\s*[:=])"
+    r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
+    r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
+    r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|cookie)[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)"
@@ -111,9 +112,13 @@ IDENTIFIER_PATTERNS = (
     re.compile(r"[A-Z]:\\Users\\[^\\\r\n]+", re.IGNORECASE),
 )
 KEYED_IDENTIFIER_PATTERN = re.compile(
-    r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>serial(?:[_ -]?number)?|device[_ -]?id|"
-    r"user(?:name)?|login|gateway[_ -]?id|asset[_ -]?site[_ -]?id|"
-    r"site[_ -]?id|din|warp[_ -]?site[_ -]?number|energy[_ -]?site)"
+    r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>"
+    r"(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?|"
+    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?id|"
+    r"(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|"
+    r"(?:[A-Z0-9]+[_ -]+)*gateway[_ -]?id|"
+    r"(?:[A-Z0-9]+[_ -]+)*site[_ -]?id|din|warp[_ -]?site[_ -]?number|"
+    r"energy[_ -]?site|account[_ -]?number|site[_ -]?address)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
@@ -151,6 +156,7 @@ class IntakeSnapshot:
     decision: IntakeDecision
     content: str
     labels: frozenset[str]
+    warning_posted: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,8 +195,8 @@ class SupportIntake:
             self._record_unsafe(
                 repository,
                 issue_number,
-                snapshot.content,
                 snapshot.decision.reasons,
+                snapshot.warning_posted,
             )
         return snapshot.decision
 
@@ -244,6 +250,11 @@ class SupportIntake:
             decision=decision,
             content="\n\n".join(snapshot_parts),
             labels=labels,
+            warning_posted=any(
+                WARNING_MARKER in str(comment.get("body", ""))
+                and self._author_login(comment) == WORKFLOW_BOT_LOGIN
+                for comment in comments
+            ),
         )
 
     def _load_comments(self, issue_path: str) -> tuple[list[dict[str, Any]], bool]:
@@ -449,8 +460,8 @@ class SupportIntake:
         self,
         repository: str,
         issue_number: int,
-        evidence_text: str,
         reasons: tuple[str, ...],
+        warning_posted: bool,
     ) -> None:
         issue_path = f"/repos/{repository}/issues/{issue_number}"
         self._client.request(
@@ -460,7 +471,7 @@ class SupportIntake:
             self._client.request(
                 "DELETE", f"{issue_path}/labels/{quote(label, safe='')}"
             )
-        if WARNING_MARKER in evidence_text:
+        if warning_posted:
             return
         reason_list = "\n".join(f"- {reason}" for reason in reasons)
         body = (

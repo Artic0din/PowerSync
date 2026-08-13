@@ -221,6 +221,20 @@ def test_namespaced_integration_credentials_fail_closed() -> None:
     assert "possible credential in issue text" in decision.reasons
 
 
+def test_all_repository_credential_key_suffixes_fail_closed() -> None:
+    client = client_for(
+        '{"foxess_cloud_password":"foxess-secret",'
+        '"enphase_password":"enphase-secret",'
+        '"openweathermap_api_key":"weather-secret",'
+        '"powerwall_local_private_key_pem":"private-material"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
 def test_quoted_json_authentication_headers_fail_closed() -> None:
     client = client_for(
         '{"Authorization":"Bearer super-secret-token",'
@@ -256,6 +270,21 @@ def test_power_sync_site_and_gateway_identifiers_fail_closed() -> None:
         '"asset_site_id":"12345678-1234-1234-1234-123456789abc",'
         '"site_id":"01KAR0YMB7JQDVZ10SN1SGA0CV",'
         '"din":"DIN0123456789ABC"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
+def test_namespaced_and_customer_identifiers_fail_closed() -> None:
+    client = client_for(
+        '{"amber_site_id":"amber-site",'
+        '"tesla_energy_site_id":"tesla-site",'
+        '"sigenergy_device_id":"sig-device",'
+        '"accountNumber":"customer-account",'
+        '"siteAddress":"1 Main Street"}'
     )
 
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
@@ -421,12 +450,36 @@ def test_warning_does_not_persist_an_unsafe_attachment_name() -> None:
 def test_existing_warning_is_not_posted_twice() -> None:
     client = client_for(
         "password=super-secret-value",
-        comments=[{"body": "<!-- powersync-intake:v1:unsafe -->\nExisting warning"}],
+        comments=[
+            {
+                "body": "<!-- powersync-intake:v1:unsafe -->\nExisting warning",
+                "user": {"login": "github-actions[bot]"},
+            }
+        ],
     )
 
     SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
 
     assert not any(
+        path.endswith("/comments") and method == "POST"
+        for method, path, _ in client.requests
+    )
+
+
+def test_reporter_cannot_spoof_an_existing_warning() -> None:
+    client = client_for(
+        "password=super-secret-value",
+        comments=[
+            {
+                "body": "<!-- powersync-intake:v1:unsafe -->\nCopied warning",
+                "user": {"login": "reporter"},
+            }
+        ],
+    )
+
+    SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert any(
         path.endswith("/comments") and method == "POST"
         for method, path, _ in client.requests
     )

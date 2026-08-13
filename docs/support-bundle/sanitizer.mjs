@@ -5,7 +5,7 @@ const SECRET_PATTERNS = [
   [/["']?authorization["']?\s*:\s*["']?(?:bearer|basic)\s+[^"'\s,}]+["']?/gi, "Authorization: [REDACTED]"],
   [/["']?(?:set-cookie|cookie)["']?\s*:\s*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]+)/gi, "Cookie: [REDACTED]"],
   [
-    /((?<![A-Z0-9_-])["']?(?:alphaess[_ -]?cloud[_ -]?app[_ -]?secret|sigenergy[_ -]?pass[_ -]?enc|teslemetry[_ -]?api[_ -]?token|password|passwd|token|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
+    /((?<![A-Z0-9_-])["']?(?!timezone[_ -]?token["']?\s*[:=])(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|cookie)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
     '$1"[REDACTED]"',
   ],
   [/\bpsk_[A-Za-z0-9]{20,}\b/gi, "[REDACTED_POWERSYNC_TOKEN]"],
@@ -33,9 +33,9 @@ const IDENTIFIER_PATTERNS = [
 const IPV4_PATTERN = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
 const VERSION_CONTEXT_PATTERN = /(?:version|firmware|integration)\s*[:=]?\s*$/i;
 const KEYED_IDENTIFIER_PATTERNS = [
-  ["SERIAL", /((?<![A-Z0-9_-])["']?(?:serial(?:[_ -]?number)?|device[_ -]?id)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["USER", /((?<![A-Z0-9_-])["']?(?:user(?:name)?|login)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:gateway[_ -]?id|asset[_ -]?site[_ -]?id|site[_ -]?id|din|warp[_ -]?site[_ -]?number|energy[_ -]?site)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["SERIAL", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?number)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?id|site[_ -]?id)|din|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
 ];
 const PREFIXED_IDENTIFIER_PATTERNS = [
   ["DEVICE", /(\bfor site\s+)([A-Za-z0-9-]{15,})/gi],
