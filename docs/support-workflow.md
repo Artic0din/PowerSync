@@ -96,7 +96,7 @@ The normal human steps are limited to supplying missing evidence and confirming 
 Configure these Actions secrets before enabling the agentic workflows:
 
 - `COPILOT_GITHUB_TOKEN`: an Artic0din-owned fine-grained token with only the account-level `Copilot Requests: read` permission.
-- `GH_AW_CI_TRIGGER_TOKEN`: a Plaintext-Lab-owned fine-grained token restricted to this fork with `Contents: read and write` and `Pull requests: read and write`.
+- `GH_AW_CI_TRIGGER_TOKEN`: a Plaintext-Lab-owned fine-grained token restricted to this fork with `Actions: read and write`, `Contents: read and write`, and `Pull requests: read and write`.
 
 The first token charges inference to Artic0din's Copilot entitlement.
 The second lets pull requests created by the workflow trigger normal GitHub checks and does not provide model access.
