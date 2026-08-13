@@ -11,6 +11,7 @@ from urllib.parse import quote
 SUCCESSFUL_CHECK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 DELIVERY_MARKER_PREFIX = "powersync-delivery:v1:"
 MAX_API_PAGES = 10
+WORKFLOW_BOT_LOGIN = "github-actions[bot]"
 
 
 def delivery_marker(pull_url: str, release_url: str) -> str:
@@ -198,7 +199,11 @@ class ReleaseDelivery:
     ) -> bool:
         issue_path = f"/repos/{repository}/issues/{issue_number}"
         issue = self._request("GET", issue_path)
-        if not isinstance(issue, dict) or issue.get("state") != "open":
+        if (
+            not isinstance(issue, dict)
+            or issue.get("state") != "open"
+            or "pull_request" in issue
+        ):
             return False
         labels = self._label_names(issue)
         if "solved" in labels:
@@ -235,6 +240,7 @@ class ReleaseDelivery:
                 raise ValueError("GitHub returned invalid issue comments")
             if any(
                 marker in str(comment.get("body", ""))
+                and self._comment_author(comment) == WORKFLOW_BOT_LOGIN
                 for comment in comments
                 if isinstance(comment, dict)
             ):
@@ -242,6 +248,13 @@ class ReleaseDelivery:
             if len(comments) < 100:
                 return False
         raise ValueError("Issue comments exceed the supported pagination limit")
+
+    @staticmethod
+    def _comment_author(comment: dict[str, Any]) -> str:
+        user = comment.get("user")
+        if isinstance(user, dict) and isinstance(user.get("login"), str):
+            return user["login"]
+        return ""
 
     @staticmethod
     def _referenced_issues(repository: str, body: Any) -> set[int]:
