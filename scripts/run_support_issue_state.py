@@ -26,7 +26,7 @@ class GitHubClient:
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         data = json.dumps(payload).encode() if payload is not None else None
         request = Request(
             f"https://api.github.com{path}",
@@ -43,7 +43,9 @@ class GitHubClient:
             with urlopen(request, timeout=30) as response:
                 content = response.read()
         except HTTPError as error:
-            if error.code == 404 and method == "DELETE" and "/labels/" in path:
+            missing_label = method == "DELETE" and "/labels/" in path
+            missing_permission = method == "GET" and path.endswith("/permission")
+            if error.code == 404 and (missing_label or missing_permission):
                 return {}
             detail = error.read().decode(errors="replace")
             raise RuntimeError(
