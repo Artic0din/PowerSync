@@ -7,6 +7,7 @@ on:
       - 'custom_components/power_sync/manifest.json'
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -105,17 +106,17 @@ jobs:
               echo "No previous tag found, using last 20 commits"
             fi
 
-            echo "## What's Changed" > /tmp/release_notes.md
-            echo "" >> /tmp/release_notes.md
-
-            git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
-              | grep -v "^### Bump version" \
-              | grep -v "^### docs(release)" \
-              | grep -v "^### chore(manifest)" \
-              | sed '/^$/N;/^\n$/d' >> /tmp/release_notes.md
-
-            echo "" >> /tmp/release_notes.md
-            echo "Update available via HACS" >> /tmp/release_notes.md
+            {
+              echo "## What's Changed"
+              echo ""
+              git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
+                | grep -v "^### Bump version" \
+                | grep -v "^### docs(release)" \
+                | grep -v "^### chore(manifest)" \
+                | sed '/^$/N;/^\n$/d'
+              echo ""
+              echo "Update available via HACS"
+            } > /tmp/release_notes.md
           fi
 
           echo "--- Release notes ---"
@@ -133,6 +134,15 @@ jobs:
             --title "PowerSync v$VERSION" \
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
+
+      - name: Reconcile released support fixes
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run support-issue-state.yml \
+            --ref main \
+            -f release_tag="v${{ steps.version.outputs.version }}"
 
       # NOTE: the separate manual-release Discord workflow will not fire here,
       # because GitHub Actions intentionally suppresses downstream workflows for

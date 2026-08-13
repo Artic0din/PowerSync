@@ -28,7 +28,11 @@ jobs:
           tests/test_validate_support_fix.py
           -q
       - name: Test support issue transitions
-        run: python -m pytest tests/test_support_issue_state.py -q
+        run: >-
+          python -m pytest
+          tests/test_support_issue_state.py
+          tests/test_support_release_delivery.py
+          -q
       - name: Test browser sanitiser
         run: node --test tests/support_bundle_sanitizer.test.mjs
       - name: Install pinned agentic workflow compiler

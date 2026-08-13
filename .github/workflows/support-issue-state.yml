@@ -3,6 +3,14 @@ name: Support issue state
 on:
   issue_comment:
     types: [created]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag to reconcile
+        required: true
+        type: string
 
 permissions:
   checks: read
@@ -11,14 +19,15 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: support-issue-${{ github.event.issue.number }}
+  group: support-state-${{ github.event.issue.number || github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   transition:
     if: >-
-      github.event.issue.pull_request == null &&
-      startsWith(github.event.comment.body, '/powersync ')
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request == null &&
+      github.event.comment.body == '/powersync solved')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
