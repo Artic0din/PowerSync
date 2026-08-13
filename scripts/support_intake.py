@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -14,6 +16,7 @@ MAX_TOTAL_BYTES = 1024 * 1024
 MAX_ATTACHMENTS = 5
 MAX_TEXT_CHARACTERS = 200_000
 MAX_COMMENT_PAGES = 10
+SAFETY_LABELS = frozenset({"safe evidence", "unsafe evidence"})
 ALLOWED_EXTENSIONS = frozenset(
     {
         ".txt",
@@ -28,21 +31,29 @@ ALLOWED_EXTENSIONS = frozenset(
         ".debug",
     }
 )
-ATTACHMENT_URL_PATTERN = re.compile(
-    r"https://github\.com/user-attachments/[^\s<>\"')]+"
-)
+ATTACHMENT_URL_PATTERN = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
 MARKDOWN_ATTACHMENT_PATTERN = re.compile(
-    r"!?\[([^\]]*)\]\((https://github\.com/user-attachments/[^)\s]+)\)"
+    r"!?\[([^\]]*)\]\((https?://[^)\s]+)\)", re.IGNORECASE
 )
 SECRET_PATTERNS = (
-    re.compile(r"(?i)authorization\s*:\s*(?:bearer|basic)\s+\S+"),
-    re.compile(r"(?i)(?:set-cookie|cookie)\s*:\s*[^\r\n]+"),
     re.compile(
-        r"(?i)[\"']?(?:password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
-        r"id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)"
-        r"[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{8,}"
+        r"[\"']?authorization[\"']?\s*:\s*[\"']?(?:bearer|basic)\s+"
+        r"[^\"'\s,}]+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"[\"']?(?:set-cookie|cookie)[\"']?\s*:"
+        r"(?![ \t]*[\"']?\[REDACTED\][\"']?[ \t]*(?:[,}]|\r?\n|\Z))"
+        r"(?:\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+        r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]+)",
+        re.IGNORECASE,
     ),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bpsk_[A-Za-z0-9]{20,}\b", re.IGNORECASE),
+    re.compile(r"\bpsync_[A-Za-z0-9_-]{43}\b"),
+    re.compile(r"\bxai-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -50,17 +61,71 @@ SECRET_PATTERNS = (
         r"https://(?:discord(?:app)?\.com/api/webhooks|hooks\.slack\.com/services)/\S+"
     ),
 )
+KEYED_SECRET_PATTERN = re.compile(
+    r"(?i)(?<![A-Z0-9_-])[\"']?(?:alphaess[_ -]?cloud[_ -]?app[_ -]?secret|"
+    r"sigenergy[_ -]?pass[_ -]?enc|teslemetry[_ -]?api[_ -]?token|"
+    r"password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
+    r"id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)[\"']?\s*[:=]\s*"
+    r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
+    r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)"
+)
+EXACT_REDACTED_VALUE = re.compile(r"^[\"']?\[REDACTED\][\"']?\s*$", re.IGNORECASE)
+EXACT_EMPTY_VALUE = re.compile(r"^(?:null|true|false)\s*$", re.IGNORECASE)
+IPV4_PATTERN = re.compile(
+    r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b"
+)
+VERSION_CONTEXT_PATTERN = re.compile(
+    r"(?:version|firmware|integration)\s*[:=]?\s*$", re.IGNORECASE
+)
 IDENTIFIER_PATTERNS = (
     re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b"
-    ),
     re.compile(r"\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b", re.IGNORECASE),
-    re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b"),
-    re.compile(r"/(?:Users|home)/[^/\s]+"),
-    re.compile(r"[A-Z]:\\Users\\[^\\\s]+", re.IGNORECASE),
-    re.compile(r"(?i)(?:serial|device[_ -]?id)\s*[:=]\s*[A-Za-z0-9_-]{5,}"),
-    re.compile(r"(?i)(?:user(?:name)?|login)\s*[:=]\s*[A-Za-z0-9_.@-]{3,}"),
+    re.compile(
+        r"(?<![0-9A-F:])(?:(?:[0-9A-F]{1,4}:){1,6}:|::)"
+        r"(?:ffff(?::0{1,4})?:)?"
+        r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+        r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![\d.])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![0-9A-F:])(?:"
+        r"(?:[0-9A-F]{1,4}:){7}[0-9A-F]{1,4}|"
+        r"(?:[0-9A-F]{1,4}:){1,7}:|"
+        r"(?:[0-9A-F]{1,4}:){1,6}:[0-9A-F]{1,4}|"
+        r"(?:[0-9A-F]{1,4}:){1,5}(?::[0-9A-F]{1,4}){1,2}|"
+        r"(?:[0-9A-F]{1,4}:){1,4}(?::[0-9A-F]{1,4}){1,3}|"
+        r"(?:[0-9A-F]{1,4}:){1,3}(?::[0-9A-F]{1,4}){1,4}|"
+        r"(?:[0-9A-F]{1,4}:){1,2}(?::[0-9A-F]{1,4}){1,5}|"
+        r"[0-9A-F]{1,4}:(?:(?::[0-9A-F]{1,4}){1,6})|"
+        r":(?:(?::[0-9A-F]{1,4}){1,7}|:)"
+        r")(?![0-9A-F:])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?=[A-HJ-NPR-Z0-9]{17}\b)(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])"
+        r"(?=[A-HJ-NPR-Z0-9]*\d)[A-HJ-NPR-Z0-9]{17}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"/(?:Users|home)/[^/\r\n]+"),
+    re.compile(r"[A-Z]:\\Users\\[^\\\r\n]+", re.IGNORECASE),
+)
+KEYED_IDENTIFIER_PATTERN = re.compile(
+    r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>serial(?:[_ -]?number)?|device[_ -]?id|"
+    r"user(?:name)?|login|gateway[_ -]?id|asset[_ -]?site[_ -]?id|"
+    r"site[_ -]?id|din|warp[_ -]?site[_ -]?number|energy[_ -]?site)"
+    r"[\"']?\s*[:=]\s*"
+    r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
+    r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)"
+)
+PREFIXED_IDENTIFIER_PATTERNS = (
+    re.compile(r"\bfor site\s+[A-Za-z0-9-]{15,}", re.IGNORECASE),
+    re.compile(r"\bsite\s+\d{13,}", re.IGNORECASE),
+    re.compile(r"\benergy_sites?[/\s:=]+\d{13,}", re.IGNORECASE),
+)
+EXACT_IDENTIFIER_VALUE = re.compile(
+    r"^[\"']?\[(?:SERIAL|USER|DEVICE)_\d+\][\"']?\s*$", re.IGNORECASE
 )
 
 
@@ -94,6 +159,22 @@ class Attachment:
     url: str
 
 
+def snapshot_revision(snapshot: IntakeSnapshot) -> str:
+    evidence_content = re.sub(r"\n\nLabels: [^\n]*", "", snapshot.content, count=1)
+    canonical = json.dumps(
+        {
+            "content": evidence_content,
+            "labels": sorted(snapshot.labels - SAFETY_LABELS),
+            "safe": snapshot.decision.safe,
+            "reasons": snapshot.decision.reasons,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class SupportIntake:
     """Inspect current issue evidence, update safety state, and dispatch triage."""
 
@@ -103,7 +184,7 @@ class SupportIntake:
     def inspect(self, repository: str, issue_number: int) -> IntakeDecision:
         snapshot = self.evaluate(repository, issue_number)
         if snapshot.decision.safe:
-            self._record_safe(repository, issue_number)
+            self._record_safe(repository, issue_number, snapshot_revision(snapshot))
         else:
             self._record_unsafe(
                 repository,
@@ -126,6 +207,8 @@ class SupportIntake:
         text_parts.extend(str(comment.get("body", "")) for comment in comments)
         combined_text = "\n".join(text_parts)
         reasons = self._inspect_text(combined_text)
+        if issue.get("state") != "open":
+            reasons.append("issue is not open")
         if comment_limit_reached:
             reasons.append("issue exceeds the support comment limit")
         attachment_reasons, attachment_contents = self._inspect_attachments(
@@ -183,11 +266,41 @@ class SupportIntake:
         reasons: list[str] = []
         if len(text) > MAX_TEXT_CHARACTERS:
             reasons.append("issue text exceeds the support evidence size limit")
-        if any(pattern.search(text) for pattern in SECRET_PATTERNS):
+        if SupportIntake._contains_secret(text):
             reasons.append("possible credential in issue text")
-        if any(pattern.search(text) for pattern in IDENTIFIER_PATTERNS):
+        if SupportIntake._contains_identifier(text):
             reasons.append("personal identifier in issue text")
         return reasons
+
+    @staticmethod
+    def _contains_secret(text: str) -> bool:
+        if any(pattern.search(text) for pattern in SECRET_PATTERNS):
+            return True
+        return any(
+            not EXACT_REDACTED_VALUE.fullmatch(match.group("value").strip())
+            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+            for match in KEYED_SECRET_PATTERN.finditer(text)
+        )
+
+    @staticmethod
+    def _contains_identifier(text: str) -> bool:
+        if any(pattern.search(text) for pattern in IDENTIFIER_PATTERNS):
+            return True
+        if any(pattern.search(text) for pattern in PREFIXED_IDENTIFIER_PATTERNS):
+            return True
+        if any(
+            not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+            for match in KEYED_IDENTIFIER_PATTERN.finditer(text)
+        ):
+            return True
+        return any(
+            VERSION_CONTEXT_PATTERN.search(
+                text[max(0, match.start() - 32) : match.start()]
+            )
+            is None
+            for match in IPV4_PATTERN.finditer(text)
+        )
 
     def _inspect_attachments(
         self, text: str
@@ -199,11 +312,12 @@ class SupportIntake:
         reasons: list[str] = []
         contents: list[tuple[Attachment, str]] = []
         total_bytes = 0
-        for attachment in attachments:
+        for index, attachment in enumerate(attachments, start=1):
+            attachment_label = f"attachment {index}"
             extension = self._extension(attachment.name)
             if extension not in ALLOWED_EXTENSIONS:
                 reasons.append(
-                    f"{attachment.name} is not an allowed text evidence format"
+                    f"{attachment_label} is not an allowed text evidence format"
                 )
                 continue
             try:
@@ -215,25 +329,27 @@ class SupportIntake:
                     )
                 decoded = content.decode("utf-8")
             except (UnicodeDecodeError, ValueError) as error:
-                reasons.append(f"{attachment.name}: {error}")
+                reasons.append(f"{attachment_label}: {error}")
                 continue
             if "\x00" in decoded:
-                reasons.append(f"{attachment.name} contains binary data")
+                reasons.append(f"{attachment_label} contains binary data")
                 continue
             if not decoded.startswith(SANITISED_MARKER):
                 reasons.append(
-                    f"{attachment.name} is missing the sanitised support bundle marker"
+                    f"{attachment_label} is missing the sanitised support bundle marker"
                 )
-            if any(pattern.search(decoded) for pattern in SECRET_PATTERNS):
+            if self._contains_secret(decoded):
                 reasons.append(
-                    f"{attachment.name} still contains a possible credential"
+                    f"{attachment_label} still contains a possible credential"
                 )
-            if any(pattern.search(decoded) for pattern in IDENTIFIER_PATTERNS):
+            if self._contains_identifier(decoded):
                 reasons.append(
-                    f"{attachment.name} still contains a personal identifier"
+                    f"{attachment_label} still contains a personal identifier"
                 )
             if self._excessively_nested(decoded, extension):
-                reasons.append(f"{attachment.name} exceeds the supported nesting depth")
+                reasons.append(
+                    f"{attachment_label} exceeds the supported nesting depth"
+                )
             contents.append((attachment, decoded))
         return reasons, contents
 
@@ -247,16 +363,29 @@ class SupportIntake:
     @staticmethod
     def _attachments(text: str) -> list[Attachment]:
         markdown_names = {
-            url: name.strip() for name, url in MARKDOWN_ATTACHMENT_PATTERN.findall(text)
+            url: name.strip()
+            for name, url in MARKDOWN_ATTACHMENT_PATTERN.findall(text)
+            if SupportIntake._is_attachment_url(url)
         }
         found: dict[str, Attachment] = {}
         for url in ATTACHMENT_URL_PATTERN.findall(text):
+            if not SupportIntake._is_attachment_url(url):
+                continue
             url_name = urlparse(url).path.rsplit("/", 1)[-1]
             resolved_name = markdown_names.get(url, "")
             if not SupportIntake._extension(resolved_name):
                 resolved_name = url_name
             found[url] = Attachment(name=resolved_name, url=url)
         return list(found.values())
+
+    @staticmethod
+    def _is_attachment_url(url: str) -> bool:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme.casefold() == "https"
+            and (parsed.hostname or "").casefold() == "github.com"
+            and parsed.path.startswith("/user-attachments/")
+        )
 
     @staticmethod
     def _extension(name: str) -> str:
@@ -268,7 +397,20 @@ class SupportIntake:
     def _excessively_nested(content: str, extension: str) -> bool:
         if extension in {".json", ".jsonc"}:
             depth = 0
+            in_string = False
+            escaped = False
             for character in content:
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        in_string = False
+                    continue
+                if character == '"':
+                    in_string = True
+                    continue
                 if character in "[{":
                     depth += 1
                     if depth > 20:
@@ -281,7 +423,9 @@ class SupportIntake:
             )
         return False
 
-    def _record_safe(self, repository: str, issue_number: int) -> None:
+    def _record_safe(
+        self, repository: str, issue_number: int, evidence_revision: str
+    ) -> None:
         issue_path = f"/repos/{repository}/issues/{issue_number}"
         self._client.request(
             "POST", f"{issue_path}/labels", {"labels": ["safe evidence"]}
@@ -292,7 +436,13 @@ class SupportIntake:
         self._client.request(
             "POST",
             f"/repos/{repository}/actions/workflows/issue-triage.lock.yml/dispatches",
-            {"ref": "main", "inputs": {"issue_number": str(issue_number)}},
+            {
+                "ref": "main",
+                "inputs": {
+                    "issue_number": str(issue_number),
+                    "evidence_revision": evidence_revision,
+                },
+            },
         )
 
     def _record_unsafe(

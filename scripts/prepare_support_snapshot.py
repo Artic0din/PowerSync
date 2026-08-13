@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from scripts.run_support_intake import GitHubClient
-from scripts.support_intake import IntakeSnapshot, SupportIntake
+from scripts.support_intake import IntakeSnapshot, SupportIntake, snapshot_revision
 
 SNAPSHOT_NAME = ".powersync-support-evidence.md"
 
@@ -22,6 +22,7 @@ def persist_snapshot(
         and "unsafe evidence" not in snapshot.labels
     )
     if not evidence_is_currently_safe:
+        safe_outputs_path.parent.mkdir(parents=True, exist_ok=True)
         with safe_outputs_path.open("a", encoding="utf-8") as output:
             output.write(
                 json.dumps(
@@ -47,14 +48,22 @@ def main() -> int:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     issue_number_text = os.environ.get("SUPPORT_ISSUE_NUMBER", "")
     safe_outputs_path = os.environ.get("GH_AW_SAFE_OUTPUTS", "")
-    if not repository or not issue_number_text.isdigit() or not safe_outputs_path:
+    expected_revision = os.environ.get("SUPPORT_EVIDENCE_REVISION", "")
+    if (
+        not repository
+        or not issue_number_text.isdigit()
+        or not safe_outputs_path
+        or not expected_revision
+    ):
         raise ValueError("The workflow is missing support snapshot metadata")
 
     snapshot = SupportIntake(GitHubClient(os.environ.get("GITHUB_TOKEN", ""))).evaluate(
         repository, int(issue_number_text)
     )
-    persist_snapshot(snapshot, Path(safe_outputs_path), Path.cwd())
-    return 0
+    if snapshot_revision(snapshot) != expected_revision:
+        raise ValueError("Issue evidence changed after deterministic intake")
+    persisted = persist_snapshot(snapshot, Path(safe_outputs_path), Path.cwd())
+    return 0 if persisted else 1
 
 
 if __name__ == "__main__":
