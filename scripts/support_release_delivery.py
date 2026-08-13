@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from datetime import datetime
 from typing import Any, Protocol
 from urllib.parse import quote
 
 SUCCESSFUL_CHECK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-DELIVERY_MARKER = "<!-- powersync-delivery:v1 -->"
+DELIVERY_MARKER_PREFIX = "powersync-delivery:v1:"
 MAX_API_PAGES = 10
+
+
+def delivery_marker(pull_url: str, release_url: str) -> str:
+    identity = sha256(f"{pull_url}\0{release_url}".encode()).hexdigest()[:16]
+    return f"<!-- {DELIVERY_MARKER_PREFIX}{identity} -->"
 
 
 class GitHubApi(Protocol):
@@ -206,12 +212,13 @@ class ReleaseDelivery:
             if label in labels:
                 self._request("DELETE", f"{issue_path}/labels/{quote(label, safe='')}")
         comment_added = False
-        if not self._has_comment_marker(issue_path, DELIVERY_MARKER):
+        marker = delivery_marker(pull_url, release_url)
+        if not self._has_comment_marker(issue_path, marker):
             self._request(
                 "POST",
                 f"{issue_path}/comments",
                 {
-                    "body": f"{DELIVERY_MARKER}\nFix delivered in {pull_url} and released "
+                    "body": f"{marker}\nFix delivered in {pull_url} and released "
                     f"as {release_url}. Waiting for the reporter to confirm with "
                     "`/powersync solved`."
                 },
@@ -240,12 +247,13 @@ class ReleaseDelivery:
     def _referenced_issues(repository: str, body: Any) -> set[int]:
         if not isinstance(body, str):
             return set()
+        body_without_comments = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
         escaped_repository = re.escape(repository)
         pattern = re.compile(
             rf"(?im)\bRefs\s+(?:#|{escaped_repository}#|"
             rf"https://github\.com/{escaped_repository}/issues/)(\d+)\b"
         )
-        return {int(number) for number in pattern.findall(body)}
+        return {int(number) for number in pattern.findall(body_without_comments)}
 
     @staticmethod
     def _label_names(issue: dict[str, Any]) -> set[str]:

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from scripts.support_issue_state import SupportIssueAutomation
+from scripts.support_release_delivery import delivery_marker
 
 
 @dataclass
@@ -117,7 +118,11 @@ def test_published_release_records_linked_verified_delivery() -> None:
             "POST",
             f"/repos/{REPOSITORY}/issues/42/comments",
             {
-                "body": "<!-- powersync-delivery:v1 -->\nFix delivered in "
+                "body": delivery_marker(
+                    "https://github.com/Plaintext-Lab/PowerSync/pull/90",
+                    "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100",
+                )
+                + "\nFix delivered in "
                 "https://github.com/Plaintext-Lab/PowerSync/pull/90 and released as "
                 "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100. "
                 "Waiting for the reporter to confirm with `/powersync solved`."
@@ -182,6 +187,19 @@ def test_release_without_a_refs_issue_link_does_not_mutate_issues() -> None:
     assert all(method == "GET" for method, _, _ in client.requests)
 
 
+def test_refs_inside_html_comments_are_ignored() -> None:
+    client = delivery_client()
+    pull_path = f"/repos/{REPOSITORY}/commits/merge123/pulls?per_page=100"
+    client.responses[("GET", pull_path)][0]["body"] = (
+        "No support reference\n<!-- Refs #42 -->"
+    )
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert all(method == "GET" for method, _, _ in client.requests)
+
+
 def test_partial_delivery_is_repaired_without_duplicate_state_label() -> None:
     client = delivery_client()
     issue_path = f"/repos/{REPOSITORY}/issues/42"
@@ -204,3 +222,23 @@ def test_partial_delivery_is_repaired_without_duplicate_state_label() -> None:
         {"labels": ["awaiting confirmation"]},
     ) not in client.requests
     assert client.requests[-1][1] == f"{issue_path}/comments"
+
+
+def test_later_release_adds_a_new_delivery_audit_comment() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    client.responses[("GET", issue_path)]["labels"] = [
+        {"name": "awaiting confirmation"}
+    ]
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {"body": "<!-- powersync-delivery:v1:previous-release -->\nOld delivery"}
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:1"
+    posted_comment = client.requests[-1][2]
+    assert posted_comment is not None
+    assert posted_comment["body"].startswith("<!-- powersync-delivery:v1:")
+    assert "previous-release" not in posted_comment["body"]
+    assert RELEASE["html_url"] in posted_comment["body"]
