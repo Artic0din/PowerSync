@@ -25,9 +25,8 @@ permissions:
 strict: false
 
 network:
-  allowed:
-    - defaults
-    - github
+  allowed: [defaults]
+  blocked: [github.com, api.github.com, raw.githubusercontent.com]
 
 engine: copilot
 
@@ -58,11 +57,56 @@ jobs:
 
 safe-outputs:
   github-token: ${{ secrets.GITHUB_TOKEN }}
-  dispatch-workflow:
-    workflows:
-      - issue-investigation
-      - feature-assessment
-    max: 1
+  jobs:
+    route-support-issue:
+      description: Dispatch the current issue to bug investigation or feature assessment.
+      runs-on: ubuntu-latest
+      permissions:
+        actions: write
+        contents: read
+        issues: read
+      needs: [agent, detection, safe_outputs]
+      if: >-
+        needs.detection.result == 'success' &&
+        needs.safe_outputs.result == 'success'
+      inputs:
+        destination:
+          description: The next workflow for this issue.
+          required: true
+          type: choice
+          options: [issue-investigation, feature-assessment]
+      steps:
+        - name: Check out deterministic support gate
+          uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+          with:
+            persist-credentials: false
+        - name: Refresh the revision after approved label mutations
+          id: refresh_evidence
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+            SUPPORT_REFRESH_REVISION: "true"
+          run: python -m scripts.revalidate_support_snapshot
+        - name: Dispatch the bound support issue
+          env:
+            GH_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ steps.refresh_evidence.outputs.evidence_revision }}
+          run: |
+            set -euo pipefail
+            mapfile -t destinations < <(
+              jq -r '.items[] | select(.type == "route_support_issue") | .destination' \
+                "$GH_AW_AGENT_OUTPUT"
+            )
+            if [ "${#destinations[@]}" -ne 1 ]; then
+              echo "Expected exactly one support route, found ${#destinations[@]}" >&2
+              exit 1
+            fi
+            gh workflow run "${destinations[0]}.lock.yml" \
+              --ref "${GITHUB_REF_NAME}" \
+              -f issue_number="$SUPPORT_ISSUE_NUMBER" \
+              -f evidence_revision="$SUPPORT_EVIDENCE_REVISION"
   add-labels:
     target: ${{ github.event.inputs.issue_number }}
     allowed:
@@ -87,17 +131,17 @@ safe-outputs:
       - needs triage
       - needs information
       - needs investigation
-    max: 9
+      - feature assessed
+    max: 10
   add-comment:
     target: ${{ github.event.inputs.issue_number }}
     max: 1
 
 tools:
-  bash:
-    - "python:*"
   github:
     toolsets: [repos]
-    min-integrity: none
+  bash:
+    - "python:*"
 
 timeout-minutes: 10
 ---
@@ -133,30 +177,30 @@ Remove any obsolete `bug`, `enhancement`, `question`, `duplicate`, `off topic`, 
 If one or more gates are missing:
 
 - Add `needs information`.
-- Remove `needs triage` and `needs investigation` if present.
+- Remove `feature assessed`, `needs triage`, and `needs investigation` if present.
 - Add one concise comment listing every missing item in a single request and explain why each item matters.
 - Before commenting, inspect existing comments. Do not request evidence that has already been supplied, and do not repeat a prior request from this workflow unless the issue was edited with new evidence and a different, still-missing item is now identifiable.
 
 If every gate is satisfied:
 
 - Add `needs investigation`.
-- Remove `needs triage` and `needs information` if present.
-- Do not add a comment unless a strong duplicate was found.
-- Call `dispatch_workflow` with `workflow_name` set to `issue-investigation` and `inputs` set to `{"issue_number":"${{ github.event.inputs.issue_number }}"}`.
+- Remove `feature assessed`, `needs triage`, and `needs information` if present.
+- Do not add a comment.
+- Call `route_support_issue` once with `destination` set to `issue-investigation`.
 
 ## Feature request evidence gates
 
 Require a category, a specific current problem, who is affected, and a proposed outcome.
 Alternatives and additional context are optional.
 
-If required information is missing, add `needs information`, remove `needs triage` and `needs investigation`, and ask once for all missing details.
-If the request is complete, remove `needs triage`, `needs information`, and `needs investigation` if present, then call `dispatch_workflow` with `workflow_name` set to `feature-assessment` and `inputs` set to `{"issue_number":"${{ github.event.inputs.issue_number }}"}`.
+If required information is missing, add `needs information`, remove `feature assessed`, `needs triage`, and `needs investigation`, and ask once for all missing details.
+If the request is complete, remove `needs triage`, `needs information`, and `needs investigation` if present, then call `route_support_issue` once with `destination` set to `feature-assessment`.
 Do not decide that the feature is approved and do not assign an agent.
 
 ## Other classifications
 
-- For a support question, add `question`, remove `needs triage`, `needs information`, and `needs investigation`, and ask only for information necessary to answer it.
-- Add `spam` or `off topic` only when the classification is unambiguous, and remove all triage-state labels. Do not close the issue.
+- For a support question, add `question`, remove `feature assessed`, `needs triage`, `needs information`, and `needs investigation`, and ask only for information necessary to answer it.
+- Add `spam` or `off topic` only when the classification is unambiguous, and remove `feature assessed` and all triage-state labels. Do not close the issue.
 - Use only labels allowed by this workflow and already present in the repository.
 
 Keep comments factual, concise, and free of implementation promises.

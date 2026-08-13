@@ -8,6 +8,10 @@ on:
         description: Bug issue that passed deterministic intake and triage
         required: true
         type: string
+      evidence_revision:
+        description: SHA-256 fingerprint accepted by deterministic intake
+        required: true
+        type: string
 
 concurrency:
   group: issue-investigation-${{ inputs.issue_number }}
@@ -23,9 +27,8 @@ permissions:
 strict: false
 
 network:
-  allowed:
-    - defaults
-    - github
+  allowed: [defaults]
+  blocked: [github.com, api.github.com, raw.githubusercontent.com]
 
 engine: copilot
 
@@ -34,38 +37,125 @@ steps:
     uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
     with:
       python-version-file: .python-version
-  - name: Install the pinned test runner
-    run: python -m pip install --disable-pip-version-check pytest==9.0.3
+  - name: Install the pinned test runner and integration runtime
+    run: |
+      python -m pip install --disable-pip-version-check pytest==9.0.3
+      python - <<'PY'
+      import json
+      import subprocess
+      import sys
+      from pathlib import Path
+
+      manifest = json.loads(
+          Path("custom_components/power_sync/manifest.json").read_text(encoding="utf-8")
+      )
+      raw_requirements = manifest.get("requirements")
+      if not isinstance(raw_requirements, list):
+          raise SystemExit("manifest.json has no valid runtime requirements list")
+      requirements = []
+      for raw_requirement in raw_requirements:
+          if not isinstance(raw_requirement, str):
+              raise SystemExit("manifest.json has no valid runtime requirements list")
+          requirement = raw_requirement.strip()
+          if not requirement or requirement.startswith("-"):
+              raise SystemExit("manifest.json has no valid runtime requirements list")
+          requirements.append(requirement)
+      subprocess.run(
+          [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *requirements],
+          check=True,
+      )
+      PY
 
 pre-agent-steps:
   - name: Capture the inspected evidence revision
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+      SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+      GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
     run: python -m scripts.prepare_support_snapshot
+
+jobs:
+  safe_outputs:
+    permissions:
+      contents: read
+    pre-steps:
+      - name: Check out deterministic support gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Revalidate evidence immediately before repository or issue mutations
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+          SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+        run: python -m scripts.revalidate_support_snapshot
 
 safe-outputs:
   github-token: ${{ secrets.GITHUB_TOKEN }}
+  jobs:
+    route-feature-assessment:
+      description: Route an issue independently reclassified as a feature request.
+      runs-on: ubuntu-latest
+      permissions:
+        actions: write
+        contents: read
+        issues: read
+      needs: [agent, detection, safe_outputs]
+      if: >-
+        needs.detection.result == 'success' &&
+        needs.safe_outputs.result == 'success'
+      steps:
+        - name: Check out deterministic support gate
+          uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+          with:
+            persist-credentials: false
+        - name: Refresh the revision after approved label mutations
+          id: refresh_evidence
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+            SUPPORT_REFRESH_REVISION: "true"
+          run: python -m scripts.revalidate_support_snapshot
+        - name: Dispatch feature assessment for the bound issue
+          env:
+            GH_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ steps.refresh_evidence.outputs.evidence_revision }}
+          run: >-
+            gh workflow run feature-assessment.lock.yml
+            --ref "${GITHUB_REF_NAME}"
+            -f issue_number="$SUPPORT_ISSUE_NUMBER"
+            -f evidence_revision="$SUPPORT_EVIDENCE_REVISION"
   create-pull-request:
+    github-token: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
     draft: false
     labels: [automation]
     auto-close-issue: false
     fallback-as-issue: false
     max: 1
   add-labels:
+    target: ${{ github.event.inputs.issue_number }}
     allowed:
+      - enhancement
       - needs information
       - needs investigation
     max: 2
   remove-labels:
+    target: ${{ github.event.inputs.issue_number }}
     allowed:
+      - bug
       - needs information
       - needs investigation
-    max: 2
+    max: 3
   add-comment:
+    target: ${{ github.event.inputs.issue_number }}
     max: 1
 
 tools:
+  github:
+    toolsets: [repos]
   edit:
   bash:
     - "cat:*"
@@ -77,9 +167,6 @@ tools:
     - "pytest:*"
     - "rg:*"
     - "tail:*"
-  github:
-    toolsets: [repos, issues, pull_requests, actions]
-    min-integrity: none
 
 timeout-minutes: 30
 ---
@@ -97,7 +184,6 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 1. Read `.powersync-support-evidence.md` with Python. Stop without any output if it is absent.
 2. Independently confirm every bug evidence gate passed; do not rely on the triage workflow's conclusion.
 3. Check the reported installed version first and compare it with `custom_components/power_sync/manifest.json` and relevant repository history.
-4. Validate that the sanitised logs cover the reported local-time window before, during, and after the event.
 5. Verify the stated monitoring-mode status and distinguish monitoring behaviour from active-control behaviour.
 6. Classify the issue before editing anything as one of:
    - unsupported or outdated version,
@@ -111,12 +197,15 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 7. Inspect the relevant implementation, callers, tests, contracts, and recent history.
 8. State a concrete root cause only when the evidence establishes the exact code path and causal chain.
 
+If independent classification shows this is a feature request or design decision, add `enhancement`, remove `bug`, `needs information`, and `needs investigation`, call `route_feature_assessment` once, and stop without editing code or creating a pull request.
+
 ## No concrete repository root cause
 
 Do not edit code or create a pull request.
 
 - Keep or add `needs investigation` when more repository investigation is possible.
-- Add `needs information` only when a specific missing item blocks progress.
+- When a specific missing item blocks progress, add `needs information` and remove `needs investigation`.
+- For a terminal non-repository conclusion, remove `needs investigation` and do not add `needs information`.
 - Add one concise issue comment containing the classification, evidence checked, conclusion, and the smallest next evidence request if one is required.
 - Do not repeat an earlier evidence request.
 
@@ -131,8 +220,8 @@ Only proceed when the issue evidence and repository inspection establish a concr
 5. If required validation cannot run or fails, do not create a pull request. Comment with the exact blocker instead.
 6. Inspect the final diff for unrelated changes and credentials.
 7. Create one ready-for-review pull request with:
-   - a conventional `fix(scope): description` or `feat(scope): description` title,
-   - `Refs #${{ github.event.inputs.issue_number }}` rather than a closing keyword,
+   - a conventional `fix(scope): description (Refs #${{ github.event.inputs.issue_number }})` or `feat(scope): description (Refs #${{ github.event.inputs.issue_number }})` title,
+   - `Refs #${{ github.event.inputs.issue_number }}` in the body rather than a closing keyword,
    - the established root cause and causal chain,
    - the exact tests and results,
    - one past-tense user-facing release-note line,

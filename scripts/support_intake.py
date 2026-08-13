@@ -229,10 +229,9 @@ class Attachment:
 
 def snapshot_revision(snapshot: IntakeSnapshot) -> str:
     evidence_content = re.sub(r"\n\nLabels: [^\n]*", "", snapshot.content, count=1)
-    canonical = json.dumps(
+    evidence_canonical = json.dumps(
         {
             "content": evidence_content,
-            "labels": sorted(snapshot.labels - SAFETY_LABELS),
             "safe": snapshot.decision.safe,
             "reasons": snapshot.decision.reasons,
         },
@@ -240,7 +239,31 @@ def snapshot_revision(snapshot: IntakeSnapshot) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    labels_canonical = json.dumps(
+        sorted(snapshot.labels - SAFETY_LABELS),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    evidence_digest = hashlib.sha256(evidence_canonical.encode("utf-8")).hexdigest()
+    labels_digest = hashlib.sha256(labels_canonical.encode("utf-8")).hexdigest()
+    return f"v1:{evidence_digest}:{labels_digest}"
+
+
+def same_evidence_revision(first: str, second: str) -> bool:
+    """Compare only immutable issue, comment, and attachment evidence."""
+    first_parts = first.split(":")
+    second_parts = second.split(":")
+    if len(first_parts) != 3 or len(second_parts) != 3:
+        return False
+    if first_parts[0] != "v1" or second_parts[0] != "v1":
+        return False
+    digest_pattern = re.compile(r"[0-9a-f]{64}")
+    if any(
+        digest_pattern.fullmatch(part) is None
+        for part in (*first_parts[1:], *second_parts[1:])
+    ):
+        return False
+    return first_parts[1] == second_parts[1]
 
 
 class SupportIntake:
@@ -822,7 +845,7 @@ class SupportIntake:
         self._client.request(
             "POST", f"{issue_path}/labels", {"labels": ["unsafe evidence"]}
         )
-        for label in ("safe evidence", "needs investigation"):
+        for label in ("safe evidence", "needs investigation", "feature assessed"):
             self._client.request(
                 "DELETE", f"{issue_path}/labels/{quote(label, safe='')}"
             )

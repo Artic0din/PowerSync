@@ -21,9 +21,23 @@ jobs:
       - name: Install test runner
         run: python -m pip install --disable-pip-version-check pytest==9.0.3
       - name: Test deterministic intake
-        run: python -m pytest tests/test_support_intake.py -q
+        run: >-
+          python -m pytest
+          tests/test_support_intake.py
+          tests/test_support_workflows.py
+          -q
       - name: Test browser sanitiser
         run: node --test tests/support_bundle_sanitizer.test.mjs
+      - name: Install pinned agentic workflow compiler
+        uses: github/gh-aw/actions/setup-cli@53843da968225dc56e1590978a7ed6407a8438ac
+        with:
+          version: v0.85.4
+      - name: Reject stale compiled agentic workflows
+        run: |
+          gh aw compile issue-triage issue-investigation feature-assessment
+          git diff --exit-code -- .github/workflows/issue-triage.lock.yml \
+            .github/workflows/issue-investigation.lock.yml \
+            .github/workflows/feature-assessment.lock.yml
 
   validate-hacs:
     runs-on: ubuntu-latest

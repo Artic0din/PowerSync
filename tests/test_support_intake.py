@@ -8,7 +8,10 @@ from typing import Any
 import pytest
 
 from scripts.prepare_support_snapshot import SNAPSHOT_NAME, persist_snapshot
-from scripts.revalidate_support_snapshot import revalidate_snapshot
+from scripts.revalidate_support_snapshot import (
+    refresh_snapshot_revision,
+    revalidate_snapshot,
+)
 from scripts.support_intake import (
     IntakeDecision,
     IntakeSnapshot,
@@ -103,6 +106,11 @@ def test_secret_pattern_fails_closed_without_dispatch() -> None:
     assert decision.safe is False
     assert "possible credential in issue text" in decision.reasons
     assert not any("/dispatches" in path for _, path, _ in client.requests)
+    assert (
+        "DELETE",
+        "/repos/Plaintext-Lab/PowerSync/issues/42/labels/feature%20assessed",
+        None,
+    ) in client.requests
     assert client.requests[-1][0:2] == (
         "POST",
         "/repos/Plaintext-Lab/PowerSync/issues/42/comments",
@@ -801,6 +809,42 @@ def test_snapshot_revalidation_rejects_changed_classification_labels() -> None:
     )
 
 
+def test_snapshot_refresh_accepts_only_workflow_label_mutations() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1000")
+    changed_client.responses[("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")][
+        "labels"
+    ] = [{"name": "bug"}, {"name": "needs investigation"}, {"name": "safe evidence"}]
+
+    refreshed = refresh_snapshot_revision(
+        changed_client,
+        "Plaintext-Lab/PowerSync",
+        42,
+        snapshot_revision(original),
+    )
+
+    current = SupportIntake(changed_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    assert refreshed == snapshot_revision(current)
+    assert refreshed != snapshot_revision(original)
+
+
+def test_snapshot_refresh_rejects_changed_issue_content() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1001")
+
+    assert (
+        refresh_snapshot_revision(
+            changed_client,
+            "Plaintext-Lab/PowerSync",
+            42,
+            snapshot_revision(original),
+        )
+        is None
+    )
+
+
 def test_json_nesting_ignores_braces_inside_strings() -> None:
     content = '{"message":"' + ("{" * 25) + '","status":500}'
 
@@ -868,6 +912,10 @@ def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> No
         "GH_AW_SAFE_OUTPUTS: "
         "${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}" in workflow
     )
+    assert (
+        "blocked: [github.com, api.github.com, raw.githubusercontent.com]"
+        in workflow
+    )
     assert "toolsets: [repos]" in workflow
     assert "group: support-evidence-${{ inputs.issue_number }}" in workflow
     intake = Path(".github/workflows/support-intake.yml").read_text(encoding="utf-8")
@@ -892,3 +940,31 @@ def test_investigation_provisions_the_pinned_test_runner() -> None:
     assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow
     assert "python-version-file: .python-version" in workflow
     assert "pytest==9.0.3" in workflow
+
+
+def test_feature_assessment_agent_and_detector_are_isolated() -> None:
+    lockfile = Path(".github/workflows/feature-assessment.lock.yml").read_text(
+        encoding="utf-8"
+    )
+    agent_commands = [
+        line for line in lockfile.splitlines() if "gh-aw/agent-stdio.log" in line
+    ]
+
+    assert agent_commands
+    assert all("--allow-all-tools" not in command for command in agent_commands)
+
+    detection_commands = [
+        line
+        for line in lockfile.splitlines()
+        if "/usr/local/bin/copilot" in line
+        and "threat-detection/detection.log" in line
+    ]
+    assert detection_commands
+    assert all("--disable-builtin-mcps" in command for command in detection_commands)
+    assert all("--allow-all-tools" in command for command in detection_commands)
+    assert "--exclude-env COPILOT_GITHUB_TOKEN" in lockfile
+
+    detection_job_header = lockfile.split("\n  detection:\n", 1)[1][:500]
+    assert "permissions:\n      contents: read" in detection_job_header
+    assert "issues: write" not in detection_job_header
+    assert "pull-requests: write" not in detection_job_header
