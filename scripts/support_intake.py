@@ -33,8 +33,10 @@ ATTACHMENT_PATTERN = re.compile(
 )
 SECRET_PATTERNS = (
     re.compile(r"(?i)authorization\s*:\s*(?:bearer|basic)\s+\S+"),
+    re.compile(r"(?i)(?:set-cookie|cookie)\s*:\s*[^\r\n]+"),
     re.compile(
-        r"(?i)(?:password|passwd|access[_ -]?token|api[_ -]?key|client[_ -]?secret)"
+        r"(?i)(?:password|passwd|token|access[_ -]?token|refresh[_ -]?token|"
+        r"id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)"
         r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{8,}"
     ),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),

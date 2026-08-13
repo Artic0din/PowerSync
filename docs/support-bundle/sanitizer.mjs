@@ -5,7 +5,7 @@ const SECRET_PATTERNS = [
   [/authorization\s*:\s*(?:bearer|basic)\s+\S+/gi, "Authorization: [REDACTED]"],
   [/(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi, "Cookie: [REDACTED]"],
   [
-    /((?:password|passwd|access[_ -]?token|api[_ -]?key|client[_ -]?secret)\s*[:=]\s*)["']?[^\s,"'}]+/gi,
+    /((?:password|passwd|token|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|cookie|api[_ -]?key|client[_ -]?secret)\s*[:=]\s*)["']?[^\s,"'}]+/gi,
     "$1[REDACTED]",
   ],
   [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]"],
@@ -21,6 +21,7 @@ const IDENTIFIER_PATTERNS = [
   ["MAC", /\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b/gi],
   ["VIN", /\b[A-HJ-NPR-Z0-9]{17}\b/g],
   ["HOME", /\/(?:Users|home)\/[^/\s]+/g],
+  ["HOME", /[A-Z]:\\Users\\[^\\\s]+/gi],
   ["SERIAL", /(?<=(?:serial|device[_ -]?id)\s*[:=]\s*)[A-Za-z0-9_-]{5,}/gi],
   ["USER", /(?<=(?:user(?:name)?|login)\s*[:=]\s*)[A-Za-z0-9_.@-]{3,}/gi],
 ];

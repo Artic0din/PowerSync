@@ -14,6 +14,15 @@ test("credentials are removed while operational context remains", async () => {
   assert.match(result, /request failed/);
 });
 
+test("cookies and generic tokens are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    "Cookie: session=customer-session-value\nrefresh_token=customer-refresh-token-value",
+  );
+
+  assert.doesNotMatch(result, /customer-session-value/);
+  assert.doesNotMatch(result, /customer-refresh-token-value/);
+});
+
 test("identical identifiers receive stable placeholders", async () => {
   const result = await sanitizeSupportBundle(
     "user@example.com connected from 192.168.1.10; user@example.com retried from 192.168.1.10",
@@ -25,4 +34,15 @@ test("identical identifiers receive stable placeholders", async () => {
   assert.equal(new Set(addresses).size, 1);
   assert.equal(emails.length, 2);
   assert.equal(addresses.length, 2);
+});
+
+test("Windows home paths are pseudonymised consistently", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`C:\Users\ryan\powersync\log.txt C:\Users\ryan\powersync\config.json`,
+  );
+  const homes = result.match(/\[HOME_[a-f0-9]+\]/g);
+
+  assert.equal(new Set(homes).size, 1);
+  assert.equal(homes.length, 2);
+  assert.doesNotMatch(result, /C:\\Users\\ryan/);
 });

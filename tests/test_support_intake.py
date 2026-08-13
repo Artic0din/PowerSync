@@ -89,6 +89,19 @@ def test_secret_pattern_fails_closed_without_dispatch() -> None:
     assert "revoke or rotate it" in payload["body"]
 
 
+def test_cookie_and_generic_token_patterns_fail_closed() -> None:
+    client = client_for(
+        "Cookie: session=customer-session-value\n"
+        "refresh_token=customer-refresh-token-value"
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+    assert not any("/dispatches" in path for _, path, _ in client.requests)
+
+
 def test_sanitised_text_attachment_is_allowed() -> None:
     url = "https://github.com/user-attachments/files/123/powersync-support.log"
     client = client_for(f"[powersync-support.log]({url})")
