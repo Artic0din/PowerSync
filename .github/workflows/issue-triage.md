@@ -194,7 +194,7 @@ Require a category, a specific current problem, who is affected, and a proposed 
 Alternatives and additional context are optional.
 
 If required information is missing, add `needs information`, remove `feature assessed`, `needs triage`, and `needs investigation`, and ask once for all missing details.
-If the request is complete, remove `needs triage`, `needs information`, and `needs investigation` if present, then call `route_support_issue` once with `destination` set to `feature-assessment`.
+If the request is complete, remove `feature assessed`, `needs triage`, `needs information`, and `needs investigation` if present, then call `route_support_issue` once with `destination` set to `feature-assessment`.
 Do not decide that the feature is approved and do not assign an agent.
 
 ## Other classifications

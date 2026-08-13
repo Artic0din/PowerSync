@@ -120,6 +120,11 @@ def test_retriage_clears_stale_feature_assessment_state() -> None:
         "Remove `feature assessed`, `needs triage`, and `needs information`"
         in source
     )
+    assert (
+        "request is complete, remove `feature assessed`, `needs triage`, "
+        "`needs information`, and `needs investigation`"
+        in source
+    )
 
 
 def test_investigation_routes_reclassified_features_after_state_mutations() -> None:
