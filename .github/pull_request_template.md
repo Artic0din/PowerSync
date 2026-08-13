@@ -4,7 +4,7 @@
 
 ## Related issue
 
-<!-- Use "Fixes #123" when merging should close the issue. Use "Refs #123" when confirmation is still required. -->
+<!-- Use "Refs #123" for support fixes so reporter confirmation controls closure. Use "Fixes #123" only when merging should close an internal issue immediately. -->
 
 ## Changes
 

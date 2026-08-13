@@ -1,0 +1,33 @@
+name: Support issue state
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: support-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  transition:
+    if: >-
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.comment.body, '/powersync ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the state machine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Apply the requested transition
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.run_support_issue_state
