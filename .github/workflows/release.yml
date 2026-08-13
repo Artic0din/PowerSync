@@ -8,6 +8,7 @@ on:
 
 permissions:
   actions: write
+  checks: read
   contents: write
 
 jobs:
@@ -25,20 +26,42 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 
-      - name: Check if tag already exists
-        id: check_tag
+      - name: Check release state
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          # Check both v-prefixed and bare tags to avoid duplicates
-          if git rev-parse "v$VERSION" >/dev/null 2>&1 || git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag v$VERSION or $VERSION already exists — skipping release"
+
+          TAG=""
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            TAG="v$VERSION"
+          elif git rev-parse "$VERSION" >/dev/null 2>&1; then
+            TAG="$VERSION"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          published_release_tag() {
+            gh release view "$1" \
+              --json tagName,isDraft,publishedAt \
+              --jq 'select(.isDraft == false and .publishedAt != null) | .tagName' \
+              2>/dev/null || true
+          }
+          PUBLISHED_TAG=$(published_release_tag "v$VERSION")
+          if [ -z "$PUBLISHED_TAG" ]; then
+            PUBLISHED_TAG=$(published_release_tag "$VERSION")
+          fi
+          if [ -n "$PUBLISHED_TAG" ]; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+            echo "A published release already exists as $PUBLISHED_TAG"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "No published release exists for $VERSION"
           fi
 
       - name: Build release notes
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.check_release.outputs.release_exists == 'false'
         id: notes
         run: |
           set -euo pipefail
@@ -122,18 +145,40 @@ jobs:
           echo "--- Release notes ---"
           head -30 /tmp/release_notes.md
 
-      - name: Create tag and release
-        if: steps.check_tag.outputs.exists == 'false'
+      - name: Create or repair tag and release
+        if: steps.check_release.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" \
-            --title "PowerSync v$VERSION" \
-            --notes-file /tmp/release_notes.md
-          echo "Created release v$VERSION"
+          TAG="${{ steps.check_release.outputs.tag }}"
+          draft_release_tag() {
+            gh release view "$1" \
+              --json tagName,isDraft \
+              --jq 'select(.isDraft == true) | .tagName' 2>/dev/null || true
+          }
+          DRAFT_TAG=$(draft_release_tag "v$VERSION")
+          if [ -z "$DRAFT_TAG" ]; then
+            DRAFT_TAG=$(draft_release_tag "$VERSION")
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="${DRAFT_TAG:-v$VERSION}"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          if [ -n "$DRAFT_TAG" ]; then
+            gh release edit "$DRAFT_TAG" \
+              --draft=false \
+              --title "PowerSync v$VERSION" \
+              --notes-file /tmp/release_notes.md
+            echo "Published draft release $DRAFT_TAG"
+          else
+            gh release create "$TAG" \
+              --title "PowerSync v$VERSION" \
+              --notes-file /tmp/release_notes.md
+            echo "Created release $TAG"
+          fi
 
       - name: Resolve published release tag
         if: ${{ !cancelled() }}
@@ -141,32 +186,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           RELEASE_TAG=""
-          if gh release view "v$VERSION" >/dev/null 2>&1; then
-            RELEASE_TAG="v$VERSION"
-          elif gh release view "$VERSION" >/dev/null 2>&1; then
-            RELEASE_TAG="$VERSION"
+          published_release_tag() {
+            gh release view "$1" \
+              --json tagName,isDraft,publishedAt \
+              --jq 'select(.isDraft == false and .publishedAt != null) | .tagName' \
+              2>/dev/null || true
+          }
+          RELEASE_TAG=$(published_release_tag "v$VERSION")
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(published_release_tag "$VERSION")
           fi
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Reconcile released support fixes
+        id: support_reconciliation
+        continue-on-error: true
         if: ${{ !cancelled() && steps.support_release.outputs.tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run support-issue-state.yml \
+          set -euo pipefail
+          RUN_URL=$(gh workflow run support-issue-state.yml \
             --ref main \
-            -f release_tag="${{ steps.support_release.outputs.tag }}"
+            -f release_tag="${{ steps.support_release.outputs.tag }}" | tail -n 1)
+          RUN_ID="${RUN_URL##*/}"
+          if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "Unable to resolve reconciliation run from: $RUN_URL" >&2
+            exit 1
+          fi
+          gh run watch "$RUN_ID" --exit-status --compact
 
       # NOTE: the separate manual-release Discord workflow will not fire here,
       # because GitHub Actions intentionally suppresses downstream workflows for
       # release events triggered by GITHUB_TOKEN. Posting to Discord directly in
       # this job is the only reliable path for automated manifest releases.
       - name: Build Discord payloads
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.check_release.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.support_release.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
@@ -195,7 +256,7 @@ jobs:
 
           marker_path = Path(".github/discord-release-last-posted.txt")
           last_posted = marker_path.read_text().strip() if marker_path.exists() else ""
-          target_tag = f"v{os.environ['VERSION']}"
+          target_tag = os.environ["RELEASE_TAG"]
           repo = os.environ["GITHUB_REPOSITORY"]
 
           releases = gh_json(f"repos/{repo}/releases?per_page=20")
@@ -272,7 +333,7 @@ jobs:
       # urllib's default User-Agent is blocked by Discord's webhook spam filter
       # (returns 403), so curl is required.
       - name: Notify Discord
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.check_release.outputs.release_exists == 'false'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
@@ -305,7 +366,7 @@ jobs:
           done
 
       - name: Clear release notes and record Discord marker
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.check_release.outputs.release_exists == 'false'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -332,3 +393,15 @@ jobs:
             git push origin main
             echo "Cleared RELEASE_NOTES.md and recorded Discord marker v$VERSION"
           fi
+
+      - name: Report support reconciliation failure
+        if: ${{ !cancelled() && steps.support_reconciliation.outcome == 'failure' }}
+        run: |
+          echo "Support reconciliation dispatch failed after release cleanup" >&2
+          exit 1
+
+      - name: Advance the automated fix queue after release completion
+        if: ${{ success() && steps.support_release.outputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run queue-automated-fixes.yml --ref main

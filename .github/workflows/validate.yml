@@ -31,6 +31,7 @@ jobs:
           python -m pytest
           tests/test_support_issue_state.py
           tests/test_support_release_delivery.py
+          tests/test_prepare_automated_release.py
           -q
       - name: Test browser sanitiser
         run: node --test tests/support_bundle_sanitizer.test.mjs

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,13 @@ class GitHubClient:
         except HTTPError as error:
             missing_label = method == "DELETE" and "/labels/" in path
             missing_permission = method == "GET" and path.endswith("/permission")
-            if error.code == 404 and (missing_label or missing_permission):
+            missing_issue = (
+                method == "GET"
+                and re.fullmatch(r"/repos/[^/]+/[^/]+/issues/\d+", path) is not None
+            )
+            if error.code == 404 and (
+                missing_label or missing_permission or missing_issue
+            ):
                 return {}
             detail = error.read().decode(errors="replace")
             raise RuntimeError(

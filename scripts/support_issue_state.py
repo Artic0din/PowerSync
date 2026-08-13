@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Protocol
 from urllib.parse import quote
 
-from scripts.support_release_delivery import ReleaseDelivery
+from scripts.support_release_delivery import WORKFLOW_BOT_LOGIN, ReleaseDelivery
 
 Action = Literal["solved"]
 WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 POWER_SYNC_REPOSITORIES = frozenset({"plaintext-lab/powersync", "bolagnaise/powersync"})
-RESOLUTION_MARKER = "<!-- powersync-resolution:v1 -->"
+RESOLUTION_MARKER_PREFIX = "powersync-resolution:v1:"
 MAX_API_PAGES = 10
 
 
@@ -32,6 +32,11 @@ class Command:
 def parse_command(body: str) -> Command | None:
     """Return a command only when the complete comment matches the contract."""
     return Command(action="solved") if body.strip() == "/powersync solved" else None
+
+
+def resolution_marker(comment_id: int) -> str:
+    """Bind the audit marker to one immutable confirmation event."""
+    return f"<!-- {RESOLUTION_MARKER_PREFIX}{comment_id} -->"
 
 
 class SupportIssueAutomation:
@@ -77,8 +82,13 @@ class SupportIssueAutomation:
             return "ignored"
 
         actor = event.get("comment", {}).get("user", {}).get("login", "")
+        comment_id = event.get("comment", {}).get("id")
         issue_number = issue_event.get("number")
-        if not actor or not isinstance(issue_number, int):
+        if (
+            not actor
+            or not isinstance(comment_id, int)
+            or not isinstance(issue_number, int)
+        ):
             raise ValueError("The GitHub event is missing required issue metadata")
 
         issue_path = f"/repos/{repository}/issues/{issue_number}"
@@ -89,13 +99,17 @@ class SupportIssueAutomation:
         labels = self._label_names(issue)
         if not author:
             raise ValueError("The GitHub issue has no author")
-        if "awaiting confirmation" not in labels and "solved" not in labels:
+        has_delivery_gate = "awaiting confirmation" in labels
+        is_terminal_retry = "solved" in labels and issue.get("state") == "closed"
+        if not has_delivery_gate and not is_terminal_retry:
             return "invalid-state"
         if actor.casefold() != author.casefold() and not self._has_write_access(
             repository, actor
         ):
             return "unauthorized"
 
+        marker = resolution_marker(comment_id)
+        marker_exists = self._has_comment_marker(issue_path, marker)
         if "solved" not in labels:
             self._request("POST", f"{issue_path}/labels", {"labels": ["solved"]})
         if issue.get("state") != "closed":
@@ -104,12 +118,12 @@ class SupportIssueAutomation:
                 issue_path,
                 {"state": "closed", "state_reason": "completed"},
             )
-        if not self._has_comment_marker(issue_path, RESOLUTION_MARKER):
+        if not marker_exists:
             self._request(
                 "POST",
                 f"{issue_path}/comments",
                 {
-                    "body": f"{RESOLUTION_MARKER}\nResolution confirmed by @{actor} "
+                    "body": f"{marker}\nResolution confirmed by @{actor} "
                     "using `/powersync solved`. Closing this issue as completed."
                 },
             )
@@ -137,6 +151,7 @@ class SupportIssueAutomation:
                 raise ValueError("GitHub returned invalid issue comments")
             if any(
                 marker in str(comment.get("body", ""))
+                and self._comment_author(comment) == WORKFLOW_BOT_LOGIN
                 for comment in comments
                 if isinstance(comment, dict)
             ):
@@ -144,6 +159,13 @@ class SupportIssueAutomation:
             if len(comments) < 100:
                 return False
         raise ValueError("Issue comments exceed the supported pagination limit")
+
+    @staticmethod
+    def _comment_author(comment: dict[str, Any]) -> str:
+        user = comment.get("user")
+        if isinstance(user, dict) and isinstance(user.get("login"), str):
+            return user["login"]
+        return ""
 
     @staticmethod
     def _label_names(issue: dict[str, Any]) -> set[str]:

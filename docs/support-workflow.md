@@ -40,7 +40,7 @@ Dispatched triage, assessment, and investigation runs use per-issue concurrency 
 - Missing evidence receives one consolidated request and `needs information`.
 - A complete bug receives `needs investigation` and is dispatched directly to issue investigation.
 - A complete feature request is dispatched directly to feature assessment.
-- Duplicate, spam, and off-topic classifications clear triage-state labels.
+- Spam and off-topic classifications clear triage-state labels.
 
 Feature assessment inspects current repository capabilities, overlap, dependencies, compatibility, and risk.
 It posts a repository-aware recommendation and applies `feature assessed`, but does not make a roadmap commitment or create code.
@@ -55,14 +55,16 @@ For a confirmed defect, the workflow:
 
 1. Adds and runs a failing regression test for the established cause.
 2. Implements the smallest root-cause fix.
-3. Increments the patch version and writes version-matched release notes.
+3. Proposes the next patch version and writes version-matched release notes.
 4. Runs the focused and relevant repository validation.
 5. Opens one ready-for-review pull request using `Refs #123`.
 
 The workflow cannot directly merge, release, deploy, close an issue, or access Discord, PowerSync Cloud, production data, or customer systems.
 
 Agent-created pull requests receive `automation`.
-A deterministic workflow adds `merge-queue` only to same-repository, non-draft pull requests with that trusted label.
+A global deterministic queue selects only one same-repository, non-draft automation pull request at a time.
+Immediately before it adds `merge-queue`, it reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
+That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
 Graphite and required repository checks decide when the pull request can merge.
 The existing version-bump workflow creates the release after merge.
 
@@ -71,9 +73,11 @@ The existing version-bump workflow creates the release after merge.
 The release workflow dispatches deterministic support reconciliation because ordinary events created with `GITHUB_TOKEN` do not start another workflow.
 Manual published releases also trigger reconciliation directly.
 
-Reconciliation compares the new release with the previous published release, discovers associated merged pull requests, and accepts only explicit same-repository `Refs #123` links.
+Reconciliation scans the bounded release history before selecting the immediately previous published release, or the immediately previous semantic version tag for a repository's first GitHub release.
+It discovers associated merged pull requests and accepts only explicit same-repository `Refs #123` links from the released commit messages.
 It ignores `Refs` examples inside HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
-Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing the pull request and release links, so a later fix produces a fresh confirmation request.
+Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing every associated pull request and the release link, so a later fix produces a fresh confirmation request.
+The workflow rereads live issue state immediately before posting and removes any state it added if a concurrent solved confirmation already closed the issue.
 
 The issue author or a write-level maintainer confirms the released result with one exact comment:
 
