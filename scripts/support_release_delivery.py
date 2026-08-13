@@ -288,6 +288,8 @@ class ReleaseDelivery:
         labels = self._label_names(issue)
         if "solved" in labels:
             return False
+        marker = delivery_marker(pull_urls, release_url)
+        marker_exists = self._has_comment_marker(issue_path, marker)
         already_awaiting = "awaiting confirmation" in labels
         if not already_awaiting:
             self._request(
@@ -314,8 +316,7 @@ class ReleaseDelivery:
             return False
 
         comment_added = False
-        marker = delivery_marker(pull_urls, release_url)
-        if not self._has_comment_marker(issue_path, marker):
+        if not marker_exists:
             pull_description = (
                 pull_urls[0]
                 if len(pull_urls) == 1

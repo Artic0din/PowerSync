@@ -350,6 +350,23 @@ def test_workflow_marker_deduplicates_the_same_delivery() -> None:
     assert all(method == "GET" for method, _, _ in client.requests)
 
 
+def test_comment_limit_fails_before_delivery_state_mutation() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    full_page = [{"body": "ordinary comment", "user": {"login": "reporter"}}] * 100
+    for page in range(1, 11):
+        client.responses[
+            ("GET", f"{issue_path}/comments?per_page=100&page={page}")
+        ] = full_page
+
+    with pytest.raises(
+        ValueError, match="Issue comments exceed the supported pagination limit"
+    ):
+        SupportIssueAutomation(client).handle(release_event())
+
+    assert all(method == "GET" for method, _, _ in client.requests)
+
+
 def test_release_workflow_reconciles_an_existing_published_release() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
@@ -378,6 +395,18 @@ def test_release_workflow_repairs_a_tag_without_a_published_release() -> None:
     assert "Create or repair tag and release" in workflow
     assert 'TAG="${{ steps.check_release.outputs.tag }}"' in workflow
     assert "if: steps.check_release.outputs.release_exists == 'false'" in workflow
+
+
+def test_release_workflow_verifies_existing_tag_targets_before_publish() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "HEAD_SHA=$(git rev-parse HEAD)" in workflow
+    assert 'tag_sha=$(git rev-parse "$candidate^{commit}")' in workflow
+    assert 'if [ "$tag_sha" != "$HEAD_SHA" ]' in workflow
+    assert 'DRAFT_TARGET_ARGS=(--target "$HEAD_SHA")' in workflow
+    assert workflow.index("verify_tag_targets_head") < workflow.index(
+        'gh release edit "$DRAFT_TAG"'
+    )
 
 
 def test_release_events_check_out_the_current_default_branch_state_machine() -> None:

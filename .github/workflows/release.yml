@@ -153,6 +153,7 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.check_release.outputs.tag }}"
+          HEAD_SHA=$(git rev-parse HEAD)
           draft_release_tag() {
             gh release view "$1" \
               --json tagName,isDraft \
@@ -162,13 +163,33 @@ jobs:
           if [ -z "$DRAFT_TAG" ]; then
             DRAFT_TAG=$(draft_release_tag "$VERSION")
           fi
+          verify_tag_targets_head() {
+            local candidate="$1"
+            if ! git rev-parse "$candidate^{commit}" >/dev/null 2>&1; then
+              return 1
+            fi
+            local tag_sha
+            tag_sha=$(git rev-parse "$candidate^{commit}")
+            if [ "$tag_sha" != "$HEAD_SHA" ]; then
+              echo "::error::Release tag $candidate targets $tag_sha, not workflow HEAD $HEAD_SHA."
+              exit 1
+            fi
+          }
+          if [ -n "$TAG" ]; then
+            verify_tag_targets_head "$TAG"
+          fi
           if [ -z "$TAG" ]; then
             TAG="${DRAFT_TAG:-v$VERSION}"
             git tag "$TAG"
             git push origin "$TAG"
           fi
           if [ -n "$DRAFT_TAG" ]; then
+            DRAFT_TARGET_ARGS=()
+            if ! verify_tag_targets_head "$DRAFT_TAG"; then
+              DRAFT_TARGET_ARGS=(--target "$HEAD_SHA")
+            fi
             gh release edit "$DRAFT_TAG" \
+              "${DRAFT_TARGET_ARGS[@]}" \
               --draft=false \
               --title "PowerSync v$VERSION" \
               --notes-file /tmp/release_notes.md
