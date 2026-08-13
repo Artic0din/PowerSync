@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -242,3 +243,61 @@ def test_later_release_adds_a_new_delivery_audit_comment() -> None:
     assert posted_comment["body"].startswith("<!-- powersync-delivery:v1:")
     assert "previous-release" not in posted_comment["body"]
     assert RELEASE["html_url"] in posted_comment["body"]
+
+
+def test_pull_request_reference_is_not_treated_as_a_support_issue() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    client.responses[("GET", issue_path)]["pull_request"] = {
+        "url": "https://api.github.com/repos/Plaintext-Lab/PowerSync/pulls/42"
+    }
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert all(method == "GET" for method, _, _ in client.requests)
+
+
+def test_reporter_cannot_spoof_a_delivery_marker() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    marker = delivery_marker(
+        "https://github.com/Plaintext-Lab/PowerSync/pull/90",
+        str(RELEASE["html_url"]),
+    )
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {"body": marker, "user": {"login": "reporter"}}
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:1"
+    assert client.requests[-1][0:2] == ("POST", f"{issue_path}/comments")
+
+
+def test_workflow_marker_deduplicates_the_same_delivery() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    client.responses[("GET", issue_path)]["labels"] = [
+        {"name": "awaiting confirmation"}
+    ]
+    marker = delivery_marker(
+        "https://github.com/Plaintext-Lab/PowerSync/pull/90",
+        str(RELEASE["html_url"]),
+    )
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {"body": marker, "user": {"login": "github-actions[bot]"}}
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert all(method == "GET" for method, _, _ in client.requests)
+
+
+def test_release_workflow_reconciles_an_existing_published_release() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "Resolve published release tag" in workflow
+    assert "steps.support_release.outputs.tag != ''" in workflow
+    assert 'release_tag="${{ steps.support_release.outputs.tag }}"' in workflow

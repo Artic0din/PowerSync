@@ -135,14 +135,29 @@ jobs:
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
 
+      - name: Resolve published release tag
+        if: ${{ !cancelled() }}
+        id: support_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          RELEASE_TAG=""
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            RELEASE_TAG="v$VERSION"
+          elif gh release view "$VERSION" >/dev/null 2>&1; then
+            RELEASE_TAG="$VERSION"
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Reconcile released support fixes
-        if: steps.check_tag.outputs.exists == 'false'
+        if: ${{ !cancelled() && steps.support_release.outputs.tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run support-issue-state.yml \
             --ref main \
-            -f release_tag="v${{ steps.version.outputs.version }}"
+            -f release_tag="${{ steps.support_release.outputs.tag }}"
 
       # NOTE: the separate manual-release Discord workflow will not fire here,
       # because GitHub Actions intentionally suppresses downstream workflows for
