@@ -15,7 +15,7 @@ body:
     attributes:
       label: Category
       options:
-        - Optimiser
+        - Optimizer
         - Dashboard
         - Integration
         - Mobile app
