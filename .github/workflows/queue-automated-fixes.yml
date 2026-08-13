@@ -2,7 +2,12 @@ name: Queue automated fixes
 
 on:
   pull_request:
-    types: [opened, labeled, ready_for_review]
+    types: [opened, labeled, ready_for_review, closed]
+  workflow_dispatch:
+
+concurrency:
+  group: automated-fix-merge-queue
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -12,14 +17,93 @@ permissions:
 jobs:
   queue:
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(github.event.pull_request.labels.*.name, 'automation') &&
-      github.event.pull_request.draft == false
+      github.event_name == 'workflow_dispatch' ||
+      github.event.action != 'closed' ||
+      github.event.pull_request.merged == false
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Enter the protected Graphite merge queue
+      - name: Check out trusted queue logic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          path: trusted
+          persist-credentials: false
+
+      - name: Select the next automation pull request
+        id: select
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
+            > /tmp/open-pull-requests.json
+          python trusted/scripts/prepare_automated_release.py select \
+            --pages /tmp/open-pull-requests.json \
+            --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the selected pull request
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.select.outputs.head_sha }}
+          fetch-depth: 0
+          path: candidate
+          token: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+
+      - name: Allocate the next release version
+        if: steps.select.outputs.selected == 'true'
+        id: release
+        working-directory: candidate
+        env:
+          PULL_REQUEST_TITLE: ${{ steps.select.outputs.title }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git show origin/main:custom_components/power_sync/manifest.json \
+            > /tmp/main-manifest.json
+          python ../trusted/scripts/prepare_automated_release.py prepare \
+            --base-manifest /tmp/main-manifest.json \
+            --manifest custom_components/power_sync/manifest.json \
+            --release-notes RELEASE_NOTES.md \
+            --title "$PULL_REQUEST_TITLE" >> "$GITHUB_OUTPUT"
+          git diff --check
+
+      - name: Record immutable delivery evidence
+        if: steps.select.outputs.selected == 'true'
+        working-directory: candidate
+        env:
+          HEAD_REF: ${{ steps.select.outputs.head_ref }}
+          ISSUE_NUMBER: ${{ steps.release.outputs.issue_number }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/power_sync/manifest.json RELEASE_NOTES.md
+          git commit --allow-empty \
+            -m "chore(release): reserve v$VERSION" \
+            -m "Refs #$ISSUE_NUMBER"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+
+      - name: Verify squash merge preserves delivery evidence
+        if: steps.select.outputs.selected == 'true'
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.release.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          git log -1 --format=%B | grep -Fx "Refs #$ISSUE_NUMBER"
+          gh api "/repos/${GITHUB_REPOSITORY}" \
+            | jq -e \
+              '.allow_squash_merge == true and
+               .squash_merge_commit_message == "COMMIT_MESSAGES"' >/dev/null
+
+      - name: Enter the protected Graphite merge queue
+        if: steps.select.outputs.selected == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ steps.select.outputs.url }}
         run: gh pr edit "$PR_URL" --add-label merge-queue
