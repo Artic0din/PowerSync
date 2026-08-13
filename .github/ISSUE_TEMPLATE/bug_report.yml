@@ -9,7 +9,9 @@ body:
     attributes:
       value: |
         Thank you for helping us improve PowerSync.
-        Search existing issues before submitting a new report and do not include passwords, tokens, or other secrets.
+        Search existing issues before submitting a new report.
+        GitHub uploads attachments immediately, so never attach a raw log.
+        Create a checked bundle first at https://plaintext-lab.github.io/PowerSync/.
 
   - type: input
     id: version
@@ -88,8 +90,8 @@ body:
     id: evidence
     attributes:
       label: Logs and supporting evidence
-      description: Upload relevant logs and screenshots covering the time before, during, and after the problem. If unavailable, explain why.
-      placeholder: "Drag files here, paste the relevant log window, or explain why logs are unavailable."
+      description: Attach only a PowerSync sanitised support bundle covering the time before, during, and after the problem. Binary files, archives, screenshots, and raw logs are rejected. If unavailable, explain why.
+      placeholder: "Attach the sanitised text bundle, paste non-sensitive context, or explain why evidence is unavailable."
     validations:
       required: true
 
@@ -100,5 +102,5 @@ body:
       options:
         - label: I searched existing issues for the same problem.
           required: true
-        - label: I removed passwords, access tokens, API keys, and other secrets from the evidence.
+        - label: I used the PowerSync support-bundle tool for every attached log and reviewed its output.
           required: true

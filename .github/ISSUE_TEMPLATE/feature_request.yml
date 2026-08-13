@@ -50,7 +50,7 @@ body:
     id: additional_context
     attributes:
       label: Additional context
-      description: Add screenshots, examples, links, or other details that would help evaluate the request.
+      description: Add non-sensitive text, examples, or links that would help evaluate the request. Do not upload raw logs, archives, screenshots, or other binary files.
 
   - type: checkboxes
     id: checks
