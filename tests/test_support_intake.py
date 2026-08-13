@@ -921,7 +921,8 @@ def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> No
     intake = Path(".github/workflows/support-intake.yml").read_text(encoding="utf-8")
     assert "group: support-evidence-${{ github.event.issue.number }}" in intake
     assert (
-        "remove `needs triage`, `needs information`, and `needs investigation`"
+        "remove `feature assessed`, `needs triage`, `needs information`, and "
+        "`needs investigation`"
         in workflow
     )
     assert (
