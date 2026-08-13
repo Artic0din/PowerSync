@@ -25,12 +25,15 @@ The warning explains how to replace it and instructs the reporter to revoke or r
 Removing an attachment link is not a confidentiality guarantee.
 
 Evidence that passes receives `safe evidence`, and the intake workflow dispatches triage with the issue number.
+Triage and investigation read a linked bundle only through the bounded support-bundle reader, which rechecks the GitHub attachment URL, 512 KB limit, UTF-8 text, marker, binary content, and credential patterns before returning evidence to the agent.
+The workflow firewall permits only GitHub's domains and the exact GitHub production user-attachment bucket required by the download redirect.
 
 ## Automated triage and routing
 
 The Copilot triage workflow reads the complete current issue and verifies `safe evidence` independently.
 It checks the installed version first, then the system profile, problem and reproduction, monitoring mode, and sanitised log window.
 It reads existing replies before asking for evidence so it does not repeat an earlier request.
+Dispatched triage, assessment, and investigation runs use per-issue concurrency groups so separate reports cannot replace one another in the pending queue.
 
 - Missing evidence receives one consolidated request and `needs information`.
 - A complete bug receives `needs investigation` and is dispatched directly to issue investigation.
@@ -39,6 +42,7 @@ It reads existing replies before asking for evidence so it does not repeat an ea
 
 Feature assessment inspects current repository capabilities, overlap, dependencies, compatibility, and risk.
 It posts a repository-aware recommendation and applies `feature assessed`, but does not make a roadmap commitment or create code.
+All issue comments and labels use the workflow's short-lived `GITHUB_TOKEN`, so agent output cannot retrigger intake; the pull-request output alone uses the dedicated CI-trigger token.
 
 ## Investigation, review, and release
 
