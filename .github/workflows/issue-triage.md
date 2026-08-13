@@ -28,7 +28,6 @@ network:
   allowed:
     - defaults
     - github
-    - github-production-user-asset-6210df.s3.amazonaws.com
 
 engine: copilot
 
