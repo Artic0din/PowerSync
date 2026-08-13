@@ -29,6 +29,14 @@ network:
 
 engine: copilot
 
+steps:
+  - name: Set up the repository Python runtime
+    uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+    with:
+      python-version-file: .python-version
+  - name: Install the pinned test runner
+    run: python -m pip install --disable-pip-version-check pytest==9.0.3
+
 pre-agent-steps:
   - name: Capture the inspected evidence revision
     env:

@@ -882,3 +882,13 @@ def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> No
     )
     assert "python -m scripts.revalidate_support_snapshot" in workflow
     assert workflow.count("target: ${{ github.event.inputs.issue_number }}") == 3
+
+
+def test_investigation_provisions_the_pinned_test_runner() -> None:
+    workflow = Path(".github/workflows/issue-investigation.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in workflow
+    assert "python-version-file: .python-version" in workflow
+    assert "pytest==9.0.3" in workflow
