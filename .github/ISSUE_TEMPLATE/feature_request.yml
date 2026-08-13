@@ -1,0 +1,60 @@
+name: Feature request
+description: Suggest an improvement to PowerSync
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for sharing your idea.
+        Explain the problem before proposing a solution so the request can be evaluated against other approaches.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Optimiser
+        - Dashboard
+        - Integration
+        - Mobile app
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you currently facing, and who is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: How do you imagine this feature working?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternative solutions you have tried.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add screenshots, examples, links, or other details that would help evaluate the request.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and feature requests for the same idea.
+          required: true
