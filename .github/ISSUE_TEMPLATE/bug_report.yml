@@ -1,0 +1,103 @@
+name: Bug report
+description: Report a reproducible problem with PowerSync
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping us improve PowerSync.
+        Search existing issues before submitting a new report and do not include passwords, tokens, or other secrets.
+
+  - type: input
+    id: version
+    attributes:
+      label: PowerSync version
+      description: Provide the exact installed version and confirm whether a newer release is available.
+      placeholder: "Installed version: 2.12.x; newer release available: yes or no"
+    validations:
+      required: true
+
+  - type: textarea
+    id: system_profile
+    attributes:
+      label: System profile
+      description: List your Home Assistant version, battery or inverter system, electricity provider, and relevant integrations.
+      placeholder: |
+        Home Assistant version:
+        Battery or inverter:
+        Electricity provider:
+        Relevant integrations:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area
+      options:
+        - Optimiser
+        - Dashboard
+        - Integration
+        - Mobile app
+        - Cloud service
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the actual result, the expected result, and when the problem occurred.
+      placeholder: |
+        Actual result:
+        Expected result:
+        Approximate date and local time:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that demonstrates the problem.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: monitoring_mode
+    attributes:
+      label: Monitoring mode
+      description: State whether PowerSync monitoring mode was enabled when the problem occurred.
+      options:
+        - Disabled
+        - Enabled
+        - Not applicable
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs and supporting evidence
+      description: Upload relevant logs and screenshots covering the time before, during, and after the problem. If unavailable, explain why.
+      placeholder: "Drag files here, paste the relevant log window, or explain why logs are unavailable."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed passwords, access tokens, API keys, and other secrets from the evidence.
+          required: true
