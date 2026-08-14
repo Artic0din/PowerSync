@@ -59,6 +59,8 @@ SECRET_PATTERNS = (
     re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    re.compile(r"(?:Exponent|Expo)PushToken\[[^\]\s]{10,}\]", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(
         r"https://(?:discord(?:app)?\.com/api/webhooks|hooks\.slack\.com/services)/\S+"
@@ -80,18 +82,29 @@ SECRET_KEY_NAME_PATTERN = re.compile(
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
-    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)$"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
+    r"authorization|set[_ -]?cookie)$"
 )
 URL_USERINFO_PATTERN = re.compile(
     r"\b[a-z][a-z0-9+.-]*://(?P<userinfo>[^/@\s]+)@", re.IGNORECASE
 )
 YAML_SECRET_SCALAR_HEADER_PATTERN = re.compile(
-    r"(?i)^(?P<indent>[ \t]*)[\"']?(?!timezone[_ -]?token[\"']?\s*:)"
+    r"(?i)^(?P<indent>[ \t]*)(?:-[ \t]+)?[\"']?"
+    r"(?!timezone[_ -]?token[\"']?\s*:)"
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
     r"[\"']?\s*:\s*(?P<value>.*)$"
+)
+COOKIE_ARRAY_HEADER_PATTERN = re.compile(
+    r"[\"']?cookies[\"']?\s*:\s*\[", re.IGNORECASE
+)
+COOKIE_VALUE_PATTERN = re.compile(
+    r"(?i)(?<![A-Z0-9_-])[\"']?value[\"']?\s*:\s*"
+    r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
+    r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n,}\]]+)"
 )
 EXACT_REDACTED_VALUE = re.compile(r"^[\"']?\[REDACTED\][\"']?\s*$", re.IGNORECASE)
 EXACT_EMPTY_VALUE = re.compile(r"^(?:null|true|false)\s*$", re.IGNORECASE)
@@ -331,6 +344,8 @@ class SupportIntake:
         for candidate in decoded_variants:
             if SupportIntake._contains_yaml_secret(candidate):
                 return True
+            if SupportIntake._contains_cookie_jar_secret(candidate):
+                return True
             if any(pattern.search(candidate) for pattern in SECRET_PATTERNS):
                 return True
             if SupportIntake._contains_escaped_keyed_secret(candidate):
@@ -381,6 +396,47 @@ class SupportIntake:
                 if not EXACT_REDACTED_VALUE.fullmatch(continuation.strip()):
                     return True
         return False
+
+    @staticmethod
+    def _contains_cookie_jar_secret(text: str) -> bool:
+        for header in COOKIE_ARRAY_HEADER_PATTERN.finditer(text):
+            array_start = header.end() - 1
+            array_end = SupportIntake._matching_json_array_end(text, array_start)
+            if array_end is None:
+                return True
+            cookie_array = text[array_start : array_end + 1]
+            if any(
+                not EXACT_REDACTED_VALUE.fullmatch(match.group("value").strip())
+                and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+                for match in COOKIE_VALUE_PATTERN.finditer(cookie_array)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _matching_json_array_end(text: str, start: int) -> int | None:
+        depth = 0
+        quote_character: str | None = None
+        escaped = False
+        for index in range(start, len(text)):
+            character = text[index]
+            if quote_character is not None:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote_character:
+                    quote_character = None
+                continue
+            if character in {'"', "'"}:
+                quote_character = character
+            elif character == "[":
+                depth += 1
+            elif character == "]":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
 
     @staticmethod
     def _contains_escaped_keyed_secret(text: str) -> bool:

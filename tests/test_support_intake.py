@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from scripts.prepare_support_snapshot import SNAPSHOT_NAME, persist_snapshot
 from scripts.revalidate_support_snapshot import revalidate_snapshot
 from scripts.support_intake import (
@@ -149,6 +151,25 @@ def test_serialized_json_credentials_fail_closed() -> None:
     client = client_for(
         r'{"payload":"{\"password\":\"hunter2\",\"status\":\"failed\"}"}'
     )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        r'{"payload":"{\"Authorization\":\"Bearer super-secret-token\"}"}',
+        '- password: "[REDACTED]"\n    correct horse\n    battery staple',
+        '{"cookies":[{"name":"session","value":"live-session-secret"}]}',
+        '{"push_tokens":{"ExponentPushToken[abcdefghijklmnopqrstuv]":{}}}',
+        '{"push_tokens":{"abcdefghijklmnopqrstuv:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345":{}}}',
+    ),
+)
+def test_additional_persisted_credentials_fail_closed(evidence: str) -> None:
+    client = client_for(evidence)
 
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
 

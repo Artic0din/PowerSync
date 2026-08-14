@@ -76,6 +76,45 @@ test("multiple credentials inside serialized JSON strings are removed", async ()
   assert.equal((result.match(/\[REDACTED\]/g) ?? []).length, 2);
 });
 
+test("authorization inside serialized JSON strings is removed", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`{"payload":"{\"Authorization\":\"Bearer super-secret-token\"}"}`,
+  );
+
+  assert.doesNotMatch(result, /super-secret-token/);
+  assert.match(result, /REDACTED/);
+});
+
+test("YAML sequence-item credential scalars are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    "- password: |\n    correct horse\n    battery staple\n- name: safe",
+  );
+
+  assert.doesNotMatch(result, /correct horse|battery staple/);
+  assert.match(result, /- password: "\[REDACTED\]"/);
+  assert.match(result, /- name: safe/);
+});
+
+test("persisted cookie-jar values are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"cookies":[{"name":"session","value":"live-session-secret"}]}',
+  );
+
+  assert.doesNotMatch(result, /live-session-secret/);
+  assert.match(result, /"value":"\[REDACTED\]"/);
+});
+
+test("push tokens are removed from object keys", async () => {
+  const expo = "ExponentPushToken[abcdefghijklmnopqrstuv]";
+  const fcm = "abcdefghijklmnopqrstuv:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+  const result = await sanitizeSupportBundle(
+    `{"push_tokens":{"${expo}":{},"${fcm}":{}}}`,
+  );
+
+  assert.doesNotMatch(result, /ExponentPushToken|abcdefghijklmnopqrstuv/);
+  assert.match(result, /REDACTED_PUSH_TOKEN/);
+});
+
 test("HTML-encoded credential syntax is decoded before redaction", async () => {
   const result = await sanitizeSupportBundle(
     "{&quot;password&quot;&#58;&quot;hunter2&quot;}",

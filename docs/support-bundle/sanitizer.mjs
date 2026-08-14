@@ -11,11 +11,13 @@ export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
   ".debug",
 ]);
 
-const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)(.*)$/i;
-const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)$/i;
+const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*(?:-[ \t]+)?)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)(.*)$/i;
+const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|authorization|set[_ -]?cookie)$/i;
 const URL_USERINFO_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi;
 const HTML_ENTITY_PATTERN = /&(?:quot|apos|amp|lt|gt|colon|#\d+|#x[0-9a-f]+);/gi;
 const NON_IDENTIFYING_PRIMITIVE_PATTERN = /^(?:null|true|false)$/i;
+const COOKIE_ARRAY_HEADER_PATTERN = /["']?cookies["']?\s*:\s*\[/gi;
+const COOKIE_VALUE_PATTERN = /((?<![A-Z0-9_-])["']?value["']?\s*:\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n,}\]]+)/gi;
 
 const SECRET_PATTERNS = [
   [
@@ -35,6 +37,8 @@ const SECRET_PATTERNS = [
   [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]"],
   [/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED_AWS_KEY]"],
   [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]"],
+  [/(?:Exponent|Expo)PushToken\[[^\]\s]{10,}\]/gi, "[REDACTED_PUSH_TOKEN]"],
+  [/\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_PUSH_TOKEN]"],
   [/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]"],
   [/https:\/\/(?:discord(?:app)?\.com\/api\/webhooks|hooks\.slack\.com\/services)\/\S+/gi, "[REDACTED_WEBHOOK]"],
 ];
@@ -118,6 +122,48 @@ function redactYamlSecretScalars(text) {
     }
   }
   return parts.join("");
+}
+
+function matchingJsonArrayEnd(text, start) {
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote !== null) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === "[") depth += 1;
+    else if (character === "]" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function redactCookieJarValues(text) {
+  let output = "";
+  let cursor = 0;
+  COOKIE_ARRAY_HEADER_PATTERN.lastIndex = 0;
+  for (
+    let header = COOKIE_ARRAY_HEADER_PATTERN.exec(text);
+    header !== null;
+    header = COOKIE_ARRAY_HEADER_PATTERN.exec(text)
+  ) {
+    const arrayStart = COOKIE_ARRAY_HEADER_PATTERN.lastIndex - 1;
+    const arrayEnd = matchingJsonArrayEnd(text, arrayStart);
+    if (arrayEnd === -1) throw new Error("Malformed persisted cookie array");
+    const cookieArray = text.slice(arrayStart, arrayEnd + 1).replace(
+      COOKIE_VALUE_PATTERN,
+      '$1"[REDACTED]"',
+    );
+    output += text.slice(cursor, arrayStart) + cookieArray;
+    cursor = arrayEnd + 1;
+    COOKIE_ARRAY_HEADER_PATTERN.lastIndex = cursor;
+  }
+  return output + text.slice(cursor);
 }
 
 function precedingBackslashes(text, quoteIndex) {
@@ -294,7 +340,9 @@ function pseudonymiseAddress(text, replacementsByLabel) {
 
 export async function sanitizeSupportBundle(input) {
   let output = redactSerializedJsonSecrets(
-    redactYamlSecretScalars(decodeHtmlEntities(input.replaceAll("\0", ""))),
+    redactCookieJarValues(
+      redactYamlSecretScalars(decodeHtmlEntities(input.replaceAll("\0", ""))),
+    ),
   );
   const replacementsByLabel = new Map();
   output = output.replace(URL_USERINFO_PATTERN, "$1");
