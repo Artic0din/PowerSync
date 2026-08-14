@@ -11,9 +11,11 @@ export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
   ".debug",
 ]);
 
-const YAML_SECRET_BLOCK_HEADER_PATTERN = /^([ \t]*)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)[|>](?:[1-9]?[+-]?|[+-]?[1-9]?)?[ \t]*(?:#.*)?$/i;
+const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)(.*)$/i;
 const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)$/i;
 const URL_USERINFO_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi;
+const HTML_ENTITY_PATTERN = /&(?:quot|apos|amp|lt|gt|colon|#\d+|#x[0-9a-f]+);/gi;
+const NON_IDENTIFYING_PRIMITIVE_PATTERN = /^(?:null|true|false)$/i;
 
 const SECRET_PATTERNS = [
   [
@@ -50,9 +52,9 @@ const IDENTIFIER_PATTERNS = [
 const IPV4_PATTERN = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
 const VERSION_CONTEXT_PATTERN = /(?:version|firmware[_ -]?version|integration[_ -]?version)\s*[:=]?\s*$/i;
 const KEYED_IDENTIFIER_PATTERNS = [
-  ["SERIAL", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?(?:id|sn|name)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["SERIAL", /((?<![A-Z0-9_-])["']?[A-Z0-9_-]*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["USER", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9_-]*user(?:name)?|[A-Z0-9_-]*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9_-]*(?:gateway[_ -]?id|device[_ -]?(?:id|sn|name)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
 ];
 const ADDRESS_IDENTIFIER_PATTERN = /((?<![A-Z0-9_-])["']?address["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi;
 const PREFIXED_IDENTIFIER_PATTERNS = [
@@ -67,24 +69,52 @@ export function isAllowedSourceFileName(fileName) {
   return ALLOWED_SOURCE_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
 }
 
-function redactYamlSecretBlocks(text) {
+function decodeHtmlEntities(text) {
+  let output = text;
+  for (let pass = 0; pass < 32; pass += 1) {
+    const decoded = output.replace(HTML_ENTITY_PATTERN, (entity) => {
+      const normalized = entity.toLowerCase();
+      const named = {
+        "&quot;": '"',
+        "&apos;": "'",
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&colon;": ":",
+      }[normalized];
+      if (named !== undefined) return named;
+      const hexadecimal = normalized.startsWith("&#x");
+      const digits = hexadecimal ? normalized.slice(3, -1) : normalized.slice(2, -1);
+      const codePoint = Number.parseInt(digits, hexadecimal ? 16 : 10);
+      return Number.isSafeInteger(codePoint)
+        && codePoint >= 0
+        && codePoint <= 0x10ffff
+        && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    });
+    if (decoded === output) return output;
+    output = decoded;
+  }
+  throw new Error("HTML entity nesting exceeds the sanitizer limit");
+}
+
+function redactYamlSecretScalars(text) {
   const parts = text.split(/(\r?\n)/);
-  let blockIndent = null;
   for (let index = 0; index < parts.length; index += 2) {
     const line = parts[index];
-    const indentation = line.match(/^[ \t]*/)?.[0] ?? "";
-    if (blockIndent !== null) {
-      if (line.trim() === "") continue;
-      if (indentation.length > blockIndent) {
-        parts[index] = `${indentation}[REDACTED]`;
-        continue;
-      }
-      blockIndent = null;
-    }
-    const header = line.match(YAML_SECRET_BLOCK_HEADER_PATTERN);
+    const header = line.match(YAML_SECRET_SCALAR_HEADER_PATTERN);
     if (header) {
-      parts[index] = `${header[1]}${header[2]}"[REDACTED]"`;
-      blockIndent = header[1].length;
+      const delimiter = header[3].trimEnd().endsWith(",") ? "," : "";
+      parts[index] = `${header[1]}${header[2]}"[REDACTED]"${delimiter}`;
+      const baseIndent = header[1].length;
+      for (let continuation = index + 2; continuation < parts.length; continuation += 2) {
+        const continuationLine = parts[continuation];
+        if (continuationLine.trim() === "") continue;
+        const indentation = continuationLine.match(/^[ \t]*/)?.[0] ?? "";
+        if (indentation.length <= baseIndent) break;
+        parts[continuation] = `${indentation}[REDACTED]`;
+      }
     }
   }
   return parts.join("");
@@ -141,8 +171,63 @@ function redactSerializedJsonSecrets(text) {
     }
     const valueClose = nextQuoteAtDepth(text, valueQuote + 1, depth);
     if (valueClose === -1) break;
-    output += `${text.slice(cursor, valueQuote + 1)}[REDACTED]${"\\".repeat(depth)}`;
-    cursor = valueClose;
+    output += `${text.slice(cursor, valueQuote + 1)}[REDACTED]${"\\".repeat(depth)}"`;
+    cursor = valueClose + 1;
+  }
+  return output + text.slice(cursor);
+}
+
+function identifierLabelForKey(key) {
+  const normalized = key.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  if (/serial(?:number)?$/.test(normalized)) return "SERIAL";
+  if (/(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|din|nmi|warpsitenumber|energysite)$/.test(normalized)) return "DEVICE";
+  if (/(?:username|login|accountnumber|accountname|accountaddress|siteaddress|concessionaddress|streetaddress|documentid|emailaddress|invoicenumber|identifier)$/.test(normalized)) return "USER";
+  return null;
+}
+
+function pseudonymiseSerializedJsonIdentifiers(text, replacementsByLabel) {
+  let output = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    const keyOpen = text.indexOf('"', cursor);
+    if (keyOpen === -1) break;
+    const depth = precedingBackslashes(text, keyOpen);
+    if (depth === 0 || depth % 2 === 0) {
+      output += text.slice(cursor, keyOpen + 1);
+      cursor = keyOpen + 1;
+      continue;
+    }
+    const keyClose = nextQuoteAtDepth(text, keyOpen + 1, depth);
+    if (keyClose === -1) break;
+    const key = text.slice(keyOpen + 1, keyClose - depth);
+    let valueOpen = keyClose + 1;
+    while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
+    if (text[valueOpen] !== ":" && text[valueOpen] !== "=") {
+      output += text.slice(cursor, keyClose + 1);
+      cursor = keyClose + 1;
+      continue;
+    }
+    valueOpen += 1;
+    while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
+    const valueQuote = text.indexOf('"', valueOpen);
+    const valueDepth = valueQuote !== -1
+      && /^\\+$/.test(text.slice(valueOpen, valueQuote))
+      ? precedingBackslashes(text, valueQuote)
+      : 0;
+    const label = identifierLabelForKey(key);
+    if (label === null || valueDepth !== depth) {
+      output += text.slice(cursor, keyClose + 1);
+      cursor = keyClose + 1;
+      continue;
+    }
+    const valueClose = nextQuoteAtDepth(text, valueQuote + 1, depth);
+    if (valueClose === -1) break;
+    const value = text.slice(valueQuote + 1, valueClose - depth);
+    const replacement = /^\[(?:SERIAL|USER|DEVICE)_\d+\]$/i.test(value)
+      ? value
+      : nextReplacement(label, value, replacementsByLabel);
+    output += `${text.slice(cursor, valueQuote + 1)}${replacement}${"\\".repeat(depth)}"`;
+    cursor = valueClose + 1;
   }
   return output + text.slice(cursor);
 }
@@ -187,6 +272,9 @@ function pseudonymiseKeyed(text, label, pattern, replacementsByLabel) {
     const quote = rawValue[0];
     const isQuoted = (quote === '"' || quote === "'") && rawValue.endsWith(quote);
     const value = isQuoted ? rawValue.slice(1, -1) : rawValue;
+    if (!isQuoted && NON_IDENTIFYING_PRIMITIVE_PATTERN.test(value.trim())) {
+      return `${prefix}${rawValue}`;
+    }
     const replacement = nextReplacement(label, value, replacementsByLabel);
     return isQuoted ? `${prefix}${quote}${replacement}${quote}` : `${prefix}${replacement}`;
   });
@@ -206,13 +294,14 @@ function pseudonymiseAddress(text, replacementsByLabel) {
 
 export async function sanitizeSupportBundle(input) {
   let output = redactSerializedJsonSecrets(
-    redactYamlSecretBlocks(input.replaceAll("\0", "")),
+    redactYamlSecretScalars(decodeHtmlEntities(input.replaceAll("\0", ""))),
   );
   const replacementsByLabel = new Map();
   output = output.replace(URL_USERINFO_PATTERN, "$1");
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     output = output.replace(pattern, replacement);
   }
+  output = pseudonymiseSerializedJsonIdentifiers(output, replacementsByLabel);
   for (const [label, pattern] of IDENTIFIER_PATTERNS) {
     output = await pseudonymise(output, label, pattern, replacementsByLabel);
   }

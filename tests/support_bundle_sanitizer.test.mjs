@@ -38,6 +38,16 @@ test("quoted JSON credentials are removed", async () => {
   assert.match(result, /"password": "\[REDACTED\]"/);
 });
 
+test("pretty-printed JSON remains valid after credential redaction", async () => {
+  const result = await sanitizeSupportBundle(
+    '{\n  "password": "correct horse",\n  "status": "failed"\n}',
+  );
+  const data = JSON.parse(result.slice(result.indexOf("\n") + 1));
+
+  assert.equal(data.password, "[REDACTED]");
+  assert.equal(data.status, "failed");
+});
+
 test("escaped quotes cannot expose a credential suffix", async () => {
   const result = await sanitizeSupportBundle(
     String.raw`{"password":"abc\"def ghi","next":"preserved"}`,
@@ -55,6 +65,24 @@ test("credentials inside serialized JSON strings are removed", async () => {
   assert.doesNotMatch(result, /hunter2/);
   assert.match(result, /\\"password\\":\\"\[REDACTED\]\\"/);
   assert.match(result, /\\"status\\":\\"failed\\"/);
+});
+
+test("multiple credentials inside serialized JSON strings are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`{"payload":"{\"password\":\"hunter2\",\"apiKey\":\"secret-key\"}"}`,
+  );
+
+  assert.doesNotMatch(result, /hunter2|secret-key/);
+  assert.equal((result.match(/\[REDACTED\]/g) ?? []).length, 2);
+});
+
+test("HTML-encoded credential syntax is decoded before redaction", async () => {
+  const result = await sanitizeSupportBundle(
+    "{&quot;password&quot;&#58;&quot;hunter2&quot;}",
+  );
+
+  assert.doesNotMatch(result, /hunter2|&quot;|&#58;/);
+  assert.match(result, /"password":"\[REDACTED\]"/);
 });
 
 test("URL user-info credentials are removed", async () => {
@@ -83,6 +111,15 @@ test("YAML block scalar credentials are removed completely", async () => {
   assert.doesNotMatch(result, /correct|horse|battery|staple|secret suffix/);
   assert.match(result, /next: preserved/);
   assert.match(result, /status: ready/);
+});
+
+test("multiline YAML credential scalars are removed completely", async () => {
+  const result = await sanitizeSupportBundle(
+    'password: "correct horse\n  battery staple"\nnext: preserved',
+  );
+
+  assert.doesNotMatch(result, /correct|horse|battery|staple/);
+  assert.match(result, /next: preserved/);
 });
 
 test("fine-grained GitHub tokens are removed", async () => {
@@ -161,6 +198,16 @@ test("unquoted JSON primitives do not consume later fields", async () => {
   assert.match(result, /"status":500/);
 });
 
+test("nullable identifiers remain valid JSON primitives", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"username":null,"status":"failed"}',
+  );
+  const data = JSON.parse(result.slice(result.indexOf("\n") + 1));
+
+  assert.equal(data.username, null);
+  assert.equal(data.status, "failed");
+});
+
 test("quoted PowerSync identifiers are pseudonymised", async () => {
   const result = await sanitizeSupportBundle(
     '{"serial_number": "TG123456789", "serialNumber": "TG123456789", "username": "alice"}',
@@ -193,6 +240,25 @@ test("namespaced and customer identifiers are pseudonymised", async () => {
     /amber-site|tesla-site|sig-device|customer-account|1 Main Street/,
   );
   assert.equal((result.match(/\[(?:USER|DEVICE)_\d+\]/g) ?? []).length, 5);
+});
+
+test("namespaced camelCase identifiers are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"bmsSerialNumber":"BMS-123","packageSerialNumber":"PACK-456","userDeviceId":"DEVICE-789"}',
+  );
+
+  assert.doesNotMatch(result, /BMS-123|PACK-456|DEVICE-789/);
+  assert.equal((result.match(/\[(?:SERIAL|DEVICE)_\d+\]/g) ?? []).length, 3);
+});
+
+test("identifiers inside serialized JSON strings are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`{"payload":"{\"username\":\"Alice Smith\",\"device_id\":\"abc-123\"}"}`,
+  );
+
+  assert.doesNotMatch(result, /Alice Smith|abc-123/);
+  assert.match(result, /\\"username\\":\\"\[USER_1\]\\"/);
+  assert.match(result, /\\"device_id\\":\\"\[DEVICE_1\]\\"/);
 });
 
 test("repository sensitive identifier keys are pseudonymised", async () => {

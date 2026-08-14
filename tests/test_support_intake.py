@@ -156,6 +156,15 @@ def test_serialized_json_credentials_fail_closed() -> None:
     assert "possible credential in issue text" in decision.reasons
 
 
+def test_html_encoded_credentials_fail_closed() -> None:
+    client = client_for("{&quot;password&quot;&#58;&quot;hunter2&quot;}")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
 def test_redacted_serialized_json_credential_is_allowed() -> None:
     client = client_for(
         r'{"payload":"{\"password\":\"[REDACTED]\",\"status\":\"failed\"}"}'
@@ -374,6 +383,29 @@ def test_repository_sensitive_identifier_keys_fail_closed() -> None:
     assert "personal identifier in issue text" in decision.reasons
 
 
+def test_namespaced_camel_case_identifier_keys_fail_closed() -> None:
+    client = client_for(
+        '{"bmsSerialNumber":"BMS-123","packageSerialNumber":"PACK-456",'
+        '"userDeviceId":"DEVICE-789"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
+def test_serialized_json_identifiers_fail_closed() -> None:
+    client = client_for(
+        r'{"payload":"{\"username\":\"Alice Smith\",\"device_id\":\"abc-123\"}"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
 def test_yaml_block_scalar_secret_fails_closed() -> None:
     client = client_for("password: |\n  correct horse\n  battery staple\nnext: preserved")
 
@@ -381,6 +413,23 @@ def test_yaml_block_scalar_secret_fails_closed() -> None:
 
     assert decision.safe is False
     assert "possible credential in issue text" in decision.reasons
+
+
+def test_redacted_yaml_header_with_raw_continuation_fails_closed() -> None:
+    client = client_for('password: "[REDACTED]"\n  battery staple\nnext: preserved')
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+def test_fully_redacted_yaml_continuation_is_allowed() -> None:
+    client = client_for('password: "[REDACTED]"\n  [REDACTED]\nnext: preserved')
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
 
 
 def test_numeric_modbus_address_is_not_treated_as_an_identifier() -> None:
@@ -570,6 +619,14 @@ def test_bare_and_html_attachment_urls_are_inspected() -> None:
 
     assert decision.safe is False
     assert "attachment 2 is not an allowed text evidence format" in decision.reasons
+
+
+def test_malformed_url_candidate_does_not_abort_intake() -> None:
+    client = client_for("https://[broken/user-attachments/x.log")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
 
 
 def test_unmarked_or_binary_attachment_fails_closed() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -84,13 +85,13 @@ SECRET_KEY_NAME_PATTERN = re.compile(
 URL_USERINFO_PATTERN = re.compile(
     r"\b[a-z][a-z0-9+.-]*://(?P<userinfo>[^/@\s]+)@", re.IGNORECASE
 )
-YAML_SECRET_BLOCK_HEADER_PATTERN = re.compile(
-    r"(?im)^[ \t]*[\"']?(?!timezone[_ -]?token[\"']?\s*:)"
+YAML_SECRET_SCALAR_HEADER_PATTERN = re.compile(
+    r"(?i)^(?P<indent>[ \t]*)[\"']?(?!timezone[_ -]?token[\"']?\s*:)"
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
-    r"[\"']?\s*:\s*[|>](?:[1-9]?[+-]?|[+-]?[1-9]?)?[ \t]*(?:#.*)?$"
+    r"[\"']?\s*:\s*(?P<value>.*)$"
 )
 EXACT_REDACTED_VALUE = re.compile(r"^[\"']?\[REDACTED\][\"']?\s*$", re.IGNORECASE)
 EXACT_EMPTY_VALUE = re.compile(r"^(?:null|true|false)\s*$", re.IGNORECASE)
@@ -139,11 +140,11 @@ IDENTIFIER_PATTERNS = (
 )
 KEYED_IDENTIFIER_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>"
-    r"(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?|"
-    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?(?:id|sn|name)|"
-    r"(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|"
-    r"(?:[A-Z0-9]+[_ -]+)*gateway[_ -]?id|"
-    r"(?:[A-Z0-9]+[_ -]+)*site[_ -]?(?:id|identifier)|din|nmi|"
+    r"[A-Z0-9_-]*serial(?:[_ -]?number)?|"
+    r"[A-Z0-9_-]*device[_ -]?(?:id|sn|name)|"
+    r"[A-Z0-9_-]*user(?:name)?|[A-Z0-9_-]*login|"
+    r"[A-Z0-9_-]*gateway[_ -]?id|"
+    r"[A-Z0-9_-]*site[_ -]?(?:id|identifier)|din|nmi|"
     r"warp[_ -]?site[_ -]?number|energy[_ -]?site|"
     r"account[_ -]?(?:number|name|address)|site[_ -]?address|"
     r"concession[_ -]?address|street[_ -]?address|document[_ -]?id|"
@@ -324,19 +325,62 @@ class SupportIntake:
 
     @staticmethod
     def _contains_secret(text: str) -> bool:
-        if YAML_SECRET_BLOCK_HEADER_PATTERN.search(text):
+        decoded_variants, exhausted = SupportIntake._html_decoded_variants(text)
+        if exhausted:
             return True
-        if any(pattern.search(text) for pattern in SECRET_PATTERNS):
-            return True
-        if SupportIntake._contains_escaped_keyed_secret(text):
-            return True
-        if URL_USERINFO_PATTERN.search(text):
-            return True
-        return any(
-            not EXACT_REDACTED_VALUE.fullmatch(match.group("value").strip())
-            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
-            for match in KEYED_SECRET_PATTERN.finditer(text)
-        )
+        for candidate in decoded_variants:
+            if SupportIntake._contains_yaml_secret(candidate):
+                return True
+            if any(pattern.search(candidate) for pattern in SECRET_PATTERNS):
+                return True
+            if SupportIntake._contains_escaped_keyed_secret(candidate):
+                return True
+            if URL_USERINFO_PATTERN.search(candidate):
+                return True
+            if any(
+                not EXACT_REDACTED_VALUE.fullmatch(match.group("value").strip())
+                and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+                for match in KEYED_SECRET_PATTERN.finditer(candidate)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _html_decoded_variants(text: str) -> tuple[tuple[str, ...], bool]:
+        variants = [text]
+        for _pass in range(32):
+            decoded = html.unescape(variants[-1])
+            if decoded == variants[-1]:
+                return tuple(variants), False
+            variants.append(decoded)
+        return tuple(variants), html.unescape(variants[-1]) != variants[-1]
+
+    @staticmethod
+    def _contains_yaml_secret(text: str) -> bool:
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            header = YAML_SECRET_SCALAR_HEADER_PATTERN.fullmatch(line)
+            if header is None:
+                continue
+            value = header.group("value").strip()
+            if value.endswith(","):
+                value = value[:-1].rstrip()
+            if not EXACT_REDACTED_VALUE.fullmatch(
+                value
+            ) and not EXACT_EMPTY_VALUE.fullmatch(value):
+                return True
+            base_indent = len(header.group("indent"))
+            for continuation in lines[index + 1 :]:
+                if not continuation.strip():
+                    continue
+                indentation = len(continuation) - len(
+                    continuation.lstrip(" \t")
+                )
+                if indentation <= base_indent:
+                    break
+                if not EXACT_REDACTED_VALUE.fullmatch(continuation.strip()):
+                    return True
+        return False
 
     @staticmethod
     def _contains_escaped_keyed_secret(text: str) -> bool:
@@ -412,36 +456,113 @@ class SupportIntake:
 
     @staticmethod
     def _contains_identifier(text: str) -> bool:
-        if any(pattern.search(text) for pattern in IDENTIFIER_PATTERNS):
-            return True
-        if any(pattern.search(text) for pattern in PREFIXED_IDENTIFIER_PATTERNS):
-            return True
-        if any(
-            not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
-            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
-            for match in KEYED_IDENTIFIER_PATTERN.finditer(text)
+        decoded_variants, _exhausted = SupportIntake._html_decoded_variants(text)
+        for candidate in decoded_variants:
+            if any(pattern.search(candidate) for pattern in IDENTIFIER_PATTERNS):
+                return True
+            if any(
+                pattern.search(candidate) for pattern in PREFIXED_IDENTIFIER_PATTERNS
+            ):
+                return True
+            if SupportIntake._contains_escaped_keyed_identifier(candidate):
+                return True
+            if any(
+                not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+                and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+                for match in KEYED_IDENTIFIER_PATTERN.finditer(candidate)
+            ):
+                return True
+            if any(
+                not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+                and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+                for match in LOG_DEVICE_IDENTIFIER_PATTERN.finditer(candidate)
+            ):
+                return True
+            if any(
+                not match.group("value").strip().isdigit()
+                and not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+                and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+                for match in ADDRESS_IDENTIFIER_PATTERN.finditer(candidate)
+            ):
+                return True
+            if any(
+                VERSION_CONTEXT_PATTERN.search(
+                    candidate[max(0, match.start() - 32) : match.start()]
+                )
+                is None
+                for match in IPV4_PATTERN.finditer(candidate)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _identifier_label(key: str) -> str | None:
+        normalized = re.sub(r"[^A-Za-z0-9]", "", key).casefold()
+        if re.search(r"serial(?:number)?$", normalized):
+            return "SERIAL"
+        if re.search(
+            r"(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|"
+            r"din|nmi|warpsitenumber|energysite)$",
+            normalized,
         ):
-            return True
-        if any(
-            not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
-            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
-            for match in LOG_DEVICE_IDENTIFIER_PATTERN.finditer(text)
+            return "DEVICE"
+        if re.search(
+            r"(?:username|login|accountnumber|accountname|accountaddress|"
+            r"siteaddress|concessionaddress|streetaddress|documentid|"
+            r"emailaddress|invoicenumber|identifier)$",
+            normalized,
         ):
-            return True
-        if any(
-            not match.group("value").strip().isdigit()
-            and not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
-            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
-            for match in ADDRESS_IDENTIFIER_PATTERN.finditer(text)
-        ):
-            return True
-        return any(
-            VERSION_CONTEXT_PATTERN.search(
-                text[max(0, match.start() - 32) : match.start()]
+            return "USER"
+        return None
+
+    @staticmethod
+    def _contains_escaped_keyed_identifier(text: str) -> bool:
+        cursor = 0
+        while cursor < len(text):
+            key_open = text.find('"', cursor)
+            if key_open == -1:
+                return False
+            depth = SupportIntake._preceding_backslashes(text, key_open)
+            if depth == 0 or depth % 2 == 0:
+                cursor = key_open + 1
+                continue
+            key_close = SupportIntake._next_quote_at_depth(
+                text, key_open + 1, depth
             )
-            is None
-            for match in IPV4_PATTERN.finditer(text)
-        )
+            if key_close == -1:
+                return False
+            key = text[key_open + 1 : key_close - depth]
+            value_open = key_close + 1
+            while value_open < len(text) and text[value_open].isspace():
+                value_open += 1
+            if value_open >= len(text) or text[value_open] not in ":=":
+                cursor = key_close + 1
+                continue
+            value_open += 1
+            while value_open < len(text) and text[value_open].isspace():
+                value_open += 1
+            value_quote = text.find('"', value_open)
+            value_prefix = text[value_open:value_quote] if value_quote != -1 else ""
+            value_depth = (
+                SupportIntake._preceding_backslashes(text, value_quote)
+                if value_quote != -1
+                and value_prefix
+                and set(value_prefix) == {"\\"}
+                else 0
+            )
+            if SupportIntake._identifier_label(key) is None or value_depth != depth:
+                cursor = key_close + 1
+                continue
+            value_close = SupportIntake._next_quote_at_depth(
+                text, value_quote + 1, depth
+            )
+            if value_close == -1:
+                return True
+            value = text[value_quote + 1 : value_close - depth]
+            if not EXACT_IDENTIFIER_VALUE.fullmatch(value):
+                return True
+            cursor = value_close + 1
+        return False
 
     def _inspect_attachments(
         self, text: str
@@ -521,10 +642,14 @@ class SupportIntake:
 
     @staticmethod
     def _is_attachment_url(url: str) -> bool:
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+        except ValueError:
+            return False
         return (
             parsed.scheme.casefold() == "https"
-            and (parsed.hostname or "").casefold() == "github.com"
+            and (hostname or "").casefold() == "github.com"
             and parsed.path.startswith("/user-attachments/")
         )
 
