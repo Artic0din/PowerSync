@@ -9,6 +9,7 @@ import pytest
 from scripts.prepare_automated_release import (
     prepare_release_files,
     select_pull_request,
+    validate_support_reference_evidence,
 )
 
 
@@ -148,3 +149,23 @@ def test_queue_rejects_ambiguous_issue_references(tmp_path: Path, title: str) ->
 
     with pytest.raises(ValueError, match="exactly one Refs"):
         prepare_release_files(base_manifest, manifest, release_notes, title)
+
+
+def test_support_reference_must_be_preserved_in_a_commit_message() -> None:
+    with pytest.raises(ValueError, match="Refs #42"):
+        validate_support_reference_evidence(
+            "Root-cause fix.\n\nRefs #42",
+            ("fix(power): repair schedule",),
+        )
+
+    validate_support_reference_evidence(
+        "Root-cause fix.\n\nRefs #42",
+        ("fix(power): repair schedule\n\nRefs #42",),
+    )
+
+
+def test_commented_support_reference_does_not_require_merge_evidence() -> None:
+    validate_support_reference_evidence(
+        "No support issue.\n<!-- Refs #42",
+        ("docs: update support guidance",),
+    )

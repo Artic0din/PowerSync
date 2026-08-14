@@ -65,6 +65,7 @@ Agent-created pull requests receive `automation`.
 A global deterministic queue selects only one same-repository, non-draft automation pull request at a time.
 Immediately before it adds `merge-queue`, it reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
 That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
+Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and a commit message; required validation rejects a mutable-only reference before merge.
 Graphite and required repository checks decide when the pull request can merge.
 The existing version-bump workflow creates the release after merge.
 
