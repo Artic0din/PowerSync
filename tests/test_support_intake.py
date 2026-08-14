@@ -328,6 +328,48 @@ def test_repository_sensitive_identifier_keys_fail_closed() -> None:
     assert "personal identifier in issue text" in decision.reasons
 
 
+def test_yaml_block_scalar_secret_fails_closed() -> None:
+    client = client_for("password: |\n  correct horse\n  battery staple\nnext: preserved")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+def test_numeric_modbus_address_is_not_treated_as_an_identifier() -> None:
+    client = client_for('{"address":12345,"function":4}')
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
+
+
+def test_device_display_names_fail_closed() -> None:
+    client = client_for(
+        '{"device_name":"Alice\'s iPhone"}\n'
+        "Token entry - platform=ios, device=Alice's iPhone, "
+        "registered_at=2026-08-13T10:00:00"
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
+def test_pseudonymised_device_display_names_are_allowed() -> None:
+    client = client_for(
+        '{"device_name":"[DEVICE_1]"}\n'
+        "Token entry - platform=ios, device=[DEVICE_1], "
+        "registered_at=2026-08-13T10:00:00"
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
+
+
 def test_dotted_mac_address_fails_closed() -> None:
     client = client_for("adapter aabb.ccdd.eeff disconnected")
 
@@ -423,6 +465,19 @@ def test_sanitised_text_attachment_is_allowed() -> None:
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
 
     assert decision.safe is True
+
+
+def test_csv_attachment_is_rejected() -> None:
+    url = "https://github.com/user-attachments/files/123/evidence.csv"
+    client = client_for(f"[evidence.csv]({url})")
+    client.downloads[url] = (
+        b"PowerSync sanitised support bundle v1\nusername,password\nalice,secret\n"
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "attachment 1 is not an allowed text evidence format" in decision.reasons
 
 
 def test_attachment_scheme_and_hostname_are_case_insensitive() -> None:

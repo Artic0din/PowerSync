@@ -26,8 +26,6 @@ ALLOWED_EXTENSIONS = frozenset(
         ".jsonc",
         ".yaml",
         ".yml",
-        ".csv",
-        ".tsv",
         ".md",
         ".debug",
     }
@@ -75,6 +73,14 @@ KEYED_SECRET_PATTERN = re.compile(
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)"
+)
+YAML_SECRET_BLOCK_HEADER_PATTERN = re.compile(
+    r"(?im)^[ \t]*[\"']?(?!timezone[_ -]?token[\"']?\s*:)"
+    r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
+    r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
+    r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
+    r"[\"']?\s*:\s*[|>](?:[1-9]?[+-]?|[+-]?[1-9]?)?[ \t]*(?:#.*)?$"
 )
 EXACT_REDACTED_VALUE = re.compile(r"^[\"']?\[REDACTED\][\"']?\s*$", re.IGNORECASE)
 EXACT_EMPTY_VALUE = re.compile(r"^(?:null|true|false)\s*$", re.IGNORECASE)
@@ -124,18 +130,28 @@ IDENTIFIER_PATTERNS = (
 KEYED_IDENTIFIER_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>"
     r"(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?|"
-    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?(?:id|sn)|"
+    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?(?:id|sn|name)|"
     r"(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|"
     r"(?:[A-Z0-9]+[_ -]+)*gateway[_ -]?id|"
     r"(?:[A-Z0-9]+[_ -]+)*site[_ -]?(?:id|identifier)|din|nmi|"
     r"warp[_ -]?site[_ -]?number|energy[_ -]?site|"
     r"account[_ -]?(?:number|name|address)|site[_ -]?address|"
     r"concession[_ -]?address|street[_ -]?address|document[_ -]?id|"
-    r"email[_ -]?address|invoice[_ -]?number|identifier|address)"
+    r"email[_ -]?address|invoice[_ -]?number|identifier)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)"
+)
+ADDRESS_IDENTIFIER_PATTERN = re.compile(
+    r"(?i)(?<![A-Z0-9_-])[\"']?address[\"']?\s*[:=]\s*"
+    r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
+    r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)"
+)
+LOG_DEVICE_IDENTIFIER_PATTERN = re.compile(
+    r"\bdevice\s*=\s*(?P<value>.*?)(?=,\s*[A-Z0-9_]+\s*=|$)",
+    re.IGNORECASE | re.MULTILINE,
 )
 PREFIXED_IDENTIFIER_PATTERNS = (
     re.compile(r"\bfor site\s+[A-Za-z0-9-]{15,}", re.IGNORECASE),
@@ -298,6 +314,8 @@ class SupportIntake:
 
     @staticmethod
     def _contains_secret(text: str) -> bool:
+        if YAML_SECRET_BLOCK_HEADER_PATTERN.search(text):
+            return True
         if any(pattern.search(text) for pattern in SECRET_PATTERNS):
             return True
         return any(
@@ -316,6 +334,19 @@ class SupportIntake:
             not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
             and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
             for match in KEYED_IDENTIFIER_PATTERN.finditer(text)
+        ):
+            return True
+        if any(
+            not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+            for match in LOG_DEVICE_IDENTIFIER_PATTERN.finditer(text)
+        ):
+            return True
+        if any(
+            not match.group("value").strip().isdigit()
+            and not EXACT_IDENTIFIER_VALUE.fullmatch(match.group("value").strip())
+            and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
+            for match in ADDRESS_IDENTIFIER_PATTERN.finditer(text)
         ):
             return True
         return any(

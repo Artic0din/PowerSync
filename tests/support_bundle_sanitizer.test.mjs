@@ -5,6 +5,7 @@ import {
   MAX_FILE_BYTES,
   SANITISED_MARKER,
   decodeUtf8SupportFile,
+  isAllowedSourceFileName,
   sanitizeSupportBundle,
 } from "../docs/support-bundle/sanitizer.mjs";
 
@@ -53,6 +54,16 @@ test("unquoted credentials consume the complete line", async () => {
 
   assert.doesNotMatch(result, /correct|horse|battery|staple/);
   assert.match(result, /next: preserved/);
+});
+
+test("YAML block scalar credentials are removed completely", async () => {
+  const result = await sanitizeSupportBundle(
+    "password: |\n  correct horse\n  battery staple\nnext: preserved\napi_key: >-\n  secret suffix\nstatus: ready",
+  );
+
+  assert.doesNotMatch(result, /correct|horse|battery|staple|secret suffix/);
+  assert.match(result, /next: preserved/);
+  assert.match(result, /status: ready/);
 });
 
 test("fine-grained GitHub tokens are removed", async () => {
@@ -174,6 +185,32 @@ test("repository sensitive identifier keys are pseudonymised", async () => {
     result,
     /E1234567890|Alice Smith|site-secret|device-secret/,
   );
+});
+
+test("numeric Modbus addresses remain operational context", async () => {
+  const result = await sanitizeSupportBundle('{"address":12345,"function":4}');
+
+  assert.match(result, /"address":12345/);
+  assert.deepEqual(
+    JSON.parse(result.slice(result.indexOf("\n") + 1)),
+    { address: 12345, function: 4 },
+  );
+});
+
+test("device display names are pseudonymised in keyed data and token logs", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"device_name":"Alice\'s iPhone"}\nToken entry - platform=ios, device=Alice\'s iPhone, registered_at=2026-08-13T10:00:00',
+  );
+
+  assert.doesNotMatch(result, /Alice|iPhone/);
+  assert.match(result, /"device_name":"\[DEVICE_1\]"/);
+  assert.match(result, /platform=ios, device=\[DEVICE_1\], registered_at=2026-08-13T10:00:00/);
+});
+
+test("only bounded supported source file extensions are accepted", () => {
+  assert.equal(isAllowedSourceFileName("powersync.log"), true);
+  assert.equal(isAllowedSourceFileName("evidence.csv"), false);
+  assert.equal(isAllowedSourceFileName("evidence.tsv"), false);
 });
 
 test("dotted MAC addresses are pseudonymised", async () => {

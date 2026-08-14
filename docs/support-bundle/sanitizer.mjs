@@ -1,5 +1,17 @@
 export const SANITISED_MARKER = "PowerSync sanitised support bundle v1";
 export const MAX_FILE_BYTES = 512 * 1024;
+export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
+  ".txt",
+  ".log",
+  ".json",
+  ".jsonc",
+  ".yaml",
+  ".yml",
+  ".md",
+  ".debug",
+]);
+
+const YAML_SECRET_BLOCK_HEADER_PATTERN = /^([ \t]*)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)[|>](?:[1-9]?[+-]?|[+-]?[1-9]?)?[ \t]*(?:#.*)?$/i;
 
 const SECRET_PATTERNS = [
   [
@@ -37,14 +49,44 @@ const IPV4_PATTERN = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\
 const VERSION_CONTEXT_PATTERN = /(?:version|firmware[_ -]?version|integration[_ -]?version)\s*[:=]?\s*$/i;
 const KEYED_IDENTIFIER_PATTERNS = [
   ["SERIAL", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier|address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?(?:id|sn)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?(?:id|sn|name)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
 ];
+const ADDRESS_IDENTIFIER_PATTERN = /((?<![A-Z0-9_-])["']?address["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi;
 const PREFIXED_IDENTIFIER_PATTERNS = [
   ["DEVICE", /(\bfor site\s+)([A-Za-z0-9-]{15,})/gi],
   ["DEVICE", /(\bsite\s+)(\d{13,})/gi],
   ["DEVICE", /(\benergy_sites?[/\s:=]+)(\d{13,})/gi],
+  ["DEVICE", /(\bdevice\s*=\s*)(.*?)(?=,\s*[A-Z0-9_]+\s*=|$)/gim],
 ];
+
+export function isAllowedSourceFileName(fileName) {
+  const lowerName = fileName.toLowerCase();
+  return ALLOWED_SOURCE_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+}
+
+function redactYamlSecretBlocks(text) {
+  const parts = text.split(/(\r?\n)/);
+  let blockIndent = null;
+  for (let index = 0; index < parts.length; index += 2) {
+    const line = parts[index];
+    const indentation = line.match(/^[ \t]*/)?.[0] ?? "";
+    if (blockIndent !== null) {
+      if (line.trim() === "") continue;
+      if (indentation.length > blockIndent) {
+        parts[index] = `${indentation}[REDACTED]`;
+        continue;
+      }
+      blockIndent = null;
+    }
+    const header = line.match(YAML_SECRET_BLOCK_HEADER_PATTERN);
+    if (header) {
+      parts[index] = `${header[1]}${header[2]}"[REDACTED]"`;
+      blockIndent = header[1].length;
+    }
+  }
+  return parts.join("");
+}
 
 async function pseudonymise(text, label, pattern, replacementsByLabel) {
   const values = [...new Set(text.match(pattern) ?? [])];
@@ -91,8 +133,20 @@ function pseudonymiseKeyed(text, label, pattern, replacementsByLabel) {
   });
 }
 
+function pseudonymiseAddress(text, replacementsByLabel) {
+  return text.replace(ADDRESS_IDENTIFIER_PATTERN, (_match, prefix, rawValue) => {
+    const trimmedValue = rawValue.trim();
+    if (/^\d+$/.test(trimmedValue)) return `${prefix}${rawValue}`;
+    const quote = trimmedValue[0];
+    const isQuoted = (quote === '"' || quote === "'") && trimmedValue.endsWith(quote);
+    const value = isQuoted ? trimmedValue.slice(1, -1) : trimmedValue;
+    const replacement = nextReplacement("USER", value, replacementsByLabel);
+    return isQuoted ? `${prefix}${quote}${replacement}${quote}` : `${prefix}${replacement}`;
+  });
+}
+
 export async function sanitizeSupportBundle(input) {
-  let output = input.replaceAll("\0", "");
+  let output = redactYamlSecretBlocks(input.replaceAll("\0", ""));
   const replacementsByLabel = new Map();
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     output = output.replace(pattern, replacement);
@@ -104,6 +158,7 @@ export async function sanitizeSupportBundle(input) {
   for (const [label, pattern] of KEYED_IDENTIFIER_PATTERNS) {
     output = pseudonymiseKeyed(output, label, pattern, replacementsByLabel);
   }
+  output = pseudonymiseAddress(output, replacementsByLabel);
   for (const [label, pattern] of PREFIXED_IDENTIFIER_PATTERNS) {
     output = pseudonymiseKeyed(output, label, pattern, replacementsByLabel);
   }
@@ -133,8 +188,11 @@ if (typeof document !== "undefined") {
 
   fileInput.addEventListener("change", () => {
     const file = fileInput.files[0];
-    createButton.disabled = !file || file.size > MAX_FILE_BYTES;
-    status.textContent = file?.size > MAX_FILE_BYTES
+    const unsupported = file && !isAllowedSourceFileName(file.name);
+    createButton.disabled = !file || file.size > MAX_FILE_BYTES || unsupported;
+    status.textContent = unsupported
+      ? "Choose a supported text log file. CSV and TSV exports are not accepted."
+      : file?.size > MAX_FILE_BYTES
       ? "That file exceeds the 512 KB limit. Export a smaller relevant log window."
       : file
         ? "Ready to create a local sanitised copy."
@@ -143,7 +201,7 @@ if (typeof document !== "undefined") {
 
   createButton.addEventListener("click", async () => {
     const file = fileInput.files[0];
-    if (!file || file.size > MAX_FILE_BYTES) return;
+    if (!file || file.size > MAX_FILE_BYTES || !isAllowedSourceFileName(file.name)) return;
     createButton.disabled = true;
     status.textContent = "Sanitising locally…";
     try {
