@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 
 from scripts.support_issue_state import SupportIssueAutomation
-from scripts.support_release_delivery import ReleaseDelivery, delivery_marker
+from scripts.support_release_delivery import (
+    ReleaseDelivery,
+    delivery_marker,
+    delivery_pending_marker,
+)
 
 
 @dataclass
@@ -119,6 +123,14 @@ def delivery_client(check_runs: list[dict[str, Any]] | None = None) -> FakeGitHu
 
 def test_published_release_records_linked_verified_delivery() -> None:
     client = delivery_client()
+    pull_url = "https://github.com/Plaintext-Lab/PowerSync/pull/90"
+    release_url = "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100"
+    marker = delivery_marker(pull_url, release_url)
+    pending_marker = delivery_pending_marker(pull_url, release_url)
+    stable_body = (
+        f"{marker}\nFix delivered in {pull_url} and released as {release_url}. "
+        "Waiting for the reporter to confirm with `/powersync solved`."
+    )
 
     result = SupportIssueAutomation(client).handle(release_event())
 
@@ -139,15 +151,13 @@ def test_published_release_records_linked_verified_delivery() -> None:
             "POST",
             f"/repos/{REPOSITORY}/issues/42/comments",
             {
-                "body": delivery_marker(
-                    "https://github.com/Plaintext-Lab/PowerSync/pull/90",
-                    "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100",
-                )
-                + "\nFix delivered in "
-                "https://github.com/Plaintext-Lab/PowerSync/pull/90 and released as "
-                "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100. "
-                "Waiting for the reporter to confirm with `/powersync solved`."
+                "body": f"{marker}\n{pending_marker}\n{stable_body.splitlines()[1]}"
             },
+        ),
+        (
+            "PATCH",
+            f"/repos/{REPOSITORY}/issues/comments/987",
+            {"body": stable_body},
         ),
     ]
 
@@ -365,6 +375,38 @@ def test_workflow_marker_deduplicates_the_same_delivery() -> None:
     assert all(method == "GET" for method, _, _ in client.requests)
 
 
+def test_open_rerun_finalizes_a_pending_delivery_comment() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    pull_url = "https://github.com/Plaintext-Lab/PowerSync/pull/90"
+    release_url = str(RELEASE["html_url"])
+    marker = delivery_marker(pull_url, release_url)
+    pending_marker = delivery_pending_marker(pull_url, release_url)
+    client.responses[("GET", issue_path)]["labels"] = [
+        {"name": "awaiting confirmation"}
+    ]
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {
+            "id": 987,
+            "body": f"{marker}\n{pending_marker}\nWaiting",
+            "user": {"login": "github-actions[bot]"},
+        }
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert (
+        "PATCH",
+        f"/repos/{REPOSITORY}/issues/comments/987",
+        {
+            "body": f"{marker}\nFix delivered in {pull_url} and released as "
+            f"{release_url}. Waiting for the reporter to confirm with "
+            "`/powersync solved`."
+        },
+    ) in client.requests
+
+
 def test_comment_limit_fails_before_delivery_state_mutation() -> None:
     client = delivery_client()
     issue_path = f"/repos/{REPOSITORY}/issues/42"
@@ -423,6 +465,20 @@ def test_release_workflow_repairs_a_tag_without_a_published_release() -> None:
     assert "Create or repair tag and release" in workflow
     assert 'TAG="${{ steps.check_release.outputs.tag }}"' in workflow
     assert "if: steps.check_release.outputs.release_exists == 'false'" in workflow
+
+
+def test_existing_release_retries_notification_and_cleanup() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    for step_name in (
+        "Build Discord payloads",
+        "Notify Discord",
+        "Clear release notes and record Discord marker",
+    ):
+        step = workflow.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
+        assert "steps.support_release.outputs.tag != ''" in step
+        assert "release_exists == 'false'" not in step
+    assert 'tag == target_tag and Path("/tmp/release_notes.md").exists()' in workflow
 
 
 def test_release_workflow_verifies_existing_tag_targets_before_publish() -> None:
@@ -567,6 +623,35 @@ def test_delivery_comment_is_rolled_back_after_concurrent_confirmation() -> None
     ) in client.requests
 
 
+def test_terminal_rerun_retries_pending_delivery_comment_cleanup() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    pull_url = "https://github.com/Plaintext-Lab/PowerSync/pull/90"
+    release_url = str(RELEASE["html_url"])
+    client.responses[("GET", issue_path)] = {
+        "number": 42,
+        "state": "closed",
+        "labels": [{"name": "solved"}],
+    }
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {
+            "id": 987,
+            "body": f"{delivery_marker(pull_url, release_url)}\n"
+            f"{delivery_pending_marker(pull_url, release_url)}\nWaiting",
+            "user": {"login": "github-actions[bot]"},
+        }
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert (
+        "DELETE",
+        f"/repos/{REPOSITORY}/issues/comments/987",
+        None,
+    ) in client.requests
+
+
 def test_previous_release_search_scans_every_bounded_page() -> None:
     client = FakeGitHubClient()
     first_page = [
@@ -656,6 +741,35 @@ def test_previous_release_must_be_in_the_current_tag_ancestry() -> None:
     assert (
         "GET",
         f"/repos/{REPOSITORY}/compare/v3.0.0...v2.12.1100",
+        None,
+    ) in client.requests
+
+
+def test_previous_release_search_skips_a_deleted_candidate_tag() -> None:
+    client = delivery_client()
+    orphaned_release = {
+        "tag_name": "v2.12.1099-hotfix",
+        "draft": False,
+        "published_at": "2026-08-12T12:00:00Z",
+    }
+    releases_path = f"/repos/{REPOSITORY}/releases?per_page=100&page=1"
+    client.responses[("GET", releases_path)] = [
+        RELEASE,
+        orphaned_release,
+        PREVIOUS_RELEASE,
+    ]
+    orphan_compare = (
+        f"/repos/{REPOSITORY}/compare/v2.12.1099-hotfix...v2.12.1100"
+    )
+    client.responses[("GET", orphan_compare)] = {}
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:1"
+    assert ("GET", orphan_compare, None) in client.requests
+    assert (
+        "GET",
+        f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100",
         None,
     ) in client.requests
     assert (

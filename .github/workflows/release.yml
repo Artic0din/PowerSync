@@ -255,7 +255,7 @@ jobs:
       # release events triggered by GITHUB_TOKEN. Posting to Discord directly in
       # this job is the only reliable path for automated manifest releases.
       - name: Build Discord payloads
-        if: steps.check_release.outputs.release_exists == 'false'
+        if: steps.support_release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.support_release.outputs.tag }}
@@ -326,7 +326,7 @@ jobs:
               notes = (release.get("body") or "").strip()
               url = release["html_url"]
 
-              if tag == target_tag:
+              if tag == target_tag and Path("/tmp/release_notes.md").exists():
                   notes = Path("/tmp/release_notes.md").read_text().strip()
 
               if not notes:
@@ -364,7 +364,7 @@ jobs:
       # urllib's default User-Agent is blocked by Discord's webhook spam filter
       # (returns 403), so curl is required.
       - name: Notify Discord
-        if: steps.check_release.outputs.release_exists == 'false'
+        if: steps.support_release.outputs.tag != ''
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
@@ -397,7 +397,7 @@ jobs:
           done
 
       - name: Clear release notes and record Discord marker
-        if: steps.check_release.outputs.release_exists == 'false'
+        if: steps.support_release.outputs.tag != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |

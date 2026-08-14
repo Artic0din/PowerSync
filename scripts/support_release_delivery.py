@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 SUCCESSFUL_CHECK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 DELIVERY_MARKER_PREFIX = "powersync-delivery:v1:"
+DELIVERY_PENDING_MARKER_PREFIX = "powersync-delivery-pending:v1:"
 MAX_API_PAGES = 10
 WORKFLOW_BOT_LOGIN = "github-actions[bot]"
 VERSION_TAG_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$", re.IGNORECASE)
@@ -22,11 +23,22 @@ class ReleasedPullRequest:
     commit_messages: tuple[str, ...]
 
 
-def delivery_marker(pull_urls: str | tuple[str, ...], release_url: str) -> str:
+def _delivery_identity(pull_urls: str | tuple[str, ...], release_url: str) -> str:
     normalized_urls = (pull_urls,) if isinstance(pull_urls, str) else pull_urls
     identity_input = "\0".join((*normalized_urls, release_url))
-    identity = sha256(identity_input.encode()).hexdigest()[:16]
+    return sha256(identity_input.encode()).hexdigest()[:16]
+
+
+def delivery_marker(pull_urls: str | tuple[str, ...], release_url: str) -> str:
+    identity = _delivery_identity(pull_urls, release_url)
     return f"<!-- {DELIVERY_MARKER_PREFIX}{identity} -->"
+
+
+def delivery_pending_marker(
+    pull_urls: str | tuple[str, ...], release_url: str
+) -> str:
+    identity = _delivery_identity(pull_urls, release_url)
+    return f"<!-- {DELIVERY_PENDING_MARKER_PREFIX}{identity} -->"
 
 
 class GitHubApi(Protocol):
@@ -167,6 +179,8 @@ class ReleaseDelivery:
             f"{quote(candidate_tag, safe='')}...{quote(current_tag, safe='')}"
         )
         response = self._request("GET", f"/repos/{repository}/compare/{encoded_range}")
+        if response == {}:
+            return False
         if not isinstance(response, dict) or not isinstance(
             response.get("status"), str
         ):
@@ -279,17 +293,20 @@ class ReleaseDelivery:
     ) -> bool:
         issue_path = f"/repos/{repository}/issues/{issue_number}"
         issue = self._request("GET", issue_path)
-        if (
-            not isinstance(issue, dict)
-            or issue.get("state") != "open"
-            or "pull_request" in issue
-        ):
+        if not isinstance(issue, dict) or "pull_request" in issue:
             return False
         labels = self._label_names(issue)
-        if "solved" in labels:
-            return False
         marker = delivery_marker(pull_urls, release_url)
-        marker_exists = self._has_comment_marker(issue_path, marker)
+        pending_marker = delivery_pending_marker(pull_urls, release_url)
+        if issue.get("state") != "open" or "solved" in labels:
+            if issue.get("state") == "closed" and "solved" in labels:
+                pending_comment = self._comment_with_marker(
+                    issue_path, pending_marker
+                )
+                if pending_comment is not None:
+                    self._delete_delivery_comment(repository, pending_comment)
+            return False
+        marker_comment = self._comment_with_marker(issue_path, marker)
         already_awaiting = "awaiting confirmation" in labels
         if not already_awaiting:
             self._request(
@@ -315,25 +332,38 @@ class ReleaseDelivery:
                 )
             return False
 
-        comment_added = False
-        if not marker_exists:
-            pull_description = (
-                pull_urls[0]
-                if len(pull_urls) == 1
-                else ", ".join(pull_urls[:-1]) + f" and {pull_urls[-1]}"
-            )
+        pull_description = (
+            pull_urls[0]
+            if len(pull_urls) == 1
+            else ", ".join(pull_urls[:-1]) + f" and {pull_urls[-1]}"
+        )
+        delivery_text = (
+            f"Fix delivered in {pull_description} and released "
+            f"as {release_url}. Waiting for the reporter to confirm with "
+            "`/powersync solved`."
+        )
+        stable_body = f"{marker}\n{delivery_text}"
+        comment_added = marker_comment is None
+        pending_comment_id: int | None = None
+        pending_comment_required = False
+        if marker_comment is None:
+            pending_comment_required = True
             posted_comment = self._request(
                 "POST",
                 f"{issue_path}/comments",
-                {
-                    "body": f"{marker}\nFix delivered in {pull_description} and released "
-                    f"as {release_url}. Waiting for the reporter to confirm with "
-                    "`/powersync solved`."
-                },
+                {"body": f"{marker}\n{pending_marker}\n{delivery_text}"},
             )
-            comment_id = (
+            pending_comment_id = (
                 posted_comment.get("id") if isinstance(posted_comment, dict) else None
             )
+        elif pending_marker in str(marker_comment.get("body", "")):
+            pending_comment_required = True
+            pending_comment_id = marker_comment.get("id")
+
+        if pending_comment_required and not isinstance(pending_comment_id, int):
+            raise ValueError("GitHub returned an invalid pending delivery comment ID")
+
+        if pending_comment_id is not None:
             final_issue = self._request("GET", issue_path)
             final_labels = (
                 self._label_names(final_issue)
@@ -346,39 +376,49 @@ class ReleaseDelivery:
                 or "pull_request" in final_issue
                 or "solved" in final_labels
             ):
-                if not isinstance(comment_id, int):
-                    raise ValueError(
-                        "GitHub did not return the delivery comment ID needed for rollback"
-                    )
-                self._request(
-                    "DELETE", f"/repos/{repository}/issues/comments/{comment_id}"
-                )
+                self._delete_delivery_comment(repository, {"id": pending_comment_id})
                 if not already_awaiting:
                     self._request(
                         "DELETE",
                         f"{issue_path}/labels/{quote('awaiting confirmation', safe='')}",
                     )
                 return False
-            comment_added = True
+            self._request(
+                "PATCH",
+                f"/repos/{repository}/issues/comments/{pending_comment_id}",
+                {"body": stable_body},
+            )
         return not already_awaiting or comment_added
 
-    def _has_comment_marker(self, issue_path: str, marker: str) -> bool:
+    def _comment_with_marker(
+        self, issue_path: str, marker: str
+    ) -> dict[str, Any] | None:
         for page in range(1, MAX_API_PAGES + 1):
             comments = self._request(
                 "GET", f"{issue_path}/comments?per_page=100&page={page}"
             )
             if not isinstance(comments, list):
                 raise ValueError("GitHub returned invalid issue comments")
-            if any(
-                marker in str(comment.get("body", ""))
-                and self._comment_author(comment) == WORKFLOW_BOT_LOGIN
-                for comment in comments
-                if isinstance(comment, dict)
-            ):
-                return True
+            for comment in comments:
+                if (
+                    isinstance(comment, dict)
+                    and marker in str(comment.get("body", ""))
+                    and self._comment_author(comment) == WORKFLOW_BOT_LOGIN
+                ):
+                    return comment
             if len(comments) < 100:
-                return False
+                return None
         raise ValueError("Issue comments exceed the supported pagination limit")
+
+    def _delete_delivery_comment(
+        self, repository: str, comment: dict[str, Any]
+    ) -> None:
+        comment_id = comment.get("id")
+        if not isinstance(comment_id, int):
+            raise ValueError("GitHub returned an invalid pending delivery comment ID")
+        self._request(
+            "DELETE", f"/repos/{repository}/issues/comments/{comment_id}"
+        )
 
     @staticmethod
     def _comment_author(comment: dict[str, Any]) -> str:

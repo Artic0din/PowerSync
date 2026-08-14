@@ -247,6 +247,27 @@ def test_missing_referenced_issue_is_treated_as_ineligible(
     assert result == {}
 
 
+def test_missing_compare_ref_is_treated_as_an_unresolvable_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_compare(*_args: Any, **_kwargs: Any) -> Any:
+        raise HTTPError(
+            "https://api.github.com/repos/example/repo/compare/deleted...current",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"message":"Not Found"}'),
+        )
+
+    monkeypatch.setattr("scripts.run_support_issue_state.urlopen", missing_compare)
+
+    result = GitHubClient("test-token").request(
+        "GET", "/repos/example/repo/compare/deleted...current"
+    )
+
+    assert result == {}
+
+
 def test_open_issue_with_solved_label_cannot_bypass_delivery_gate() -> None:
     issue_path = "/repos/Plaintext-Lab/PowerSync/issues/42"
     client = FakeGitHubClient(

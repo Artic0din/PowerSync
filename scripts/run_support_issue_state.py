@@ -50,8 +50,13 @@ class GitHubClient:
                 method == "GET"
                 and re.fullmatch(r"/repos/[^/]+/[^/]+/issues/\d+", path) is not None
             )
+            missing_compare = (
+                method == "GET"
+                and path.startswith("/repos/")
+                and "/compare/" in path
+            )
             if error.code == 404 and (
-                missing_label or missing_permission or missing_issue
+                missing_label or missing_permission or missing_issue or missing_compare
             ):
                 return {}
             detail = error.read().decode(errors="replace")
