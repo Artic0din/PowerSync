@@ -76,7 +76,7 @@ def delivery_client(check_runs: list[dict[str, Any]] | None = None) -> FakeGitHu
             (
                 "GET",
                 f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100",
-            ): {"status": "ahead"},
+            ): {"status": "ahead", "ahead_by": 1},
             (
                 "GET",
                 f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100?per_page=100&page=1",
@@ -128,7 +128,8 @@ def test_published_release_records_linked_verified_delivery() -> None:
     marker = delivery_marker(pull_url, release_url)
     pending_marker = delivery_pending_marker(pull_url, release_url)
     stable_body = (
-        f"{marker}\nFix delivered in {pull_url} and released as {release_url}. "
+        f"{marker}\n{pending_marker}\n"
+        f"Fix delivered in {pull_url} and released as {release_url}. "
         "Waiting for the reporter to confirm with `/powersync solved`."
     )
 
@@ -150,16 +151,31 @@ def test_published_release_records_linked_verified_delivery() -> None:
         (
             "POST",
             f"/repos/{REPOSITORY}/issues/42/comments",
-            {
-                "body": f"{marker}\n{pending_marker}\n{stable_body.splitlines()[1]}"
-            },
-        ),
-        (
-            "PATCH",
-            f"/repos/{REPOSITORY}/issues/comments/987",
             {"body": stable_body},
         ),
     ]
+
+
+def test_delivery_comment_keeps_cleanup_marker_after_final_state_check() -> None:
+    client = delivery_client()
+    pull_url = "https://github.com/Plaintext-Lab/PowerSync/pull/90"
+    release_url = str(RELEASE["html_url"])
+    cleanup_marker = delivery_pending_marker(pull_url, release_url)
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:1"
+    posted = next(
+        payload
+        for method, path, payload in client.requests
+        if method == "POST" and path.endswith("/comments")
+    )
+    assert cleanup_marker in str(posted["body"])
+    assert client.requests[-1] == (
+        "GET",
+        f"/repos/{REPOSITORY}/issues/42",
+        None,
+    )
 
 
 def test_missing_referenced_issue_does_not_abort_other_deliveries() -> None:
@@ -400,7 +416,8 @@ def test_open_rerun_finalizes_a_pending_delivery_comment() -> None:
         "PATCH",
         f"/repos/{REPOSITORY}/issues/comments/987",
         {
-            "body": f"{marker}\nFix delivered in {pull_url} and released as "
+            "body": f"{marker}\n{pending_marker}\n"
+            f"Fix delivered in {pull_url} and released as "
             f"{release_url}. Waiting for the reporter to confirm with "
             "`/powersync solved`."
         },
@@ -533,6 +550,10 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     assert "git commit --allow-empty \\" in workflow
     assert '-m "Refs #$ISSUE_NUMBER"' in workflow
     assert "Verify squash merge preserves delivery evidence" in workflow
+    assert "validate-automation" in workflow
+    assert workflow.index("validate-automation") < workflow.index(
+        "Enter the protected Graphite merge queue"
+    )
     assert 'squash_merge_commit_message == "COMMIT_MESSAGES"' in workflow
     assert 'git log -1 --format=%B' in workflow
     assert workflow.index("Record immutable delivery evidence") < workflow.index(
@@ -574,7 +595,10 @@ def test_pull_request_validation_requires_immutable_support_references() -> None
     assert "Validate immutable support references" in workflow
     assert "validate-reference" in workflow
     assert 'squash_merge_commit_message == "COMMIT_MESSAGES"' in workflow
-    assert "types: [opened, synchronize, reopened, ready_for_review, edited]" in workflow
+    assert (
+        "types: [opened, synchronize, reopened, ready_for_review, edited, labeled]"
+        in workflow
+    )
 
 
 def test_solved_comment_filter_defers_whitespace_handling_to_the_parser() -> None:
@@ -586,17 +610,31 @@ def test_solved_comment_filter_defers_whitespace_handling_to_the_parser() -> Non
     assert "github.event.comment.body == '/powersync solved'" not in workflow
 
 
-def test_release_advances_the_queue_only_after_successful_completion() -> None:
-    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
-
-    advance = workflow.index("Advance the automated fix queue after release completion")
-    assert workflow.index("Clear release notes and record Discord marker") < advance
-    assert workflow.index("Report support reconciliation failure") < advance
-    assert (
-        "if: ${{ success() && steps.support_release.outputs.tag != '' }}"
-        in workflow[advance:]
+def test_queue_runs_after_release_workflow_completion() -> None:
+    workflow = Path(".github/workflows/queue-automated-fixes.yml").read_text(
+        encoding="utf-8"
     )
-    assert "gh workflow run queue-automated-fixes.yml --ref main" in workflow[advance:]
+
+    assert "workflow_run:" in workflow
+    assert 'workflows: ["Create Release on Version Bump"]' in workflow
+    assert "types: [completed]" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
+
+
+def test_queue_requires_successful_release_run_for_current_manifest_commit() -> None:
+    workflow = Path(".github/workflows/queue-automated-fixes.yml").read_text(
+        encoding="utf-8"
+    )
+
+    gate = workflow.split("- name: Select the next automation pull request", 1)[1]
+    assert "git -C trusted log -1 --format=%H --" in gate
+    assert "custom_components/power_sync/manifest.json" in gate
+    assert "actions/workflows/release.yml/runs" in gate
+    assert "head_sha=$RELEASE_HEAD" in gate
+    assert '.conclusion == "success"' in gate
+    assert gate.index("head_sha=$RELEASE_HEAD") < gate.index(
+        "prepare_automated_release.py select"
+    )
 
 
 def test_release_rechecks_issue_state_before_posting_delivery() -> None:
@@ -707,7 +745,7 @@ def test_previous_release_search_scans_every_bounded_page() -> None:
     ]
     client.responses[
         ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
-    ] = {"status": "ahead"}
+    ] = {"status": "ahead", "ahead_by": 1}
 
     previous_tag = ReleaseDelivery(client)._find_previous_release(
         REPOSITORY,
@@ -732,7 +770,7 @@ def test_previous_release_search_uses_bounded_candidate_before_history_limit() -
         ] = releases
     client.responses[
         ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
-    ] = {"status": "ahead"}
+    ] = {"status": "ahead", "ahead_by": 1}
 
     previous_tag = ReleaseDelivery(client)._find_previous_release(
         REPOSITORY,
@@ -754,7 +792,7 @@ def test_previous_version_search_uses_bounded_candidate_before_tag_limit() -> No
         ] = tags
     client.responses[
         ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
-    ] = {"status": "ahead"}
+    ] = {"status": "ahead", "ahead_by": 1}
 
     previous_tag = ReleaseDelivery(client)._find_previous_version_tag(
         REPOSITORY, "v2.12.1100"
@@ -787,7 +825,7 @@ def test_identical_previous_release_tag_is_a_valid_empty_bound() -> None:
     client = delivery_client()
     client.responses[
         ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
-    ] = {"status": "identical"}
+    ] = {"status": "identical", "ahead_by": 0}
 
     previous_tag = ReleaseDelivery(client)._find_previous_release(
         REPOSITORY,
@@ -843,6 +881,35 @@ def test_previous_release_must_be_in_the_current_tag_ancestry() -> None:
         f"/repos/{REPOSITORY}/compare/v3.0.0...v2.12.1100",
         None,
     ) in client.requests
+
+
+def test_previous_release_is_nearest_ancestor_not_latest_publication() -> None:
+    client = delivery_client()
+    backfilled_release = {
+        "tag_name": "v2.12.1098",
+        "draft": False,
+        "published_at": "2026-08-13T08:30:00Z",
+    }
+    releases_path = f"/repos/{REPOSITORY}/releases?per_page=100&page=1"
+    client.responses[("GET", releases_path)] = [
+        RELEASE,
+        backfilled_release,
+        PREVIOUS_RELEASE,
+    ]
+    client.responses[
+        ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1098...v2.12.1100")
+    ] = {"status": "ahead", "ahead_by": 2}
+    client.responses[
+        ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
+    ] = {"status": "ahead", "ahead_by": 1}
+
+    previous_tag = ReleaseDelivery(client)._find_previous_release(
+        REPOSITORY,
+        str(RELEASE["tag_name"]),
+        datetime.fromisoformat(str(RELEASE["published_at"]).replace("Z", "+00:00")),
+    )
+
+    assert previous_tag == PREVIOUS_RELEASE["tag_name"]
 
 
 def test_previous_release_search_skips_a_deleted_candidate_tag() -> None:

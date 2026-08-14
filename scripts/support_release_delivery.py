@@ -138,9 +138,13 @@ class ReleaseDelivery:
             if len(releases) < 100:
                 break
             history_truncated = page == MAX_API_PAGES
-        for _candidate_time, tag in sorted(candidates, reverse=True):
-            if self._is_ancestor_tag(repository, tag, current_tag):
-                return tag
+        ancestors: list[tuple[int, float, str]] = []
+        for candidate_time, tag in candidates:
+            distance = self._ancestor_distance(repository, tag, current_tag)
+            if distance is not None:
+                ancestors.append((distance, -candidate_time.timestamp(), tag))
+        if ancestors:
+            return min(ancestors)[2]
         if history_truncated:
             raise ValueError("Release history exceeds the supported pagination limit")
         return None
@@ -181,17 +185,30 @@ class ReleaseDelivery:
     def _is_ancestor_tag(
         self, repository: str, candidate_tag: str, current_tag: str
     ) -> bool:
+        return (
+            self._ancestor_distance(repository, candidate_tag, current_tag)
+            is not None
+        )
+
+    def _ancestor_distance(
+        self, repository: str, candidate_tag: str, current_tag: str
+    ) -> int | None:
         encoded_range = (
             f"{quote(candidate_tag, safe='')}...{quote(current_tag, safe='')}"
         )
         response = self._request("GET", f"/repos/{repository}/compare/{encoded_range}")
         if response == {}:
-            return False
+            return None
         if not isinstance(response, dict) or not isinstance(
             response.get("status"), str
         ):
             raise ValueError("GitHub returned invalid tag ancestry data")
-        return response["status"] in {"ahead", "identical"}
+        if response["status"] not in {"ahead", "identical"}:
+            return None
+        ahead_by = response.get("ahead_by")
+        if not isinstance(ahead_by, int) or ahead_by < 0:
+            raise ValueError("GitHub returned invalid tag ancestry distance")
+        return ahead_by
 
     def _pull_requests_between(
         self, repository: str, previous_tag: str, current_tag: str
@@ -348,16 +365,17 @@ class ReleaseDelivery:
             f"as {release_url}. Waiting for the reporter to confirm with "
             "`/powersync solved`."
         )
-        stable_body = f"{marker}\n{delivery_text}"
+        stable_body = f"{marker}\n{pending_marker}\n{delivery_text}"
         comment_added = marker_comment is None
         pending_comment_id: int | None = None
         pending_comment_required = False
+        pending_comment_body = ""
         if marker_comment is None:
             pending_comment_required = True
             posted_comment = self._request(
                 "POST",
                 f"{issue_path}/comments",
-                {"body": f"{marker}\n{pending_marker}\n{delivery_text}"},
+                {"body": stable_body},
             )
             pending_comment_id = (
                 posted_comment.get("id") if isinstance(posted_comment, dict) else None
@@ -365,6 +383,7 @@ class ReleaseDelivery:
         elif pending_marker in str(marker_comment.get("body", "")):
             pending_comment_required = True
             pending_comment_id = marker_comment.get("id")
+            pending_comment_body = str(marker_comment.get("body", ""))
 
         if pending_comment_required and not isinstance(pending_comment_id, int):
             raise ValueError("GitHub returned an invalid pending delivery comment ID")
@@ -389,11 +408,12 @@ class ReleaseDelivery:
                         f"{issue_path}/labels/{quote('awaiting confirmation', safe='')}",
                     )
                 return False
-            self._request(
-                "PATCH",
-                f"/repos/{repository}/issues/comments/{pending_comment_id}",
-                {"body": stable_body},
-            )
+            if pending_comment_body and pending_comment_body != stable_body:
+                self._request(
+                    "PATCH",
+                    f"/repos/{repository}/issues/comments/{pending_comment_id}",
+                    {"body": stable_body},
+                )
         return not already_awaiting or comment_added
 
     def _comment_with_marker(

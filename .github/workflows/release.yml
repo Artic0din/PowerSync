@@ -440,9 +440,3 @@ jobs:
         run: |
           echo "Support reconciliation dispatch failed after release cleanup" >&2
           exit 1
-
-      - name: Advance the automated fix queue after release completion
-        if: ${{ success() && steps.support_release.outputs.tag != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run queue-automated-fixes.yml --ref main
