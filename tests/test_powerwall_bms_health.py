@@ -38,6 +38,7 @@ trim_excess_pw3_follower_placeholders = (
     bms_health.trim_excess_pw3_follower_placeholders
 )
 resolve_physical_battery_count = bms_health.resolve_physical_battery_count
+ghost_pack_topology_log_decision = bms_health.ghost_pack_topology_log_decision
 
 
 def test_battery_health_fetch_uses_site_info_as_authoritative_count():
@@ -473,3 +474,60 @@ def test_does_not_reconcile_when_pack_capacities_do_not_match_aggregate():
 
     assert result[1]["nominalEnergyRemainingWh"] == 200.0
     assert "remainingReconciledFromAggregate" not in result[1]
+
+
+def test_ghost_pack_topology_log_decision_logs_once_on_first_classification():
+    signature, message = ghost_pack_topology_log_decision(
+        1, 28580.0, 29000.0, previous_signature=None
+    )
+
+    assert signature == (1, 28580)
+    assert message is not None
+    assert "dropping 1 placeholder expansion pack(s)" in message
+    assert "expansion slots registered but not physically installed" in message
+
+
+def test_ghost_pack_topology_log_decision_stays_silent_when_unchanged():
+    first_signature, _first_message = ghost_pack_topology_log_decision(
+        1, 28580.0, 29000.0, previous_signature=None
+    )
+
+    # A later poll (e.g. current_wh has drifted with charge/discharge, but the
+    # same phantom pack is still being dropped) must not re-log.
+    signature, message = ghost_pack_topology_log_decision(
+        1, 28580.0, 29400.0, previous_signature=first_signature
+    )
+
+    assert signature == first_signature
+    assert message is None
+
+
+def test_ghost_pack_topology_log_decision_logs_a_change_with_old_and_new():
+    first_signature, _first_message = ghost_pack_topology_log_decision(
+        1, 28580.0, 29000.0, previous_signature=None
+    )
+
+    signature, message = ghost_pack_topology_log_decision(
+        2, 14290.0, 15000.0, previous_signature=first_signature
+    )
+
+    assert signature == (2, 14290)
+    assert message is not None
+    assert "expansion pack topology changed" in message
+    assert "was 1 placeholder(s)/28580 Wh" in message
+    assert "now 2 placeholder(s)/14290 Wh" in message
+
+
+def test_ghost_pack_topology_log_decision_rounds_signature_before_comparing():
+    first_signature, _first_message = ghost_pack_topology_log_decision(
+        1, 28580.4, 29000.0, previous_signature=None
+    )
+
+    # Sub-watt-hour float noise between polls must not be treated as a real
+    # topology change.
+    signature, message = ghost_pack_topology_log_decision(
+        1, 28580.49, 29000.0, previous_signature=first_signature
+    )
+
+    assert signature == first_signature
+    assert message is None

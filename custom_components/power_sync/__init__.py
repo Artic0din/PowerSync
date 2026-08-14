@@ -6795,6 +6795,12 @@ class BatteryHealthView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
         self._hass = hass
+        # Ghost-expansion-pack classification signature per config entry, so the
+        # 5-minute BMS health poll logs a topology change once instead of
+        # re-logging the same stable classification every poll. A fresh
+        # BatteryHealthView is created on every entry setup, so this resets
+        # naturally on reload.
+        self._bms_ghost_pack_log_signature: dict[str, tuple[int, int] | None] = {}
 
     async def _sync_live_battery_health_to_sensor(
         self,
@@ -6989,6 +6995,7 @@ class BatteryHealthView(HomeAssistantView):
         )
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
+            ghost_pack_topology_log_decision,
             has_pw3_stack,
             known_expansion_dins_from_gateway_config,
             reconcile_pack_remaining_with_aggregate,
@@ -7301,12 +7308,15 @@ class BatteryHealthView(HomeAssistantView):
                 kept_full_wh = sum(p["nominalFullPackEnergyWh"] for p in kept)
                 if kept_full_wh > 0 and abs(current_wh - kept_full_wh) / current_wh < 0.10:
                     ghost_count = len(ghost_candidates)
-                    _LOGGER.info(
-                        "fleet_api_bms: dropping %d placeholder expansion pack(s) (no serial + near-empty) — "
-                        "system %.0f Wh matches real-pack sum %.0f Wh (ratio %.3f); "
-                        "expansion slots registered but not physically installed",
-                        ghost_count, current_wh, kept_full_wh, kept_full_wh / current_wh,
+                    new_signature, ghost_log_message = ghost_pack_topology_log_decision(
+                        ghost_count,
+                        kept_full_wh,
+                        current_wh,
+                        previous_signature=self._bms_ghost_pack_log_signature.get(entry.entry_id),
                     )
+                    if ghost_log_message:
+                        _LOGGER.info(ghost_log_message)
+                    self._bms_ghost_pack_log_signature[entry.entry_id] = new_signature
                     individual = kept
                     bms_module_count -= ghost_count
 
