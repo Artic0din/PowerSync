@@ -171,8 +171,9 @@ def test_terminal_non_repository_conclusions_clear_stale_bug_state() -> None:
     source = workflow("issue-investigation.md")
 
     assert (
-        "For expected behaviour, third-party integration or hardware, and "
-        "PowerSync Cloud or worker-side conclusions, remove both `bug` and "
+        "For unsupported or outdated versions, expected behaviour, third-party "
+        "integration or hardware, and PowerSync Cloud or worker-side conclusions, "
+        "remove both `bug` and "
         "`needs investigation`" in source
     )
 

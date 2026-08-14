@@ -245,7 +245,7 @@ Do not edit code or create a pull request.
 
 - Keep or add `needs investigation` when more repository investigation is possible.
 - When a specific missing item blocks progress, add `needs information` and remove `needs investigation`.
-- For expected behaviour, third-party integration or hardware, and PowerSync Cloud or worker-side conclusions, remove both `bug` and `needs investigation`, and do not add `needs information`.
+- For unsupported or outdated versions, expected behaviour, third-party integration or hardware, and PowerSync Cloud or worker-side conclusions, remove both `bug` and `needs investigation`, and do not add `needs information`.
 - Add one concise issue comment containing the classification, evidence checked, conclusion, and the smallest next evidence request if one is required.
 - Do not repeat an earlier evidence request.
 
