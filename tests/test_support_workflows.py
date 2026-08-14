@@ -166,6 +166,17 @@ def test_investigation_clears_state_only_after_pull_request_creation() -> None:
         "finalizer clears those labels only after pull request creation succeeds."
         in source
     )
+    finalizer = source.split("    finalize-created-fix:", 1)[1].split(
+        "  create-pull-request:", 1
+    )[0]
+    assert "python -m scripts.revalidate_support_snapshot" in finalizer
+    assert (
+        "SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}"
+        in finalizer
+    )
+    assert finalizer.index("revalidate_support_snapshot") < finalizer.index(
+        "gh issue edit"
+    )
 
 
 def test_feature_assessment_reclassifies_and_routes_misrouted_issues() -> None:
@@ -180,6 +191,24 @@ def test_feature_assessment_reclassifies_and_routes_misrouted_issues() -> None:
     assert "- question" in add_labels.rsplit("  add-labels:", 1)[1]
     assert "- needs investigation" in add_labels.rsplit("  add-labels:", 1)[1]
     assert "- enhancement" in remove_labels.split("  add-comment:", 1)[0]
+
+
+def test_cross_classification_routing_has_a_single_hop_guard() -> None:
+    for name, route_job in (
+        ("issue-investigation.md", "route-feature-assessment:"),
+        ("feature-assessment.md", "route-issue-investigation:"),
+    ):
+        source = workflow(name)
+        route = source.split(f"    {route_job}", 1)[1].split(
+            "  create-pull-request:" if name == "issue-investigation.md" else "  add-labels:",
+            1,
+        )[0]
+
+        assert "routing_hops:" in source
+        assert 'default: "0"' in source
+        assert "github.event.inputs.routing_hops == '0'" in route
+        assert "-f routing_hops=1" in route
+        assert "If `routing_hops` is not `0`, do not call a cross-classification route" in source
 
 
 def test_investigation_installs_manifest_runtime_requirements() -> None:

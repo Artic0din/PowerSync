@@ -12,6 +12,11 @@ on:
         description: SHA-256 fingerprint accepted by deterministic intake
         required: true
         type: string
+      routing_hops:
+        description: Cross-classification dispatches already used for this evidence
+        required: false
+        default: "0"
+        type: string
 
 concurrency:
   group: issue-investigation-${{ inputs.issue_number }}
@@ -104,7 +109,8 @@ safe-outputs:
       needs: [agent, detection, safe_outputs]
       if: >-
         needs.detection.result == 'success' &&
-        needs.safe_outputs.result == 'success'
+        needs.safe_outputs.result == 'success' &&
+        github.event.inputs.routing_hops == '0'
       steps:
         - name: Check out deterministic support gate
           uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -128,6 +134,7 @@ safe-outputs:
             --ref "${GITHUB_REF_NAME}"
             -f issue_number="$SUPPORT_ISSUE_NUMBER"
             -f evidence_revision="$SUPPORT_EVIDENCE_REVISION"
+            -f routing_hops=1
     finalize-created-fix:
       description: Clear investigation state only after a fix pull request was created.
       runs-on: ubuntu-latest
@@ -140,6 +147,16 @@ safe-outputs:
         needs.safe_outputs.result == 'success' &&
         needs.safe_outputs.outputs.created_pr_url != ''
       steps:
+        - name: Check out deterministic support gate
+          uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+          with:
+            persist-credentials: false
+        - name: Revalidate the bound evidence before clearing state
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+          run: python -m scripts.revalidate_support_snapshot
         - name: Clear completed investigation labels
           env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -219,6 +236,7 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 8. State a concrete root cause only when the evidence establishes the exact code path and causal chain.
 
 If independent classification shows this is a feature request or design decision, add `enhancement`, remove `bug`, `needs information`, and `needs investigation`, call `route_feature_assessment` once, and stop without editing code or creating a pull request.
+If `routing_hops` is not `0`, do not call a cross-classification route; record the conflicting classification in the issue comment and stop after the approved label changes.
 
 ## No concrete repository root cause
 
