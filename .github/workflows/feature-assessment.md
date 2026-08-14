@@ -150,7 +150,10 @@ Stop without any output if `.powersync-support-evidence.md` is absent.
 2. Before assessing fields, classify it independently as a feature request, bug, or support question.
    If `routing_hops` is not `0`, do not call a cross-classification route; record the conflicting classification in the issue comment and stop after the approved label changes.
 3. If it is a bug, add `bug` and `needs investigation`, remove `enhancement`, `feature assessed`, `question`, `needs triage`, and `needs information`, call `route_issue_investigation` once, and stop without assessing it as a feature.
-4. If it is a support question, add `question`, remove `enhancement`, `feature assessed`, `bug`, `needs triage`, `needs information`, and `needs investigation`, add one concise answer or smallest evidence request, and stop.
+4. If it is a support question:
+   - If the available evidence is sufficient to answer, add `question`, remove `enhancement`, `feature assessed`, `bug`, `needs triage`, `needs information`, and `needs investigation`, add one concise answer, and stop.
+   - If a specific missing item prevents an answer, add `question` and `needs information`, remove `enhancement`, `feature assessed`, `bug`, `needs triage`, and `needs investigation`, add one concise request for that item, and stop.
+   - Do not repeat an earlier evidence request.
 5. For a feature request, confirm it states a category, current problem, affected users, and proposed outcome.
 6. If any required field is missing, add `needs information`, remove only `feature assessed`, `needs triage`, and `needs investigation`, and add one concise comment requesting every missing field.
    Do not assess the request or repeat an earlier evidence request.

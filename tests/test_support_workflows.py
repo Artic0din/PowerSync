@@ -171,10 +171,24 @@ def test_terminal_non_repository_conclusions_clear_stale_bug_state() -> None:
     source = workflow("issue-investigation.md")
 
     assert (
-        "For unsupported or outdated versions, expected behaviour, third-party "
-        "integration or hardware, and PowerSync Cloud or worker-side conclusions, "
-        "remove both `bug` and "
+        "For unsupported or outdated versions, confirmed configuration issues, "
+        "expected behaviour, third-party integration or hardware, and PowerSync "
+        "Cloud or worker-side conclusions, remove both `bug` and "
         "`needs investigation`" in source
+    )
+
+
+def test_unanswered_support_questions_keep_needs_information() -> None:
+    source = workflow("feature-assessment.md")
+
+    assert (
+        "If the available evidence is sufficient to answer, add `question`, "
+        "remove `enhancement`, `feature assessed`, `bug`, `needs triage`, "
+        "`needs information`, and `needs investigation`" in source
+    )
+    assert (
+        "If a specific missing item prevents an answer, add `question` and "
+        "`needs information`" in source
     )
 
 
