@@ -36,6 +36,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [ ! -f trusted/scripts/prepare_automated_release.py ]; then
+            echo "Trusted queue logic is not available on main yet"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           gh api --paginate --slurp \
             "/repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
             > /tmp/open-pull-requests.json

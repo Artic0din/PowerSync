@@ -453,6 +453,10 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     assert "group: automated-fix-merge-queue" in workflow
     assert "ref: main" in workflow
     assert "prepare_automated_release.py prepare" in workflow
+    assert "Trusted queue logic is not available on main yet" in workflow
+    assert workflow.index("Trusted queue logic is not available on main yet") < workflow.index(
+        "prepare_automated_release.py select"
+    )
     assert "pulls?state=open&base=main&per_page=100" in workflow
     assert "git commit --allow-empty \\" in workflow
     assert '-m "Refs #$ISSUE_NUMBER"' in workflow
