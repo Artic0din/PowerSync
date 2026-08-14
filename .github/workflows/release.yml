@@ -54,7 +54,7 @@ jobs:
             ); then
               rm -f "$error_file"
               jq -r \
-                'if .draft == false and
+                'if .draft == false and .prerelease == false and
                     (.published_at | type) == "string" and
                     (.tag_name | type) == "string"
                  then .tag_name
@@ -260,7 +260,7 @@ jobs:
             ); then
               rm -f "$error_file"
               jq -r \
-                'if .draft == false and
+                'if .draft == false and .prerelease == false and
                     (.published_at | type) == "string" and
                     (.tag_name | type) == "string"
                  then .tag_name
@@ -320,6 +320,7 @@ jobs:
           set -euo pipefail
 
           python3 - <<'PY'
+          import base64
           import json
           import os
           import subprocess
@@ -341,13 +342,18 @@ jobs:
                           raise SystemExit(exc.output) from exc
                       time.sleep(2)
 
-          marker_path = Path(".github/discord-release-last-posted.txt")
-          last_posted = marker_path.read_text().strip() if marker_path.exists() else ""
           target_tag = os.environ["RELEASE_TAG"]
           repo = os.environ["GITHUB_REPOSITORY"]
+          marker_path = ".github/discord-release-last-posted.txt"
+          marker = gh_json(f"repos/{repo}/contents/{marker_path}?ref=main")
+          last_posted = base64.b64decode(marker["content"]).decode().strip()
 
           releases = gh_json(f"repos/{repo}/releases?per_page=20")
-          releases = [release for release in releases if not release.get("draft")]
+          releases = [
+              release
+              for release in releases
+              if not release.get("draft") and not release.get("prerelease")
+          ]
 
           tags = [release["tag_name"] for release in releases]
           if target_tag not in tags:
@@ -423,8 +429,61 @@ jobs:
         if: steps.support_release.outputs.tag != ''
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          record_discord_marker() {
+            RELEASE_NOTIFICATION_TAG="$1" python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import time
+
+          marker_path = ".github/discord-release-last-posted.txt"
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_NOTIFICATION_TAG"]
+          for attempt in range(6):
+              current = json.loads(
+                  subprocess.check_output(
+                      ["gh", "api", f"repos/{repo}/contents/{marker_path}?ref=main"],
+                      text=True,
+                  )
+              )
+              current_value = base64.b64decode(current["content"]).decode().strip()
+              if current_value == tag:
+                  raise SystemExit(0)
+              payload = {
+                  "message": (
+                      f"ci(release): record Discord notification through {tag} "
+                      "[skip ci]"
+                  ),
+                  "content": base64.b64encode(f"{tag}\n".encode()).decode(),
+                  "branch": "main",
+                  "sha": current["sha"],
+              }
+              result = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      "--method",
+                      "PUT",
+                      f"repos/{repo}/contents/{marker_path}",
+                      "--input",
+                      "-",
+                  ],
+                  input=json.dumps(payload),
+                  text=True,
+                  capture_output=True,
+              )
+              if result.returncode == 0:
+                  raise SystemExit(0)
+              if attempt == 5:
+                  raise SystemExit(result.stderr or result.stdout)
+              time.sleep(2)
+          PY
+          }
 
           COUNT=$(cat /tmp/discord_release_count.txt)
           if [ "$COUNT" = "0" ]; then
@@ -449,36 +508,33 @@ jobs:
               exit 1
             fi
 
+            record_discord_marker "$tag"
             echo "$tag" >> /tmp/discord_release_posted_tags.txt
           done
 
-      - name: Clear release notes and record Discord marker
+      - name: Clear release notes
         if: steps.support_release.outputs.tag != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
-          MARKER_PATH=".github/discord-release-last-posted.txt"
-
           # Prevent stale hand-written notes from being reused on the
-          # next version bump. Also record the Discord notification marker
-          # only after the webhook succeeds, so scheduled backfill can catch
-          # any missed release later without duplicating successful posts.
+          # next version bump. Start from current main so a retry of the
+          # original release run never pushes from its stale triggering commit.
+          git fetch origin main
+          git checkout -B release-cleanup origin/main
           echo -n "" > RELEASE_NOTES.md
-          if [ -s /tmp/discord_release_posted_tags.txt ]; then
-            tail -n 1 /tmp/discord_release_posted_tags.txt > "$MARKER_PATH"
-          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add RELEASE_NOTES.md "$MARKER_PATH"
+          git add RELEASE_NOTES.md
           if git diff --cached --quiet; then
             echo "No release cleanup changes to commit"
           else
             git commit -m "docs(release): clear RELEASE_NOTES.md after v$VERSION"
-            git push origin main
-            echo "Cleared RELEASE_NOTES.md and recorded Discord marker v$VERSION"
+            git push origin HEAD:main
+            echo "Cleared RELEASE_NOTES.md after v$VERSION"
           fi
 
       - name: Report support reconciliation failure
