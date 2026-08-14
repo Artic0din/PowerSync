@@ -86,9 +86,9 @@ def validate_support_reference_evidence(
     pull_request_body: Any, commit_messages: Sequence[str]
 ) -> None:
     """Require visible support references to survive in immutable merge evidence."""
-    if not isinstance(pull_request_body, str):
-        return
-    visible_body = HTML_COMMENT_PATTERN.sub("", pull_request_body)
+    if pull_request_body is not None and not isinstance(pull_request_body, str):
+        raise ValueError("GitHub returned an invalid pull request body")
+    visible_body = HTML_COMMENT_PATTERN.sub("", pull_request_body or "")
     body_references = {
         int(number) for number in REFERENCE_PATTERN.findall(visible_body)
     }
@@ -147,7 +147,7 @@ def validate_automation_reference_metadata(
 
 def _commit_reference_trailers(commit_messages: Sequence[str]) -> set[int]:
     references: set[int] = set()
-    for message in commit_messages:
+    for message in commit_messages[-1:]:
         if not isinstance(message, str) or not message.strip():
             continue
         footer = re.split(r"\n\s*\n", message.rstrip())[-1]

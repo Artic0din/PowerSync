@@ -209,6 +209,25 @@ def test_support_reference_must_be_preserved_in_a_commit_message() -> None:
     )
 
 
+def test_support_reference_must_be_in_the_final_pull_request_commit() -> None:
+    with pytest.raises(ValueError, match="Refs #42"):
+        validate_support_reference_evidence(
+            "Root-cause fix.\n\nRefs #42",
+            (
+                "fix(power): repair schedule\n\nRefs #42",
+                "test(power): add follow-up coverage",
+            ),
+        )
+
+
+def test_missing_pull_request_body_rejects_immutable_only_reference() -> None:
+    with pytest.raises(ValueError, match="Refs #42"):
+        validate_support_reference_evidence(
+            None,
+            ("fix(power): repair schedule\n\nRefs #42",),
+        )
+
+
 def test_automation_title_reference_must_match_body_and_commit_evidence() -> None:
     with pytest.raises(ValueError, match="same support issue"):
         validate_automation_reference_evidence(

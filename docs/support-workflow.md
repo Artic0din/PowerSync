@@ -69,7 +69,7 @@ Immediately before it adds `merge-queue`, the queue validates the title and body
 That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
 For automation pull requests, initial validation requires matching title and visible body references.
 After the queue creates the reservation commit, strict validation requires the title, visible body reference, and immutable commit reference to identify the same issue before `merge-queue` is added.
-Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and as an exact line in the final metadata block of a commit message.
+Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and as an exact line in the final metadata block of the pull request's last commit.
 Required validation rejects mutable-only, conflicting, quoted, prose, and fenced-example references before merge.
 Graphite and required repository checks decide when the pull request can merge.
 The existing version-bump workflow creates the release after merge.
@@ -84,7 +84,7 @@ It discovers associated merged pull requests and accepts only an exact `Refs #12
 It ignores `Refs` examples in prose, fenced code, and HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
 Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing every associated pull request and the release link, so a later fix produces a fresh confirmation request.
 The workflow rereads live issue state immediately before posting and removes any state it added if a concurrent solved confirmation already closed the issue.
-The audit comment retains a hidden cleanup marker so a terminal retry can delete it if solved confirmation races with delivery after the final state read.
+The audit comment retains a hidden cleanup marker so a terminal retry can delete it if solved confirmation or manual closure races with delivery after the final state read.
 
 The issue author or a write-level maintainer confirms the released result with one exact comment:
 

@@ -473,8 +473,20 @@ def test_release_workflow_reconciles_only_after_valid_release_state() -> None:
 def test_release_workflow_rejects_drafts_as_existing_publications() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
-    assert "--json tagName,isDraft,publishedAt" in workflow
-    assert ".isDraft == false and .publishedAt != null" in workflow
+    assert ".draft == false" in workflow
+    assert '(.published_at | type) == "string"' in workflow
+
+
+def test_published_release_lookup_fails_on_errors_other_than_not_found() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+    resolve_step = workflow.split("- name: Resolve published release tag", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+
+    assert "releases/tags/$candidate" in resolve_step
+    assert "(HTTP 404)" in resolve_step
+    assert 'cat "$error_file" >&2' in resolve_step
+    assert "2>/dev/null || true" not in resolve_step
 
 
 def test_release_workflow_verifies_published_tag_targets_workflow_head() -> None:
@@ -560,11 +572,17 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
         "Enter the protected Graphite merge queue"
     )
     assert (
-        "types: [opened, labeled, unlabeled, ready_for_review, synchronize, closed]"
+        "types: [opened, reopened, labeled, unlabeled, ready_for_review, "
+        "synchronize, closed]"
         in workflow
     )
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
+    assert "Clear stale queue label after unmerged closure" in workflow
+    assert "--remove-label merge-queue" in workflow
+    assert workflow.index("Clear stale queue label after unmerged closure") < workflow.index(
+        "Select the next automation pull request"
+    )
 
 
 def test_automation_queue_reuses_reservation_and_revalidates_live_pr() -> None:
@@ -585,6 +603,7 @@ def test_automation_queue_reuses_reservation_and_revalidates_live_pr() -> None:
     assert 'gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER"' in queue_step
     assert '.head.sha == $head_sha' in queue_step
     assert '.base.ref == "main"' in queue_step
+    assert '.state == "open"' in queue_step
     assert '.draft == false' in queue_step
     assert 'map(.name) | index("automation")' in queue_step
 
@@ -708,6 +727,35 @@ def test_terminal_rerun_retries_pending_delivery_comment_cleanup() -> None:
         "number": 42,
         "state": "closed",
         "labels": [{"name": "solved"}],
+    }
+    client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
+        {
+            "id": 987,
+            "body": f"{delivery_marker(pull_url, release_url)}\n"
+            f"{delivery_pending_marker(pull_url, release_url)}\nWaiting",
+            "user": {"login": "github-actions[bot]"},
+        }
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert (
+        "DELETE",
+        f"/repos/{REPOSITORY}/issues/comments/987",
+        None,
+    ) in client.requests
+
+
+def test_closed_unsolved_rerun_retries_pending_delivery_comment_cleanup() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    pull_url = "https://github.com/Plaintext-Lab/PowerSync/pull/90"
+    release_url = str(RELEASE["html_url"])
+    client.responses[("GET", issue_path)] = {
+        "number": 42,
+        "state": "closed",
+        "labels": [],
     }
     client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
         {
