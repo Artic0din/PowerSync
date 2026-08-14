@@ -145,6 +145,43 @@ def test_investigation_routes_reclassified_features_after_state_mutations() -> N
     )[0]
 
 
+def test_terminal_non_repository_conclusions_clear_stale_bug_state() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert (
+        "For expected behaviour, third-party integration or hardware, and "
+        "PowerSync Cloud or worker-side conclusions, remove both `bug` and "
+        "`needs investigation`" in source
+    )
+
+
+def test_investigation_clears_state_only_after_pull_request_creation() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert "finalize-created-fix:" in source
+    assert "needs.safe_outputs.outputs.created_pr_url != ''" in source
+    assert "call `finalize_created_fix` once" in source
+    assert (
+        "Do not request label removal for a repository defect; the deterministic "
+        "finalizer clears those labels only after pull request creation succeeds."
+        in source
+    )
+
+
+def test_feature_assessment_reclassifies_and_routes_misrouted_issues() -> None:
+    source = workflow("feature-assessment.md")
+    add_labels, remove_labels = source.split("  remove-labels:", 1)
+
+    assert "route-issue-investigation:" in source
+    assert "gh workflow run issue-investigation.lock.yml" in source
+    assert "call `route_issue_investigation` once" in source
+    assert "classify it independently as a feature request, bug, or support question" in source
+    assert "- bug" in add_labels.rsplit("  add-labels:", 1)[1]
+    assert "- question" in add_labels.rsplit("  add-labels:", 1)[1]
+    assert "- needs investigation" in add_labels.rsplit("  add-labels:", 1)[1]
+    assert "- enhancement" in remove_labels.split("  add-comment:", 1)[0]
+
+
 def test_investigation_installs_manifest_runtime_requirements() -> None:
     source = workflow("issue-investigation.md")
 

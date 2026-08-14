@@ -128,6 +128,27 @@ safe-outputs:
             --ref "${GITHUB_REF_NAME}"
             -f issue_number="$SUPPORT_ISSUE_NUMBER"
             -f evidence_revision="$SUPPORT_EVIDENCE_REVISION"
+    finalize-created-fix:
+      description: Clear investigation state only after a fix pull request was created.
+      runs-on: ubuntu-latest
+      permissions:
+        contents: read
+        issues: write
+      needs: [agent, detection, safe_outputs]
+      if: >-
+        needs.detection.result == 'success' &&
+        needs.safe_outputs.result == 'success' &&
+        needs.safe_outputs.outputs.created_pr_url != ''
+      steps:
+        - name: Clear completed investigation labels
+          env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+          run: >-
+            gh issue edit "$SUPPORT_ISSUE_NUMBER"
+            --repo "$GITHUB_REPOSITORY"
+            --remove-label "needs information"
+            --remove-label "needs investigation"
   create-pull-request:
     github-token: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
     draft: false
@@ -205,7 +226,7 @@ Do not edit code or create a pull request.
 
 - Keep or add `needs investigation` when more repository investigation is possible.
 - When a specific missing item blocks progress, add `needs information` and remove `needs investigation`.
-- For a terminal non-repository conclusion, remove `needs investigation` and do not add `needs information`.
+- For expected behaviour, third-party integration or hardware, and PowerSync Cloud or worker-side conclusions, remove both `bug` and `needs investigation`, and do not add `needs information`.
 - Add one concise issue comment containing the classification, evidence checked, conclusion, and the smallest next evidence request if one is required.
 - Do not repeat an earlier evidence request.
 
@@ -226,6 +247,7 @@ Only proceed when the issue evidence and repository inspection establish a concr
    - the exact tests and results,
    - one past-tense user-facing release-note line,
    - no unsupported solved or release claim.
-8. Remove `needs information` and `needs investigation` from the issue.
+8. After requesting pull request creation, call `finalize_created_fix` once.
+   Do not request label removal for a repository defect; the deterministic finalizer clears those labels only after pull request creation succeeds.
 
 Never create a patch merely because one appears plausible.
