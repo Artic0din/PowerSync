@@ -53,6 +53,7 @@ def live_issue(*, state: str = "open", labels: tuple[str, ...] = ()) -> dict[str
 
 def test_only_exact_solved_command_is_recognised() -> None:
     assert parse_command("/powersync solved") == Command(action="solved")
+    assert parse_command("  /powersync solved\n") == Command(action="solved")
     assert parse_command("This looks solved now") is None
     assert parse_command("/powersync solved thanks") is None
     assert parse_command("/powersync delivered https://example.com") is None
@@ -260,12 +261,18 @@ def test_open_issue_with_solved_label_cannot_bypass_delivery_gate() -> None:
     assert client.requests == [("GET", issue_path, None)]
 
 
-def test_closed_solved_issue_can_finish_an_interrupted_confirmation() -> None:
+def test_closed_solved_issue_can_finish_the_same_interrupted_confirmation() -> None:
     issue_path = "/repos/Plaintext-Lab/PowerSync/issues/42"
+    audit_marker = resolution_marker(123)
     client = FakeGitHubClient(
         responses={
             ("GET", issue_path): live_issue(labels=("solved",), state="closed"),
-            ("GET", f"{issue_path}/comments?per_page=100&page=1"): [],
+            ("GET", f"{issue_path}/comments?per_page=100&page=1"): [
+                {
+                    "body": f"{audit_marker}\nEarlier audit",
+                    "user": {"login": "github-actions[bot]"},
+                }
+            ],
         }
     )
 
@@ -273,7 +280,27 @@ def test_closed_solved_issue_can_finish_an_interrupted_confirmation() -> None:
 
     assert result == "closed-confirmed"
     assert not any(method == "PATCH" for method, _, _ in client.requests)
-    assert any(
+    assert not any(
         method == "POST" and path == f"{issue_path}/comments"
         for method, path, _ in client.requests
     )
+
+
+def test_new_solved_comment_cannot_reopen_a_terminal_confirmation_retry() -> None:
+    issue_path = "/repos/Plaintext-Lab/PowerSync/issues/42"
+    client = FakeGitHubClient(
+        responses={
+            ("GET", issue_path): live_issue(labels=("solved",), state="closed"),
+            ("GET", f"{issue_path}/comments?per_page=100&page=1"): [
+                {
+                    "body": resolution_marker(122),
+                    "user": {"login": "github-actions[bot]"},
+                }
+            ],
+        }
+    )
+
+    result = SupportIssueAutomation(client).handle(solved_event(comment_id=123))
+
+    assert result == "invalid-state"
+    assert all(method == "GET" for method, _, _ in client.requests)
