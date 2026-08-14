@@ -2,7 +2,7 @@ name: Queue automated fixes
 
 on:
   pull_request:
-    types: [opened, labeled, ready_for_review, synchronize, closed]
+    types: [opened, labeled, unlabeled, ready_for_review, synchronize, closed]
   workflow_dispatch:
 
 concurrency:

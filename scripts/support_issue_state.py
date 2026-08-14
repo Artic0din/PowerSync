@@ -110,6 +110,8 @@ class SupportIssueAutomation:
 
         marker = resolution_marker(comment_id)
         marker_exists = self._has_comment_marker(issue_path, marker)
+        if is_terminal_retry and not has_delivery_gate and not marker_exists:
+            return "invalid-state"
         if "solved" not in labels:
             self._request("POST", f"{issue_path}/labels", {"labels": ["solved"]})
         if issue.get("state") != "closed":
@@ -127,9 +129,11 @@ class SupportIssueAutomation:
                     "using `/powersync solved`. Closing this issue as completed."
                 },
             )
-        self._request(
-            "DELETE", f"{issue_path}/labels/{quote('awaiting confirmation', safe='')}"
-        )
+        if has_delivery_gate:
+            self._request(
+                "DELETE",
+                f"{issue_path}/labels/{quote('awaiting confirmation', safe='')}",
+            )
         return "closed-confirmed"
 
     def _has_write_access(self, repository: str, actor: str) -> bool:

@@ -23,16 +23,21 @@ def select_pull_request(pages: Any, repository: str) -> dict[str, Any] | None:
     if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
         raise ValueError("GitHub returned invalid pull request pages")
     pull_requests = [pull_request for page in pages for pull_request in page]
-    automation_pull_requests = [
+    release_branch_pull_requests = [
         pull_request
         for pull_request in pull_requests
-        if _is_release_branch_automation_pull_request(pull_request, repository)
+        if _is_release_branch_pull_request(pull_request, repository)
     ]
     if any(
         MERGE_QUEUE_LABEL in _label_names(pull_request)
-        for pull_request in automation_pull_requests
+        for pull_request in release_branch_pull_requests
     ):
         return None
+    automation_pull_requests = [
+        pull_request
+        for pull_request in release_branch_pull_requests
+        if AUTOMATION_LABEL in _label_names(pull_request)
+    ]
     eligible = [
         pull_request
         for pull_request in automation_pull_requests
@@ -127,6 +132,13 @@ def _is_eligible_pull_request(pull_request: Any, repository: str) -> bool:
 def _is_release_branch_automation_pull_request(
     pull_request: Any, repository: str
 ) -> bool:
+    return (
+        _is_release_branch_pull_request(pull_request, repository)
+        and AUTOMATION_LABEL in _label_names(pull_request)
+    )
+
+
+def _is_release_branch_pull_request(pull_request: Any, repository: str) -> bool:
     if not isinstance(pull_request, dict):
         return False
     head = pull_request.get("head")
@@ -137,7 +149,6 @@ def _is_release_branch_automation_pull_request(
         and head_repository.get("full_name", "").casefold() == repository.casefold()
         and isinstance(base, dict)
         and base.get("ref") == RELEASE_BRANCH
-        and AUTOMATION_LABEL in _label_names(pull_request)
     )
 
 

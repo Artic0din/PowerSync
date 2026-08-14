@@ -466,7 +466,10 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     assert workflow.index("Record immutable delivery evidence") < workflow.index(
         "Enter the protected Graphite merge queue"
     )
-    assert "types: [opened, labeled, ready_for_review, synchronize, closed]" in workflow
+    assert (
+        "types: [opened, labeled, unlabeled, ready_for_review, synchronize, closed]"
+        in workflow
+    )
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
 
@@ -477,6 +480,16 @@ def test_pull_request_validation_requires_immutable_support_references() -> None
     assert "Validate immutable support references" in workflow
     assert "validate-reference" in workflow
     assert 'squash_merge_commit_message == "COMMIT_MESSAGES"' in workflow
+    assert "types: [opened, synchronize, reopened, ready_for_review, edited]" in workflow
+
+
+def test_solved_comment_filter_defers_whitespace_handling_to_the_parser() -> None:
+    workflow = Path(".github/workflows/support-issue-state.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "github.event.issue.pull_request == null" in workflow
+    assert "github.event.comment.body == '/powersync solved'" not in workflow
 
 
 def test_release_advances_the_queue_only_after_successful_completion() -> None:

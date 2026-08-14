@@ -67,6 +67,15 @@ def test_queue_waits_while_an_automation_pull_request_is_already_queued() -> Non
     assert selected is None
 
 
+def test_queue_waits_when_the_queued_pull_request_lost_automation_label() -> None:
+    selected = select_pull_request(
+        [[pull_request(1, labels=("merge-queue",)), pull_request(2)]],
+        REPOSITORY,
+    )
+
+    assert selected is None
+
+
 def test_queue_waits_when_the_queued_automation_pull_request_becomes_draft() -> None:
     selected = select_pull_request(
         [
