@@ -322,7 +322,7 @@ class ReleaseDelivery:
         marker = delivery_marker(pull_urls, release_url)
         pending_marker = delivery_pending_marker(pull_urls, release_url)
         if issue.get("state") != "open" or "solved" in labels:
-            if issue.get("state") == "closed" and "solved" in labels:
+            if issue.get("state") == "closed":
                 pending_comment = self._comment_with_marker(
                     issue_path, pending_marker
                 )

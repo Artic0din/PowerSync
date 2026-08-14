@@ -43,10 +43,33 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           published_release_tag() {
-            gh release view "$1" \
-              --json tagName,isDraft,publishedAt \
-              --jq 'select(.isDraft == false and .publishedAt != null) | .tagName' \
-              2>/dev/null || true
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -r \
+                'if .draft == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
           }
           PUBLISHED_TAG=$(published_release_tag "v$VERSION")
           if [ -z "$PUBLISHED_TAG" ]; then
@@ -226,10 +249,33 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           RELEASE_TAG=""
           published_release_tag() {
-            gh release view "$1" \
-              --json tagName,isDraft,publishedAt \
-              --jq 'select(.isDraft == false and .publishedAt != null) | .tagName' \
-              2>/dev/null || true
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -r \
+                'if .draft == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
           }
           RELEASE_TAG=$(published_release_tag "v$VERSION")
           if [ -z "$RELEASE_TAG" ]; then

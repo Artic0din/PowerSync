@@ -2,7 +2,7 @@ name: Queue automated fixes
 
 on:
   pull_request:
-    types: [opened, labeled, unlabeled, ready_for_review, synchronize, closed]
+    types: [opened, reopened, labeled, unlabeled, ready_for_review, synchronize, closed]
   workflow_run:
     workflows: ["Create Release on Version Bump"]
     types: [completed]
@@ -31,6 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Clear stale queue label after unmerged closure
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr edit "$PR_URL" --remove-label merge-queue
+
       - name: Check out trusted queue logic
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -178,6 +188,7 @@ jobs:
                .head.ref == $head_ref and
                .head.repo.full_name == $repository and
                .base.ref == "main" and
+               .state == "open" and
                .draft == false and
                .title == $title and
                ((.labels | map(.name) | index("automation")) != null)' >/dev/null
