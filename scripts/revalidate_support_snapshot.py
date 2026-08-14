@@ -14,6 +14,40 @@ from scripts.support_intake import (
     snapshot_revision,
 )
 
+ROUTE_LABEL_STATES = {
+    "issue-investigation": (
+        frozenset({"bug", "needs investigation"}),
+        frozenset(
+            {
+                "enhancement",
+                "question",
+                "duplicate",
+                "off topic",
+                "spam",
+                "needs triage",
+                "needs information",
+                "feature assessed",
+            }
+        ),
+    ),
+    "feature-assessment": (
+        frozenset({"enhancement"}),
+        frozenset(
+            {
+                "bug",
+                "question",
+                "duplicate",
+                "off topic",
+                "spam",
+                "needs triage",
+                "needs information",
+                "needs investigation",
+                "feature assessed",
+            }
+        ),
+    ),
+}
+
 
 class RevalidationClient(Protocol):
     def request(
@@ -46,15 +80,22 @@ def refresh_snapshot_revision(
     repository: str,
     issue_number: int,
     expected_revision: str,
+    expected_route: str,
 ) -> str | None:
-    """Return a new bound revision after safe-output label mutations only."""
+    """Return a revision only for the route's exact classification state."""
     snapshot = SupportIntake(client).evaluate(repository, issue_number)
     current_revision = snapshot_revision(snapshot)
+    route_state = ROUTE_LABEL_STATES.get(expected_route)
+    if route_state is None:
+        return None
+    required_labels, forbidden_labels = route_state
     if (
         snapshot.decision.safe
         and "safe evidence" in snapshot.labels
         and "unsafe evidence" not in snapshot.labels
         and same_evidence_revision(current_revision, expected_revision)
+        and required_labels <= snapshot.labels
+        and snapshot.labels.isdisjoint(forbidden_labels)
     ):
         return current_revision
     return None
@@ -68,8 +109,13 @@ def main() -> int:
         raise ValueError("The workflow is missing support revalidation metadata")
     client = GitHubClient(os.environ.get("GITHUB_TOKEN", ""))
     if os.environ.get("SUPPORT_REFRESH_REVISION") == "true":
+        expected_route = os.environ.get("SUPPORT_EXPECTED_ROUTE", "")
         refreshed_revision = refresh_snapshot_revision(
-            client, repository, int(issue_number_text), expected_revision
+            client,
+            repository,
+            int(issue_number_text),
+            expected_revision,
+            expected_route,
         )
         output_path = os.environ.get("GITHUB_OUTPUT", "")
         if refreshed_revision is None or not output_path:

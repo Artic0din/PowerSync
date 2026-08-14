@@ -23,6 +23,27 @@ def test_triage_routes_only_the_triggering_issue() -> None:
     assert "options: [issue-investigation, feature-assessment]" in source
     assert "needs: [agent, detection, safe_outputs]" in source
     assert "needs.safe_outputs.result == 'success'" in source
+    assert "SUPPORT_EXPECTED_ROUTE: ${{ steps.route.outputs.destination }}" in source
+
+
+def test_triage_applies_destination_classification_before_routing() -> None:
+    source = workflow("issue-triage.md")
+
+    assert "Add `bug` and `needs investigation`." in source
+    assert (
+        "add `enhancement`, remove `feature assessed`, `bug`, `question`, "
+        "`needs triage`, `needs information`, and `needs investigation`" in source
+    )
+
+
+def test_every_route_refresh_requires_the_expected_label_state() -> None:
+    triage = workflow("issue-triage.md")
+    investigation = workflow("issue-investigation.md")
+    assessment = workflow("feature-assessment.md")
+
+    assert "SUPPORT_EXPECTED_ROUTE: ${{ steps.route.outputs.destination }}" in triage
+    assert 'SUPPORT_EXPECTED_ROUTE: "feature-assessment"' in investigation
+    assert 'SUPPORT_EXPECTED_ROUTE: "issue-investigation"' in assessment
 
 
 def test_models_cannot_read_other_issue_content() -> None:
@@ -121,8 +142,9 @@ def test_retriage_clears_stale_feature_assessment_state() -> None:
         in source
     )
     assert (
-        "request is complete, remove `feature assessed`, `needs triage`, "
-        "`needs information`, and `needs investigation`"
+        "request is complete, add `enhancement`, remove `feature assessed`, "
+        "`bug`, `question`, `needs triage`, `needs information`, and "
+        "`needs investigation`"
         in source
     )
 

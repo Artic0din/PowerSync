@@ -80,19 +80,8 @@ safe-outputs:
           uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
           with:
             persist-credentials: false
-        - name: Refresh the revision after approved label mutations
-          id: refresh_evidence
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
-            SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
-            SUPPORT_REFRESH_REVISION: "true"
-          run: python -m scripts.revalidate_support_snapshot
-        - name: Dispatch the bound support issue
-          env:
-            GH_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
-            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
-            SUPPORT_EVIDENCE_REVISION: ${{ steps.refresh_evidence.outputs.evidence_revision }}
+        - name: Resolve the requested support route
+          id: route
           run: |
             set -euo pipefail
             mapfile -t destinations < <(
@@ -103,7 +92,25 @@ safe-outputs:
               echo "Expected exactly one support route, found ${#destinations[@]}" >&2
               exit 1
             fi
-            gh workflow run "${destinations[0]}.lock.yml" \
+            echo "destination=${destinations[0]}" >> "$GITHUB_OUTPUT"
+        - name: Refresh the revision after approved label mutations
+          id: refresh_evidence
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+            SUPPORT_REFRESH_REVISION: "true"
+            SUPPORT_EXPECTED_ROUTE: ${{ steps.route.outputs.destination }}
+          run: python -m scripts.revalidate_support_snapshot
+        - name: Dispatch the bound support issue
+          env:
+            GH_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+            SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+            SUPPORT_EVIDENCE_REVISION: ${{ steps.refresh_evidence.outputs.evidence_revision }}
+            SUPPORT_DESTINATION: ${{ steps.route.outputs.destination }}
+          run: |
+            set -euo pipefail
+            gh workflow run "$SUPPORT_DESTINATION.lock.yml" \
               --ref "${GITHUB_REF_NAME}" \
               -f issue_number="$SUPPORT_ISSUE_NUMBER" \
               -f evidence_revision="$SUPPORT_EVIDENCE_REVISION"
@@ -183,7 +190,7 @@ If one or more gates are missing:
 
 If every gate is satisfied:
 
-- Add `needs investigation`.
+- Add `bug` and `needs investigation`.
 - Remove `feature assessed`, `needs triage`, and `needs information` if present.
 - Do not add a comment.
 - Call `route_support_issue` once with `destination` set to `issue-investigation`.
@@ -194,7 +201,7 @@ Require a category, a specific current problem, who is affected, and a proposed 
 Alternatives and additional context are optional.
 
 If required information is missing, add `needs information`, remove `feature assessed`, `needs triage`, and `needs investigation`, and ask once for all missing details.
-If the request is complete, remove `feature assessed`, `needs triage`, `needs information`, and `needs investigation` if present, then call `route_support_issue` once with `destination` set to `feature-assessment`.
+If the request is complete, add `enhancement`, remove `feature assessed`, `bug`, `question`, `needs triage`, `needs information`, and `needs investigation` if present, then call `route_support_issue` once with `destination` set to `feature-assessment`.
 Do not decide that the feature is approved and do not assign an agent.
 
 ## Other classifications

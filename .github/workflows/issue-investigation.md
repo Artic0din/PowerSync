@@ -123,6 +123,7 @@ safe-outputs:
             SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
             SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
             SUPPORT_REFRESH_REVISION: "true"
+            SUPPORT_EXPECTED_ROUTE: "feature-assessment"
           run: python -m scripts.revalidate_support_snapshot
         - name: Dispatch feature assessment for the bound issue
           env:

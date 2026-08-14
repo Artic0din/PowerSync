@@ -822,11 +822,54 @@ def test_snapshot_refresh_accepts_only_workflow_label_mutations() -> None:
         "Plaintext-Lab/PowerSync",
         42,
         snapshot_revision(original),
+        "issue-investigation",
     )
 
     current = SupportIntake(changed_client).evaluate("Plaintext-Lab/PowerSync", 42)
     assert refreshed == snapshot_revision(current)
     assert refreshed != snapshot_revision(original)
+
+
+def test_snapshot_refresh_rejects_labels_that_conflict_with_route() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1000")
+    changed_client.responses[("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")][
+        "labels"
+    ] = [
+        {"name": "bug"},
+        {"name": "needs information"},
+        {"name": "safe evidence"},
+    ]
+
+    refreshed = refresh_snapshot_revision(
+        changed_client,
+        "Plaintext-Lab/PowerSync",
+        42,
+        snapshot_revision(original),
+        "issue-investigation",
+    )
+
+    assert refreshed is None
+
+
+def test_snapshot_refresh_accepts_complete_feature_route_labels() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1000")
+    changed_client.responses[("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")][
+        "labels"
+    ] = [{"name": "enhancement"}, {"name": "safe evidence"}]
+
+    refreshed = refresh_snapshot_revision(
+        changed_client,
+        "Plaintext-Lab/PowerSync",
+        42,
+        snapshot_revision(original),
+        "feature-assessment",
+    )
+
+    assert refreshed is not None
 
 
 def test_snapshot_refresh_rejects_changed_issue_content() -> None:
@@ -840,6 +883,7 @@ def test_snapshot_refresh_rejects_changed_issue_content() -> None:
             "Plaintext-Lab/PowerSync",
             42,
             snapshot_revision(original),
+            "issue-investigation",
         )
         is None
     )
