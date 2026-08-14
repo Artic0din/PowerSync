@@ -47,6 +47,25 @@ test("escaped quotes cannot expose a credential suffix", async () => {
   assert.match(result, /"next":"preserved"/);
 });
 
+test("credentials inside serialized JSON strings are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`{"payload":"{\"password\":\"hunter2\",\"status\":\"failed\"}"}`,
+  );
+
+  assert.doesNotMatch(result, /hunter2/);
+  assert.match(result, /\\"password\\":\\"\[REDACTED\]\\"/);
+  assert.match(result, /\\"status\\":\\"failed\\"/);
+});
+
+test("URL user-info credentials are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    "request http://admin:hunter2@192.168.1.10/api failed",
+  );
+
+  assert.doesNotMatch(result, /admin|hunter2/);
+  assert.match(result, /http:\/\/\[IP_1\]\/api/);
+});
+
 test("unquoted credentials consume the complete line", async () => {
   const result = await sanitizeSupportBundle(
     "password: correct horse battery staple\nnext: preserved",

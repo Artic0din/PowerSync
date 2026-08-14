@@ -12,6 +12,8 @@ export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
 ]);
 
 const YAML_SECRET_BLOCK_HEADER_PATTERN = /^([ \t]*)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)[|>](?:[1-9]?[+-]?|[+-]?[1-9]?)?[ \t]*(?:#.*)?$/i;
+const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)$/i;
+const URL_USERINFO_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi;
 
 const SECRET_PATTERNS = [
   [
@@ -88,6 +90,63 @@ function redactYamlSecretBlocks(text) {
   return parts.join("");
 }
 
+function precedingBackslashes(text, quoteIndex) {
+  let count = 0;
+  for (let index = quoteIndex - 1; index >= 0 && text[index] === "\\"; index -= 1) {
+    count += 1;
+  }
+  return count;
+}
+
+function nextQuoteAtDepth(text, start, depth) {
+  for (let index = start; index < text.length; index += 1) {
+    if (text[index] === '"' && precedingBackslashes(text, index) === depth) return index;
+  }
+  return -1;
+}
+
+function redactSerializedJsonSecrets(text) {
+  let output = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    const keyOpen = text.indexOf('"', cursor);
+    if (keyOpen === -1) break;
+    const depth = precedingBackslashes(text, keyOpen);
+    if (depth === 0 || depth % 2 === 0) {
+      output += text.slice(cursor, keyOpen + 1);
+      cursor = keyOpen + 1;
+      continue;
+    }
+    const keyClose = nextQuoteAtDepth(text, keyOpen + 1, depth);
+    if (keyClose === -1) break;
+    const key = text.slice(keyOpen + 1, keyClose - depth);
+    let valueOpen = keyClose + 1;
+    while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
+    if (text[valueOpen] !== ":" && text[valueOpen] !== "=") {
+      output += text.slice(cursor, keyClose + 1);
+      cursor = keyClose + 1;
+      continue;
+    }
+    valueOpen += 1;
+    while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
+    const valueQuote = text.indexOf('"', valueOpen);
+    const valueDepth = valueQuote !== -1
+      && /^\\+$/.test(text.slice(valueOpen, valueQuote))
+      ? precedingBackslashes(text, valueQuote)
+      : 0;
+    if (!SECRET_KEY_NAME_PATTERN.test(key) || valueDepth !== depth) {
+      output += text.slice(cursor, keyClose + 1);
+      cursor = keyClose + 1;
+      continue;
+    }
+    const valueClose = nextQuoteAtDepth(text, valueQuote + 1, depth);
+    if (valueClose === -1) break;
+    output += `${text.slice(cursor, valueQuote + 1)}[REDACTED]${"\\".repeat(depth)}`;
+    cursor = valueClose;
+  }
+  return output + text.slice(cursor);
+}
+
 async function pseudonymise(text, label, pattern, replacementsByLabel) {
   const values = [...new Set(text.match(pattern) ?? [])];
   const replacements = replacementsByLabel.get(label) ?? new Map();
@@ -146,8 +205,11 @@ function pseudonymiseAddress(text, replacementsByLabel) {
 }
 
 export async function sanitizeSupportBundle(input) {
-  let output = redactYamlSecretBlocks(input.replaceAll("\0", ""));
+  let output = redactSerializedJsonSecrets(
+    redactYamlSecretBlocks(input.replaceAll("\0", "")),
+  );
   const replacementsByLabel = new Map();
+  output = output.replace(URL_USERINFO_PATTERN, "$1");
   for (const [pattern, replacement] of SECRET_PATTERNS) {
     output = output.replace(pattern, replacement);
   }

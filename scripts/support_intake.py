@@ -74,6 +74,16 @@ KEYED_SECRET_PATTERN = re.compile(
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)"
 )
+SECRET_KEY_NAME_PATTERN = re.compile(
+    r"(?i)^(?!timezone[_ -]?token$)"
+    r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
+    r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
+    r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)$"
+)
+URL_USERINFO_PATTERN = re.compile(
+    r"\b[a-z][a-z0-9+.-]*://(?P<userinfo>[^/@\s]+)@", re.IGNORECASE
+)
 YAML_SECRET_BLOCK_HEADER_PATTERN = re.compile(
     r"(?im)^[ \t]*[\"']?(?!timezone[_ -]?token[\"']?\s*:)"
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
@@ -318,11 +328,87 @@ class SupportIntake:
             return True
         if any(pattern.search(text) for pattern in SECRET_PATTERNS):
             return True
+        if SupportIntake._contains_escaped_keyed_secret(text):
+            return True
+        if URL_USERINFO_PATTERN.search(text):
+            return True
         return any(
             not EXACT_REDACTED_VALUE.fullmatch(match.group("value").strip())
             and not EXACT_EMPTY_VALUE.fullmatch(match.group("value").strip())
             for match in KEYED_SECRET_PATTERN.finditer(text)
         )
+
+    @staticmethod
+    def _contains_escaped_keyed_secret(text: str) -> bool:
+        cursor = 0
+        while cursor < len(text):
+            key_open = text.find('"', cursor)
+            if key_open == -1:
+                return False
+            depth = SupportIntake._preceding_backslashes(text, key_open)
+            if depth == 0 or depth % 2 == 0:
+                cursor = key_open + 1
+                continue
+            key_close = SupportIntake._next_quote_at_depth(
+                text, key_open + 1, depth
+            )
+            if key_close == -1:
+                return False
+            key = text[key_open + 1 : key_close - depth]
+            value_open = key_close + 1
+            while value_open < len(text) and text[value_open].isspace():
+                value_open += 1
+            if value_open >= len(text) or text[value_open] not in ":=":
+                cursor = key_close + 1
+                continue
+            value_open += 1
+            while value_open < len(text) and text[value_open].isspace():
+                value_open += 1
+            value_quote = text.find('"', value_open)
+            value_prefix = (
+                text[value_open:value_quote] if value_quote != -1 else ""
+            )
+            value_depth = (
+                SupportIntake._preceding_backslashes(text, value_quote)
+                if value_quote != -1
+                and value_prefix
+                and set(value_prefix) == {"\\"}
+                else 0
+            )
+            if not SECRET_KEY_NAME_PATTERN.fullmatch(key) or value_depth != depth:
+                cursor = key_close + 1
+                continue
+            value_close = SupportIntake._next_quote_at_depth(
+                text, value_quote + 1, depth
+            )
+            if value_close == -1:
+                return True
+            if (
+                text[value_quote + 1 : value_close - depth].casefold()
+                != "[redacted]"
+            ):
+                return True
+            cursor = value_close + 1
+        return False
+
+    @staticmethod
+    def _preceding_backslashes(text: str, quote_index: int) -> int:
+        count = 0
+        index = quote_index - 1
+        while index >= 0 and text[index] == "\\":
+            count += 1
+            index -= 1
+        return count
+
+    @staticmethod
+    def _next_quote_at_depth(text: str, start: int, depth: int) -> int:
+        for index in range(start, len(text)):
+            if (
+                text[index] == '"'
+                and SupportIntake._preceding_backslashes(text, index) == depth
+            ):
+                return index
+        return -1
 
     @staticmethod
     def _contains_identifier(text: str) -> bool:

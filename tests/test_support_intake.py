@@ -145,6 +145,52 @@ def test_escaped_quote_secret_fails_closed() -> None:
     assert "possible credential in issue text" in decision.reasons
 
 
+def test_serialized_json_credentials_fail_closed() -> None:
+    client = client_for(
+        r'{"payload":"{\"password\":\"hunter2\",\"status\":\"failed\"}"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+def test_redacted_serialized_json_credential_is_allowed() -> None:
+    client = client_for(
+        r'{"payload":"{\"password\":\"[REDACTED]\",\"status\":\"failed\"}"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
+
+
+def test_url_user_info_credentials_fail_closed() -> None:
+    client = client_for("request http://admin:hunter2@192.168.1.10/api failed")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+def test_url_without_user_info_is_allowed() -> None:
+    client = client_for("request http://service.local/api failed")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is True
+
+
+def test_deleted_comments_retrigger_deterministic_intake() -> None:
+    workflow = Path(".github/workflows/support-intake.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "types: [created, edited, deleted]" in workflow
+
+
 def test_multiword_username_fails_closed() -> None:
     client = client_for('{"username": "Alice Smith"}')
 
