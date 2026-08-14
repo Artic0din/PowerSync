@@ -12,6 +12,7 @@ AUTOMATION_LABEL = "automation"
 MERGE_QUEUE_LABEL = "merge-queue"
 RELEASE_BRANCH = "main"
 REFERENCE_PATTERN = re.compile(r"(?i)\bRefs\s+#(\d+)\b")
+HTML_COMMENT_PATTERN = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 RELEASE_MARKER_PATTERN = re.compile(
     r"^\s*<!--\s*release:\s*v?\d+\.\d+\.\d+\s*-->\s*", re.IGNORECASE
 )
@@ -73,6 +74,31 @@ def prepare_release_files(
         f"<!-- release: v{next_version} -->\n{note}\n", encoding="utf-8"
     )
     return next_version, issue_number
+
+
+def validate_support_reference_evidence(
+    pull_request_body: Any, commit_messages: Sequence[str]
+) -> None:
+    """Require visible support references to survive in immutable merge evidence."""
+    if not isinstance(pull_request_body, str):
+        return
+    visible_body = HTML_COMMENT_PATTERN.sub("", pull_request_body)
+    body_references = {
+        int(number) for number in REFERENCE_PATTERN.findall(visible_body)
+    }
+    if not body_references:
+        return
+    commit_references = {
+        int(number)
+        for message in commit_messages
+        for number in REFERENCE_PATTERN.findall(message)
+    }
+    missing_references = sorted(body_references - commit_references)
+    if missing_references:
+        missing = ", ".join(f"Refs #{number}" for number in missing_references)
+        raise ValueError(
+            f"Support references must be preserved in commit messages: {missing}"
+        )
 
 
 def _is_eligible_pull_request(pull_request: Any, repository: str) -> bool:
@@ -163,6 +189,26 @@ def _prepare_command(arguments: argparse.Namespace) -> None:
     print(f"issue_number={issue_number}")
 
 
+def _validate_reference_command(arguments: argparse.Namespace) -> None:
+    event = json.loads(arguments.event.read_text(encoding="utf-8"))
+    pages = json.loads(arguments.pages.read_text(encoding="utf-8"))
+    pull_request = event.get("pull_request") if isinstance(event, dict) else None
+    if not isinstance(pull_request, dict):
+        raise ValueError("The event has no pull request")
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise ValueError("GitHub returned invalid pull request commit pages")
+    messages: list[str] = []
+    for page in pages:
+        for item in page:
+            commit = item.get("commit") if isinstance(item, dict) else None
+            message = commit.get("message") if isinstance(commit, dict) else None
+            if not isinstance(message, str) or not message:
+                raise ValueError("A pull request commit has no message")
+            messages.append(message)
+    validate_support_reference_evidence(pull_request.get("body"), tuple(messages))
+    print("support-reference-evidence=valid")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -178,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--release-notes", type=Path, required=True)
     prepare_parser.add_argument("--title", required=True)
     prepare_parser.set_defaults(handler=_prepare_command)
+
+    validate_reference_parser = subparsers.add_parser("validate-reference")
+    validate_reference_parser.add_argument("--event", type=Path, required=True)
+    validate_reference_parser.add_argument("--pages", type=Path, required=True)
+    validate_reference_parser.set_defaults(handler=_validate_reference_command)
     return parser
 
 

@@ -246,6 +246,21 @@ def test_refs_inside_html_comments_are_ignored() -> None:
     assert all(method == "GET" for method, _, _ in client.requests)
 
 
+def test_refs_inside_unterminated_html_comments_are_ignored() -> None:
+    client = delivery_client()
+    compare_path = (
+        f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100?per_page=100&page=1"
+    )
+    client.responses[("GET", compare_path)]["commits"][0]["commit"]["message"] = (
+        "No support reference\n<!-- Refs #42"
+    )
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert all(method == "GET" for method, _, _ in client.requests)
+
+
 def test_partial_delivery_is_repaired_without_duplicate_state_label() -> None:
     client = delivery_client()
     issue_path = f"/repos/{REPOSITORY}/issues/42"
@@ -387,6 +402,19 @@ def test_release_workflow_rejects_drafts_as_existing_publications() -> None:
     assert ".isDraft == false and .publishedAt != null" in workflow
 
 
+def test_release_workflow_verifies_published_tag_targets_workflow_head() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    published_check = workflow.index('if [ -n "$PUBLISHED_TAG" ]')
+    release_exists = workflow.index("release_exists=true", published_check)
+    verification = workflow.index(
+        'git rev-parse "$PUBLISHED_TAG^{commit}"', published_check
+    )
+
+    assert verification < release_exists
+    assert "not workflow HEAD" in workflow[verification:release_exists]
+
+
 def test_release_workflow_repairs_a_tag_without_a_published_release() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
@@ -434,9 +462,17 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     assert workflow.index("Record immutable delivery evidence") < workflow.index(
         "Enter the protected Graphite merge queue"
     )
-    assert "types: [opened, labeled, ready_for_review, closed]" in workflow
+    assert "types: [opened, labeled, ready_for_review, synchronize, closed]" in workflow
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
+
+
+def test_pull_request_validation_requires_immutable_support_references() -> None:
+    workflow = Path(".github/workflows/validate.yml").read_text(encoding="utf-8")
+
+    assert "Validate immutable support references" in workflow
+    assert "validate-reference" in workflow
+    assert 'squash_merge_commit_message == "COMMIT_MESSAGES"' in workflow
 
 
 def test_release_advances_the_queue_only_after_successful_completion() -> None:

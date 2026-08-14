@@ -391,7 +391,7 @@ class ReleaseDelivery:
     def _referenced_issues(repository: str, body: Any) -> set[int]:
         if not isinstance(body, str):
             return set()
-        body_without_comments = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+        body_without_comments = re.sub(r"<!--.*?(?:-->|$)", "", body, flags=re.DOTALL)
         escaped_repository = re.escape(repository)
         pattern = re.compile(
             rf"(?im)\bRefs\s+(?:#|{escaped_repository}#|"

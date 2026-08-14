@@ -4,7 +4,7 @@
 
 ## Related issue
 
-<!-- Use "Refs #123" for support fixes so reporter confirmation controls closure. Use "Fixes #123" only when merging should close an internal issue immediately. -->
+<!-- Use "Refs #123" in both this section and a commit message for support fixes so immutable release evidence controls reporter confirmation. Use "Fixes #123" only when merging should close an internal issue immediately. -->
 
 ## Changes
 

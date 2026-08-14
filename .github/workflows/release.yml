@@ -53,6 +53,16 @@ jobs:
             PUBLISHED_TAG=$(published_release_tag "$VERSION")
           fi
           if [ -n "$PUBLISHED_TAG" ]; then
+            HEAD_SHA=$(git rev-parse HEAD)
+            if ! git rev-parse "$PUBLISHED_TAG^{commit}" >/dev/null 2>&1; then
+              echo "::error::Published release tag $PUBLISHED_TAG cannot be resolved."
+              exit 1
+            fi
+            PUBLISHED_SHA=$(git rev-parse "$PUBLISHED_TAG^{commit}")
+            if [ "$PUBLISHED_SHA" != "$HEAD_SHA" ]; then
+              echo "::error::Published release tag $PUBLISHED_TAG targets $PUBLISHED_SHA, not workflow HEAD $HEAD_SHA."
+              exit 1
+            fi
             echo "release_exists=true" >> "$GITHUB_OUTPUT"
             echo "A published release already exists as $PUBLISHED_TAG"
           else
