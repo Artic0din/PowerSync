@@ -57,8 +57,8 @@ class ReleaseDelivery:
         self._client = client
 
     def record(self, repository: str, release: dict[str, Any]) -> str:
-        if release.get("draft") is not False:
-            raise ValueError("The supplied release must be published and not a draft")
+        if release.get("draft") is not False or release.get("prerelease") is not False:
+            raise ValueError("The supplied release must be a stable published release")
         current_tag = release.get("tag_name")
         release_url = release.get("html_url")
         published_at = self._parse_timestamp(
@@ -126,7 +126,11 @@ class ReleaseDelivery:
             if not isinstance(releases, list):
                 raise ValueError("GitHub returned invalid release history")
             for release in releases:
-                if not isinstance(release, dict) or release.get("draft") is not False:
+                if (
+                    not isinstance(release, dict)
+                    or release.get("draft") is not False
+                    or release.get("prerelease") is not False
+                ):
                     continue
                 tag = release.get("tag_name")
                 timestamp = release.get("published_at")
@@ -328,6 +332,11 @@ class ReleaseDelivery:
                 )
                 if pending_comment is not None:
                     self._delete_delivery_comment(repository, pending_comment)
+                if "awaiting confirmation" in labels:
+                    self._request(
+                        "DELETE",
+                        f"{issue_path}/labels/{quote('awaiting confirmation', safe='')}",
+                    )
             return False
         marker_comment = self._comment_with_marker(issue_path, marker)
         already_awaiting = "awaiting confirmation" in labels

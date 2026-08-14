@@ -39,11 +39,13 @@ RELEASE = {
     "tag_name": "v2.12.1100",
     "html_url": "https://github.com/Plaintext-Lab/PowerSync/releases/tag/v2.12.1100",
     "draft": False,
+    "prerelease": False,
     "published_at": "2026-08-13T09:00:00Z",
 }
 PREVIOUS_RELEASE = {
     "tag_name": "v2.12.1099",
     "draft": False,
+    "prerelease": False,
     "published_at": "2026-08-12T09:00:00Z",
 }
 
@@ -217,6 +219,16 @@ def test_release_time_must_be_strictly_after_merge() -> None:
         SupportIssueAutomation(client).handle(release_event())
 
     assert all(method == "GET" for method, _, _ in client.requests)
+
+
+def test_prerelease_does_not_transition_reporter_issues() -> None:
+    client = delivery_client()
+    prerelease = {**RELEASE, "prerelease": True}
+
+    with pytest.raises(ValueError, match="stable published release"):
+        ReleaseDelivery(client).record(REPOSITORY, prerelease)
+
+    assert client.requests == []
 
 
 def test_every_page_of_latest_checks_must_pass() -> None:
@@ -474,6 +486,7 @@ def test_release_workflow_rejects_drafts_as_existing_publications() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert ".draft == false" in workflow
+    assert ".prerelease == false" in workflow
     assert '(.published_at | type) == "string"' in workflow
 
 
@@ -518,12 +531,32 @@ def test_existing_release_retries_notification_and_cleanup() -> None:
     for step_name in (
         "Build Discord payloads",
         "Notify Discord",
-        "Clear release notes and record Discord marker",
+        "Clear release notes",
     ):
         step = workflow.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
         assert "steps.support_release.outputs.tag != ''" in step
         assert "release_exists == 'false'" not in step
     assert 'tag == target_tag and Path("/tmp/release_notes.md").exists()' in workflow
+
+
+def test_discord_receipt_is_persisted_per_release_before_later_cleanup() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+    build = workflow.split("- name: Build Discord payloads", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    notify = workflow.split("- name: Notify Discord", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    cleanup = workflow.split("- name: Clear release notes", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+
+    assert "contents/{marker_path}?ref=main" in build
+    assert "record_discord_marker" in notify
+    assert notify.index('record_discord_marker "$tag"') > notify.index("HTTP_CODE")
+    assert "git fetch origin main" in cleanup
+    assert "git checkout -B release-cleanup origin/main" in cleanup
+    assert "discord-release-last-posted.txt" not in cleanup
 
 
 def test_release_workflow_verifies_existing_tag_targets_before_publish() -> None:
@@ -573,16 +606,19 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     )
     assert (
         "types: [opened, reopened, labeled, unlabeled, ready_for_review, "
-        "synchronize, closed]"
+        "converted_to_draft, synchronize, closed]"
         in workflow
     )
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "Clear stale queue label after unmerged closure" in workflow
+    assert "Clear stale queue label after unmerged closure or eligibility loss" in workflow
     assert "--remove-label merge-queue" in workflow
-    assert workflow.index("Clear stale queue label after unmerged closure") < workflow.index(
-        "Select the next automation pull request"
-    )
+    assert workflow.index(
+        "Clear stale queue label after unmerged closure or eligibility loss"
+    ) < workflow.index("Select the next automation pull request")
+    assert "github.event.action == 'unlabeled'" in workflow
+    assert "github.event.label.name == 'automation'" in workflow
+    assert "github.event.action == 'converted_to_draft'" in workflow
 
 
 def test_automation_queue_reuses_reservation_and_revalidates_live_pr() -> None:
@@ -726,7 +762,7 @@ def test_terminal_rerun_retries_pending_delivery_comment_cleanup() -> None:
     client.responses[("GET", issue_path)] = {
         "number": 42,
         "state": "closed",
-        "labels": [{"name": "solved"}],
+        "labels": [{"name": "solved"}, {"name": "awaiting confirmation"}],
     }
     client.responses[("GET", f"{issue_path}/comments?per_page=100&page=1")] = [
         {
@@ -743,6 +779,11 @@ def test_terminal_rerun_retries_pending_delivery_comment_cleanup() -> None:
     assert (
         "DELETE",
         f"/repos/{REPOSITORY}/issues/comments/987",
+        None,
+    ) in client.requests
+    assert (
+        "DELETE",
+        f"{issue_path}/labels/awaiting%20confirmation",
         None,
     ) in client.requests
 
@@ -782,6 +823,7 @@ def test_previous_release_search_scans_every_bounded_page() -> None:
         {
             "tag_name": "v2.12.1098",
             "draft": False,
+            "prerelease": False,
             "published_at": "2026-08-11T09:00:00Z",
         }
     ] + [{"draft": True} for _ in range(99)]
@@ -909,6 +951,7 @@ def test_previous_release_must_be_in_the_current_tag_ancestry() -> None:
     divergent_release = {
         "tag_name": "v3.0.0",
         "draft": False,
+        "prerelease": False,
         "published_at": "2026-08-13T08:30:00Z",
     }
     releases_path = f"/repos/{REPOSITORY}/releases?per_page=100&page=1"
@@ -936,6 +979,7 @@ def test_previous_release_is_nearest_ancestor_not_latest_publication() -> None:
     backfilled_release = {
         "tag_name": "v2.12.1098",
         "draft": False,
+        "prerelease": False,
         "published_at": "2026-08-13T08:30:00Z",
     }
     releases_path = f"/repos/{REPOSITORY}/releases?per_page=100&page=1"
@@ -965,6 +1009,7 @@ def test_previous_release_search_skips_a_deleted_candidate_tag() -> None:
     orphaned_release = {
         "tag_name": "v2.12.1099-hotfix",
         "draft": False,
+        "prerelease": False,
         "published_at": "2026-08-12T12:00:00Z",
     }
     releases_path = f"/repos/{REPOSITORY}/releases?per_page=100&page=1"

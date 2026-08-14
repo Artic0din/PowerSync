@@ -2,7 +2,7 @@ name: Queue automated fixes
 
 on:
   pull_request:
-    types: [opened, reopened, labeled, unlabeled, ready_for_review, synchronize, closed]
+    types: [opened, reopened, labeled, unlabeled, ready_for_review, converted_to_draft, synchronize, closed]
   workflow_run:
     workflows: ["Create Release on Version Bump"]
     types: [completed]
@@ -31,11 +31,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Clear stale queue label after unmerged closure
+      - name: Clear stale queue label after unmerged closure or eligibility loss
         if: >-
           github.event_name == 'pull_request' &&
-          github.event.action == 'closed' &&
-          github.event.pull_request.merged == false
+          ((github.event.action == 'closed' &&
+            github.event.pull_request.merged == false) ||
+           (github.event.action == 'unlabeled' &&
+            github.event.label.name == 'automation') ||
+           github.event.action == 'converted_to_draft')
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
