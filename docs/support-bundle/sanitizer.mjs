@@ -2,10 +2,13 @@ export const SANITISED_MARKER = "PowerSync sanitised support bundle v1";
 export const MAX_FILE_BYTES = 512 * 1024;
 
 const SECRET_PATTERNS = [
-  [/["']?authorization["']?\s*:\s*["']?(?:bearer|basic)\s+[^"'\s,}]+["']?/gi, "Authorization: [REDACTED]"],
+  [
+    /((?<![A-Z0-9_-])["']?authorization["']?\s*:\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:bearer|basic)\s+[^"'\s,}]+|[^\r\n]+)/gi,
+    '$1"[REDACTED]"',
+  ],
   [/["']?(?:set-cookie|cookie)["']?\s*:\s*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]+)/gi, "Cookie: [REDACTED]"],
   [
-    /((?<![A-Z0-9_-])["']?(?!timezone[_ -]?token["']?\s*[:=])(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|cookie)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
+    /((?<![A-Z0-9_-])["']?(?!timezone[_ -]?token["']?\s*[:=])(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
     '$1"[REDACTED]"',
   ],
   [/\bpsk_[A-Za-z0-9]{20,}\b/gi, "[REDACTED_POWERSYNC_TOKEN]"],
@@ -24,18 +27,18 @@ const IDENTIFIER_PATTERNS = [
   ["EMAIL", /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi],
   ["IPV6", /(?<![0-9A-F:])(?:(?:[0-9A-F]{1,4}:){1,6}:|::)(?:ffff(?::0{1,4})?:)?(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![\d.])/gi],
   ["IPV6", /(?<![0-9A-F:])(?:(?:[0-9A-F]{1,4}:){7}[0-9A-F]{1,4}|(?:[0-9A-F]{1,4}:){1,7}:|(?:[0-9A-F]{1,4}:){1,6}:[0-9A-F]{1,4}|(?:[0-9A-F]{1,4}:){1,5}(?::[0-9A-F]{1,4}){1,2}|(?:[0-9A-F]{1,4}:){1,4}(?::[0-9A-F]{1,4}){1,3}|(?:[0-9A-F]{1,4}:){1,3}(?::[0-9A-F]{1,4}){1,4}|(?:[0-9A-F]{1,4}:){1,2}(?::[0-9A-F]{1,4}){1,5}|[0-9A-F]{1,4}:(?:(?::[0-9A-F]{1,4}){1,6})|:(?:(?::[0-9A-F]{1,4}){1,7}|:))(?![0-9A-F:])/gi],
-  ["MAC", /\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b/gi],
+  ["MAC", /\b(?:(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}|(?:[0-9A-F]{4}\.){2}[0-9A-F]{4})\b/gi],
   ["VIN", /\b(?=[A-HJ-NPR-Z0-9]{17}\b)(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])(?=[A-HJ-NPR-Z0-9]*\d)[A-HJ-NPR-Z0-9]{17}\b/gi],
   ["HOME", /\/(?:Users|home)\/[^/\r\n]+/g],
   ["HOME", /[A-Z]:\\Users\\[^\\\r\n]+/gi],
 ];
 
 const IPV4_PATTERN = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
-const VERSION_CONTEXT_PATTERN = /(?:version|firmware|integration)\s*[:=]?\s*$/i;
+const VERSION_CONTEXT_PATTERN = /(?:version|firmware[_ -]?version|integration[_ -]?version)\s*[:=]?\s*$/i;
 const KEYED_IDENTIFIER_PATTERNS = [
   ["SERIAL", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?number)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?id|site[_ -]?id)|din|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["USER", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier|address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:(?:[A-Z0-9]+[_ -]+)*(?:gateway[_ -]?id|device[_ -]?(?:id|sn)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
 ];
 const PREFIXED_IDENTIFIER_PATTERNS = [
   ["DEVICE", /(\bfor site\s+)([A-Za-z0-9-]{15,})/gi],

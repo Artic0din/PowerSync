@@ -99,6 +99,23 @@ test("quoted JSON authentication headers are removed", async () => {
   assert.doesNotMatch(result, /super-secret-token|customer-secret/);
 });
 
+test("every authorization header value is removed", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"Authorization":"apikey customer-secret","next":"preserved"}\nAuthorization: raw-token-value',
+  );
+
+  assert.doesNotMatch(result, /customer-secret|raw-token-value/);
+  assert.match(result, /"next":"preserved"/);
+});
+
+test("camelCase credentials are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"accessToken":"access-secret","refreshToken":"refresh-secret"}',
+  );
+
+  assert.doesNotMatch(result, /access-secret|refresh-secret/);
+});
+
 test("timezone token metadata remains visible", async () => {
   const result = await sanitizeSupportBundle('{"timezone_token":"AEST"}');
 
@@ -148,6 +165,24 @@ test("namespaced and customer identifiers are pseudonymised", async () => {
   assert.equal((result.match(/\[(?:USER|DEVICE)_\d+\]/g) ?? []).length, 5);
 });
 
+test("repository sensitive identifier keys are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"nmi":"E1234567890","accountName":"Alice Smith","siteIdentifier":"site-secret","device_sn":"device-secret"}',
+  );
+
+  assert.doesNotMatch(
+    result,
+    /E1234567890|Alice Smith|site-secret|device-secret/,
+  );
+});
+
+test("dotted MAC addresses are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle("adapter aabb.ccdd.eeff disconnected");
+
+  assert.doesNotMatch(result, /aabb\.ccdd\.eeff/i);
+  assert.match(result, /\[MAC_1\]/);
+});
+
 test("PowerSync identifiers in log phrases and URLs are pseudonymised", async () => {
   const result = await sanitizeSupportBundle(
     "request for site 01KAR0YMB7JQDVZ10SN1SGA0CV energy_sites/1234567890123",
@@ -190,6 +225,13 @@ test("four-part software versions remain visible", async () => {
 
   assert.match(result, /integration version 1\.2\.3\.4/);
   assert.doesNotMatch(result, /\[IP_/);
+});
+
+test("an address after a bare integration label is pseudonymised", async () => {
+  const result = await sanitizeSupportBundle("integration 192.168.1.10 failed");
+
+  assert.doesNotMatch(result, /192\.168\.1\.10/);
+  assert.match(result, /\[IP_1\]/);
 });
 
 test("identical identifiers receive stable placeholders", async () => {

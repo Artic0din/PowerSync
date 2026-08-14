@@ -160,6 +160,7 @@ def test_redacted_credential_placeholder_is_allowed_in_a_marked_bundle() -> None
     client.downloads[url] = (
         b'PowerSync sanitised support bundle v1\n{"password": "[REDACTED]"}\n'
         b"Cookie: [REDACTED]\n"
+        b"Authorization: [REDACTED]\n"
     )
 
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
@@ -247,6 +248,28 @@ def test_quoted_json_authentication_headers_fail_closed() -> None:
     assert "possible credential in issue text" in decision.reasons
 
 
+def test_every_authorization_header_value_fails_closed() -> None:
+    client = client_for(
+        '{"Authorization":"apikey customer-secret"}\nAuthorization: raw-token-value'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
+def test_camel_case_credentials_fail_closed() -> None:
+    client = client_for(
+        '{"accessToken":"access-secret","refreshToken":"refresh-secret"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "possible credential in issue text" in decision.reasons
+
+
 def test_timezone_token_and_null_token_are_not_credentials() -> None:
     client = client_for('{"timezone_token":"AEST","token":null,"status":500}')
 
@@ -293,10 +316,30 @@ def test_namespaced_and_customer_identifiers_fail_closed() -> None:
     assert "personal identifier in issue text" in decision.reasons
 
 
+def test_repository_sensitive_identifier_keys_fail_closed() -> None:
+    client = client_for(
+        '{"nmi":"E1234567890","accountName":"Alice Smith",'
+        '"siteIdentifier":"site-secret","device_sn":"device-secret"}'
+    )
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
+def test_dotted_mac_address_fails_closed() -> None:
+    client = client_for("adapter aabb.ccdd.eeff disconnected")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
+
+
 def test_power_sync_identifiers_in_log_phrases_fail_closed() -> None:
     client = client_for(
-        "request for site 01KAR0YMB7JQDVZ10SN1SGA0CV "
-        "energy_sites/1234567890123"
+        "request for site 01KAR0YMB7JQDVZ10SN1SGA0CV energy_sites/1234567890123"
     )
 
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
@@ -311,6 +354,15 @@ def test_four_part_version_is_not_misclassified_as_an_ip_address() -> None:
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
 
     assert decision.safe is True
+
+
+def test_address_after_bare_integration_label_fails_closed() -> None:
+    client = client_for("integration 192.168.1.10 failed")
+
+    decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
+
+    assert decision.safe is False
+    assert "personal identifier in issue text" in decision.reasons
 
 
 def test_closed_issue_fails_snapshot_revalidation() -> None:

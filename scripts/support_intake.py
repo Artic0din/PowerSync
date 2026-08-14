@@ -38,8 +38,11 @@ MARKDOWN_ATTACHMENT_PATTERN = re.compile(
 )
 SECRET_PATTERNS = (
     re.compile(
-        r"[\"']?authorization[\"']?\s*:\s*[\"']?(?:bearer|basic)\s+"
-        r"[^\"'\s,}]+",
+        r"[\"']?authorization[\"']?\s*:"
+        r"(?![ \t]*[\"']?\[REDACTED\][\"']?[ \t]*(?:[,}]|\r?\n|\Z))"
+        r"[ \t]*"
+        r"(?:\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
+        r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]+)",
         re.IGNORECASE,
     ),
     re.compile(
@@ -66,7 +69,9 @@ KEYED_SECRET_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9_-])[\"']?(?!timezone[_ -]?token[\"']?\s*[:=])"
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
-    r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|cookie)[\"']?\s*[:=]\s*"
+    r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
+    r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)"
@@ -77,11 +82,16 @@ IPV4_PATTERN = re.compile(
     r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b"
 )
 VERSION_CONTEXT_PATTERN = re.compile(
-    r"(?:version|firmware|integration)\s*[:=]?\s*$", re.IGNORECASE
+    r"(?:version|firmware[_ -]?version|integration[_ -]?version)\s*[:=]?\s*$",
+    re.IGNORECASE,
 )
 IDENTIFIER_PATTERNS = (
     re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(r"\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}|"
+        r"(?:[0-9A-F]{4}\.){2}[0-9A-F]{4})\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?<![0-9A-F:])(?:(?:[0-9A-F]{1,4}:){1,6}:|::)"
         r"(?:ffff(?::0{1,4})?:)?"
@@ -114,11 +124,14 @@ IDENTIFIER_PATTERNS = (
 KEYED_IDENTIFIER_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9_-])[\"']?(?P<kind>"
     r"(?:[A-Z0-9]+[_ -]+)*serial(?:[_ -]?number)?|"
-    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?id|"
+    r"(?:[A-Z0-9]+[_ -]+)*device[_ -]?(?:id|sn)|"
     r"(?:[A-Z0-9]+[_ -]+)*user(?:name)?|(?:[A-Z0-9]+[_ -]+)*login|"
     r"(?:[A-Z0-9]+[_ -]+)*gateway[_ -]?id|"
-    r"(?:[A-Z0-9]+[_ -]+)*site[_ -]?id|din|warp[_ -]?site[_ -]?number|"
-    r"energy[_ -]?site|account[_ -]?number|site[_ -]?address)"
+    r"(?:[A-Z0-9]+[_ -]+)*site[_ -]?(?:id|identifier)|din|nmi|"
+    r"warp[_ -]?site[_ -]?number|energy[_ -]?site|"
+    r"account[_ -]?(?:number|name|address)|site[_ -]?address|"
+    r"concession[_ -]?address|street[_ -]?address|document[_ -]?id|"
+    r"email[_ -]?address|invoice[_ -]?number|identifier|address)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
