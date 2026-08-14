@@ -63,9 +63,12 @@ The workflow cannot directly merge, release, deploy, close an issue, or access D
 
 Agent-created pull requests receive `automation`.
 A global deterministic queue selects only one same-repository, non-draft automation pull request at a time.
-Immediately before it adds `merge-queue`, it reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
+The queue remains blocked until the release workflow for the commit that last changed the `main` manifest has completed successfully.
+The release workflow's completed event wakes the queue, so publication, support reconciliation, notification, and cleanup finish before another fix can be allocated.
+Immediately before it adds `merge-queue`, the queue validates the title and body reference, reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
 That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
-For automation pull requests, the title, visible body reference, and immutable commit reference must all identify the same issue.
+For automation pull requests, initial validation requires matching title and visible body references.
+After the queue creates the reservation commit, strict validation requires the title, visible body reference, and immutable commit reference to identify the same issue before `merge-queue` is added.
 Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and as an exact line in the final metadata block of a commit message.
 Required validation rejects mutable-only, conflicting, quoted, prose, and fenced-example references before merge.
 Graphite and required repository checks decide when the pull request can merge.
@@ -76,11 +79,12 @@ The existing version-bump workflow creates the release after merge.
 The release workflow dispatches deterministic support reconciliation because ordinary events created with `GITHUB_TOKEN` do not start another workflow.
 Manual published releases also trigger reconciliation directly.
 
-Reconciliation scans the bounded release history before selecting the immediately previous published release, or the immediately previous semantic version tag for a repository's first GitHub release.
+Reconciliation scans the bounded release history and selects the published ancestor with the shortest commit distance, or the immediately previous semantic version tag for a repository's first GitHub release.
 It discovers associated merged pull requests and accepts only an exact `Refs #123` line in a released commit's final metadata block.
 It ignores `Refs` examples in prose, fenced code, and HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
 Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing every associated pull request and the release link, so a later fix produces a fresh confirmation request.
 The workflow rereads live issue state immediately before posting and removes any state it added if a concurrent solved confirmation already closed the issue.
+The audit comment retains a hidden cleanup marker so a terminal retry can delete it if solved confirmation races with delivery after the final state read.
 
 The issue author or a write-level maintainer confirms the released result with one exact comment:
 

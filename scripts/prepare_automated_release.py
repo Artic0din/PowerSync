@@ -57,8 +57,8 @@ def prepare_release_files(
     commit_messages: Sequence[str],
 ) -> tuple[str, int]:
     """Allocate the next patch from main and retain the reviewed release note."""
-    issue_number = validate_automation_reference_evidence(
-        pull_request_title, pull_request_body, commit_messages
+    issue_number = validate_automation_reference_metadata(
+        pull_request_title, pull_request_body
     )
 
     base_manifest = _read_manifest(base_manifest_path)
@@ -108,6 +108,23 @@ def validate_automation_reference_evidence(
     commit_messages: Sequence[str],
 ) -> int:
     """Bind one automation title reference to visible and immutable evidence."""
+    issue_number = validate_automation_reference_metadata(
+        pull_request_title, pull_request_body
+    )
+    commit_references = _commit_reference_trailers(commit_messages)
+    if {issue_number} != commit_references:
+        raise ValueError(
+            "The automation title, body, and commit metadata must reference the "
+            "same support issue"
+        )
+    return issue_number
+
+
+def validate_automation_reference_metadata(
+    pull_request_title: Any,
+    pull_request_body: Any,
+) -> int:
+    """Bind one automation title reference to the visible pull request body."""
     title_references = (
         {int(number) for number in REFERENCE_PATTERN.findall(pull_request_title)}
         if isinstance(pull_request_title, str)
@@ -121,11 +138,9 @@ def validate_automation_reference_evidence(
     body_references = {
         int(number) for number in REFERENCE_PATTERN.findall(visible_body)
     }
-    commit_references = _commit_reference_trailers(commit_messages)
-    if title_references != body_references or title_references != commit_references:
+    if title_references != body_references:
         raise ValueError(
-            "The automation title, body, and commit metadata must reference the "
-            "same support issue"
+            "The automation title and body must reference the same support issue"
         )
     return title_references.pop()
 
@@ -260,12 +275,30 @@ def _validate_reference_command(arguments: argparse.Namespace) -> None:
         raise ValueError("The event has no pull request")
     messages = _commit_messages_from_pages(pages)
     if AUTOMATION_LABEL in _label_names(pull_request):
-        validate_automation_reference_evidence(
-            pull_request.get("title"), pull_request.get("body"), messages
-        )
+        if MERGE_QUEUE_LABEL in _label_names(pull_request):
+            validate_automation_reference_evidence(
+                pull_request.get("title"), pull_request.get("body"), messages
+            )
+        else:
+            validate_automation_reference_metadata(
+                pull_request.get("title"), pull_request.get("body")
+            )
     else:
         validate_support_reference_evidence(pull_request.get("body"), messages)
     print("support-reference-evidence=valid")
+
+
+def _validate_automation_command(arguments: argparse.Namespace) -> None:
+    pull_request = json.loads(arguments.pull_request.read_text(encoding="utf-8"))
+    pages = json.loads(arguments.pages.read_text(encoding="utf-8"))
+    if not isinstance(pull_request, dict):
+        raise ValueError("GitHub returned an invalid pull request")
+    validate_automation_reference_evidence(
+        pull_request.get("title"),
+        pull_request.get("body"),
+        _commit_messages_from_pages(pages),
+    )
+    print("automation-reference-evidence=valid")
 
 
 def _commit_messages_from_pages(pages: Any) -> tuple[str, ...]:
@@ -303,6 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate_reference_parser.add_argument("--event", type=Path, required=True)
     validate_reference_parser.add_argument("--pages", type=Path, required=True)
     validate_reference_parser.set_defaults(handler=_validate_reference_command)
+
+    validate_automation_parser = subparsers.add_parser("validate-automation")
+    validate_automation_parser.add_argument("--pull-request", type=Path, required=True)
+    validate_automation_parser.add_argument("--pages", type=Path, required=True)
+    validate_automation_parser.set_defaults(handler=_validate_automation_command)
     return parser
 
 

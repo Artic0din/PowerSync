@@ -10,6 +10,7 @@ from scripts.prepare_automated_release import (
     prepare_release_files,
     select_pull_request,
     validate_automation_reference_evidence,
+    validate_automation_reference_metadata,
     validate_support_reference_evidence,
 )
 
@@ -145,6 +146,31 @@ def test_queue_reallocates_patch_version_from_main_and_preserves_note(
     )
 
 
+def test_queue_allocates_before_the_reservation_trailer_exists(
+    tmp_path: Path,
+) -> None:
+    base_manifest = tmp_path / "base-manifest.json"
+    manifest = tmp_path / "manifest.json"
+    release_notes = tmp_path / "RELEASE_NOTES.md"
+    base_manifest.write_text('{"version":"2.12.1099"}\n', encoding="utf-8")
+    manifest.write_text('{"version":"2.12.1099"}\n', encoding="utf-8")
+    release_notes.write_text(
+        "<!-- release: v2.12.1099 -->\nFixed schedule drift.\n",
+        encoding="utf-8",
+    )
+
+    version, issue_number = prepare_release_files(
+        base_manifest,
+        manifest,
+        release_notes,
+        "fix(power): repair schedule (Refs #42)",
+        "Root-cause fix.\n\nRefs #42",
+        ("fix(power): repair schedule",),
+    )
+
+    assert (version, issue_number) == ("2.12.1100", 42)
+
+
 @pytest.mark.parametrize(
     "title",
     ["fix(power): missing reference", "fix(power): mixed (Refs #1, Refs #2)"],
@@ -198,6 +224,20 @@ def test_automation_title_reference_must_match_body_and_commit_evidence() -> Non
     )
 
     assert issue_number == 80
+
+
+def test_initial_automation_validation_binds_title_to_body_before_reservation() -> None:
+    issue_number = validate_automation_reference_metadata(
+        "fix(power): repair schedule (Refs #80)",
+        "Root-cause fix.\n\nRefs #80",
+    )
+
+    assert issue_number == 80
+    with pytest.raises(ValueError, match="title and body"):
+        validate_automation_reference_metadata(
+            "fix(power): repair schedule (Refs #81)",
+            "Root-cause fix.\n\nRefs #80",
+        )
 
 
 def test_support_reference_requires_a_terminal_metadata_line() -> None:

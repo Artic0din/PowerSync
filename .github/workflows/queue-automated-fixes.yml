@@ -3,6 +3,9 @@ name: Queue automated fixes
 on:
   pull_request:
     types: [opened, labeled, unlabeled, ready_for_review, synchronize, closed]
+  workflow_run:
+    workflows: ["Create Release on Version Bump"]
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -10,6 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: read
@@ -18,8 +22,12 @@ jobs:
   queue:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.action != 'closed' ||
-      github.event.pull_request.merged == false
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action != 'closed' ||
+        github.event.pull_request.merged == false))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -38,6 +46,21 @@ jobs:
           set -euo pipefail
           if [ ! -f trusted/scripts/prepare_automated_release.py ]; then
             echo "Trusted queue logic is not available on main yet"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RELEASE_HEAD=$(
+            git -C trusted log -1 --format=%H -- \
+              custom_components/power_sync/manifest.json
+          )
+          RELEASE_RUNS=$(
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&event=push&head_sha=$RELEASE_HEAD&status=completed&per_page=100"
+          )
+          if ! jq -e \
+            'any(.workflow_runs[]?; .conclusion == "success")' \
+            <<< "$RELEASE_RUNS" >/dev/null; then
+            echo "Release for manifest commit $RELEASE_HEAD is not complete"
             echo "selected=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -116,9 +139,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.release.outputs.issue_number }}
+          PR_NUMBER: ${{ steps.select.outputs.number }}
         run: |
           set -euo pipefail
           git log -1 --format=%B | grep -Fx "Refs #$ISSUE_NUMBER"
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            > /tmp/evidenced-pull-request.json
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/commits?per_page=100" \
+            > /tmp/evidenced-pull-request-commits.json
+          python ../trusted/scripts/prepare_automated_release.py \
+            validate-automation \
+            --pull-request /tmp/evidenced-pull-request.json \
+            --pages /tmp/evidenced-pull-request-commits.json
           gh api "/repos/${GITHUB_REPOSITORY}" \
             | jq -e \
               '.allow_squash_merge == true and

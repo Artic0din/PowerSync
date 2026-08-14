@@ -4,7 +4,7 @@
 
 ## Related issue
 
-<!-- Use the same "Refs #123" here and as an exact line in the final metadata block of a commit message for support fixes. Automation-fix titles must identify that issue too. Use "Fixes #123" only when merging should close an internal issue immediately. -->
+<!-- Use the same "Refs #123" here and as an exact line in the final metadata block of a commit message for human-authored support fixes. Automation-fix titles must identify that issue too; the release queue adds their immutable reservation commit. Use "Fixes #123" only when merging should close an internal issue immediately. -->
 
 ## Changes
 
