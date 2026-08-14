@@ -65,7 +65,9 @@ Agent-created pull requests receive `automation`.
 A global deterministic queue selects only one same-repository, non-draft automation pull request at a time.
 Immediately before it adds `merge-queue`, it reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
 That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
-Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and a commit message; required validation rejects a mutable-only reference before merge.
+For automation pull requests, the title, visible body reference, and immutable commit reference must all identify the same issue.
+Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and as an exact line in the final metadata block of a commit message.
+Required validation rejects mutable-only, conflicting, quoted, prose, and fenced-example references before merge.
 Graphite and required repository checks decide when the pull request can merge.
 The existing version-bump workflow creates the release after merge.
 
@@ -75,8 +77,8 @@ The release workflow dispatches deterministic support reconciliation because ord
 Manual published releases also trigger reconciliation directly.
 
 Reconciliation scans the bounded release history before selecting the immediately previous published release, or the immediately previous semantic version tag for a repository's first GitHub release.
-It discovers associated merged pull requests and accepts only explicit same-repository `Refs #123` links from the released commit messages.
-It ignores `Refs` examples inside HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
+It discovers associated merged pull requests and accepts only an exact `Refs #123` line in a released commit's final metadata block.
+It ignores `Refs` examples in prose, fenced code, and HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
 Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing every associated pull request and the release link, so a later fix produces a fresh confirmation request.
 The workflow rereads live issue state immediately before posting and removes any state it added if a concurrent solved confirmation already closed the issue.
 

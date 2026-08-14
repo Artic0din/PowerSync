@@ -15,6 +15,8 @@ DELIVERY_PENDING_MARKER_PREFIX = "powersync-delivery-pending:v1:"
 MAX_API_PAGES = 10
 WORKFLOW_BOT_LOGIN = "github-actions[bot]"
 VERSION_TAG_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$", re.IGNORECASE)
+REFERENCE_TRAILER_PATTERN = re.compile(r"(?i)^Refs\s+#(\d+)$")
+STANDARD_TRAILER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s+.+$")
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,7 @@ class ReleaseDelivery:
         self, repository: str, current_tag: str, published_at: datetime
     ) -> str | None:
         candidates: list[tuple[datetime, str]] = []
+        history_truncated = False
         for page in range(1, MAX_API_PAGES + 1):
             releases = self._request(
                 "GET", f"/repos/{repository}/releases?per_page=100&page={page}"
@@ -134,11 +137,12 @@ class ReleaseDelivery:
                     candidates.append((candidate_time, tag))
             if len(releases) < 100:
                 break
-        else:
-            raise ValueError("Release history exceeds the supported pagination limit")
+            history_truncated = page == MAX_API_PAGES
         for _candidate_time, tag in sorted(candidates, reverse=True):
             if self._is_ancestor_tag(repository, tag, current_tag):
                 return tag
+        if history_truncated:
+            raise ValueError("Release history exceeds the supported pagination limit")
         return None
 
     def _find_previous_version_tag(
@@ -148,6 +152,7 @@ class ReleaseDelivery:
         if current_version is None:
             return None
         candidates: list[tuple[tuple[int, int, int], str]] = []
+        history_truncated = False
         for page in range(1, MAX_API_PAGES + 1):
             tags = self._request(
                 "GET", f"/repos/{repository}/tags?per_page=100&page={page}"
@@ -165,11 +170,12 @@ class ReleaseDelivery:
                     candidates.append((version, name))
             if len(tags) < 100:
                 break
-        else:
-            raise ValueError("Tag history exceeds the supported pagination limit")
+            history_truncated = page == MAX_API_PAGES
         for _version, name in sorted(candidates, reverse=True):
             if self._is_ancestor_tag(repository, name, current_tag):
                 return name
+        if history_truncated:
+            raise ValueError("Tag history exceeds the supported pagination limit")
         return None
 
     def _is_ancestor_tag(
@@ -432,12 +438,19 @@ class ReleaseDelivery:
         if not isinstance(body, str):
             return set()
         body_without_comments = re.sub(r"<!--.*?(?:-->|$)", "", body, flags=re.DOTALL)
-        escaped_repository = re.escape(repository)
-        pattern = re.compile(
-            rf"(?im)\bRefs\s+(?:#|{escaped_repository}#|"
-            rf"https://github\.com/{escaped_repository}/issues/)(\d+)\b"
-        )
-        return {int(number) for number in pattern.findall(body_without_comments)}
+        footer = re.split(r"\n\s*\n", body_without_comments.rstrip())[-1]
+        footer_lines = [line.strip() for line in footer.splitlines() if line.strip()]
+        if not footer_lines or any(
+            REFERENCE_TRAILER_PATTERN.fullmatch(line) is None
+            and STANDARD_TRAILER_PATTERN.fullmatch(line) is None
+            for line in footer_lines
+        ):
+            return set()
+        return {
+            int(match.group(1))
+            for line in footer_lines
+            if (match := REFERENCE_TRAILER_PATTERN.fullmatch(line)) is not None
+        }
 
     @staticmethod
     def _label_names(issue: dict[str, Any]) -> set[str]:

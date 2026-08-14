@@ -9,6 +9,7 @@ import pytest
 from scripts.prepare_automated_release import (
     prepare_release_files,
     select_pull_request,
+    validate_automation_reference_evidence,
     validate_support_reference_evidence,
 )
 
@@ -132,6 +133,8 @@ def test_queue_reallocates_patch_version_from_main_and_preserves_note(
         manifest,
         release_notes,
         "fix(power): repair schedule (Refs #42)",
+        "Root-cause fix.\n\nRefs #42",
+        ("fix(power): repair schedule\n\nRefs #42",),
     )
 
     assert version == "2.12.1100"
@@ -157,7 +160,14 @@ def test_queue_rejects_ambiguous_issue_references(tmp_path: Path, title: str) ->
     )
 
     with pytest.raises(ValueError, match="exactly one Refs"):
-        prepare_release_files(base_manifest, manifest, release_notes, title)
+        prepare_release_files(
+            base_manifest,
+            manifest,
+            release_notes,
+            title,
+            "Root-cause fix.\n\nRefs #42",
+            ("fix(power): repair schedule\n\nRefs #42",),
+        )
 
 
 def test_support_reference_must_be_preserved_in_a_commit_message() -> None:
@@ -171,6 +181,53 @@ def test_support_reference_must_be_preserved_in_a_commit_message() -> None:
         "Root-cause fix.\n\nRefs #42",
         ("fix(power): repair schedule\n\nRefs #42",),
     )
+
+
+def test_automation_title_reference_must_match_body_and_commit_evidence() -> None:
+    with pytest.raises(ValueError, match="same support issue"):
+        validate_automation_reference_evidence(
+            "fix(power): repair schedule (Refs #81)",
+            "Root-cause fix.\n\nRefs #80",
+            ("fix(power): repair schedule\n\nRefs #80",),
+        )
+
+    issue_number = validate_automation_reference_evidence(
+        "fix(power): repair schedule (Refs #80)",
+        "Root-cause fix.\n\nRefs #80",
+        ("fix(power): repair schedule\n\nRefs #80",),
+    )
+
+    assert issue_number == 80
+
+
+def test_support_reference_requires_a_terminal_metadata_line() -> None:
+    validate_support_reference_evidence(
+        "Root-cause fix.\n\nRefs #42",
+        (
+            "docs: show examples\n\n```text\nRefs #42\n```\n\n"
+            "Refs #42",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Refs #42"):
+        validate_support_reference_evidence(
+            "Root-cause fix.\n\nRefs #42",
+            ("docs: show example\n\n```text\nRefs #42\n```",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "commits"),
+    [
+        ("Root-cause fix.\n\nRefs #42", ("fix: repair\n\nRefs #42\nRefs #43",)),
+        ("Root-cause fix.", ("fix: repair\n\nRefs #42",)),
+    ],
+)
+def test_mutable_and_immutable_support_references_must_match_exactly(
+    body: str, commits: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="match exactly"):
+        validate_support_reference_evidence(body, commits)
 
 
 def test_commented_support_reference_does_not_require_merge_evidence() -> None:
