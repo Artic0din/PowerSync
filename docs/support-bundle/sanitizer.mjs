@@ -103,6 +103,18 @@ function decodeHtmlEntities(text) {
   throw new Error("HTML entity nesting exceeds the sanitizer limit");
 }
 
+function decodeJsonUnicodeEscapes(value) {
+  return value.replace(/\\u([0-9a-f]{4})/gi, (_match, digits) =>
+    String.fromCharCode(Number.parseInt(digits, 16)));
+}
+
+function normalizeJsonKeyEscapes(text) {
+  return text.replace(
+    /"((?:\\.|[^"\\])*)"(\s*:)/g,
+    (_match, key, delimiter) => `"${decodeJsonUnicodeEscapes(key)}"${delimiter}`,
+  );
+}
+
 function redactYamlSecretScalars(text) {
   const parts = text.split(/(\r?\n)/);
   for (let index = 0; index < parts.length; index += 2) {
@@ -111,7 +123,7 @@ function redactYamlSecretScalars(text) {
     if (header) {
       const delimiter = header[3].trimEnd().endsWith(",") ? "," : "";
       parts[index] = `${header[1]}${header[2]}"[REDACTED]"${delimiter}`;
-      const baseIndent = header[1].length;
+      const baseIndent = header[1].match(/^[ \t]*/)?.[0].length ?? 0;
       for (let continuation = index + 2; continuation < parts.length; continuation += 2) {
         const continuationLine = parts[continuation];
         if (continuationLine.trim() === "") continue;
@@ -195,7 +207,7 @@ function redactSerializedJsonSecrets(text) {
     }
     const keyClose = nextQuoteAtDepth(text, keyOpen + 1, depth);
     if (keyClose === -1) break;
-    const key = text.slice(keyOpen + 1, keyClose - depth);
+    const key = decodeJsonUnicodeEscapes(text.slice(keyOpen + 1, keyClose - depth));
     let valueOpen = keyClose + 1;
     while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
     if (text[valueOpen] !== ":" && text[valueOpen] !== "=") {
@@ -341,7 +353,9 @@ function pseudonymiseAddress(text, replacementsByLabel) {
 export async function sanitizeSupportBundle(input) {
   let output = redactSerializedJsonSecrets(
     redactCookieJarValues(
-      redactYamlSecretScalars(decodeHtmlEntities(input.replaceAll("\0", ""))),
+      redactYamlSecretScalars(
+        normalizeJsonKeyEscapes(decodeHtmlEntities(input.replaceAll("\0", ""))),
+      ),
     ),
   );
   const replacementsByLabel = new Map();

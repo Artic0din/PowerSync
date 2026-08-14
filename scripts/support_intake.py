@@ -63,7 +63,8 @@ SECRET_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(
-        r"https://(?:discord(?:app)?\.com/api/webhooks|hooks\.slack\.com/services)/\S+"
+        r"https://(?:discord(?:app)?\.com/api/webhooks|hooks\.slack\.com/services)/\S+",
+        re.IGNORECASE,
     ),
 )
 KEYED_SECRET_PATTERN = re.compile(
@@ -85,6 +86,8 @@ SECRET_KEY_NAME_PATTERN = re.compile(
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
     r"authorization|set[_ -]?cookie)$"
 )
+JSON_KEY_PATTERN = re.compile(r'"(?P<key>(?:\\.|[^"\\])*)"(?P<delimiter>\s*:)')
+JSON_UNICODE_ESCAPE_PATTERN = re.compile(r"\\u(?P<digits>[0-9a-f]{4})", re.IGNORECASE)
 URL_USERINFO_PATTERN = re.compile(
     r"\b[a-z][a-z0-9+.-]*://(?P<userinfo>[^/@\s]+)@", re.IGNORECASE
 )
@@ -342,6 +345,7 @@ class SupportIntake:
         if exhausted:
             return True
         for candidate in decoded_variants:
+            candidate = SupportIntake._normalize_json_key_escapes(candidate)
             if SupportIntake._contains_yaml_secret(candidate):
                 return True
             if SupportIntake._contains_cookie_jar_secret(candidate):
@@ -359,6 +363,17 @@ class SupportIntake:
             ):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_json_key_escapes(text: str) -> str:
+        def normalize(match: re.Match[str]) -> str:
+            key = JSON_UNICODE_ESCAPE_PATTERN.sub(
+                lambda escape: chr(int(escape.group("digits"), 16)),
+                match.group("key"),
+            )
+            return f'"{key}"{match.group("delimiter")}'
+
+        return JSON_KEY_PATTERN.sub(normalize, text)
 
     @staticmethod
     def _html_decoded_variants(text: str) -> tuple[tuple[str, ...], bool]:
@@ -454,7 +469,10 @@ class SupportIntake:
             )
             if key_close == -1:
                 return False
-            key = text[key_open + 1 : key_close - depth]
+            key = JSON_UNICODE_ESCAPE_PATTERN.sub(
+                lambda escape: chr(int(escape.group("digits"), 16)),
+                text[key_open + 1 : key_close - depth],
+            )
             value_open = key_close + 1
             while value_open < len(text) and text[value_open].isspace():
                 value_open += 1

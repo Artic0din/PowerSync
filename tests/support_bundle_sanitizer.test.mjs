@@ -468,3 +468,20 @@ test("sanitised output cannot exceed the upload limit", async () => {
     /Sanitised bundle exceeds the 512 KB limit/,
   );
 });
+
+test("unicode-escaped JSON credential keys are removed", async () => {
+  const output = await sanitizeSupportBundle(
+    String.raw`{"pass\u0077ord":"hunter2","Authoriz\u0061tion":"Bearer live"}`,
+  );
+
+  assert.doesNotMatch(output, /hunter2|Bearer live/);
+});
+
+test("multiline YAML sequence credentials use leading indentation", async () => {
+  const output = await sanitizeSupportBundle(
+    '- password: "correct\n  horse"\nnext: visible',
+  );
+
+  assert.doesNotMatch(output, /correct|horse/);
+  assert.match(output, /next: visible/);
+});

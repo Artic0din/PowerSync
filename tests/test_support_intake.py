@@ -806,6 +806,16 @@ def test_json_nesting_ignores_braces_inside_strings() -> None:
     assert SupportIntake._excessively_nested(content, ".json") is False
 
 
+def test_issue_webhook_scheme_and_hostname_are_case_insensitive() -> None:
+    assert SupportIntake._contains_secret(
+        "HTTPS://HOOKS.SLACK.COM/SERVICES/T000/B000/secret"
+    )
+
+
+def test_unicode_escaped_json_credential_key_fails_closed() -> None:
+    assert SupportIntake._contains_secret(r'{"pass\u0077ord":"hunter2"}')
+
+
 def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> None:
     workflow = Path(".github/workflows/issue-triage.md").read_text(encoding="utf-8")
 
