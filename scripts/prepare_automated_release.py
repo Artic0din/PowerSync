@@ -12,6 +12,8 @@ AUTOMATION_LABEL = "automation"
 MERGE_QUEUE_LABEL = "merge-queue"
 RELEASE_BRANCH = "main"
 REFERENCE_PATTERN = re.compile(r"(?i)\bRefs\s+#(\d+)\b")
+REFERENCE_TRAILER_PATTERN = re.compile(r"(?i)^Refs\s+#(\d+)$")
+STANDARD_TRAILER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s+.+$")
 HTML_COMMENT_PATTERN = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 RELEASE_MARKER_PATTERN = re.compile(
     r"^\s*<!--\s*release:\s*v?\d+\.\d+\.\d+\s*-->\s*", re.IGNORECASE
@@ -51,14 +53,13 @@ def prepare_release_files(
     manifest_path: Path,
     release_notes_path: Path,
     pull_request_title: str,
+    pull_request_body: Any,
+    commit_messages: Sequence[str],
 ) -> tuple[str, int]:
     """Allocate the next patch from main and retain the reviewed release note."""
-    issue_numbers = {
-        int(number) for number in REFERENCE_PATTERN.findall(pull_request_title)
-    }
-    if len(issue_numbers) != 1:
-        raise ValueError("The pull request title must contain exactly one Refs #N")
-    issue_number = issue_numbers.pop()
+    issue_number = validate_automation_reference_evidence(
+        pull_request_title, pull_request_body, commit_messages
+    )
 
     base_manifest = _read_manifest(base_manifest_path)
     manifest = _read_manifest(manifest_path)
@@ -91,19 +92,63 @@ def validate_support_reference_evidence(
     body_references = {
         int(number) for number in REFERENCE_PATTERN.findall(visible_body)
     }
-    if not body_references:
-        return
-    commit_references = {
-        int(number)
-        for message in commit_messages
-        for number in REFERENCE_PATTERN.findall(message)
-    }
-    missing_references = sorted(body_references - commit_references)
-    if missing_references:
-        missing = ", ".join(f"Refs #{number}" for number in missing_references)
+    commit_references = _commit_reference_trailers(commit_messages)
+    mismatched_references = sorted(body_references ^ commit_references)
+    if mismatched_references:
+        mismatch = ", ".join(f"Refs #{number}" for number in mismatched_references)
         raise ValueError(
-            f"Support references must be preserved in commit messages: {missing}"
+            "Support references in the pull request body and commit metadata "
+            f"must match exactly: {mismatch}"
         )
+
+
+def validate_automation_reference_evidence(
+    pull_request_title: Any,
+    pull_request_body: Any,
+    commit_messages: Sequence[str],
+) -> int:
+    """Bind one automation title reference to visible and immutable evidence."""
+    title_references = (
+        {int(number) for number in REFERENCE_PATTERN.findall(pull_request_title)}
+        if isinstance(pull_request_title, str)
+        else set()
+    )
+    if len(title_references) != 1:
+        raise ValueError("The pull request title must contain exactly one Refs #N")
+    if not isinstance(pull_request_body, str):
+        raise ValueError("An automation pull request must have a body")
+    visible_body = HTML_COMMENT_PATTERN.sub("", pull_request_body)
+    body_references = {
+        int(number) for number in REFERENCE_PATTERN.findall(visible_body)
+    }
+    commit_references = _commit_reference_trailers(commit_messages)
+    if title_references != body_references or title_references != commit_references:
+        raise ValueError(
+            "The automation title, body, and commit metadata must reference the "
+            "same support issue"
+        )
+    return title_references.pop()
+
+
+def _commit_reference_trailers(commit_messages: Sequence[str]) -> set[int]:
+    references: set[int] = set()
+    for message in commit_messages:
+        if not isinstance(message, str) or not message.strip():
+            continue
+        footer = re.split(r"\n\s*\n", message.rstrip())[-1]
+        footer_lines = [line.strip() for line in footer.splitlines() if line.strip()]
+        if not footer_lines or any(
+            REFERENCE_TRAILER_PATTERN.fullmatch(line) is None
+            and STANDARD_TRAILER_PATTERN.fullmatch(line) is None
+            for line in footer_lines
+        ):
+            continue
+        references.update(
+            int(match.group(1))
+            for line in footer_lines
+            if (match := REFERENCE_TRAILER_PATTERN.fullmatch(line)) is not None
+        )
+    return references
 
 
 def _is_eligible_pull_request(pull_request: Any, repository: str) -> bool:
@@ -190,11 +235,18 @@ def _select_command(arguments: argparse.Namespace) -> None:
 
 
 def _prepare_command(arguments: argparse.Namespace) -> None:
+    pull_request = json.loads(arguments.pull_request.read_text(encoding="utf-8"))
+    pages = json.loads(arguments.pages.read_text(encoding="utf-8"))
+    if not isinstance(pull_request, dict):
+        raise ValueError("GitHub returned an invalid pull request")
+    messages = _commit_messages_from_pages(pages)
     version, issue_number = prepare_release_files(
         arguments.base_manifest,
         arguments.manifest,
         arguments.release_notes,
-        arguments.title,
+        pull_request.get("title"),
+        pull_request.get("body"),
+        messages,
     )
     print(f"version={version}")
     print(f"issue_number={issue_number}")
@@ -206,6 +258,17 @@ def _validate_reference_command(arguments: argparse.Namespace) -> None:
     pull_request = event.get("pull_request") if isinstance(event, dict) else None
     if not isinstance(pull_request, dict):
         raise ValueError("The event has no pull request")
+    messages = _commit_messages_from_pages(pages)
+    if AUTOMATION_LABEL in _label_names(pull_request):
+        validate_automation_reference_evidence(
+            pull_request.get("title"), pull_request.get("body"), messages
+        )
+    else:
+        validate_support_reference_evidence(pull_request.get("body"), messages)
+    print("support-reference-evidence=valid")
+
+
+def _commit_messages_from_pages(pages: Any) -> tuple[str, ...]:
     if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
         raise ValueError("GitHub returned invalid pull request commit pages")
     messages: list[str] = []
@@ -216,8 +279,7 @@ def _validate_reference_command(arguments: argparse.Namespace) -> None:
             if not isinstance(message, str) or not message:
                 raise ValueError("A pull request commit has no message")
             messages.append(message)
-    validate_support_reference_evidence(pull_request.get("body"), tuple(messages))
-    print("support-reference-evidence=valid")
+    return tuple(messages)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,7 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--base-manifest", type=Path, required=True)
     prepare_parser.add_argument("--manifest", type=Path, required=True)
     prepare_parser.add_argument("--release-notes", type=Path, required=True)
-    prepare_parser.add_argument("--title", required=True)
+    prepare_parser.add_argument("--pull-request", type=Path, required=True)
+    prepare_parser.add_argument("--pages", type=Path, required=True)
     prepare_parser.set_defaults(handler=_prepare_command)
 
     validate_reference_parser = subparsers.add_parser("validate-reference")

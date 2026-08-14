@@ -437,6 +437,22 @@ def test_release_workflow_reconciles_an_existing_published_release() -> None:
     assert "gh run watch \"$RUN_ID\" --exit-status --compact" in workflow
 
 
+def test_release_workflow_reconciles_only_after_valid_release_state() -> None:
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    resolve_step = workflow.split("- name: Resolve published release tag", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    reconcile_step = workflow.split("- name: Reconcile released support fixes", 1)[
+        1
+    ].split("\n      - name:", 1)[0]
+
+    assert "steps.check_release.outcome == 'success'" in resolve_step
+    assert "steps.create_release.outcome == 'success'" in resolve_step
+    assert "steps.check_release.outcome == 'success'" in reconcile_step
+    assert "steps.create_release.outcome == 'success'" in reconcile_step
+
+
 def test_release_workflow_rejects_drafts_as_existing_publications() -> None:
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
@@ -528,6 +544,28 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     )
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
+
+
+def test_automation_queue_reuses_reservation_and_revalidates_live_pr() -> None:
+    workflow = Path(".github/workflows/queue-automated-fixes.yml").read_text(
+        encoding="utf-8"
+    )
+
+    evidence_step = workflow.split("- name: Record immutable delivery evidence", 1)[
+        1
+    ].split("\n      - name:", 1)[0]
+    queue_step = workflow.split("- name: Enter the protected Graphite merge queue", 1)[
+        1
+    ]
+
+    assert "Reusing existing release reservation" in evidence_step
+    assert "git diff --cached --quiet" in evidence_step
+    assert 'head_sha=$(git rev-parse HEAD)' in evidence_step
+    assert 'gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER"' in queue_step
+    assert '.head.sha == $head_sha' in queue_step
+    assert '.base.ref == "main"' in queue_step
+    assert '.draft == false' in queue_step
+    assert 'map(.name) | index("automation")' in queue_step
 
 
 def test_pull_request_validation_requires_immutable_support_references() -> None:
@@ -681,6 +719,68 @@ def test_previous_release_search_scans_every_bounded_page() -> None:
     assert ("GET", f"/repos/{REPOSITORY}/releases?per_page=100&page=2", None) in (
         client.requests
     )
+
+
+def test_previous_release_search_uses_bounded_candidate_before_history_limit() -> None:
+    client = FakeGitHubClient()
+    for page in range(1, 11):
+        releases = [{"draft": True} for _ in range(100)]
+        if page == 1:
+            releases[0] = PREVIOUS_RELEASE
+        client.responses[
+            ("GET", f"/repos/{REPOSITORY}/releases?per_page=100&page={page}")
+        ] = releases
+    client.responses[
+        ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
+    ] = {"status": "ahead"}
+
+    previous_tag = ReleaseDelivery(client)._find_previous_release(
+        REPOSITORY,
+        str(RELEASE["tag_name"]),
+        datetime.fromisoformat(str(RELEASE["published_at"]).replace("Z", "+00:00")),
+    )
+
+    assert previous_tag == PREVIOUS_RELEASE["tag_name"]
+
+
+def test_previous_version_search_uses_bounded_candidate_before_tag_limit() -> None:
+    client = FakeGitHubClient()
+    for page in range(1, 11):
+        tags = [{"name": "not-a-version"} for _ in range(100)]
+        if page == 1:
+            tags[0] = {"name": "v2.12.1099"}
+        client.responses[
+            ("GET", f"/repos/{REPOSITORY}/tags?per_page=100&page={page}")
+        ] = tags
+    client.responses[
+        ("GET", f"/repos/{REPOSITORY}/compare/v2.12.1099...v2.12.1100")
+    ] = {"status": "ahead"}
+
+    previous_tag = ReleaseDelivery(client)._find_previous_version_tag(
+        REPOSITORY, "v2.12.1100"
+    )
+
+    assert previous_tag == "v2.12.1099"
+
+
+def test_refs_in_commit_prose_or_fenced_examples_are_not_delivery_metadata() -> None:
+    for message in (
+        "docs: explain support syntax\n\nFor example, use Refs #42 in a commit.",
+        "docs: explain support syntax\n\n```text\nRefs #42\n```",
+    ):
+        client = delivery_client()
+        compare_path = (
+            f"/repos/{REPOSITORY}/compare/"
+            "v2.12.1099...v2.12.1100?per_page=100&page=1"
+        )
+        client.responses[("GET", compare_path)]["commits"][0]["commit"][
+            "message"
+        ] = message
+
+        result = SupportIssueAutomation(client).handle(release_event())
+
+        assert result == "deliveries-recorded:0"
+        assert all(method == "GET" for method, _, _ in client.requests)
 
 
 def test_identical_previous_release_tag_is_a_valid_empty_bound() -> None:

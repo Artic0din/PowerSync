@@ -156,6 +156,7 @@ jobs:
           head -30 /tmp/release_notes.md
 
       - name: Create or repair tag and release
+        id: create_release
         if: steps.check_release.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -212,7 +213,11 @@ jobs:
           fi
 
       - name: Resolve published release tag
-        if: ${{ !cancelled() }}
+        if: >-
+          ${{ !cancelled() &&
+              steps.check_release.outcome == 'success' &&
+              (steps.check_release.outputs.release_exists == 'true' ||
+               steps.create_release.outcome == 'success') }}
         id: support_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -235,7 +240,12 @@ jobs:
       - name: Reconcile released support fixes
         id: support_reconciliation
         continue-on-error: true
-        if: ${{ !cancelled() && steps.support_release.outputs.tag != '' }}
+        if: >-
+          ${{ !cancelled() &&
+              steps.check_release.outcome == 'success' &&
+              (steps.check_release.outputs.release_exists == 'true' ||
+               steps.create_release.outcome == 'success') &&
+              steps.support_release.outputs.tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

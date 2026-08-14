@@ -62,9 +62,15 @@ jobs:
         id: release
         working-directory: candidate
         env:
-          PULL_REQUEST_TITLE: ${{ steps.select.outputs.title }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.select.outputs.number }}
         run: |
           set -euo pipefail
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            > /tmp/selected-pull-request.json
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/commits?per_page=100" \
+            > /tmp/selected-pull-request-commits.json
           git fetch origin main
           git show origin/main:custom_components/power_sync/manifest.json \
             > /tmp/main-manifest.json
@@ -72,11 +78,13 @@ jobs:
             --base-manifest /tmp/main-manifest.json \
             --manifest custom_components/power_sync/manifest.json \
             --release-notes RELEASE_NOTES.md \
-            --title "$PULL_REQUEST_TITLE" >> "$GITHUB_OUTPUT"
+            --pull-request /tmp/selected-pull-request.json \
+            --pages /tmp/selected-pull-request-commits.json >> "$GITHUB_OUTPUT"
           git diff --check
 
       - name: Record immutable delivery evidence
         if: steps.select.outputs.selected == 'true'
+        id: evidence
         working-directory: candidate
         env:
           HEAD_REF: ${{ steps.select.outputs.head_ref }}
@@ -87,10 +95,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add custom_components/power_sync/manifest.json RELEASE_NOTES.md
-          git commit --allow-empty \
-            -m "chore(release): reserve v$VERSION" \
-            -m "Refs #$ISSUE_NUMBER"
-          git push origin "HEAD:refs/heads/$HEAD_REF"
+          if [ "$(git log -1 --format=%s)" = "chore(release): reserve v$VERSION" ] && \
+             git log -1 --format=%B | grep -Fx "Refs #$ISSUE_NUMBER"; then
+            if ! git diff --cached --quiet; then
+              echo "::error::Existing release reservation does not match generated files."
+              exit 1
+            fi
+            echo "Reusing existing release reservation"
+          else
+            git commit --allow-empty \
+              -m "chore(release): reserve v$VERSION" \
+              -m "Refs #$ISSUE_NUMBER"
+            git push origin "HEAD:refs/heads/$HEAD_REF"
+          fi
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Verify squash merge preserves delivery evidence
         if: steps.select.outputs.selected == 'true'
@@ -111,4 +129,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ steps.select.outputs.url }}
-        run: gh pr edit "$PR_URL" --add-label merge-queue
+          PR_NUMBER: ${{ steps.select.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ steps.evidence.outputs.head_sha }}
+          EXPECTED_HEAD_REF: ${{ steps.select.outputs.head_ref }}
+          EXPECTED_TITLE: ${{ steps.select.outputs.title }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            | jq -e \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg head_sha "$EXPECTED_HEAD_SHA" \
+              --arg head_ref "$EXPECTED_HEAD_REF" \
+              --arg title "$EXPECTED_TITLE" \
+              '.head.sha == $head_sha and
+               .head.ref == $head_ref and
+               .head.repo.full_name == $repository and
+               .base.ref == "main" and
+               .draft == false and
+               .title == $title and
+               ((.labels | map(.name) | index("automation")) != null)' >/dev/null
+          gh pr edit "$PR_URL" --add-label merge-queue
