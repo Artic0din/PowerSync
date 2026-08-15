@@ -12,7 +12,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: support-intake-${{ github.event.issue.number }}
+  group: support-evidence-${{ github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:

@@ -12,6 +12,7 @@ from scripts.revalidate_support_snapshot import revalidate_snapshot
 from scripts.support_intake import (
     IntakeDecision,
     IntakeSnapshot,
+    MAX_TEXT_CHARACTERS,
     SupportIntake,
     snapshot_revision,
 )
@@ -816,6 +817,50 @@ def test_unicode_escaped_json_credential_key_fails_closed() -> None:
     assert SupportIntake._contains_secret(r'{"pass\u0077ord":"hunter2"}')
 
 
+def test_yaml_hex_escaped_credential_key_fails_closed() -> None:
+    assert SupportIntake._contains_secret(r'"pass\x77ord": "hunter2"')
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        r'{"user\u006eame":"Alice Smith"}',
+        r'{"payload":"{\"device\u005fid\":\"abc123\"}"}',
+    ],
+)
+def test_escaped_identifier_keys_fail_closed(evidence: str) -> None:
+    assert SupportIntake._contains_identifier(evidence)
+
+
+def test_registration_pin_fails_closed() -> None:
+    assert SupportIntake._contains_secret(
+        '{"registration":{"pin":"1234567890123456"}}'
+    )
+
+
+def test_redacted_sequence_secret_preserves_sibling_mapping_fields() -> None:
+    evidence = '- password: "[REDACTED]"\n  host: gateway.local\n  status: timeout'
+
+    assert SupportIntake._contains_secret(evidence) is False
+
+
+def test_oversized_issue_text_stops_before_regex_scans(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        SupportIntake,
+        "_contains_secret",
+        staticmethod(lambda _text: pytest.fail("secret scan should not run")),
+    )
+    monkeypatch.setattr(
+        SupportIntake,
+        "_contains_identifier",
+        staticmethod(lambda _text: pytest.fail("identifier scan should not run")),
+    )
+
+    assert SupportIntake._inspect_text("x" * (MAX_TEXT_CHARACTERS + 1)) == [
+        "issue text exceeds the support evidence size limit"
+    ]
+
+
 def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> None:
     workflow = Path(".github/workflows/issue-triage.md").read_text(encoding="utf-8")
 
@@ -824,7 +869,9 @@ def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> No
         "${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}" in workflow
     )
     assert "toolsets: [repos]" in workflow
-    assert "group: issue-triage-${{ inputs.issue_number }}" in workflow
+    assert "group: support-evidence-${{ inputs.issue_number }}" in workflow
+    intake = Path(".github/workflows/support-intake.yml").read_text(encoding="utf-8")
+    assert "group: support-evidence-${{ github.event.issue.number }}" in intake
     assert (
         "remove `needs triage`, `needs information`, and `needs investigation`"
         in workflow

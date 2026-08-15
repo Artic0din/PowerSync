@@ -72,7 +72,8 @@ KEYED_SECRET_PATTERN = re.compile(
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
-    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
+    r"pin|passcode)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
@@ -84,10 +85,14 @@ SECRET_KEY_NAME_PATTERN = re.compile(
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
+    r"pin|passcode|"
     r"authorization|set[_ -]?cookie)$"
 )
 JSON_KEY_PATTERN = re.compile(r'"(?P<key>(?:\\.|[^"\\])*)"(?P<delimiter>\s*:)')
-JSON_UNICODE_ESCAPE_PATTERN = re.compile(r"\\u(?P<digits>[0-9a-f]{4})", re.IGNORECASE)
+QUOTED_KEY_ESCAPE_PATTERN = re.compile(
+    r"\\(?:(?P<short>x[0-9a-fA-F]{2})|(?P<unicode>u[0-9a-fA-F]{4})|"
+    r"(?P<long>U[0-9a-fA-F]{8}))"
+)
 URL_USERINFO_PATTERN = re.compile(
     r"\b[a-z][a-z0-9+.-]*://(?P<userinfo>[^/@\s]+)@", re.IGNORECASE
 )
@@ -97,7 +102,8 @@ YAML_SECRET_SCALAR_HEADER_PATTERN = re.compile(
     r"(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|"
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
-    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)"
+    r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
+    r"pin|passcode)"
     r"[\"']?\s*:\s*(?P<value>.*)$"
 )
 COOKIE_ARRAY_HEADER_PATTERN = re.compile(
@@ -330,9 +336,9 @@ class SupportIntake:
 
     @staticmethod
     def _inspect_text(text: str) -> list[str]:
-        reasons: list[str] = []
         if len(text) > MAX_TEXT_CHARACTERS:
-            reasons.append("issue text exceeds the support evidence size limit")
+            return ["issue text exceeds the support evidence size limit"]
+        reasons: list[str] = []
         if SupportIntake._contains_secret(text):
             reasons.append("possible credential in issue text")
         if SupportIntake._contains_identifier(text):
@@ -345,7 +351,7 @@ class SupportIntake:
         if exhausted:
             return True
         for candidate in decoded_variants:
-            candidate = SupportIntake._normalize_json_key_escapes(candidate)
+            candidate = SupportIntake._normalize_quoted_key_escapes(candidate)
             if SupportIntake._contains_yaml_secret(candidate):
                 return True
             if SupportIntake._contains_cookie_jar_secret(candidate):
@@ -365,12 +371,26 @@ class SupportIntake:
         return False
 
     @staticmethod
-    def _normalize_json_key_escapes(text: str) -> str:
-        def normalize(match: re.Match[str]) -> str:
-            key = JSON_UNICODE_ESCAPE_PATTERN.sub(
-                lambda escape: chr(int(escape.group("digits"), 16)),
-                match.group("key"),
+    def _decode_quoted_key_escapes(value: str) -> str:
+        def decode(match: re.Match[str]) -> str:
+            encoded = (
+                match.group("short")
+                or match.group("unicode")
+                or match.group("long")
             )
+            if encoded is None:
+                return match.group(0)
+            code_point = int(encoded[1:], 16)
+            if code_point > 0x10FFFF or 0xD800 <= code_point <= 0xDFFF:
+                return match.group(0)
+            return chr(code_point)
+
+        return QUOTED_KEY_ESCAPE_PATTERN.sub(decode, value)
+
+    @staticmethod
+    def _normalize_quoted_key_escapes(text: str) -> str:
+        def normalize(match: re.Match[str]) -> str:
+            key = SupportIntake._decode_quoted_key_escapes(match.group("key"))
             return f'"{key}"{match.group("delimiter")}'
 
         return JSON_KEY_PATTERN.sub(normalize, text)
@@ -407,6 +427,10 @@ class SupportIntake:
                     continuation.lstrip(" \t")
                 )
                 if indentation <= base_indent:
+                    break
+                if re.match(
+                    r"^[ \t]*(?:-[ \t]+)?[^#\s][^:]*:\s*", continuation
+                ):
                     break
                 if not EXACT_REDACTED_VALUE.fullmatch(continuation.strip()):
                     return True
@@ -469,9 +493,8 @@ class SupportIntake:
             )
             if key_close == -1:
                 return False
-            key = JSON_UNICODE_ESCAPE_PATTERN.sub(
-                lambda escape: chr(int(escape.group("digits"), 16)),
-                text[key_open + 1 : key_close - depth],
+            key = SupportIntake._decode_quoted_key_escapes(
+                text[key_open + 1 : key_close - depth]
             )
             value_open = key_close + 1
             while value_open < len(text) and text[value_open].isspace():
@@ -532,6 +555,7 @@ class SupportIntake:
     def _contains_identifier(text: str) -> bool:
         decoded_variants, _exhausted = SupportIntake._html_decoded_variants(text)
         for candidate in decoded_variants:
+            candidate = SupportIntake._normalize_quoted_key_escapes(candidate)
             if any(pattern.search(candidate) for pattern in IDENTIFIER_PATTERNS):
                 return True
             if any(
@@ -605,7 +629,9 @@ class SupportIntake:
             )
             if key_close == -1:
                 return False
-            key = text[key_open + 1 : key_close - depth]
+            key = SupportIntake._decode_quoted_key_escapes(
+                text[key_open + 1 : key_close - depth]
+            )
             value_open = key_close + 1
             while value_open < len(text) and text[value_open].isspace():
                 value_open += 1

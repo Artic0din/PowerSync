@@ -485,3 +485,38 @@ test("multiline YAML sequence credentials use leading indentation", async () => 
   assert.doesNotMatch(output, /correct|horse/);
   assert.match(output, /next: visible/);
 });
+
+test("YAML hex-escaped credential keys are removed", async () => {
+  const output = await sanitizeSupportBundle(
+    String.raw`"pass\x77ord": "hunter2"`,
+  );
+
+  assert.doesNotMatch(output, /hunter2/);
+});
+
+test("YAML sequence mappings retain non-secret siblings", async () => {
+  const output = await sanitizeSupportBundle(
+    "- password: hunter2\n  host: gateway.local\n  status: timeout",
+  );
+
+  assert.doesNotMatch(output, /hunter2/);
+  assert.match(output, /host: gateway\.local/);
+  assert.match(output, /status: timeout/);
+});
+
+test("registration PINs are removed", async () => {
+  const output = await sanitizeSupportBundle(
+    '{"registration":{"pin":"1234567890123456"}}',
+  );
+
+  assert.doesNotMatch(output, /1234567890123456/);
+});
+
+test("escaped identifier keys are pseudonymised", async () => {
+  const output = await sanitizeSupportBundle(
+    String.raw`{"user\u006eame":"Alice Smith","payload":"{\"device\u005fid\":\"abc123\"}"}`,
+  );
+
+  assert.doesNotMatch(output, /Alice Smith|abc123/);
+  assert.match(output, /\[USER_1\]|\[DEVICE_1\]/);
+});

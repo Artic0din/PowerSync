@@ -14,7 +14,7 @@ on:
         type: string
 
 concurrency:
-  group: issue-triage-${{ inputs.issue_number }}
+  group: support-evidence-${{ inputs.issue_number }}
   cancel-in-progress: false
   queue: max
 

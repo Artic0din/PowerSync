@@ -11,8 +11,8 @@ export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
   ".debug",
 ]);
 
-const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*(?:-[ \t]+)?)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*:\s*)(.*)$/i;
-const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|authorization|set[_ -]?cookie)$/i;
+const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*(?:-[ \t]+)?)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode)["']?\s*:\s*)(.*)$/i;
+const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode|authorization|set[_ -]?cookie)$/i;
 const URL_USERINFO_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi;
 const HTML_ENTITY_PATTERN = /&(?:quot|apos|amp|lt|gt|colon|#\d+|#x[0-9a-f]+);/gi;
 const NON_IDENTIFYING_PRIMITIVE_PATTERN = /^(?:null|true|false)$/i;
@@ -26,7 +26,7 @@ const SECRET_PATTERNS = [
   ],
   [/["']?(?:set-cookie|cookie)["']?\s*:\s*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\r\n]+)/gi, "Cookie: [REDACTED]"],
   [
-    /((?<![A-Z0-9_-])["']?(?!timezone[_ -]?token["']?\s*[:=])(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
+    /((?<![A-Z0-9_-])["']?(?!timezone[_ -]?token["']?\s*[:=])(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode)["']?\s*[:=]\s*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]*)/gi,
     '$1"[REDACTED]"',
   ],
   [/\bpsk_[A-Za-z0-9]{20,}\b/gi, "[REDACTED_POWERSYNC_TOKEN]"],
@@ -103,16 +103,31 @@ function decodeHtmlEntities(text) {
   throw new Error("HTML entity nesting exceeds the sanitizer limit");
 }
 
-function decodeJsonUnicodeEscapes(value) {
-  return value.replace(/\\u([0-9a-f]{4})/gi, (_match, digits) =>
-    String.fromCharCode(Number.parseInt(digits, 16)));
+function decodeQuotedKeyEscapes(value) {
+  return value.replace(
+    /\\(?:x([0-9a-f]{2})|u([0-9a-f]{4})|U([0-9a-f]{8}))/g,
+    (match, short, unicode, long) => {
+      const codePoint = Number.parseInt(short ?? unicode ?? long, 16);
+      return codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ? String.fromCodePoint(codePoint)
+        : match;
+    },
+  );
 }
 
-function normalizeJsonKeyEscapes(text) {
+function normalizeQuotedKeyEscapes(text) {
   return text.replace(
     /"((?:\\.|[^"\\])*)"(\s*:)/g,
-    (_match, key, delimiter) => `"${decodeJsonUnicodeEscapes(key)}"${delimiter}`,
+    (_match, key, delimiter) => `"${decodeQuotedKeyEscapes(key)}"${delimiter}`,
   );
+}
+
+function yamlContinuationKind(value) {
+  const trimmed = value.trim().replace(/,$/, "").trim();
+  if (/^[|>][+-]?(?:\s+#.*)?$/.test(trimmed)) return "block";
+  if ((trimmed.startsWith('"') && !trimmed.endsWith('"'))
+      || (trimmed.startsWith("'") && !trimmed.endsWith("'"))) return "quoted";
+  return null;
 }
 
 function redactYamlSecretScalars(text) {
@@ -121,15 +136,23 @@ function redactYamlSecretScalars(text) {
     const line = parts[index];
     const header = line.match(YAML_SECRET_SCALAR_HEADER_PATTERN);
     if (header) {
+      const continuationKind = yamlContinuationKind(header[3]);
       const delimiter = header[3].trimEnd().endsWith(",") ? "," : "";
       parts[index] = `${header[1]}${header[2]}"[REDACTED]"${delimiter}`;
+      if (continuationKind === null) continue;
       const baseIndent = header[1].match(/^[ \t]*/)?.[0].length ?? 0;
+      let blockIndent = null;
       for (let continuation = index + 2; continuation < parts.length; continuation += 2) {
         const continuationLine = parts[continuation];
         if (continuationLine.trim() === "") continue;
         const indentation = continuationLine.match(/^[ \t]*/)?.[0] ?? "";
         if (indentation.length <= baseIndent) break;
+        if (continuationKind === "block") {
+          blockIndent ??= indentation.length;
+          if (indentation.length < blockIndent) break;
+        }
         parts[continuation] = `${indentation}[REDACTED]`;
+        if (continuationKind === "quoted" && /["']\s*$/.test(continuationLine)) break;
       }
     }
   }
@@ -207,7 +230,7 @@ function redactSerializedJsonSecrets(text) {
     }
     const keyClose = nextQuoteAtDepth(text, keyOpen + 1, depth);
     if (keyClose === -1) break;
-    const key = decodeJsonUnicodeEscapes(text.slice(keyOpen + 1, keyClose - depth));
+    const key = decodeQuotedKeyEscapes(text.slice(keyOpen + 1, keyClose - depth));
     let valueOpen = keyClose + 1;
     while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
     if (text[valueOpen] !== ":" && text[valueOpen] !== "=") {
@@ -257,7 +280,7 @@ function pseudonymiseSerializedJsonIdentifiers(text, replacementsByLabel) {
     }
     const keyClose = nextQuoteAtDepth(text, keyOpen + 1, depth);
     if (keyClose === -1) break;
-    const key = text.slice(keyOpen + 1, keyClose - depth);
+    const key = decodeQuotedKeyEscapes(text.slice(keyOpen + 1, keyClose - depth));
     let valueOpen = keyClose + 1;
     while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
     if (text[valueOpen] !== ":" && text[valueOpen] !== "=") {
@@ -354,7 +377,7 @@ export async function sanitizeSupportBundle(input) {
   let output = redactSerializedJsonSecrets(
     redactCookieJarValues(
       redactYamlSecretScalars(
-        normalizeJsonKeyEscapes(decodeHtmlEntities(input.replaceAll("\0", ""))),
+        normalizeQuotedKeyEscapes(decodeHtmlEntities(input.replaceAll("\0", ""))),
       ),
     ),
   );
