@@ -11,6 +11,10 @@ permissions:
   checks: read
   contents: write
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
