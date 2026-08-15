@@ -237,8 +237,9 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 7. Inspect the relevant implementation, callers, tests, contracts, and recent history.
 8. State a concrete root cause only when the evidence establishes the exact code path and causal chain.
 
-If independent classification shows this is a feature request or design decision, add `enhancement`, remove `bug`, `needs information`, and `needs investigation`, call `route_feature_assessment` once, and stop without editing code or creating a pull request.
-If `routing_hops` is not `0`, do not call a cross-classification route; record the conflicting classification in the issue comment and stop after the approved label changes.
+If independent classification shows this is a feature request or design decision and `routing_hops` is `0`, add `enhancement`, remove `bug`, `needs information`, and `needs investigation`, call `route_feature_assessment` once, and stop without editing code or creating a pull request.
+If `routing_hops` is not `0`, do not call a cross-classification route.
+Add `enhancement`, remove `bug` and `needs information`, keep or add `needs investigation` as the explicit maintainer-review queue, record the conflicting classification in the issue comment, and stop without editing code or creating a pull request.
 
 ## No concrete repository root cause
 

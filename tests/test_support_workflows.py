@@ -247,6 +247,12 @@ def test_cross_classification_routing_has_a_single_hop_guard() -> None:
         assert "-f routing_hops=1" in route
         assert "If `routing_hops` is not `0`, do not call a cross-classification route" in source
 
+    investigation = workflow("issue-investigation.md")
+    assert (
+        "keep or add `needs investigation` as the explicit maintainer-review queue"
+        in investigation
+    )
+
 
 def test_investigation_installs_manifest_runtime_requirements() -> None:
     source = workflow("issue-investigation.md")
