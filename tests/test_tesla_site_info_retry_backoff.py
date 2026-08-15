@@ -141,10 +141,16 @@ coordinator_module = importlib.import_module("power_sync.coordinator")
 DOMAIN = coordinator_module.DOMAIN
 TeslaEnergyCoordinator = coordinator_module.TeslaEnergyCoordinator
 UpdateFailed = coordinator_module.UpdateFailed
+# Defined locally in coordinator.py (matching TESLA_OUTAGE_NOTIFY_FAILURES and
+# friends), not in const.py -- several other test files build a minimal fake
+# "power_sync.const" module exposing only the names they need, so adding a
+# new name to const.py would break every one of those on collection.
+TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS = (
+    coordinator_module.TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS
+)
 
 const_module = importlib.import_module("power_sync.const")
 TESLA_PROVIDER_TESLEMETRY = const_module.TESLA_PROVIDER_TESLEMETRY
-TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS = const_module.TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS
 
 ConfigEntryAuthFailed = sys.modules["homeassistant.exceptions"].ConfigEntryAuthFailed
 

@@ -52,7 +52,6 @@ from .const import (
     CONF_MONITORING_MODE,
     CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
-    TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
     SIGENERGY_CHARGER_EVAC,
@@ -77,6 +76,10 @@ LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
 TESLA_OUTAGE_NOTIFY_MIN_SECONDS = 300
 TESLEMETRY_STREAM_FRESH_SECONDS = 150
+# How long to back off retrying site_info after a transient (non-auth) fetch
+# failure, e.g. a DNS or connection error during a wider outage. Recovery is
+# automatic on the next attempt after this window — no reload/restart needed.
+TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS = 30 * 60
 LIFETIME_TOTAL_KEYS = (
     "lifetime_solar_kwh",
     "lifetime_grid_import_kwh",
