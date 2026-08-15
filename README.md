@@ -6,7 +6,7 @@
   Intelligent battery energy management for Home Assistant. Automatically optimize your battery system with dynamic electricity pricing to minimize costs and maximize savings.
 
   [![Sponsor](https://img.shields.io/badge/Sponsor-❤-ea4aaa?logo=github)](https://github.com/sponsors/Bolagnaise)
-  [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/eaWDWxEWE3)
+  [![Community](https://img.shields.io/badge/Discord-Community-5865F2?logo=discord&logoColor=white)](https://discord.gg/eaWDWxEWE3)
   [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 
   <a href="https://testflight.apple.com/join/FhnUtSFy"><img src="https://img.shields.io/badge/iOS-TestFlight-blue?logo=apple&logoColor=white" alt="iOS TestFlight"></a>
@@ -17,7 +17,7 @@
 > **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, AGL, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
-> **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, please report it on [Discord](https://discord.gg/eaWDWxEWE3) with your tariff details and the action plan it generated.
+> **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, submit a [bug report](https://github.com/Plaintext-Lab/PowerSync/issues/new?template=bug_report.yml) with your tariff details, the action plan it generated, and only evidence checked by the [PowerSync support-bundle tool](https://plaintext-lab.github.io/PowerSync/support-bundle/).
 
 ---
 
@@ -168,8 +168,18 @@ Remote monitoring and control via iOS and Android.
 
 ## Support
 
-- **Discord:** https://discord.gg/eaWDWxEWE3 — bug reports, feature requests, and support
-- **Wiki:** https://github.com/bolagnaise/PowerSync/wiki
+GitHub Issues is the system of record for PowerSync support.
+The intake, investigation, and resolution workflows run on GitHub-hosted runners without PowerBot, Discord Tickets v2, a private server, Docker, or a separate ticket database.
+
+- **Bug reports:** [Report a reproducible problem](https://github.com/Plaintext-Lab/PowerSync/issues/new?template=bug_report.yml)
+- **Feature requests:** [Suggest an improvement](https://github.com/Plaintext-Lab/PowerSync/issues/new?template=feature_request.yml)
+- **Support questions:** [Ask a configuration or usage question](https://github.com/Plaintext-Lab/PowerSync/issues/new?template=support_question.yml)
+- **Documentation:** [PowerSync wiki](https://github.com/bolagnaise/PowerSync/wiki)
+- **Community chat:** [Discord](https://discord.gg/eaWDWxEWE3) — community discussion only; requests are tracked on GitHub
+
+Never attach a raw log to GitHub.
+GitHub uploads attachments as soon as they are selected, so create and review a sanitised text bundle in your browser with the [PowerSync support-bundle tool](https://plaintext-lab.github.io/PowerSync/support-bundle/) before attaching it.
+See the [support workflow](docs/support-workflow.md) for the evidence gates, automated investigation limits, release reconciliation, and exact solved-confirmation process.
 
 ## License
 
