@@ -171,7 +171,7 @@ async def async_set_tesla_grid_charging_confirmed(
     Transport failures may retry the POST. Once Tesla accepts a POST, this
     function only polls readback and never duplicates the accepted command.
     Reads are deliberately direct and uncached so a coordinator cache or prior
-    ``_site_info_fetch_failed`` latch cannot produce a false confirmation.
+    ``_site_info_next_retry`` backoff cannot produce a false confirmation.
     """
     api_base_url = api_base_url.rstrip("/")
     write_url = f"{api_base_url}/api/1/energy_sites/{site_id}/grid_import_export"

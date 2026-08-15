@@ -1285,6 +1285,10 @@ UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(seconds=15)  # Tesla energy data every 15 seconds
 TESLA_SITE_INFO_CACHE_TTL_SECONDS = 6 * 60 * 60
 TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 60
+# How long to back off retrying site_info after a transient (non-auth) fetch
+# failure, e.g. a DNS or connection error during a wider outage. Recovery is
+# automatic on the next attempt after this window — no reload/restart needed.
+TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS = 30 * 60
 # How recently the local Powerwall coordinator must have ticked for its data
 # to be trusted by number.py/select.py/sensor.py's local-prefer overrides and
 # optimization/battery_controller.py's local snapshot lookup.

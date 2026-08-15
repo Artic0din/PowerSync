@@ -52,6 +52,7 @@ from .const import (
     CONF_MONITORING_MODE,
     CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
+    TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
     SIGENERGY_CHARGER_EVAC,
@@ -2082,7 +2083,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info (normally refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
-        self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
+        # Monotonic timestamp before which a failed fetch won't be retried (0 = no
+        # backoff active). Avoids retrying on every sync cycle while still recovering
+        # automatically after a transient outage, without needing a reload/restart.
+        self._site_info_next_retry: float = 0
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
         self._last_valid_battery_level_pct: float | None = None
@@ -2669,7 +2673,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             _site_info_stale = (
                 time.monotonic() - self._site_info_last_fetch
             ) > TESLA_SITE_INFO_CACHE_TTL_SECONDS
-            if _site_info_stale and not self._site_info_fetch_failed:
+            if _site_info_stale and time.monotonic() >= self._site_info_next_retry:
                 try:
                     await self.async_get_site_info()
                 except Exception:
@@ -2922,9 +2926,12 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
 
-        # Don't retry if a previous fetch already failed (avoids spamming logs every sync cycle)
-        if self._site_info_fetch_failed:
-            return None
+        # Back off after a transient failure instead of retrying every sync cycle;
+        # a fresh attempt is allowed automatically once the backoff window elapses,
+        # returning whatever payload we last fetched successfully (if any) in the
+        # meantime instead of losing it.
+        if time.monotonic() < self._site_info_next_retry:
+            return self._site_info_cache
 
         current_token = self._get_current_token()
         headers = self._tesla_headers(current_token)
@@ -3018,6 +3025,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             elif storm_mode_active is not None:
                 self._storm_mode_enabled = bool(storm_mode_active)
 
+            if self._site_info_next_retry:
+                _LOGGER.info("Recovered site_info fetch for site %s", self.site_id)
+                self._site_info_next_retry = 0
+
             # Cache the result with timestamp
             self._site_info_cache = site_info
             self._site_info_last_fetch = time.monotonic()
@@ -3033,14 +3044,30 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             return site_info
 
+        except ConfigEntryAuthFailed:
+            # Genuine credential failure, not a transient outage — don't
+            # negative-cache it, let HA's reauth flow take over.
+            raise
         except UpdateFailed as err:
-            _LOGGER.warning("Failed to fetch site_info: %s (will not retry until next restart)", err)
-            self._site_info_fetch_failed = True
-            return None
+            _LOGGER.warning(
+                "Failed to fetch site_info: %s (retrying in %d min)",
+                err,
+                TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS // 60,
+            )
+            self._site_info_next_retry = (
+                time.monotonic() + TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS
+            )
+            return self._site_info_cache
         except Exception as err:
-            _LOGGER.warning("Unexpected error fetching site_info: %s (will not retry until next restart)", err)
-            self._site_info_fetch_failed = True
-            return None
+            _LOGGER.warning(
+                "Unexpected error fetching site_info: %s (retrying in %d min)",
+                err,
+                TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS // 60,
+            )
+            self._site_info_next_retry = (
+                time.monotonic() + TESLA_SITE_INFO_RETRY_BACKOFF_SECONDS
+            )
+            return self._site_info_cache
 
     def invalidate_site_info_cache(self) -> None:
         """Force the next async_get_site_info() call to re-fetch from Tesla.
@@ -3058,7 +3085,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # the cached payload itself to force the next call to refetch.
         self._site_info_cache = None
         self._site_info_last_fetch = 0
-        self._site_info_fetch_failed = False
+        self._site_info_next_retry = 0
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
     async def set_grid_charging_enabled(self, enabled: bool) -> bool:
