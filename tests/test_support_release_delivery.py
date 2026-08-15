@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
@@ -31,6 +32,31 @@ class FakeGitHubClient:
         sequence = self.response_sequences.get((method, path))
         if sequence:
             return sequence.pop(0)
+        if method == "POST" and path.endswith("/labels") and isinstance(payload, dict):
+            issue_path = path[: -len("/labels")]
+            issue = self.responses.get(("GET", issue_path))
+            labels = payload.get("labels")
+            if isinstance(issue, dict) and isinstance(labels, list):
+                current = [
+                    label
+                    for label in issue.get("labels", [])
+                    if isinstance(label, dict)
+                ]
+                names = {str(label.get("name", "")) for label in current}
+                current.extend(
+                    {"name": label} for label in labels if label not in names
+                )
+                issue["labels"] = current
+        if method == "DELETE" and "/labels/" in path:
+            issue_path, encoded_label = path.rsplit("/labels/", 1)
+            issue = self.responses.get(("GET", issue_path))
+            if isinstance(issue, dict):
+                removed = unquote(encoded_label)
+                issue["labels"] = [
+                    label
+                    for label in issue.get("labels", [])
+                    if not isinstance(label, dict) or label.get("name") != removed
+                ]
         return self.responses.get((method, path), {})
 
 
@@ -557,6 +583,8 @@ def test_discord_receipt_is_persisted_per_release_before_later_cleanup() -> None
     assert "git fetch origin main" in cleanup
     assert "git checkout -B release-cleanup origin/main" in cleanup
     assert "discord-release-last-posted.txt" not in cleanup
+    assert "group: release-main" in workflow
+    assert "cancel-in-progress: false" in workflow
 
 
 def test_release_workflow_verifies_existing_tag_targets_before_publish() -> None:
@@ -611,14 +639,18 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     )
     assert "github.event.pull_request.merged == false" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "Clear stale queue label after unmerged closure or eligibility loss" in workflow
+    assert "Clear stale queue label before revalidation or after eligibility loss" in workflow
     assert "--remove-label merge-queue" in workflow
     assert workflow.index(
-        "Clear stale queue label after unmerged closure or eligibility loss"
+        "Clear stale queue label before revalidation or after eligibility loss"
     ) < workflow.index("Select the next automation pull request")
     assert "github.event.action == 'unlabeled'" in workflow
     assert "github.event.label.name == 'automation'" in workflow
     assert "github.event.action == 'converted_to_draft'" in workflow
+    assert "github.event.action == 'synchronize'" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'merge-queue')" in workflow
+    assert ".allow_merge_commit == false" in workflow
+    assert ".allow_rebase_merge == false" in workflow
 
 
 def test_automation_queue_reuses_reservation_and_revalidates_live_pr() -> None:
@@ -650,6 +682,8 @@ def test_pull_request_validation_requires_immutable_support_references() -> None
     assert "Validate immutable support references" in workflow
     assert "validate-reference" in workflow
     assert 'squash_merge_commit_message == "COMMIT_MESSAGES"' in workflow
+    assert ".allow_merge_commit == false" in workflow
+    assert ".allow_rebase_merge == false" in workflow
     assert (
         "types: [opened, synchronize, reopened, ready_for_review, edited, labeled]"
         in workflow
@@ -716,6 +750,54 @@ def test_release_rechecks_issue_state_before_posting_delivery() -> None:
         method == "POST" and path.endswith("/comments")
         for method, path, _ in client.requests
     )
+
+
+def test_release_requires_delivery_gate_before_posting_audit() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    client.response_sequences[("GET", issue_path)] = [
+        {
+            "number": 42,
+            "state": "open",
+            "labels": [{"name": "needs investigation"}],
+        },
+        {"number": 42, "state": "open", "labels": []},
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert not any(
+        method == "POST" and path.endswith("/comments")
+        for method, path, _ in client.requests
+    )
+
+
+def test_delivery_comment_is_rolled_back_when_gate_is_removed() -> None:
+    client = delivery_client()
+    issue_path = f"/repos/{REPOSITORY}/issues/42"
+    client.response_sequences[("GET", issue_path)] = [
+        {
+            "number": 42,
+            "state": "open",
+            "labels": [{"name": "needs investigation"}],
+        },
+        {
+            "number": 42,
+            "state": "open",
+            "labels": [{"name": "awaiting confirmation"}],
+        },
+        {"number": 42, "state": "open", "labels": []},
+    ]
+
+    result = SupportIssueAutomation(client).handle(release_event())
+
+    assert result == "deliveries-recorded:0"
+    assert (
+        "DELETE",
+        f"/repos/{REPOSITORY}/issues/comments/987",
+        None,
+    ) in client.requests
 
 
 def test_delivery_comment_is_rolled_back_after_concurrent_confirmation() -> None:

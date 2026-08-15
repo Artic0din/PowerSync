@@ -36,6 +36,8 @@ jobs:
           gh api "/repos/${GITHUB_REPOSITORY}" \
             | jq -e \
               '.allow_squash_merge == true and
+               .allow_merge_commit == false and
+               .allow_rebase_merge == false and
                .squash_merge_commit_message == "COMMIT_MESSAGES"' >/dev/null
           python -m scripts.prepare_automated_release validate-reference \
             --event "$GITHUB_EVENT_PATH" \

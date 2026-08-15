@@ -356,6 +356,7 @@ class ReleaseDelivery:
             or live_issue.get("state") != "open"
             or "pull_request" in live_issue
             or "solved" in live_labels
+            or "awaiting confirmation" not in live_labels
         ):
             if not already_awaiting:
                 self._request(
@@ -409,6 +410,7 @@ class ReleaseDelivery:
                 or final_issue.get("state") != "open"
                 or "pull_request" in final_issue
                 or "solved" in final_labels
+                or "awaiting confirmation" not in final_labels
             ):
                 self._delete_delivery_comment(repository, {"id": pending_comment_id})
                 if not already_awaiting:

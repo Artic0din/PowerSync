@@ -31,14 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Clear stale queue label after unmerged closure or eligibility loss
+      - name: Clear stale queue label before revalidation or after eligibility loss
         if: >-
           github.event_name == 'pull_request' &&
           ((github.event.action == 'closed' &&
             github.event.pull_request.merged == false) ||
            (github.event.action == 'unlabeled' &&
             github.event.label.name == 'automation') ||
-           github.event.action == 'converted_to_draft')
+           github.event.action == 'converted_to_draft' ||
+           (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'merge-queue')))
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -168,6 +170,8 @@ jobs:
           gh api "/repos/${GITHUB_REPOSITORY}" \
             | jq -e \
               '.allow_squash_merge == true and
+               .allow_merge_commit == false and
+               .allow_rebase_merge == false and
                .squash_merge_commit_message == "COMMIT_MESSAGES"' >/dev/null
 
       - name: Enter the protected Graphite merge queue
