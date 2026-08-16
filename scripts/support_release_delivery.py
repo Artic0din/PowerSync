@@ -13,6 +13,7 @@ SUCCESSFUL_CHECK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 DELIVERY_MARKER_PREFIX = "powersync-delivery:v1:"
 DELIVERY_PENDING_MARKER_PREFIX = "powersync-delivery-pending:v1:"
 MAX_API_PAGES = 10
+MAX_ANCESTRY_CANDIDATES = 50
 WORKFLOW_BOT_LOGIN = "github-actions[bot]"
 VERSION_TAG_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$", re.IGNORECASE)
 REFERENCE_TRAILER_PATTERN = re.compile(r"(?i)^Refs\s+#(\d+)$")
@@ -143,12 +144,18 @@ class ReleaseDelivery:
                 break
             history_truncated = page == MAX_API_PAGES
         ancestors: list[tuple[int, float, str]] = []
-        for candidate_time, tag in candidates:
+        for candidate_time, tag in sorted(candidates, reverse=True)[
+            :MAX_ANCESTRY_CANDIDATES
+        ]:
             distance = self._ancestor_distance(repository, tag, current_tag)
             if distance is not None:
                 ancestors.append((distance, -candidate_time.timestamp(), tag))
         if ancestors:
             return min(ancestors)[2]
+        if len(candidates) > MAX_ANCESTRY_CANDIDATES:
+            raise ValueError(
+                "No ancestral release found within the supported search bound"
+            )
         if history_truncated:
             raise ValueError("Release history exceeds the supported pagination limit")
         return None
@@ -179,9 +186,15 @@ class ReleaseDelivery:
             if len(tags) < 100:
                 break
             history_truncated = page == MAX_API_PAGES
-        for _version, name in sorted(candidates, reverse=True):
+        for _version, name in sorted(candidates, reverse=True)[
+            :MAX_ANCESTRY_CANDIDATES
+        ]:
             if self._is_ancestor_tag(repository, name, current_tag):
                 return name
+        if len(candidates) > MAX_ANCESTRY_CANDIDATES:
+            raise ValueError(
+                "No ancestral version tag found within the supported search bound"
+            )
         if history_truncated:
             raise ValueError("Tag history exceeds the supported pagination limit")
         return None
