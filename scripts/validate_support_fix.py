@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -63,36 +62,38 @@ def changed_paths(repository: Path, base_sha: str) -> set[Path]:
 
 
 def _is_test_file(path: Path) -> bool:
-    return (
-        len(path.parts) > 1
-        and path.parts[0] == "tests"
-        and path.name.startswith("test_")
-        and path.suffix == ".py"
+    if len(path.parts) <= 1 or path.parts[0] != "tests":
+        return False
+    return (path.name.startswith("test_") and path.suffix == ".py") or (
+        path.name.endswith(".test.mjs")
     )
 
 
 def _run_tests(
     repository: Path, test_files: list[Path]
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *(str(path) for path in test_files)],
-        cwd=repository,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _extract_revision(repository: Path, base_sha: str, destination: Path) -> None:
-    archive_path = destination.parent / "base.tar"
-    with archive_path.open("wb") as archive:
-        subprocess.run(
-            ["git", "archive", "--format=tar", base_sha],
-            cwd=repository,
-            check=True,
-            stdout=archive,
+) -> list[subprocess.CompletedProcess[str]]:
+    python_tests = [path for path in test_files if path.suffix == ".py"]
+    node_tests = [path for path in test_files if path.name.endswith(".test.mjs")]
+    commands = []
+    if python_tests:
+        commands.append(
+            [sys.executable, "-m", "pytest", "-q", *(str(path) for path in python_tests)]
         )
-    with tarfile.open(archive_path) as archive:
-        archive.extractall(destination, filter="data")
+    if node_tests:
+        commands.append(["node", "--test", *(str(path) for path in node_tests)])
+    return [
+        subprocess.run(
+            command,
+            cwd=repository,
+            capture_output=True,
+            text=True,
+        )
+        for command in commands
+    ]
+
+
+def _format_results(results: list[subprocess.CompletedProcess[str]]) -> str:
+    return "".join(result.stdout + result.stderr for result in results)
 
 
 def validate_fix(repository: Path, base_sha: str) -> None:
@@ -111,33 +112,35 @@ def validate_fix(repository: Path, base_sha: str) -> None:
 
     with tempfile.TemporaryDirectory(prefix="powersync-support-base-") as temporary:
         base_repository = Path(temporary) / "repository"
-        base_repository.mkdir()
-        _extract_revision(repository, base_sha, base_repository)
-        for path in paths:
-            if not path.parts or path.parts[0] != "tests":
-                continue
-            source = repository / path
-            destination = base_repository / path
-            if source.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-            elif destination.exists():
-                destination.unlink()
-        pre_fix_result = _run_tests(base_repository, test_files)
-    if pre_fix_result.returncode != 1:
+        _git(repository, "worktree", "add", "--detach", str(base_repository), base_sha)
+        try:
+            for path in paths:
+                if not path.parts or path.parts[0] != "tests":
+                    continue
+                source = repository / path
+                destination = base_repository / path
+                if source.is_file():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                elif destination.exists():
+                    destination.unlink()
+            pre_fix_results = _run_tests(base_repository, test_files)
+        finally:
+            _git(repository, "worktree", "remove", "--force", str(base_repository))
+    pre_fix_statuses = {result.returncode for result in pre_fix_results}
+    if not pre_fix_statuses.issubset({0, 1}) or 1 not in pre_fix_statuses:
         raise ValueError(
             "The changed regression test did not fail against the pre-fix revision "
-            f"with pytest's test-failure status (got {pre_fix_result.returncode}):\n"
-            + pre_fix_result.stdout
-            + pre_fix_result.stderr
+            "with a supported test-failure status "
+            f"(got {sorted(pre_fix_statuses)}):\n"
+            + _format_results(pre_fix_results)
         )
 
-    final_result = _run_tests(repository, test_files)
-    if final_result.returncode != 0:
+    final_results = _run_tests(repository, test_files)
+    if any(result.returncode != 0 for result in final_results):
         raise ValueError(
             "The changed regression test does not pass on the proposed fix:\n"
-            + final_result.stdout
-            + final_result.stderr
+            + _format_results(final_results)
         )
 
 

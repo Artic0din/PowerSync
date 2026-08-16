@@ -91,19 +91,15 @@ jobs:
     if: needs.agent.result == 'success'
     permissions:
       contents: read
-    pre-steps:
-      - name: Check out deterministic support gate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Revalidate evidence immediately before repository or issue mutations
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
-          SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
-        run: python -m scripts.revalidate_support_snapshot
 
 safe-outputs:
+  steps:
+    - name: Revalidate evidence at the safe-output mutation boundary
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SUPPORT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+        SUPPORT_EVIDENCE_REVISION: ${{ github.event.inputs.evidence_revision }}
+      run: python -m scripts.revalidate_support_snapshot
   github-token: ${{ secrets.GITHUB_TOKEN }}
   jobs:
     route-feature-assessment:
@@ -185,16 +181,18 @@ safe-outputs:
     target: ${{ github.event.inputs.issue_number }}
     allowed:
       - enhancement
+      - question
       - needs information
       - needs investigation
     max: 2
   remove-labels:
     target: ${{ github.event.inputs.issue_number }}
     allowed:
+      - enhancement
       - bug
       - needs information
       - needs investigation
-    max: 3
+    max: 4
   add-comment:
     target: ${{ github.event.inputs.issue_number }}
     max: 1
@@ -241,6 +239,7 @@ Do not merge a pull request, release software, close an issue, or claim that a r
    - PowerSync Cloud or worker-side issue outside this repository,
    - reproducible defect in this repository,
    - feature request or design decision,
+   - support question,
    - unknown.
 7. Inspect the relevant implementation, callers, tests, contracts, and recent history.
 8. State a concrete root cause only when the evidence establishes the exact code path and causal chain.
@@ -248,6 +247,12 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 If independent classification shows this is a feature request or design decision and `routing_hops` is `0`, add `enhancement`, remove `bug`, `needs information`, and `needs investigation`, call `route_feature_assessment` once, and stop without editing code or creating a pull request.
 If `routing_hops` is not `0`, do not call a cross-classification route.
 Add `enhancement`, remove `bug` and `needs information`, keep or add `needs investigation` as the explicit maintainer-review queue, record the conflicting classification in the issue comment, and stop without editing code or creating a pull request.
+
+If independent classification shows this is a support question:
+
+- If the available evidence is sufficient to answer, add `question`, remove `enhancement`, `bug`, `needs information`, and `needs investigation`, add one concise answer, and stop without editing code or creating a pull request.
+- If a specific missing item prevents an answer, add `question` and `needs information`, remove `enhancement`, `bug`, and `needs investigation`, add one concise request for that item, and stop without editing code or creating a pull request.
+- Do not repeat an earlier evidence request.
 
 ## No concrete repository root cause
 
