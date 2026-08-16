@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+TRUSTED_VALIDATOR_PATH = Path("scripts/validate_support_fix.py")
+
 
 def requested_pull_request(output_path: Path) -> bool:
     """Return whether agent safe output requests pull-request creation."""
@@ -50,7 +52,14 @@ def _git(repository: Path, *arguments: str) -> str:
 
 def changed_paths(repository: Path, base_sha: str) -> set[Path]:
     """Return committed, staged, working-tree, and untracked changes from base."""
-    tracked = _git(repository, "diff", "--name-only", "-z", base_sha).split("\0")
+    tracked = _git(
+        repository,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        base_sha,
+    ).split("\0")
     untracked = _git(
         repository,
         "ls-files",
@@ -94,6 +103,48 @@ def _run_tests(
 
 def _format_results(results: list[subprocess.CompletedProcess[str]]) -> str:
     return "".join(result.stdout + result.stderr for result in results)
+
+
+def validate_candidate_patch(
+    trusted_repository: Path, base_sha: str, patch_path: Path
+) -> None:
+    """Apply an agent patch in isolation before validating its regression proof."""
+    if not patch_path.is_file():
+        raise ValueError("The requested support fix has no candidate patch")
+    with tempfile.TemporaryDirectory(prefix="powersync-support-candidate-") as temporary:
+        candidate_repository = Path(temporary) / "repository"
+        _git(
+            trusted_repository,
+            "worktree",
+            "add",
+            "--detach",
+            str(candidate_repository),
+            base_sha,
+        )
+        try:
+            result = subprocess.run(
+                ["git", "am", "--no-verify", str(patch_path)],
+                cwd=candidate_repository,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise ValueError(
+                    "The candidate patch could not be applied to the trusted revision:\n"
+                    + result.stdout
+                    + result.stderr
+                )
+            if TRUSTED_VALIDATOR_PATH in changed_paths(candidate_repository, base_sha):
+                raise ValueError("The candidate patch changes the trusted validator")
+            validate_fix(candidate_repository, base_sha)
+        finally:
+            _git(
+                trusted_repository,
+                "worktree",
+                "remove",
+                "--force",
+                str(candidate_repository),
+            )
 
 
 def validate_fix(repository: Path, base_sha: str) -> None:
@@ -152,7 +203,11 @@ def main() -> int:
     base_sha = os.environ.get("GITHUB_SHA", "")
     if not repository.is_dir() or not base_sha:
         raise ValueError("The workflow is missing support-fix validation metadata")
-    validate_fix(repository, base_sha)
+    raw_patch_path = os.environ.get("GH_AW_CANDIDATE_PATCH")
+    if raw_patch_path:
+        validate_candidate_patch(repository, base_sha, Path(raw_patch_path))
+    else:
+        validate_fix(repository, base_sha)
     return 0
 
 

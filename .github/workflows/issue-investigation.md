@@ -80,12 +80,6 @@ pre-agent-steps:
       GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
     run: python -m scripts.prepare_support_snapshot
 
-post-steps:
-  - name: Prove requested fixes against the pre-fix revision
-    env:
-      GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
-    run: python -m scripts.validate_support_fix
-
 jobs:
   safe_outputs:
     if: needs.agent.result == 'success'
@@ -94,6 +88,12 @@ jobs:
 
 safe-outputs:
   steps:
+    - name: Prove requested fixes from the trusted checkout
+      if: contains(needs.agent.outputs.output_types, 'create_pull_request')
+      env:
+        GH_AW_SAFE_OUTPUTS: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}
+        GH_AW_CANDIDATE_PATCH: /tmp/gh-aw/aw.patch
+      run: python -m scripts.validate_support_fix
     - name: Revalidate evidence at the safe-output mutation boundary
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

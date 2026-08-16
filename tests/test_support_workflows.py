@@ -238,9 +238,10 @@ def test_investigation_clears_state_only_after_pull_request_creation() -> None:
 def test_investigation_deterministically_validates_requested_fixes() -> None:
     source = workflow("issue-investigation.md")
 
-    assert "post-steps:" in source
+    assert "post-steps:" not in source
+    assert "Prove requested fixes from the trusted checkout" in source
     assert "python -m scripts.validate_support_fix" in source
-    assert "jobs:" in source
+    assert "GH_AW_CANDIDATE_PATCH: /tmp/gh-aw/aw.patch" in source
     assert "needs.agent.result == 'success'" in source
 
 
