@@ -2,7 +2,7 @@ name: Support evidence intake
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, closed]
   issue_comment:
     types: [created, edited, deleted]
 

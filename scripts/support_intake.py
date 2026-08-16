@@ -73,7 +73,7 @@ KEYED_SECRET_PATTERN = re.compile(
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
-    r"pin|passcode)"
+    r"pin|passcode|authorization|set[_ -]?cookie)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
@@ -103,17 +103,21 @@ YAML_SECRET_SCALAR_HEADER_PATTERN = re.compile(
     r"api[_ -]?key|app[_ -]?secret|client[_ -]?secret|"
     r"private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|"
     r"apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|"
-    r"pin|passcode)"
+    r"pin|passcode|authorization|set[_ -]?cookie)"
     r"[\"']?\s*:\s*(?P<value>.*)$"
 )
-COOKIE_ARRAY_HEADER_PATTERN = re.compile(
-    r"[\"']?cookies[\"']?\s*:\s*\[", re.IGNORECASE
-)
+COOKIE_ARRAY_HEADER_PATTERN = re.compile(r"[\"']?cookies[\"']?\s*:\s*\[", re.IGNORECASE)
 COOKIE_VALUE_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9_-])[\"']?value[\"']?\s*:\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
     r"(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n,}\]]+)"
+)
+YAML_ANCHOR_PATTERN = re.compile(
+    r"(?:^|[\s:[{,])&(?P<name>[^\s[\]{},]+)(?=$|[\s,\]}])", re.MULTILINE
+)
+YAML_ALIAS_PATTERN = re.compile(
+    r"(?:^|[\s:[{,])\*(?P<name>[^\s[\]{},]+)(?=$|[\s,\]}])", re.MULTILINE
 )
 EXACT_REDACTED_VALUE = re.compile(r"^[\"']?\[REDACTED\][\"']?\s*$", re.IGNORECASE)
 EXACT_EMPTY_VALUE = re.compile(r"^(?:null|true|false)\s*$", re.IGNORECASE)
@@ -166,11 +170,13 @@ KEYED_IDENTIFIER_PATTERN = re.compile(
     r"[A-Z0-9_-]*device[_ -]?(?:id|sn|name)|"
     r"[A-Z0-9_-]*user(?:name)?|[A-Z0-9_-]*login|"
     r"[A-Z0-9_-]*gateway[_ -]?id|"
-    r"[A-Z0-9_-]*site[_ -]?(?:id|identifier)|din|nmi|"
+    r"[A-Z0-9_-]*site[_ -]?(?:id|identifier)|"
+    r"[A-Z0-9_-]*station[_ -]?id|din|nmi|"
     r"warp[_ -]?site[_ -]?number|energy[_ -]?site|"
     r"account[_ -]?(?:number|name|address)|site[_ -]?address|"
     r"concession[_ -]?address|street[_ -]?address|document[_ -]?id|"
-    r"email[_ -]?address|invoice[_ -]?number|identifier)"
+    r"email[_ -]?address|invoice[_ -]?number|identifier|"
+    r"latitude|longitude|lat|lon|lng)"
     r"[\"']?\s*[:=]\s*"
     r"(?P<value>\"(?:\\[^\r\n]|[^\"\\\r\n])*\"|"
     r"'(?:\\[^\r\n]|[^'\\\r\n])*'|"
@@ -190,9 +196,15 @@ PREFIXED_IDENTIFIER_PATTERNS = (
     re.compile(r"\bfor site\s+[A-Za-z0-9-]{15,}", re.IGNORECASE),
     re.compile(r"\bsite\s+\d{13,}", re.IGNORECASE),
     re.compile(r"\benergy_sites?[/\s:=]+\d{13,}", re.IGNORECASE),
+    re.compile(r"\bSigenergy station\s+\d{13,}", re.IGNORECASE),
+    re.compile(
+        r"\bUsing explicit coordinates:\s*-?\d{1,3}(?:\.\d+)?\s*,\s*"
+        r"-?\d{1,3}(?:\.\d+)?",
+        re.IGNORECASE,
+    ),
 )
 EXACT_IDENTIFIER_VALUE = re.compile(
-    r"^[\"']?\[(?:SERIAL|USER|DEVICE)_\d+\][\"']?\s*$", re.IGNORECASE
+    r"^[\"']?\[(?:SERIAL|USER|DEVICE|LOCATION)_\d+\][\"']?\s*$", re.IGNORECASE
 )
 
 
@@ -352,6 +364,8 @@ class SupportIntake:
             return True
         for candidate in decoded_variants:
             candidate = SupportIntake._normalize_quoted_key_escapes(candidate)
+            if SupportIntake._contains_yaml_anchor_or_alias(candidate):
+                return True
             if SupportIntake._contains_yaml_secret(candidate):
                 return True
             if SupportIntake._contains_cookie_jar_secret(candidate):
@@ -374,9 +388,7 @@ class SupportIntake:
     def _decode_quoted_key_escapes(value: str) -> str:
         def decode(match: re.Match[str]) -> str:
             encoded = (
-                match.group("short")
-                or match.group("unicode")
-                or match.group("long")
+                match.group("short") or match.group("unicode") or match.group("long")
             )
             if encoded is None:
                 return match.group(0)
@@ -423,18 +435,20 @@ class SupportIntake:
             for continuation in lines[index + 1 :]:
                 if not continuation.strip():
                     continue
-                indentation = len(continuation) - len(
-                    continuation.lstrip(" \t")
-                )
+                indentation = len(continuation) - len(continuation.lstrip(" \t"))
                 if indentation <= base_indent:
                     break
-                if re.match(
-                    r"^[ \t]*(?:-[ \t]+)?[^#\s][^:]*:\s*", continuation
-                ):
+                if re.match(r"^[ \t]*(?:-[ \t]+)?[^#\s][^:]*:\s*", continuation):
                     break
                 if not EXACT_REDACTED_VALUE.fullmatch(continuation.strip()):
                     return True
         return False
+
+    @staticmethod
+    def _contains_yaml_anchor_or_alias(text: str) -> bool:
+        return YAML_ANCHOR_PATTERN.search(text) is not None or (
+            YAML_ALIAS_PATTERN.search(text) is not None
+        )
 
     @staticmethod
     def _contains_cookie_jar_secret(text: str) -> bool:
@@ -453,21 +467,47 @@ class SupportIntake:
         return False
 
     @staticmethod
-    def _matching_json_array_end(text: str, start: int) -> int | None:
+    def _matching_json_array_end(
+        text: str, start: int, quote_escape_depth: int = 0
+    ) -> int | None:
         depth = 0
         quote_character: str | None = None
-        escaped = False
-        for index in range(start, len(text)):
+        line_comment = False
+        block_comment = False
+        index = start
+        while index < len(text):
             character = text[index]
-            if quote_character is not None:
-                if escaped:
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character == quote_character:
-                    quote_character = None
+            next_character = text[index + 1] if index + 1 < len(text) else ""
+            if line_comment:
+                if character in "\r\n":
+                    line_comment = False
+                index += 1
                 continue
-            if character in {'"', "'"}:
+            if block_comment:
+                if character == "*" and next_character == "/":
+                    block_comment = False
+                    index += 2
+                else:
+                    index += 1
+                continue
+            if quote_character is not None:
+                if character == quote_character and SupportIntake._is_quote_at_depth(
+                    text, index, quote_escape_depth
+                ):
+                    quote_character = None
+                index += 1
+                continue
+            if character == "/" and next_character == "/":
+                line_comment = True
+                index += 2
+                continue
+            if character == "/" and next_character == "*":
+                block_comment = True
+                index += 2
+                continue
+            if character in {'"', "'"} and SupportIntake._is_quote_at_depth(
+                text, index, quote_escape_depth
+            ):
                 quote_character = character
             elif character == "[":
                 depth += 1
@@ -475,10 +515,13 @@ class SupportIntake:
                 depth -= 1
                 if depth == 0:
                     return index
+            index += 1
         return None
 
     @staticmethod
-    def _contains_escaped_keyed_secret(text: str) -> bool:
+    def _contains_escaped_keyed_secret(
+        text: str, *, cookie_values: bool = False
+    ) -> bool:
         cursor = 0
         while cursor < len(text):
             key_open = text.find('"', cursor)
@@ -488,9 +531,7 @@ class SupportIntake:
             if depth == 0 or depth % 2 == 0:
                 cursor = key_open + 1
                 continue
-            key_close = SupportIntake._next_quote_at_depth(
-                text, key_open + 1, depth
-            )
+            key_close = SupportIntake._next_quote_at_depth(text, key_open + 1, depth)
             if key_close == -1:
                 return False
             key = SupportIntake._decode_quoted_key_escapes(
@@ -505,18 +546,29 @@ class SupportIntake:
             value_open += 1
             while value_open < len(text) and text[value_open].isspace():
                 value_open += 1
+            if key.casefold() == "cookies" and text[value_open : value_open + 1] == "[":
+                array_end = SupportIntake._matching_json_array_end(
+                    text, value_open, depth
+                )
+                if array_end is None:
+                    return True
+                if SupportIntake._contains_escaped_keyed_secret(
+                    text[value_open : array_end + 1], cookie_values=True
+                ):
+                    return True
+                cursor = array_end + 1
+                continue
             value_quote = text.find('"', value_open)
-            value_prefix = (
-                text[value_open:value_quote] if value_quote != -1 else ""
-            )
+            value_prefix = text[value_open:value_quote] if value_quote != -1 else ""
             value_depth = (
                 SupportIntake._preceding_backslashes(text, value_quote)
-                if value_quote != -1
-                and value_prefix
-                and set(value_prefix) == {"\\"}
+                if value_quote != -1 and value_prefix and set(value_prefix) == {"\\"}
                 else 0
             )
-            if not SECRET_KEY_NAME_PATTERN.fullmatch(key) or value_depth != depth:
+            sensitive_key = SECRET_KEY_NAME_PATTERN.fullmatch(key) is not None or (
+                cookie_values and key.casefold() == "value"
+            )
+            if not sensitive_key or value_depth != depth:
                 cursor = key_close + 1
                 continue
             value_close = SupportIntake._next_quote_at_depth(
@@ -524,10 +576,7 @@ class SupportIntake:
             )
             if value_close == -1:
                 return True
-            if (
-                text[value_quote + 1 : value_close - depth].casefold()
-                != "[redacted]"
-            ):
+            if text[value_quote + 1 : value_close - depth].casefold() != "[redacted]":
                 return True
             cursor = value_close + 1
         return False
@@ -540,6 +589,11 @@ class SupportIntake:
             count += 1
             index -= 1
         return count
+
+    @staticmethod
+    def _is_quote_at_depth(text: str, quote_index: int, depth: int) -> bool:
+        backslashes = SupportIntake._preceding_backslashes(text, quote_index)
+        return backslashes % 2 == 0 if depth == 0 else backslashes == depth
 
     @staticmethod
     def _next_quote_at_depth(text: str, start: int, depth: int) -> int:
@@ -599,11 +653,13 @@ class SupportIntake:
         if re.search(r"serial(?:number)?$", normalized):
             return "SERIAL"
         if re.search(
-            r"(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|"
+            r"(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|stationid|"
             r"din|nmi|warpsitenumber|energysite)$",
             normalized,
         ):
             return "DEVICE"
+        if re.search(r"(?:latitude|longitude|lat|lon|lng)$", normalized):
+            return "LOCATION"
         if re.search(
             r"(?:username|login|accountnumber|accountname|accountaddress|"
             r"siteaddress|concessionaddress|streetaddress|documentid|"
@@ -624,9 +680,7 @@ class SupportIntake:
             if depth == 0 or depth % 2 == 0:
                 cursor = key_open + 1
                 continue
-            key_close = SupportIntake._next_quote_at_depth(
-                text, key_open + 1, depth
-            )
+            key_close = SupportIntake._next_quote_at_depth(text, key_open + 1, depth)
             if key_close == -1:
                 return False
             key = SupportIntake._decode_quoted_key_escapes(
@@ -645,9 +699,7 @@ class SupportIntake:
             value_prefix = text[value_open:value_quote] if value_quote != -1 else ""
             value_depth = (
                 SupportIntake._preceding_backslashes(text, value_quote)
-                if value_quote != -1
-                and value_prefix
-                and set(value_prefix) == {"\\"}
+                if value_quote != -1 and value_prefix and set(value_prefix) == {"\\"}
                 else 0
             )
             if SupportIntake._identifier_label(key) is None or value_depth != depth:

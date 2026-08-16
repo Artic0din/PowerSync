@@ -11,7 +11,7 @@ export const ALLOWED_SOURCE_EXTENSIONS = Object.freeze([
   ".debug",
 ]);
 
-const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*(?:-[ \t]+)?)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode)["']?\s*:\s*)(.*)$/i;
+const YAML_SECRET_SCALAR_HEADER_PATTERN = /^([ \t]*(?:-[ \t]+)?)(["']?(?!timezone[_ -]?token["']?\s*:)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode|authorization|set[_ -]?cookie)["']?\s*:\s*)(.*)$/i;
 const SECRET_KEY_NAME_PATTERN = /^(?!timezone[_ -]?token$)(?:(?:[A-Z0-9]+[_ -]+)*(?:password|passwd|pass[_ -]?enc|token|api[_ -]?key|app[_ -]?secret|client[_ -]?secret|private[_ -]?key(?:[_ -]?(?:pem|der))?)|accessToken|refreshToken|apiKey|appSecret|clientSecret|privateKey(?:Pem|Der)?|passEnc|cookie|pin|passcode|authorization|set[_ -]?cookie)$/i;
 const URL_USERINFO_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi;
 const HTML_ENTITY_PATTERN = /&(?:quot|apos|amp|lt|gt|colon|#\d+|#x[0-9a-f]+);/gi;
@@ -39,7 +39,7 @@ const SECRET_PATTERNS = [
   [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]"],
   [/(?:Exponent|Expo)PushToken\[[^\]\s]{10,}\]/gi, "[REDACTED_PUSH_TOKEN]"],
   [/\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_PUSH_TOKEN]"],
-  [/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]"],
+  [/-----BEGIN ((?:RSA |EC |OPENSSH )?PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g, "[REDACTED_PRIVATE_KEY]"],
   [/https:\/\/(?:discord(?:app)?\.com\/api\/webhooks|hooks\.slack\.com\/services)\/\S+/gi, "[REDACTED_WEBHOOK]"],
 ];
 
@@ -58,15 +58,20 @@ const VERSION_CONTEXT_PATTERN = /(?:version|firmware[_ -]?version|integration[_ 
 const KEYED_IDENTIFIER_PATTERNS = [
   ["SERIAL", /((?<![A-Z0-9_-])["']?[A-Z0-9_-]*serial(?:[_ -]?number)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
   ["USER", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9_-]*user(?:name)?|[A-Z0-9_-]*login|account[_ -]?(?:number|name|address)|concession[_ -]?address|street[_ -]?address|document[_ -]?id|email[_ -]?address|invoice[_ -]?number|identifier)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
-  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9_-]*(?:gateway[_ -]?id|device[_ -]?(?:id|sn|name)|site[_ -]?(?:id|identifier))|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["DEVICE", /((?<![A-Z0-9_-])["']?(?:[A-Z0-9_-]*(?:gateway[_ -]?id|device[_ -]?(?:id|sn|name)|site[_ -]?(?:id|identifier)|station[_ -]?id)|din|nmi|warp[_ -]?site[_ -]?number|energy[_ -]?site|site[_ -]?address)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
+  ["LOCATION", /((?<![A-Z0-9_-])["']?(?:latitude|longitude|lat|lon|lng)["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi],
 ];
 const ADDRESS_IDENTIFIER_PATTERN = /((?<![A-Z0-9_-])["']?address["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|(?:null|true|false|-?\d+(?:\.\d+)?)(?=\s*[,}])|[^\r\n]+)/gi;
 const PREFIXED_IDENTIFIER_PATTERNS = [
   ["DEVICE", /(\bfor site\s+)([A-Za-z0-9-]{15,})/gi],
   ["DEVICE", /(\bsite\s+)(\d{13,})/gi],
   ["DEVICE", /(\benergy_sites?[/\s:=]+)(\d{13,})/gi],
+  ["DEVICE", /(\bSigenergy station\s+)(\d{13,})/gi],
   ["DEVICE", /(\bdevice\s*=\s*)(.*?)(?=,\s*[A-Z0-9_]+\s*=|$)/gim],
 ];
+const COORDINATE_PAIR_PATTERN = /(\bUsing explicit coordinates:\s*)(-?\d{1,3}(?:\.\d+)?)(\s*,\s*)(-?\d{1,3}(?:\.\d+)?)/gi;
+const YAML_ANCHOR_PATTERN = /(?:^|[\s:[{,])&([^\s[\]{},]+)(?=$|[\s,\]}])/gm;
+const YAML_ALIAS_PATTERN = /(?:^|[\s:[{,])\*([^\s[\]{},]+)(?=$|[\s,\]}])/gm;
 
 export function isAllowedSourceFileName(fileName) {
   const lowerName = fileName.toLowerCase();
@@ -159,19 +164,41 @@ function redactYamlSecretScalars(text) {
   return parts.join("");
 }
 
-function matchingJsonArrayEnd(text, start) {
+function matchingJsonArrayEnd(text, start, quoteEscapeDepth = 0) {
   let depth = 0;
   let quote = null;
-  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
   for (let index = start; index < text.length; index += 1) {
     const character = text[index];
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
+    const nextCharacter = text[index + 1];
+    if (lineComment) {
+      if (character === "\n" || character === "\r") lineComment = false;
       continue;
     }
-    if (character === '"' || character === "'") quote = character;
+    if (blockComment) {
+      if (character === "*" && nextCharacter === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote && isQuoteAtDepth(text, index, quoteEscapeDepth)) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "/" && nextCharacter === "/") {
+      lineComment = true;
+      index += 1;
+    } else if (character === "/" && nextCharacter === "*") {
+      blockComment = true;
+      index += 1;
+    } else if (
+      (character === '"' || character === "'")
+      && isQuoteAtDepth(text, index, quoteEscapeDepth)
+    ) quote = character;
     else if (character === "[") depth += 1;
     else if (character === "]" && --depth === 0) return index;
   }
@@ -209,6 +236,11 @@ function precedingBackslashes(text, quoteIndex) {
   return count;
 }
 
+function isQuoteAtDepth(text, quoteIndex, depth) {
+  const backslashes = precedingBackslashes(text, quoteIndex);
+  return depth === 0 ? backslashes % 2 === 0 : backslashes === depth;
+}
+
 function nextQuoteAtDepth(text, start, depth) {
   for (let index = start; index < text.length; index += 1) {
     if (text[index] === '"' && precedingBackslashes(text, index) === depth) return index;
@@ -216,7 +248,7 @@ function nextQuoteAtDepth(text, start, depth) {
   return -1;
 }
 
-function redactSerializedJsonSecrets(text) {
+function redactSerializedJsonSecrets(text, redactCookieValues = false) {
   let output = "";
   let cursor = 0;
   while (cursor < text.length) {
@@ -240,12 +272,25 @@ function redactSerializedJsonSecrets(text) {
     }
     valueOpen += 1;
     while (/\s/.test(text[valueOpen] ?? "")) valueOpen += 1;
+    if (key.toLowerCase() === "cookies" && text[valueOpen] === "[") {
+      const arrayEnd = matchingJsonArrayEnd(text, valueOpen, depth);
+      if (arrayEnd === -1) throw new Error("Malformed serialized cookie array");
+      const cookieArray = redactSerializedJsonSecrets(
+        text.slice(valueOpen, arrayEnd + 1),
+        true,
+      );
+      output += text.slice(cursor, valueOpen) + cookieArray;
+      cursor = arrayEnd + 1;
+      continue;
+    }
     const valueQuote = text.indexOf('"', valueOpen);
     const valueDepth = valueQuote !== -1
       && /^\\+$/.test(text.slice(valueOpen, valueQuote))
       ? precedingBackslashes(text, valueQuote)
       : 0;
-    if (!SECRET_KEY_NAME_PATTERN.test(key) || valueDepth !== depth) {
+    const sensitiveKey = SECRET_KEY_NAME_PATTERN.test(key)
+      || (redactCookieValues && key.toLowerCase() === "value");
+    if (!sensitiveKey || valueDepth !== depth) {
       output += text.slice(cursor, keyClose + 1);
       cursor = keyClose + 1;
       continue;
@@ -261,7 +306,8 @@ function redactSerializedJsonSecrets(text) {
 function identifierLabelForKey(key) {
   const normalized = key.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
   if (/serial(?:number)?$/.test(normalized)) return "SERIAL";
-  if (/(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|din|nmi|warpsitenumber|energysite)$/.test(normalized)) return "DEVICE";
+  if (/(?:gatewayid|deviceid|devicesn|devicename|siteid|siteidentifier|stationid|din|nmi|warpsitenumber|energysite)$/.test(normalized)) return "DEVICE";
+  if (/(?:latitude|longitude|lat|lon|lng)$/.test(normalized)) return "LOCATION";
   if (/(?:username|login|accountnumber|accountname|accountaddress|siteaddress|concessionaddress|streetaddress|documentid|emailaddress|invoicenumber|identifier)$/.test(normalized)) return "USER";
   return null;
 }
@@ -373,11 +419,32 @@ function pseudonymiseAddress(text, replacementsByLabel) {
   });
 }
 
+function pseudonymiseCoordinatePairs(text, replacementsByLabel) {
+  return text.replace(
+    COORDINATE_PAIR_PATTERN,
+    (_match, prefix, latitude, separator, longitude) => (
+      `${prefix}${nextReplacement("LOCATION", latitude, replacementsByLabel)}`
+      + `${separator}${nextReplacement("LOCATION", longitude, replacementsByLabel)}`
+    ),
+  );
+}
+
+function containsYamlAliasPair(text) {
+  const anchors = new Set(
+    [...text.matchAll(YAML_ANCHOR_PATTERN)].map((match) => match[1]),
+  );
+  return [...text.matchAll(YAML_ALIAS_PATTERN)].some((match) => anchors.has(match[1]));
+}
+
 export async function sanitizeSupportBundle(input) {
+  const decodedInput = decodeHtmlEntities(input.replaceAll("\0", ""));
+  if (containsYamlAliasPair(decodedInput)) {
+    throw new Error("YAML anchors and aliases are not supported");
+  }
   let output = redactSerializedJsonSecrets(
     redactCookieJarValues(
       redactYamlSecretScalars(
-        normalizeQuotedKeyEscapes(decodeHtmlEntities(input.replaceAll("\0", ""))),
+        normalizeQuotedKeyEscapes(decodedInput),
       ),
     ),
   );
@@ -398,6 +465,7 @@ export async function sanitizeSupportBundle(input) {
   for (const [label, pattern] of PREFIXED_IDENTIFIER_PATTERNS) {
     output = pseudonymiseKeyed(output, label, pattern, replacementsByLabel);
   }
+  output = pseudonymiseCoordinatePairs(output, replacementsByLabel);
   const bundle = `${SANITISED_MARKER}\n${output}`;
   if (new TextEncoder().encode(bundle).byteLength > MAX_FILE_BYTES) {
     throw new RangeError("Sanitised bundle exceeds the 512 KB limit");

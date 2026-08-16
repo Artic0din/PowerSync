@@ -178,6 +178,23 @@ def test_additional_persisted_credentials_fail_closed(evidence: str) -> None:
     assert "possible credential in issue text" in decision.reasons
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        '{"cookies": [ // ] diagnostic\n {"name":"session","value":"live-secret"}\n]}',
+        r'{"payload":"{\"cookies\":[{\"name\":\"session\",\"value\":\"live-secret\"}]}"}',
+    ],
+)
+def test_alternate_cookie_jar_encodings_fail_closed(evidence: str) -> None:
+    assert SupportIntake._contains_secret(evidence)
+
+
+def test_redacted_cookie_jar_with_escaped_backslash_is_allowed() -> None:
+    evidence = '{"cookies":[{"name":"ends\\\\","value":"[REDACTED]"}]}'
+
+    assert SupportIntake._contains_secret(evidence) is False
+
+
 def test_html_encoded_credentials_fail_closed() -> None:
     client = client_for("{&quot;password&quot;&#58;&quot;hunter2&quot;}")
 
@@ -215,9 +232,7 @@ def test_url_without_user_info_is_allowed() -> None:
 
 
 def test_deleted_comments_retrigger_deterministic_intake() -> None:
-    workflow = Path(".github/workflows/support-intake.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = Path(".github/workflows/support-intake.yml").read_text(encoding="utf-8")
 
     assert "types: [created, edited, deleted]" in workflow
 
@@ -429,7 +444,9 @@ def test_serialized_json_identifiers_fail_closed() -> None:
 
 
 def test_yaml_block_scalar_secret_fails_closed() -> None:
-    client = client_for("password: |\n  correct horse\n  battery staple\nnext: preserved")
+    client = client_for(
+        "password: |\n  correct horse\n  battery staple\nnext: preserved"
+    )
 
     decision = SupportIntake(client).inspect("Plaintext-Lab/PowerSync", 42)
 
@@ -444,6 +461,18 @@ def test_redacted_yaml_header_with_raw_continuation_fails_closed() -> None:
 
     assert decision.safe is False
     assert "possible credential in issue text" in decision.reasons
+
+
+def test_redacted_authentication_header_with_raw_continuation_fails_closed() -> None:
+    evidence = 'Authorization: "[REDACTED]"\n  Bearer live-secret\nstatus: failed'
+
+    assert SupportIntake._contains_secret(evidence)
+
+
+def test_yaml_aliases_fail_closed_after_sensitive_reference_is_redacted() -> None:
+    evidence = 'secret_value: &pw hunter2\npassword: "[REDACTED]"'
+
+    assert SupportIntake._contains_secret(evidence)
 
 
 def test_fully_redacted_yaml_continuation_is_allowed() -> None:
@@ -505,6 +534,19 @@ def test_power_sync_identifiers_in_log_phrases_fail_closed() -> None:
 
     assert decision.safe is False
     assert "personal identifier in issue text" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        '{"station_id":"102025092300219"}',
+        "Setting tariff for Sigenergy station 102025092300219",
+        '{"latitude":-37.8136,"longitude":144.9631}',
+        "Using explicit coordinates: -37.8136, 144.9631",
+    ],
+)
+def test_station_and_location_identifiers_fail_closed(evidence: str) -> None:
+    assert SupportIntake._contains_identifier(evidence)
 
 
 def test_four_part_version_is_not_misclassified_as_an_ip_address() -> None:
@@ -833,9 +875,7 @@ def test_escaped_identifier_keys_fail_closed(evidence: str) -> None:
 
 
 def test_registration_pin_fails_closed() -> None:
-    assert SupportIntake._contains_secret(
-        '{"registration":{"pin":"1234567890123456"}}'
-    )
+    assert SupportIntake._contains_secret('{"registration":{"pin":"1234567890123456"}}')
 
 
 def test_redacted_sequence_secret_preserves_sibling_mapping_fields() -> None:
@@ -844,7 +884,9 @@ def test_redacted_sequence_secret_preserves_sibling_mapping_fields() -> None:
     assert SupportIntake._contains_secret(evidence) is False
 
 
-def test_oversized_issue_text_stops_before_regex_scans(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_oversized_issue_text_stops_before_regex_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         SupportIntake,
         "_contains_secret",
@@ -872,6 +914,7 @@ def test_triage_passes_the_compiler_safe_output_path_to_snapshot_capture() -> No
     assert "group: support-evidence-${{ inputs.issue_number }}" in workflow
     intake = Path(".github/workflows/support-intake.yml").read_text(encoding="utf-8")
     assert "group: support-evidence-${{ github.event.issue.number }}" in intake
+    assert "types: [opened, edited, reopened, closed]" in intake
     assert (
         "remove `needs triage`, `needs information`, and `needs investigation`"
         in workflow

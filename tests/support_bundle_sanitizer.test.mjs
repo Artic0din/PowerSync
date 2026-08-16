@@ -104,6 +104,34 @@ test("persisted cookie-jar values are removed", async () => {
   assert.match(result, /"value":"\[REDACTED\]"/);
 });
 
+test("JSONC comments do not terminate persisted cookie arrays", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"cookies": [ // ] diagnostic\n {"name":"session","value":"live-secret"}\n]}',
+  );
+
+  assert.doesNotMatch(result, /live-secret/);
+  assert.match(result, /"value":"\[REDACTED\]"/);
+});
+
+test("escaped backslashes do not hide persisted cookie values", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"cookies":[{"name":"ends\\\\","value":"live-secret"}]}',
+  );
+  const data = JSON.parse(result.slice(result.indexOf("\n") + 1));
+
+  assert.equal(data.cookies[0].name, "ends\\");
+  assert.equal(data.cookies[0].value, "[REDACTED]");
+});
+
+test("cookie jars inside serialized JSON are removed", async () => {
+  const result = await sanitizeSupportBundle(
+    String.raw`{"payload":"{\"cookies\":[{\"name\":\"session\",\"value\":\"live-secret\"}]}"}`,
+  );
+
+  assert.doesNotMatch(result, /live-secret/);
+  assert.match(result, /\\"value\\":\\"\[REDACTED\]\\"/);
+});
+
 test("push tokens are removed from object keys", async () => {
   const expo = "ExponentPushToken[abcdefghijklmnopqrstuv]";
   const fcm = "abcdefghijklmnopqrstuv:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
@@ -150,6 +178,27 @@ test("YAML block scalar credentials are removed completely", async () => {
   assert.doesNotMatch(result, /correct|horse|battery|staple|secret suffix/);
   assert.match(result, /next: preserved/);
   assert.match(result, /status: ready/);
+});
+
+test("YAML authentication-header block scalars are removed completely", async () => {
+  const result = await sanitizeSupportBundle(
+    "Authorization: |\n  Bearer live-secret\nstatus: failed",
+  );
+
+  assert.doesNotMatch(result, /Bearer live-secret/);
+  assert.match(result, /status: failed/);
+});
+
+test("YAML anchors and aliases are rejected", async () => {
+  for (const input of [
+    "secret_value: &pw hunter2\npassword: *pw",
+    "secret_value: &amp;pw hunter2\npassword: *pw",
+  ]) {
+    await assert.rejects(
+      sanitizeSupportBundle(input),
+      /YAML anchors and aliases are not supported/,
+    );
+  }
 });
 
 test("multiline YAML credential scalars are removed completely", async () => {
@@ -267,6 +316,24 @@ test("PowerSync site and gateway identifiers are pseudonymised", async () => {
     /gateway-0123456789abcdef|12345678-1234-1234-1234-123456789abc|01KAR0YMB7JQDVZ10SN1SGA0CV|DIN0123456789ABC/,
   );
   assert.equal((result.match(/\[DEVICE_\d+\]/g) ?? []).length, 4);
+});
+
+test("Sigenergy station identifiers are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"station_id":"102025092300219"}\nSetting tariff for Sigenergy station 102025092300219',
+  );
+
+  assert.doesNotMatch(result, /102025092300219/);
+  assert.equal((result.match(/\[DEVICE_1\]/g) ?? []).length, 2);
+});
+
+test("geographic coordinates are pseudonymised", async () => {
+  const result = await sanitizeSupportBundle(
+    '{"latitude":-37.8136,"longitude":144.9631}\nUsing explicit coordinates: -37.8136, 144.9631',
+  );
+
+  assert.doesNotMatch(result, /-37\.8136|144\.9631/);
+  assert.match(result, /Using explicit coordinates: \[LOCATION_1\], \[LOCATION_2\]/);
 });
 
 test("namespaced and customer identifiers are pseudonymised", async () => {
@@ -510,6 +577,15 @@ test("registration PINs are removed", async () => {
   );
 
   assert.doesNotMatch(output, /1234567890123456/);
+});
+
+test("truncated private-key blocks are removed through end of input", async () => {
+  const output = await sanitizeSupportBundle(
+    "status: failed\n-----BEGIN RSA PRIVATE KEY-----\nlive-secret",
+  );
+
+  assert.match(output, /status: failed/);
+  assert.doesNotMatch(output, /BEGIN RSA PRIVATE KEY|live-secret/);
 });
 
 test("escaped identifier keys are pseudonymised", async () => {
