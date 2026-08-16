@@ -2,7 +2,7 @@ name: Queue automated fixes
 
 on:
   pull_request:
-    types: [opened, reopened, labeled, unlabeled, ready_for_review, converted_to_draft, synchronize, closed]
+    types: [opened, reopened, edited, labeled, unlabeled, ready_for_review, converted_to_draft, synchronize, closed]
   workflow_run:
     workflows: ["Create Release on Version Bump"]
     types: [completed]
@@ -40,7 +40,7 @@ jobs:
            (github.event.action == 'unlabeled' &&
             github.event.label.name == 'automation') ||
            github.event.action == 'converted_to_draft' ||
-           (github.event.action == 'synchronize' &&
+           ((github.event.action == 'edited' || github.event.action == 'synchronize') &&
             contains(github.event.pull_request.labels.*.name, 'merge-queue')))
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,17 +65,56 @@ jobs:
             echo "selected=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          RELEASE_VERSION=$(jq -r '.version' \
+          RELEASE_VERSION=$(jq -er '.version | strings | select(length > 0)' \
             trusted/custom_components/power_sync/manifest.json)
-          if ! gh release view "v$RELEASE_VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isDraft,isPrerelease,publishedAt,tagName \
-            | jq -e \
-              '.isDraft == false and .isPrerelease == false and
-               (.publishedAt | type) == "string" and
-               .tagName == "v" + $version' \
-              --arg version "$RELEASE_VERSION" >/dev/null; then
-            echo "Published release v$RELEASE_VERSION is not available"
+          published_release_tag() {
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -er \
+                'if .draft == false and .prerelease == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
+          }
+          RELEASE_TAG=$(published_release_tag "v$RELEASE_VERSION")
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(published_release_tag "$RELEASE_VERSION")
+          fi
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "Published release for $RELEASE_VERSION is not available"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin "refs/tags/$RELEASE_TAG"
+          RELEASE_HEAD=$(git rev-parse "FETCH_HEAD^{commit}")
+          RELEASE_RUNS=$(
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&event=push&head_sha=$RELEASE_HEAD&status=completed&per_page=100"
+          )
+          if ! jq -e \
+            'any(.workflow_runs[]?; .conclusion == "success")' \
+            <<< "$RELEASE_RUNS" >/dev/null; then
+            echo "Release workflow for $RELEASE_TAG is not complete"
             echo "selected=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

@@ -633,7 +633,7 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
         "Enter the protected Graphite merge queue"
     )
     assert (
-        "types: [opened, reopened, labeled, unlabeled, ready_for_review, "
+        "types: [opened, reopened, edited, labeled, unlabeled, ready_for_review, "
         "converted_to_draft, synchronize, closed]"
         in workflow
     )
@@ -648,6 +648,7 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
     assert "github.event.action == 'unlabeled'" in workflow
     assert "github.event.label.name == 'automation'" in workflow
     assert "github.event.action == 'converted_to_draft'" in workflow
+    assert "github.event.action == 'edited'" in workflow
     assert "github.event.action == 'synchronize'" in workflow
     assert "contains(github.event.pull_request.labels.*.name, 'merge-queue')" in workflow
     assert ".allow_merge_commit == false" in workflow
@@ -711,18 +712,24 @@ def test_queue_runs_after_release_workflow_completion() -> None:
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
 
 
-def test_queue_requires_a_published_release_for_the_current_manifest_version() -> None:
+def test_queue_requires_a_successful_release_for_the_current_manifest_version() -> None:
     workflow = Path(".github/workflows/queue-automated-fixes.yml").read_text(
         encoding="utf-8"
     )
 
     gate = workflow.split("- name: Select the next automation pull request", 1)[1]
     assert "custom_components/power_sync/manifest.json" in gate
-    assert "RELEASE_VERSION=$(jq -r '.version'" in gate
-    assert 'gh release view "v$RELEASE_VERSION"' in gate
-    assert ".isDraft == false and .isPrerelease == false" in gate
-    assert '"v" + $version' in gate
-    assert gate.index('gh release view "v$RELEASE_VERSION"') < gate.index(
+    assert "RELEASE_VERSION=$(jq -er '.version | strings | select(length > 0)'" in gate
+    assert 'published_release_tag "v$RELEASE_VERSION"' in gate
+    assert 'published_release_tag "$RELEASE_VERSION"' in gate
+    assert "/releases/tags/$candidate" in gate
+    assert "(HTTP 404)" in gate
+    assert 'git fetch origin "refs/tags/$RELEASE_TAG"' in gate
+    assert 'RELEASE_HEAD=$(git rev-parse "FETCH_HEAD^{commit}")' in gate
+    assert "actions/workflows/release.yml/runs" in gate
+    assert "head_sha=$RELEASE_HEAD" in gate
+    assert '.conclusion == "success"' in gate
+    assert gate.index("actions/workflows/release.yml/runs") < gate.index(
         "prepare_automated_release.py select"
     )
 
