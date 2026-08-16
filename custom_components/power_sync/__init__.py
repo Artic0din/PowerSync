@@ -19344,6 +19344,59 @@ def _sync_covau_withdrawn_plan_issue(
     )
 
 
+# Strict deadline for the *initial* network-envelope reconciliation kicked
+# off during config-entry setup (see
+# _run_bounded_initial_network_envelope_reconciliation below). Home Assistant
+# waits for tasks created with hass.async_create_task() during config-entry
+# setup before it reports RUNNING, so an unbounded first solve here can hold
+# bootstrap hostage until HA's own much longer setup timeout fires (observed
+# 400+s stalls). Kept well under that so a stuck optimizer never meaningfully
+# delays startup.
+_NETWORK_ENVELOPE_INITIAL_RECONCILE_TIMEOUT_SECONDS = 20.0
+
+
+async def _run_bounded_initial_network_envelope_reconciliation(
+    reconcile: Callable[[Any, Any], Any],
+    old_envelope: Any,
+    new_envelope: Any,
+    *,
+    timeout_seconds: float = _NETWORK_ENVELOPE_INITIAL_RECONCILE_TIMEOUT_SECONDS,
+    logger: logging.Logger = _LOGGER,
+) -> None:
+    """Run the first network-envelope reconciliation without letting bootstrap
+    wait on an unbounded optimizer solve.
+
+    Deny-by-default safety is unaffected by how this wrapper behaves: the
+    envelope manager/guard start deny-only, and ``reconcile`` (i.e.
+    ``_network_envelope_changed``) is the *only* code path that can ever grant
+    upward export authority, and only via
+    ``guard.approve_reoptimized_snapshot(...)`` after it observes a completed,
+    still-current, fault-free solve. This wrapper never calls that itself —
+    on timeout or on any other exception it simply stops waiting and leaves
+    whatever safe state ``reconcile`` (or the manager) was already in before
+    the deadline hit.
+    """
+    try:
+        await asyncio.wait_for(
+            reconcile(old_envelope, new_envelope), timeout=timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Initial network envelope reconciliation did not complete within "
+            "%.0fs and was abandoned so Home Assistant startup would not be "
+            "blocked; network export authority remains denied until a future "
+            "reconciliation succeeds",
+            timeout_seconds,
+        )
+    except Exception as err:  # noqa: BLE001 - must never fail config entry setup
+        logger.error(
+            "Initial network envelope reconciliation raised %s; network "
+            "export authority remains denied until a future reconciliation "
+            "succeeds",
+            err,
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -39712,13 +39765,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # The manager starts before the optimizer so recorder-restored
             # state can never arm Active. Once the listener exists, reconcile
             # the current deny-only snapshot and grant any upward authority
-            # only after this first successful solve.
-            hass.async_create_task(
-                _network_envelope_changed(
+            # only after this first successful solve. This initial solve is
+            # bounded (#30): an unbounded call here previously blocked HA
+            # bootstrap for 400+s whenever the first solve stalled. The
+            # deadline only stops *waiting* on the coroutine — it never grants
+            # export authority itself, so deny-by-default is unaffected.
+            network_envelope_initial_reconcile_task = hass.async_create_task(
+                _run_bounded_initial_network_envelope_reconciliation(
+                    _network_envelope_changed,
                     NetworkExportEnvelope(),
                     network_envelope_manager.snapshot,
                 )
             )
+            hass.data[DOMAIN][entry.entry_id][
+                "network_envelope_initial_reconcile_task"
+            ] = network_envelope_initial_reconcile_task
 
             # Add Away Mode and Profit Max switches (deferred from switch platform setup).
             add_away_mode = hass.data[DOMAIN][entry.entry_id].pop("switch_add_away_mode", None)
@@ -41383,6 +41444,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if network_listener_unsub := entry_data.get("network_envelope_listener_unsub"):
         network_listener_unsub()
         entry_data["network_envelope_listener_unsub"] = None
+    if initial_reconcile_task := entry_data.get("network_envelope_initial_reconcile_task"):
+        # Defensive: normally finishes (success/timeout/error) well before
+        # unload, but a reload racing setup could still find it pending.
+        # Cancelling an already-done task is a harmless no-op either way.
+        if not initial_reconcile_task.done():
+            initial_reconcile_task.cancel()
+        entry_data["network_envelope_initial_reconcile_task"] = None
+        _LOGGER.debug("Cancelled initial network envelope reconciliation task")
     if network_envelope_manager := entry_data.get("network_envelope_manager"):
         try:
             await network_envelope_manager.async_stop()
