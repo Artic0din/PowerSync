@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
@@ -241,10 +242,9 @@ class Attachment:
 
 def snapshot_revision(snapshot: IntakeSnapshot) -> str:
     evidence_content = re.sub(r"\n\nLabels: [^\n]*", "", snapshot.content, count=1)
-    canonical = json.dumps(
+    evidence_canonical = json.dumps(
         {
             "content": evidence_content,
-            "labels": sorted(snapshot.labels - SAFETY_LABELS),
             "safe": snapshot.decision.safe,
             "reasons": snapshot.decision.reasons,
         },
@@ -252,7 +252,64 @@ def snapshot_revision(snapshot: IntakeSnapshot) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    labels_canonical = json.dumps(
+        sorted(snapshot.labels - SAFETY_LABELS),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    evidence_digest = hashlib.sha256(evidence_canonical.encode("utf-8")).hexdigest()
+    labels_digest = hashlib.sha256(labels_canonical.encode("utf-8")).hexdigest()
+    encoded_labels = base64.urlsafe_b64encode(labels_canonical.encode("utf-8"))
+    return f"v2:{evidence_digest}:{labels_digest}:{encoded_labels.decode().rstrip('=')}"
+
+
+def snapshot_revision_labels(revision: str) -> frozenset[str] | None:
+    """Recover and authenticate the non-safety labels bound to a revision."""
+    parts = revision.split(":")
+    if len(parts) != 4 or parts[0] != "v2":
+        return None
+    digest_pattern = re.compile(r"[0-9a-f]{64}")
+    if any(digest_pattern.fullmatch(part) is None for part in parts[1:3]):
+        return None
+    try:
+        padding = "=" * (-len(parts[3]) % 4)
+        labels_canonical = base64.b64decode(
+            parts[3] + padding,
+            altchars=b"-_",
+            validate=True,
+        ).decode("utf-8")
+        labels = json.loads(labels_canonical)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(labels, list)
+        or any(not isinstance(label, str) for label in labels)
+        or labels != sorted(set(labels))
+        or hashlib.sha256(labels_canonical.encode("utf-8")).hexdigest() != parts[2]
+    ):
+        return None
+    return frozenset(labels)
+
+
+def same_evidence_revision(first: str, second: str) -> bool:
+    """Compare only immutable issue, comment, and attachment evidence."""
+    first_parts = first.split(":")
+    second_parts = second.split(":")
+    if len(first_parts) != 4 or len(second_parts) != 4:
+        return False
+    if first_parts[0] != "v2" or second_parts[0] != "v2":
+        return False
+    digest_pattern = re.compile(r"[0-9a-f]{64}")
+    if any(
+        digest_pattern.fullmatch(part) is None
+        for part in (*first_parts[1:3], *second_parts[1:3])
+    ):
+        return False
+    return (
+        snapshot_revision_labels(first) is not None
+        and snapshot_revision_labels(second) is not None
+        and first_parts[1] == second_parts[1]
+    )
 
 
 class SupportIntake:
@@ -874,7 +931,7 @@ class SupportIntake:
         self._client.request(
             "POST", f"{issue_path}/labels", {"labels": ["unsafe evidence"]}
         )
-        for label in ("safe evidence", "needs investigation"):
+        for label in ("safe evidence", "needs investigation", "feature assessed"):
             self._client.request(
                 "DELETE", f"{issue_path}/labels/{quote(label, safe='')}"
             )
