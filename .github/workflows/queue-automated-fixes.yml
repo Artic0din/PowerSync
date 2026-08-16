@@ -1,0 +1,241 @@
+name: Queue automated fixes
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, labeled, unlabeled, ready_for_review, converted_to_draft, synchronize, closed]
+  workflow_run:
+    workflows: ["Create Release on Version Bump"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: automated-fix-merge-queue
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  queue:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.action != 'closed' ||
+        github.event.pull_request.merged == false))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clear stale queue label before revalidation or after eligibility loss
+        if: >-
+          github.event_name == 'pull_request' &&
+          ((github.event.action == 'closed' &&
+            github.event.pull_request.merged == false) ||
+           (github.event.action == 'unlabeled' &&
+            github.event.label.name == 'automation') ||
+           github.event.action == 'converted_to_draft' ||
+           ((github.event.action == 'edited' || github.event.action == 'synchronize') &&
+            contains(github.event.pull_request.labels.*.name, 'merge-queue')))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr edit "$PR_URL" --remove-label merge-queue
+
+      - name: Check out trusted queue logic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          path: trusted
+          persist-credentials: false
+
+      - name: Select the next automation pull request
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f trusted/scripts/prepare_automated_release.py ]; then
+            echo "Trusted queue logic is not available on main yet"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RELEASE_VERSION=$(jq -er '.version | strings | select(length > 0)' \
+            trusted/custom_components/power_sync/manifest.json)
+          published_release_tag() {
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -er \
+                'if .draft == false and .prerelease == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
+          }
+          RELEASE_TAG=$(published_release_tag "v$RELEASE_VERSION")
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(published_release_tag "$RELEASE_VERSION")
+          fi
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "Published release for $RELEASE_VERSION is not available"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin "refs/tags/$RELEASE_TAG"
+          RELEASE_HEAD=$(git rev-parse "FETCH_HEAD^{commit}")
+          RELEASE_RUNS=$(
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&event=push&head_sha=$RELEASE_HEAD&status=completed&per_page=100"
+          )
+          if ! jq -e \
+            'any(.workflow_runs[]?; .conclusion == "success")' \
+            <<< "$RELEASE_RUNS" >/dev/null; then
+            echo "Release workflow for $RELEASE_TAG is not complete"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
+            > /tmp/open-pull-requests.json
+          python trusted/scripts/prepare_automated_release.py select \
+            --pages /tmp/open-pull-requests.json \
+            --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the selected pull request
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.select.outputs.head_sha }}
+          fetch-depth: 0
+          path: candidate
+          token: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
+
+      - name: Allocate the next release version
+        if: steps.select.outputs.selected == 'true'
+        id: release
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.select.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            > /tmp/selected-pull-request.json
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/commits?per_page=100" \
+            > /tmp/selected-pull-request-commits.json
+          git fetch origin main
+          git show origin/main:custom_components/power_sync/manifest.json \
+            > /tmp/main-manifest.json
+          python ../trusted/scripts/prepare_automated_release.py prepare \
+            --base-manifest /tmp/main-manifest.json \
+            --manifest custom_components/power_sync/manifest.json \
+            --release-notes RELEASE_NOTES.md \
+            --pull-request /tmp/selected-pull-request.json \
+            --pages /tmp/selected-pull-request-commits.json >> "$GITHUB_OUTPUT"
+          git diff --check
+
+      - name: Record immutable delivery evidence
+        if: steps.select.outputs.selected == 'true'
+        id: evidence
+        working-directory: candidate
+        env:
+          HEAD_REF: ${{ steps.select.outputs.head_ref }}
+          ISSUE_NUMBER: ${{ steps.release.outputs.issue_number }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/power_sync/manifest.json RELEASE_NOTES.md
+          if [ "$(git log -1 --format=%s)" = "chore(release): reserve v$VERSION" ] && \
+             git log -1 --format=%B | grep -Fx "Refs #$ISSUE_NUMBER"; then
+            if ! git diff --cached --quiet; then
+              echo "::error::Existing release reservation does not match generated files."
+              exit 1
+            fi
+            echo "Reusing existing release reservation"
+          else
+            git commit --allow-empty \
+              -m "chore(release): reserve v$VERSION" \
+              -m "Refs #$ISSUE_NUMBER"
+            git push origin "HEAD:refs/heads/$HEAD_REF"
+          fi
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify squash merge preserves delivery evidence
+        if: steps.select.outputs.selected == 'true'
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.release.outputs.issue_number }}
+          PR_NUMBER: ${{ steps.select.outputs.number }}
+        run: |
+          set -euo pipefail
+          git log -1 --format=%B | grep -Fx "Refs #$ISSUE_NUMBER"
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            > /tmp/evidenced-pull-request.json
+          gh api --paginate --slurp \
+            "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER/commits?per_page=100" \
+            > /tmp/evidenced-pull-request-commits.json
+          python ../trusted/scripts/prepare_automated_release.py \
+            validate-automation \
+            --pull-request /tmp/evidenced-pull-request.json \
+            --pages /tmp/evidenced-pull-request-commits.json
+          gh api "/repos/${GITHUB_REPOSITORY}" \
+            | jq -e \
+              '.allow_squash_merge == true and
+               .allow_merge_commit == false and
+               .allow_rebase_merge == false and
+               .squash_merge_commit_message == "COMMIT_MESSAGES"' >/dev/null
+
+      - name: Enter the protected Graphite merge queue
+        if: steps.select.outputs.selected == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ steps.select.outputs.url }}
+          PR_NUMBER: ${{ steps.select.outputs.number }}
+          EXPECTED_HEAD_SHA: ${{ steps.evidence.outputs.head_sha }}
+          EXPECTED_HEAD_REF: ${{ steps.select.outputs.head_ref }}
+          EXPECTED_TITLE: ${{ steps.select.outputs.title }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" \
+            | jq -e \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg head_sha "$EXPECTED_HEAD_SHA" \
+              --arg head_ref "$EXPECTED_HEAD_REF" \
+              --arg title "$EXPECTED_TITLE" \
+              '.head.sha == $head_sha and
+               .head.ref == $head_ref and
+               .head.repo.full_name == $repository and
+               .base.ref == "main" and
+               .state == "open" and
+               .draft == false and
+               .title == $title and
+               ((.labels | map(.name) | index("automation")) != null)' >/dev/null
+          gh pr edit "$PR_URL" --add-label merge-queue

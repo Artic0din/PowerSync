@@ -271,17 +271,19 @@ Only proceed when the issue evidence and repository inspection establish a concr
 1. Add a regression test that reproduces the defect.
 2. Run it before the fix and confirm it fails for the expected reason.
 3. Implement the smallest root-cause fix without unrelated refactoring or features.
-4. Run the focused regression test, then the relevant surrounding tests and repository validation available in the runner.
-5. If required validation cannot run or fails, do not create a pull request. Comment with the exact blocker instead.
-6. Inspect the final diff for unrelated changes and credentials.
-7. Create one ready-for-review pull request with:
+4. Increment only the patch component of the version in `custom_components/power_sync/manifest.json` from the current default-branch value.
+5. Replace `RELEASE_NOTES.md` with the matching `<!-- release: vVERSION -->` marker and the single user-facing release-note line for this fix.
+6. Run the focused regression test, then the relevant surrounding tests and repository validation available in the runner.
+7. If required validation cannot run or fails, do not create a pull request. Comment with the exact blocker instead.
+8. Inspect the final diff for unrelated changes and credentials.
+9. Create one ready-for-review pull request with:
    - a conventional `fix(scope): description (Refs #${{ github.event.inputs.issue_number }})` or `feat(scope): description (Refs #${{ github.event.inputs.issue_number }})` title,
    - `Refs #${{ github.event.inputs.issue_number }}` in the body rather than a closing keyword,
    - the established root cause and causal chain,
    - the exact tests and results,
    - one past-tense user-facing release-note line,
    - no unsupported solved or release claim.
-8. After requesting pull request creation, call `finalize_created_fix` once.
+10. After requesting pull request creation, call `finalize_created_fix` once.
    Do not request label removal for a repository defect; the deterministic finalizer clears those labels only after pull request creation succeeds.
 
 Never create a patch merely because one appears plausible.

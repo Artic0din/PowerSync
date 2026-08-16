@@ -1,0 +1,123 @@
+# GitHub support workflow
+
+PowerSync support issues use GitHub as the system of record.
+The workflows run on GitHub-hosted runners and do not require PowerBot, Discord, a server, self-hosted Docker, or persistent watermark files.
+
+GitHub Agentic Workflows is currently in public preview.
+Keep the fork trial isolated from production systems until every transition has been validated.
+
+## Safe evidence intake
+
+GitHub uploads an attachment as soon as it is added to an issue editor, before the issue or comment is submitted.
+Do not attach raw logs, credentials, archives, screenshots, or other binary evidence.
+
+Use the [PowerSync support-bundle tool](https://plaintext-lab.github.io/PowerSync/support-bundle/) locally in the browser.
+It removes credentials and consistently pseudonymises identifiers without sending the source log to a service.
+Its opaque identifiers are scoped to one bundle and cannot be reversed from a deterministic hash.
+Its output starts with `PowerSync sanitised support bundle v1`.
+
+The deterministic intake workflow runs on public issue creation, edits, reopening, and new or edited replies.
+It scans the complete current issue, comments, and linked GitHub attachments before Copilot is dispatched.
+It accepts at most five UTF-8 text attachments, 512 KB each and 1 MB combined, in the documented text formats.
+It rejects binary content, archives, unsupported formats, excessive structured-data nesting, missing bundle markers, oversized evidence, credential patterns, and raw personal identifiers.
+
+Unsafe evidence receives `unsafe evidence` and never reaches a model.
+The warning explains how to replace it and instructs the reporter to revoke or rotate any credential that may already have been uploaded.
+Removing an attachment link is not a confidentiality guarantee.
+
+Evidence that passes receives `safe evidence`, and the intake workflow dispatches triage with the issue number.
+Immediately before each model starts, a deterministic pre-agent step refetches and rechecks the current issue, every comment, and every attachment.
+It writes one immutable, locally excluded evidence snapshot only after the URL, size, format, marker, binary, credential, and identifier gates pass.
+The workflow instructs the agent to read only that snapshot; later issue edits or attachments require a new intake run.
+
+## Automated triage and routing
+
+The Copilot triage workflow reads the immutable inspected snapshot and verifies `safe evidence` independently.
+It checks the installed version first, then the system profile, problem and reproduction, monitoring mode, and sanitised log window.
+It reads existing replies before asking for evidence so it does not repeat an earlier request.
+Dispatched triage, assessment, and investigation runs use per-issue concurrency groups so separate reports cannot replace one another in the pending queue.
+
+- Missing evidence receives one consolidated request and `needs information`.
+- A complete bug receives `needs investigation` and is dispatched directly to issue investigation.
+- A complete feature request is dispatched directly to feature assessment.
+- Spam and off-topic classifications clear triage-state labels.
+
+Feature assessment inspects current repository capabilities, overlap, dependencies, compatibility, and risk.
+It posts a repository-aware recommendation and applies `feature assessed`, but does not make a roadmap commitment or create code.
+All issue comments and labels use the workflow's short-lived `GITHUB_TOKEN`, so agent output cannot retrigger intake; the pull-request output alone uses the dedicated CI-trigger token.
+
+## Investigation, review, and release
+
+Issue investigation independently rechecks intake and every bug evidence gate before editing.
+No concrete repository root cause means no patch or pull request.
+
+For a confirmed defect, the workflow:
+
+1. Adds and runs a failing regression test for the established cause.
+2. Implements the smallest root-cause fix.
+3. Proposes the next patch version and writes version-matched release notes.
+4. Runs the focused and relevant repository validation.
+5. Opens one ready-for-review pull request using `Refs #123`.
+
+The workflow cannot directly merge, release, deploy, close an issue, or access Discord, PowerSync Cloud, production data, or customer systems.
+
+Agent-created pull requests receive `automation`.
+A global deterministic queue selects only one same-repository, non-draft automation pull request at a time.
+The queue remains blocked until the release workflow for the commit that last changed the `main` manifest has completed successfully.
+The release workflow's completed event wakes the queue, so publication, support reconciliation, notification, and cleanup finish before another fix can be allocated.
+Closing, drafting, or removing `automation` from a queued pull request removes its queue label before another candidate is selected.
+Immediately before it adds `merge-queue`, the queue validates the title and body reference, reallocates the patch version from the current `main`, preserves the reviewed release note, and adds a bot commit containing the issue reference.
+That commit is the immutable delivery evidence used after release; later PR-body edits cannot change it.
+For automation pull requests, initial validation requires matching title and visible body references.
+After the queue creates the reservation commit, strict validation requires the title, visible body reference, and immutable commit reference to identify the same issue before `merge-queue` is added.
+Human-authored support fixes must likewise place the same `Refs #123` in the pull request body and as an exact line in the final metadata block of the pull request's last commit.
+Required validation rejects mutable-only, conflicting, quoted, prose, and fenced-example references before merge.
+Graphite and required repository checks decide when the pull request can merge.
+The existing version-bump workflow creates the release after merge.
+
+## Delivery and solved confirmation
+
+The release workflow dispatches deterministic support reconciliation because ordinary events created with `GITHUB_TOKEN` do not start another workflow.
+Manual published releases also trigger reconciliation directly.
+
+Reconciliation scans the bounded release history and selects the published ancestor with the shortest commit distance, or the immediately previous semantic version tag for a repository's first GitHub release.
+Drafts and prereleases never transition reporter issues.
+It discovers associated merged pull requests and accepts only an exact `Refs #123` line in a released commit's final metadata block.
+It ignores `Refs` examples in prose, fenced code, and HTML comments, verifies every page of the pull request head's latest check runs, and requires the release publication time to be strictly after the merge time.
+Valid linked issues receive `awaiting confirmation` and one release-specific audit comment containing every associated pull request and the release link, so a later fix produces a fresh confirmation request.
+The workflow rereads live issue state immediately before posting and removes any state it added if a concurrent solved confirmation already closed the issue.
+The audit comment retains a hidden cleanup marker so a terminal retry can delete it if solved confirmation or manual closure races with delivery after the final state read.
+Each successful Discord notification records its release marker on the current `main` branch before later release cleanup runs, so cleanup retries do not repost it.
+
+The issue author or a write-level maintainer confirms the released result with one exact comment:
+
+```text
+/powersync solved
+```
+
+Only that exact command closes an issue in `awaiting confirmation`.
+The transition rereads live issue state after entering its concurrency queue and remains retryable after partial GitHub API failures.
+It adds `solved`, records the confirming user, closes the issue, removes `awaiting confirmation` last, and retains the complete issue history.
+
+The normal human steps are limited to supplying missing evidence and confirming the released result.
+
+## Required repository secrets
+
+Configure these Actions secrets before enabling the agentic workflows:
+
+- `COPILOT_GITHUB_TOKEN`: an Artic0din-owned fine-grained token with only the account-level `Copilot Requests: read` permission.
+- `GH_AW_CI_TRIGGER_TOKEN`: a Plaintext-Lab-owned fine-grained token restricted to this fork with `Actions: read and write`, `Contents: read and write`, and `Pull requests: read and write`.
+
+The first token charges inference to Artic0din's Copilot entitlement.
+The second lets pull requests created by the workflow trigger normal GitHub checks and does not provide model access.
+Do not reuse Ryan's broad GitHub CLI login token for either secret.
+
+## Trial sequence
+
+1. Try an unmarked raw log and verify `unsafe evidence` blocks every Copilot workflow.
+2. Create a sanitised bundle, replace the evidence, and verify deterministic intake dispatches triage.
+3. Submit an incomplete bug, supply the requested evidence in a reply, and verify the request is not repeated.
+4. Exercise the no-root-cause path and verify no pull request is created.
+5. Validate an agent-created fix through CI, automated review, Graphite merge, and a harmless fork release.
+6. Verify the release moves the issue to `awaiting confirmation` automatically.
+7. Verify conversational solved wording does nothing and `/powersync solved` closes the issue.

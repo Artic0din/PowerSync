@@ -7,7 +7,13 @@ on:
       - 'custom_components/power_sync/manifest.json'
 
 permissions:
+  actions: write
+  checks: read
   contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -24,20 +30,75 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 
-      - name: Check if tag already exists
-        id: check_tag
+      - name: Check release state
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          # Check both v-prefixed and bare tags to avoid duplicates
-          if git rev-parse "v$VERSION" >/dev/null 2>&1 || git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag v$VERSION or $VERSION already exists — skipping release"
+
+          TAG=""
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            TAG="v$VERSION"
+          elif git rev-parse "$VERSION" >/dev/null 2>&1; then
+            TAG="$VERSION"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          published_release_tag() {
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -r \
+                'if .draft == false and .prerelease == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
+          }
+          PUBLISHED_TAG=$(published_release_tag "v$VERSION")
+          if [ -z "$PUBLISHED_TAG" ]; then
+            PUBLISHED_TAG=$(published_release_tag "$VERSION")
+          fi
+          if [ -n "$PUBLISHED_TAG" ]; then
+            HEAD_SHA=$(git rev-parse HEAD)
+            if ! git rev-parse "$PUBLISHED_TAG^{commit}" >/dev/null 2>&1; then
+              echo "::error::Published release tag $PUBLISHED_TAG cannot be resolved."
+              exit 1
+            fi
+            PUBLISHED_SHA=$(git rev-parse "$PUBLISHED_TAG^{commit}")
+            if [ "$PUBLISHED_SHA" != "$HEAD_SHA" ]; then
+              echo "::error::Published release tag $PUBLISHED_TAG targets $PUBLISHED_SHA, not workflow HEAD $HEAD_SHA."
+              exit 1
+            fi
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+            echo "A published release already exists as $PUBLISHED_TAG"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "No published release exists for $VERSION"
           fi
 
       - name: Build release notes
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.check_release.outputs.release_exists == 'false'
         id: notes
         run: |
           set -euo pipefail
@@ -105,48 +166,165 @@ jobs:
               echo "No previous tag found, using last 20 commits"
             fi
 
-            echo "## What's Changed" > /tmp/release_notes.md
-            echo "" >> /tmp/release_notes.md
-
-            git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
-              | grep -v "^### Bump version" \
-              | grep -v "^### docs(release)" \
-              | grep -v "^### chore(manifest)" \
-              | sed '/^$/N;/^\n$/d' >> /tmp/release_notes.md
-
-            echo "" >> /tmp/release_notes.md
-            echo "Update available via HACS" >> /tmp/release_notes.md
+            {
+              echo "## What's Changed"
+              echo ""
+              git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
+                | grep -v "^### Bump version" \
+                | grep -v "^### docs(release)" \
+                | grep -v "^### chore(manifest)" \
+                | sed '/^$/N;/^\n$/d'
+              echo ""
+              echo "Update available via HACS"
+            } > /tmp/release_notes.md
           fi
 
           echo "--- Release notes ---"
           head -30 /tmp/release_notes.md
 
-      - name: Create tag and release
-        if: steps.check_tag.outputs.exists == 'false'
+      - name: Create or repair tag and release
+        id: create_release
+        if: steps.check_release.outputs.release_exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" \
-            --title "PowerSync v$VERSION" \
-            --notes-file /tmp/release_notes.md
-          echo "Created release v$VERSION"
+          TAG="${{ steps.check_release.outputs.tag }}"
+          HEAD_SHA=$(git rev-parse HEAD)
+          draft_release_tag() {
+            gh release view "$1" \
+              --json tagName,isDraft \
+              --jq 'select(.isDraft == true) | .tagName' 2>/dev/null || true
+          }
+          DRAFT_TAG=$(draft_release_tag "v$VERSION")
+          if [ -z "$DRAFT_TAG" ]; then
+            DRAFT_TAG=$(draft_release_tag "$VERSION")
+          fi
+          verify_tag_targets_head() {
+            local candidate="$1"
+            if ! git rev-parse "$candidate^{commit}" >/dev/null 2>&1; then
+              return 1
+            fi
+            local tag_sha
+            tag_sha=$(git rev-parse "$candidate^{commit}")
+            if [ "$tag_sha" != "$HEAD_SHA" ]; then
+              echo "::error::Release tag $candidate targets $tag_sha, not workflow HEAD $HEAD_SHA."
+              exit 1
+            fi
+          }
+          if [ -n "$TAG" ]; then
+            verify_tag_targets_head "$TAG"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="${DRAFT_TAG:-v$VERSION}"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          if [ -n "$DRAFT_TAG" ]; then
+            DRAFT_TARGET_ARGS=()
+            if ! verify_tag_targets_head "$DRAFT_TAG"; then
+              DRAFT_TARGET_ARGS=(--target "$HEAD_SHA")
+            fi
+            gh release edit "$DRAFT_TAG" \
+              "${DRAFT_TARGET_ARGS[@]}" \
+              --draft=false \
+              --title "PowerSync v$VERSION" \
+              --notes-file /tmp/release_notes.md
+            echo "Published draft release $DRAFT_TAG"
+          else
+            gh release create "$TAG" \
+              --title "PowerSync v$VERSION" \
+              --notes-file /tmp/release_notes.md
+            echo "Created release $TAG"
+          fi
+
+      - name: Resolve published release tag
+        if: >-
+          ${{ !cancelled() &&
+              steps.check_release.outcome == 'success' &&
+              (steps.check_release.outputs.release_exists == 'true' ||
+               steps.create_release.outcome == 'success') }}
+        id: support_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          RELEASE_TAG=""
+          published_release_tag() {
+            local candidate="$1"
+            local error_file
+            local payload
+            error_file=$(mktemp)
+            if payload=$(
+              gh api \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/$candidate" \
+                2>"$error_file"
+            ); then
+              rm -f "$error_file"
+              jq -r \
+                'if .draft == false and .prerelease == false and
+                    (.published_at | type) == "string" and
+                    (.tag_name | type) == "string"
+                 then .tag_name
+                 elif .draft == true then ""
+                 else error("GitHub returned invalid release data")
+                 end' <<< "$payload"
+              return
+            fi
+            if grep -Fq "(HTTP 404)" "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            return 1
+          }
+          RELEASE_TAG=$(published_release_tag "v$VERSION")
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG=$(published_release_tag "$VERSION")
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile released support fixes
+        id: support_reconciliation
+        continue-on-error: true
+        if: >-
+          ${{ !cancelled() &&
+              steps.check_release.outcome == 'success' &&
+              (steps.check_release.outputs.release_exists == 'true' ||
+               steps.create_release.outcome == 'success') &&
+              steps.support_release.outputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RUN_URL=$(gh workflow run support-issue-state.yml \
+            --ref main \
+            -f release_tag="${{ steps.support_release.outputs.tag }}" | tail -n 1)
+          RUN_ID="${RUN_URL##*/}"
+          if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "Unable to resolve reconciliation run from: $RUN_URL" >&2
+            exit 1
+          fi
+          gh run watch "$RUN_ID" --exit-status --compact
 
       # NOTE: the separate manual-release Discord workflow will not fire here,
       # because GitHub Actions intentionally suppresses downstream workflows for
       # release events triggered by GITHUB_TOKEN. Posting to Discord directly in
       # this job is the only reliable path for automated manifest releases.
       - name: Build Discord payloads
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.support_release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.support_release.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
           python3 - <<'PY'
+          import base64
           import json
           import os
           import subprocess
@@ -168,13 +346,18 @@ jobs:
                           raise SystemExit(exc.output) from exc
                       time.sleep(2)
 
-          marker_path = Path(".github/discord-release-last-posted.txt")
-          last_posted = marker_path.read_text().strip() if marker_path.exists() else ""
-          target_tag = f"v{os.environ['VERSION']}"
+          target_tag = os.environ["RELEASE_TAG"]
           repo = os.environ["GITHUB_REPOSITORY"]
+          marker_path = ".github/discord-release-last-posted.txt"
+          marker = gh_json(f"repos/{repo}/contents/{marker_path}?ref=main")
+          last_posted = base64.b64decode(marker["content"]).decode().strip()
 
           releases = gh_json(f"repos/{repo}/releases?per_page=20")
-          releases = [release for release in releases if not release.get("draft")]
+          releases = [
+              release
+              for release in releases
+              if not release.get("draft") and not release.get("prerelease")
+          ]
 
           tags = [release["tag_name"] for release in releases]
           if target_tag not in tags:
@@ -209,7 +392,7 @@ jobs:
               notes = (release.get("body") or "").strip()
               url = release["html_url"]
 
-              if tag == target_tag:
+              if tag == target_tag and Path("/tmp/release_notes.md").exists():
                   notes = Path("/tmp/release_notes.md").read_text().strip()
 
               if not notes:
@@ -247,11 +430,64 @@ jobs:
       # urllib's default User-Agent is blocked by Discord's webhook spam filter
       # (returns 403), so curl is required.
       - name: Notify Discord
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.support_release.outputs.tag != ''
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          record_discord_marker() {
+            RELEASE_NOTIFICATION_TAG="$1" python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import time
+
+          marker_path = ".github/discord-release-last-posted.txt"
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_NOTIFICATION_TAG"]
+          for attempt in range(6):
+              current = json.loads(
+                  subprocess.check_output(
+                      ["gh", "api", f"repos/{repo}/contents/{marker_path}?ref=main"],
+                      text=True,
+                  )
+              )
+              current_value = base64.b64decode(current["content"]).decode().strip()
+              if current_value == tag:
+                  raise SystemExit(0)
+              payload = {
+                  "message": (
+                      f"ci(release): record Discord notification through {tag} "
+                      "[skip ci]"
+                  ),
+                  "content": base64.b64encode(f"{tag}\n".encode()).decode(),
+                  "branch": "main",
+                  "sha": current["sha"],
+              }
+              result = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      "--method",
+                      "PUT",
+                      f"repos/{repo}/contents/{marker_path}",
+                      "--input",
+                      "-",
+                  ],
+                  input=json.dumps(payload),
+                  text=True,
+                  capture_output=True,
+              )
+              if result.returncode == 0:
+                  raise SystemExit(0)
+              if attempt == 5:
+                  raise SystemExit(result.stderr or result.stdout)
+              time.sleep(2)
+          PY
+          }
 
           COUNT=$(cat /tmp/discord_release_count.txt)
           if [ "$COUNT" = "0" ]; then
@@ -276,34 +512,37 @@ jobs:
               exit 1
             fi
 
+            record_discord_marker "$tag"
             echo "$tag" >> /tmp/discord_release_posted_tags.txt
           done
 
-      - name: Clear release notes and record Discord marker
-        if: steps.check_tag.outputs.exists == 'false'
+      - name: Clear release notes
+        if: steps.support_release.outputs.tag != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
-          MARKER_PATH=".github/discord-release-last-posted.txt"
-
           # Prevent stale hand-written notes from being reused on the
-          # next version bump. Also record the Discord notification marker
-          # only after the webhook succeeds, so scheduled backfill can catch
-          # any missed release later without duplicating successful posts.
+          # next version bump. Start from current main so a retry of the
+          # original release run never pushes from its stale triggering commit.
+          git fetch origin main
+          git checkout -B release-cleanup origin/main
           echo -n "" > RELEASE_NOTES.md
-          if [ -s /tmp/discord_release_posted_tags.txt ]; then
-            tail -n 1 /tmp/discord_release_posted_tags.txt > "$MARKER_PATH"
-          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add RELEASE_NOTES.md "$MARKER_PATH"
+          git add RELEASE_NOTES.md
           if git diff --cached --quiet; then
             echo "No release cleanup changes to commit"
           else
             git commit -m "docs(release): clear RELEASE_NOTES.md after v$VERSION"
-            git push origin main
-            echo "Cleared RELEASE_NOTES.md and recorded Discord marker v$VERSION"
+            git push origin HEAD:main
+            echo "Cleared RELEASE_NOTES.md after v$VERSION"
           fi
+
+      - name: Report support reconciliation failure
+        if: ${{ !cancelled() && steps.support_reconciliation.outcome == 'failure' }}
+        run: |
+          echo "Support reconciliation dispatch failed after release cleanup" >&2
+          exit 1

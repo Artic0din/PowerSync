@@ -228,6 +228,7 @@ def test_deleted_comments_retrigger_deterministic_intake() -> None:
     )
 
     assert "types: [created, edited, deleted]" in workflow
+    assert "github.event.comment.body != '/powersync solved'" in workflow
 
 
 def test_multiword_username_fails_closed() -> None:
