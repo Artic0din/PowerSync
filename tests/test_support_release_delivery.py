@@ -638,6 +638,7 @@ def test_automation_queue_serializes_release_allocation_and_records_refs() -> No
         in workflow
     )
     assert "github.event.pull_request.merged == false" in workflow
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in workflow
     assert "workflow_dispatch:" in workflow
     assert "Clear stale queue label before revalidation or after eligibility loss" in workflow
     assert "--remove-label merge-queue" in workflow
@@ -710,18 +711,18 @@ def test_queue_runs_after_release_workflow_completion() -> None:
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
 
 
-def test_queue_requires_successful_release_run_for_current_manifest_commit() -> None:
+def test_queue_requires_a_published_release_for_the_current_manifest_version() -> None:
     workflow = Path(".github/workflows/queue-automated-fixes.yml").read_text(
         encoding="utf-8"
     )
 
     gate = workflow.split("- name: Select the next automation pull request", 1)[1]
-    assert "git -C trusted log -1 --format=%H --" in gate
     assert "custom_components/power_sync/manifest.json" in gate
-    assert "actions/workflows/release.yml/runs" in gate
-    assert "head_sha=$RELEASE_HEAD" in gate
-    assert '.conclusion == "success"' in gate
-    assert gate.index("head_sha=$RELEASE_HEAD") < gate.index(
+    assert "RELEASE_VERSION=$(jq -r '.version'" in gate
+    assert 'gh release view "v$RELEASE_VERSION"' in gate
+    assert ".isDraft == false and .isPrerelease == false" in gate
+    assert '"v" + $version' in gate
+    assert gate.index('gh release view "v$RELEASE_VERSION"') < gate.index(
         "prepare_automated_release.py select"
     )
 
@@ -951,6 +952,36 @@ def test_previous_release_search_uses_bounded_candidate_before_history_limit() -
     )
 
     assert previous_tag == PREVIOUS_RELEASE["tag_name"]
+
+
+def test_previous_release_search_limits_ancestry_requests() -> None:
+    client = FakeGitHubClient()
+    releases = [
+        {
+            "tag_name": f"v2.12.{1099 - index}",
+            "draft": False,
+            "prerelease": False,
+            "published_at": f"2026-08-12T{23 - index // 3:02d}:{59 - index % 3:02d}:00Z",
+        }
+        for index in range(51)
+    ]
+    client.responses[("GET", f"/repos/{REPOSITORY}/releases?per_page=100&page=1")] = (
+        releases
+    )
+
+    with pytest.raises(ValueError, match="supported search bound"):
+        ReleaseDelivery(client)._find_previous_release(
+            REPOSITORY,
+            str(RELEASE["tag_name"]),
+            datetime.fromisoformat(
+                str(RELEASE["published_at"]).replace("Z", "+00:00")
+            ),
+        )
+
+    ancestry_requests = [
+        path for method, path, _ in client.requests if method == "GET" and "/compare/" in path
+    ]
+    assert len(ancestry_requests) == 50
 
 
 def test_previous_version_search_uses_bounded_candidate_before_tag_limit() -> None:
