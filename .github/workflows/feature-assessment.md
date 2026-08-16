@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       evidence_revision:
-        description: SHA-256 fingerprint accepted by deterministic intake
+        description: Evidence and label revision accepted by deterministic intake
         required: true
         type: string
       routing_hops:

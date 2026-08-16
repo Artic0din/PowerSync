@@ -49,6 +49,7 @@ jobs:
           python -m pytest
           tests/test_support_intake.py
           tests/test_support_workflows.py
+          tests/test_validate_support_fix.py
           -q
       - name: Test support issue transitions
         run: >-

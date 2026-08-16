@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass, field
+from email.message import Message
 from typing import Any
 from urllib.error import HTTPError
 
@@ -213,7 +214,7 @@ def test_missing_collaborator_permission_is_treated_as_no_access(
             "https://api.github.com/repos/example/repo/collaborators/outsider/permission",
             404,
             "Not Found",
-            {},
+            Message(),
             io.BytesIO(b'{"message":"Not Found"}'),
         )
 
@@ -234,7 +235,7 @@ def test_missing_referenced_issue_is_treated_as_ineligible(
             "https://api.github.com/repos/example/repo/issues/999999",
             404,
             "Not Found",
-            {},
+            Message(),
             io.BytesIO(b'{"message":"Not Found"}'),
         )
 
@@ -255,7 +256,7 @@ def test_missing_compare_ref_is_treated_as_an_unresolvable_candidate(
             "https://api.github.com/repos/example/repo/compare/deleted...current",
             404,
             "Not Found",
-            {},
+            Message(),
             io.BytesIO(b'{"message":"Not Found"}'),
         )
 

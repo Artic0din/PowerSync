@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       evidence_revision:
-        description: SHA-256 fingerprint captured by deterministic intake
+        description: Evidence and label revision captured by deterministic intake
         required: true
         type: string
 

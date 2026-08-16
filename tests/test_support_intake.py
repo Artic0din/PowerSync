@@ -853,6 +853,68 @@ def test_snapshot_refresh_rejects_labels_that_conflict_with_route() -> None:
     assert refreshed is None
 
 
+def test_snapshot_refresh_rejects_unapproved_concurrent_label_changes() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original_issue = original_client.responses[
+        ("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")
+    ]
+    original_issue["labels"] = [
+        {"name": "needs triage"},
+        {"name": "priority: high"},
+    ]
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1000")
+    changed_client.responses[("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")][
+        "labels"
+    ] = [
+        {"name": "bug"},
+        {"name": "needs investigation"},
+        {"name": "priority: low"},
+        {"name": "safe evidence"},
+    ]
+
+    refreshed = refresh_snapshot_revision(
+        changed_client,
+        "Plaintext-Lab/PowerSync",
+        42,
+        snapshot_revision(original),
+        "issue-investigation",
+    )
+
+    assert refreshed is None
+
+
+def test_snapshot_refresh_preserves_unchanged_non_routing_labels() -> None:
+    original_client = client_for("Version 2.12.1000")
+    original_issue = original_client.responses[
+        ("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")
+    ]
+    original_issue["labels"] = [
+        {"name": "needs triage"},
+        {"name": "priority: high"},
+    ]
+    original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)
+    changed_client = client_for("Version 2.12.1000")
+    changed_client.responses[("GET", "/repos/Plaintext-Lab/PowerSync/issues/42")][
+        "labels"
+    ] = [
+        {"name": "bug"},
+        {"name": "needs investigation"},
+        {"name": "priority: high"},
+        {"name": "safe evidence"},
+    ]
+
+    refreshed = refresh_snapshot_revision(
+        changed_client,
+        "Plaintext-Lab/PowerSync",
+        42,
+        snapshot_revision(original),
+        "issue-investigation",
+    )
+
+    assert refreshed is not None
+
+
 def test_snapshot_refresh_accepts_complete_feature_route_labels() -> None:
     original_client = client_for("Version 2.12.1000")
     original = SupportIntake(original_client).evaluate("Plaintext-Lab/PowerSync", 42)

@@ -110,6 +110,7 @@ def test_workflow_contract_tests_run_in_ci() -> None:
     source = workflow("validate.yml")
 
     assert "tests/test_support_workflows.py" in source
+    assert "tests/test_validate_support_fix.py" in source
     assert "version: v0.85.4" in source
     assert "gh aw compile issue-triage issue-investigation feature-assessment" in source
     assert "git diff --exit-code" in source
@@ -162,7 +163,7 @@ def test_investigation_routes_reclassified_features_after_state_mutations() -> N
         "SUPPORT_EVIDENCE_REVISION: "
         "${{ steps.refresh_evidence.outputs.evidence_revision }}" in source
     )
-    assert "max: 3" in source.split("  remove-labels:", 1)[1].split(
+    assert "max: 4" in source.split("  remove-labels:", 1)[1].split(
         "  add-comment:", 1
     )[0]
 
@@ -192,6 +193,24 @@ def test_unanswered_support_questions_keep_needs_information() -> None:
     )
 
 
+def test_investigation_handles_reclassified_support_questions() -> None:
+    source = workflow("issue-investigation.md")
+    add_labels, remove_labels = source.split("  remove-labels:", 1)
+
+    assert "support question" in source
+    assert (
+        "If the available evidence is sufficient to answer, add `question`, "
+        "remove `enhancement`, `bug`, `needs information`, and "
+        "`needs investigation`" in source
+    )
+    assert (
+        "If a specific missing item prevents an answer, add `question` and "
+        "`needs information`" in source
+    )
+    assert "- question" in add_labels.rsplit("  add-labels:", 1)[1]
+    assert "- enhancement" in remove_labels.split("  add-comment:", 1)[0]
+
+
 def test_investigation_clears_state_only_after_pull_request_creation() -> None:
     source = workflow("issue-investigation.md")
 
@@ -214,6 +233,31 @@ def test_investigation_clears_state_only_after_pull_request_creation() -> None:
     assert finalizer.index("revalidate_support_snapshot") < finalizer.index(
         "gh issue edit"
     )
+
+
+def test_investigation_deterministically_validates_requested_fixes() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert "post-steps:" in source
+    assert "python -m scripts.validate_support_fix" in source
+    assert "jobs:" in source
+    assert "needs.agent.result == 'success'" in source
+
+
+def test_investigation_revalidates_at_safe_output_handler_boundary() -> None:
+    source = workflow("issue-investigation.md")
+    safe_output_steps = source.split("safe-outputs:\n", 1)[1].split(
+        "  github-token:", 1
+    )[0]
+
+    assert "steps:" in safe_output_steps
+    assert "python -m scripts.revalidate_support_snapshot" in safe_output_steps
+
+
+def test_investigation_rechecks_the_complete_log_window() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert "before, during, and after the reported event" in source
 
 
 def test_feature_assessment_reclassifies_and_routes_misrouted_issues() -> None:

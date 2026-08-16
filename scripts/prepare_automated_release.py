@@ -254,12 +254,15 @@ def _prepare_command(arguments: argparse.Namespace) -> None:
     pages = json.loads(arguments.pages.read_text(encoding="utf-8"))
     if not isinstance(pull_request, dict):
         raise ValueError("GitHub returned an invalid pull request")
+    pull_request_title = pull_request.get("title")
+    if not isinstance(pull_request_title, str):
+        raise ValueError("GitHub returned an invalid pull request title")
     messages = _commit_messages_from_pages(pages)
     version, issue_number = prepare_release_files(
         arguments.base_manifest,
         arguments.manifest,
         arguments.release_notes,
-        pull_request.get("title"),
+        pull_request_title,
         pull_request.get("body"),
         messages,
     )

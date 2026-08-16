@@ -198,6 +198,7 @@ def test_delivery_comment_keeps_cleanup_marker_after_final_state_check() -> None
         for method, path, payload in client.requests
         if method == "POST" and path.endswith("/comments")
     )
+    assert posted is not None
     assert cleanup_marker in str(posted["body"])
     assert client.requests[-1] == (
         "GET",
@@ -935,7 +936,9 @@ def test_previous_release_search_scans_every_bounded_page() -> None:
 def test_previous_release_search_uses_bounded_candidate_before_history_limit() -> None:
     client = FakeGitHubClient()
     for page in range(1, 11):
-        releases = [{"draft": True} for _ in range(100)]
+        releases: list[dict[str, object]] = [
+            {"draft": True} for _ in range(100)
+        ]
         if page == 1:
             releases[0] = PREVIOUS_RELEASE
         client.responses[
