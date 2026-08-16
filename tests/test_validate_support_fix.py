@@ -9,6 +9,7 @@ import pytest
 from scripts.validate_support_fix import (
     changed_paths,
     requested_pull_request,
+    validate_candidate_patch,
     validate_fix,
 )
 
@@ -31,6 +32,12 @@ def repository_with_regression(tmp_path: Path) -> tuple[Path, str]:
     git(repository, "config", "user.name", "Tests")
     (repository / "calculator.py").write_text(
         "def total(values: list[int]) -> int:\n    return 0\n",
+        encoding="utf-8",
+    )
+    scripts = repository / "scripts"
+    scripts.mkdir()
+    (scripts / "validate_support_fix.py").write_text(
+        "def main() -> int:\n    return 0\n",
         encoding="utf-8",
     )
     tests = repository / "tests"
@@ -59,6 +66,23 @@ def repository_with_regression(tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
     return repository, base_sha
+
+
+def patch_from_changes(repository: Path, base_sha: str, destination: Path) -> Path:
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "candidate fix")
+    patch = destination / "aw.patch"
+    patch.write_text(
+        subprocess.run(
+            ["git", "format-patch", "--stdout", f"{base_sha}..HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout,
+        encoding="utf-8",
+    )
+    return patch
 
 
 def repository_with_node_regression(tmp_path: Path) -> tuple[Path, str]:
@@ -137,6 +161,45 @@ def test_validation_requires_regression_failure_before_fix(tmp_path: Path) -> No
     repository, base_sha = repository_with_regression(tmp_path)
 
     validate_fix(repository, base_sha)
+
+
+def test_trusted_validator_applies_the_candidate_patch_in_isolation(
+    tmp_path: Path,
+) -> None:
+    repository, base_sha = repository_with_regression(tmp_path)
+    patch = patch_from_changes(repository, base_sha, tmp_path)
+
+    validate_candidate_patch(repository, base_sha, patch)
+
+
+def test_trusted_validator_rejects_a_patch_that_changes_the_gate(
+    tmp_path: Path,
+) -> None:
+    repository, base_sha = repository_with_regression(tmp_path)
+    (repository / "scripts" / "validate_support_fix.py").write_text(
+        "def main() -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    patch = patch_from_changes(repository, base_sha, tmp_path)
+
+    with pytest.raises(ValueError, match="trusted validator"):
+        validate_candidate_patch(repository, base_sha, patch)
+
+
+def test_trusted_validator_rejects_a_patch_that_renames_the_gate(
+    tmp_path: Path,
+) -> None:
+    repository, base_sha = repository_with_regression(tmp_path)
+    git(
+        repository,
+        "mv",
+        "scripts/validate_support_fix.py",
+        "scripts/disabled_support_fix_validator.py",
+    )
+    patch = patch_from_changes(repository, base_sha, tmp_path)
+
+    with pytest.raises(ValueError, match="trusted validator"):
+        validate_candidate_patch(repository, base_sha, patch)
 
 
 def test_validation_supports_node_regression_tests(tmp_path: Path) -> None:
