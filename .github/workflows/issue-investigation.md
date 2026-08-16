@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       evidence_revision:
-        description: SHA-256 fingerprint accepted by deterministic intake
+        description: Evidence and label revision accepted by deterministic intake
         required: true
         type: string
       routing_hops:
@@ -80,8 +80,15 @@ pre-agent-steps:
       GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
     run: python -m scripts.prepare_support_snapshot
 
+post-steps:
+  - name: Prove requested fixes against the pre-fix revision
+    env:
+      GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
+    run: python -m scripts.validate_support_fix
+
 jobs:
   safe_outputs:
+    if: needs.agent.result == 'success'
     permissions:
       contents: read
     pre-steps:
@@ -223,6 +230,7 @@ Do not merge a pull request, release software, close an issue, or claim that a r
 1. Read `.powersync-support-evidence.md` with Python. Stop without any output if it is absent.
 2. Independently confirm every bug evidence gate passed; do not rely on the triage workflow's conclusion.
 3. Check the reported installed version first and compare it with `custom_components/power_sync/manifest.json` and relevant repository history.
+4. Verify that the logs cover the state before, during, and after the reported event, with timestamps and no unexplained gap at the failure boundary.
 5. Verify the stated monitoring-mode status and distinguish monitoring behaviour from active-control behaviour.
 6. Classify the issue before editing anything as one of:
    - unsupported or outdated version,

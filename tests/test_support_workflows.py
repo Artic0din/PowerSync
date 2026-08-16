@@ -110,6 +110,7 @@ def test_workflow_contract_tests_run_in_ci() -> None:
     source = workflow("validate.yml")
 
     assert "tests/test_support_workflows.py" in source
+    assert "tests/test_validate_support_fix.py" in source
     assert "version: v0.85.4" in source
     assert "gh aw compile issue-triage issue-investigation feature-assessment" in source
     assert "git diff --exit-code" in source
@@ -214,6 +215,21 @@ def test_investigation_clears_state_only_after_pull_request_creation() -> None:
     assert finalizer.index("revalidate_support_snapshot") < finalizer.index(
         "gh issue edit"
     )
+
+
+def test_investigation_deterministically_validates_requested_fixes() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert "post-steps:" in source
+    assert "python -m scripts.validate_support_fix" in source
+    assert "jobs:" in source
+    assert "needs.agent.result == 'success'" in source
+
+
+def test_investigation_rechecks_the_complete_log_window() -> None:
+    source = workflow("issue-investigation.md")
+
+    assert "before, during, and after the reported event" in source
 
 
 def test_feature_assessment_reclassifies_and_routes_misrouted_issues() -> None:

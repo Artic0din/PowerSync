@@ -1,0 +1,161 @@
+"""Deterministically gate support-fix pull requests on regression evidence."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+def requested_pull_request(output_path: Path) -> bool:
+    """Return whether agent safe output requests pull-request creation."""
+    if not output_path.is_file():
+        return False
+    for line in output_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError("Agent safe output is not valid JSON") from error
+        candidates: list[Any]
+        if isinstance(item, dict) and isinstance(item.get("items"), list):
+            candidates = item["items"]
+        else:
+            candidates = [item]
+        if any(
+            isinstance(candidate, dict)
+            and candidate.get("type") == "create_pull_request"
+            for candidate in candidates
+        ):
+            return True
+    return False
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def changed_paths(repository: Path, base_sha: str) -> set[Path]:
+    """Return committed, staged, working-tree, and untracked changes from base."""
+    tracked = _git(repository, "diff", "--name-only", "-z", base_sha).split("\0")
+    untracked = _git(
+        repository,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ).split("\0")
+    return {Path(path) for path in tracked + untracked if path}
+
+
+def _is_test_file(path: Path) -> bool:
+    return (
+        len(path.parts) > 1
+        and path.parts[0] == "tests"
+        and path.name.startswith("test_")
+        and path.suffix == ".py"
+    )
+
+
+def _run_tests(
+    repository: Path, test_files: list[Path]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *(str(path) for path in test_files)],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _extract_revision(repository: Path, base_sha: str, destination: Path) -> None:
+    archive_path = destination.parent / "base.tar"
+    with archive_path.open("wb") as archive:
+        subprocess.run(
+            ["git", "archive", "--format=tar", base_sha],
+            cwd=repository,
+            check=True,
+            stdout=archive,
+        )
+    with tarfile.open(archive_path) as archive:
+        archive.extractall(destination, filter="data")
+
+
+def validate_fix(repository: Path, base_sha: str) -> None:
+    """Require changed tests to fail before the fix and pass after it."""
+    paths = changed_paths(repository, base_sha)
+    test_files = sorted(
+        path for path in paths if _is_test_file(path) and (repository / path).is_file()
+    )
+    production_paths = [
+        path for path in paths if path.parts and path.parts[0] != "tests"
+    ]
+    if not test_files:
+        raise ValueError("A requested support fix has no changed regression test")
+    if not production_paths:
+        raise ValueError("A requested support fix has no production change")
+
+    with tempfile.TemporaryDirectory(prefix="powersync-support-base-") as temporary:
+        base_repository = Path(temporary) / "repository"
+        base_repository.mkdir()
+        _extract_revision(repository, base_sha, base_repository)
+        for path in paths:
+            if not path.parts or path.parts[0] != "tests":
+                continue
+            source = repository / path
+            destination = base_repository / path
+            if source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            elif destination.exists():
+                destination.unlink()
+        pre_fix_result = _run_tests(base_repository, test_files)
+    if pre_fix_result.returncode != 1:
+        raise ValueError(
+            "The changed regression test did not fail against the pre-fix revision "
+            f"with pytest's test-failure status (got {pre_fix_result.returncode}):\n"
+            + pre_fix_result.stdout
+            + pre_fix_result.stderr
+        )
+
+    final_result = _run_tests(repository, test_files)
+    if final_result.returncode != 0:
+        raise ValueError(
+            "The changed regression test does not pass on the proposed fix:\n"
+            + final_result.stdout
+            + final_result.stderr
+        )
+
+
+def main() -> int:
+    output_path = Path(os.environ.get("GH_AW_SAFE_OUTPUTS", ""))
+    if not requested_pull_request(output_path):
+        return 0
+    repository = Path(os.environ.get("GITHUB_WORKSPACE", ""))
+    base_sha = os.environ.get("GITHUB_SHA", "")
+    if not repository.is_dir() or not base_sha:
+        raise ValueError("The workflow is missing support-fix validation metadata")
+    validate_fix(repository, base_sha)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"::error title=Support fix validation failed::{error}", file=sys.stderr)
+        raise SystemExit(1) from error

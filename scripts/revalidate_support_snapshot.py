@@ -9,9 +9,11 @@ from typing import Any, Protocol
 
 from scripts.run_support_intake import GitHubClient
 from scripts.support_intake import (
+    SAFETY_LABELS,
     SupportIntake,
     same_evidence_revision,
     snapshot_revision,
+    snapshot_revision_labels,
 )
 
 ROUTE_LABEL_STATES = {
@@ -47,6 +49,11 @@ ROUTE_LABEL_STATES = {
         ),
     ),
 }
+ROUTE_LABELS = frozenset(
+    label
+    for required_labels, forbidden_labels in ROUTE_LABEL_STATES.values()
+    for label in required_labels | forbidden_labels
+)
 
 
 class RevalidationClient(Protocol):
@@ -85,10 +92,12 @@ def refresh_snapshot_revision(
     """Return a revision only for the route's exact classification state."""
     snapshot = SupportIntake(client).evaluate(repository, issue_number)
     current_revision = snapshot_revision(snapshot)
+    original_labels = snapshot_revision_labels(expected_revision)
     route_state = ROUTE_LABEL_STATES.get(expected_route)
-    if route_state is None:
+    if route_state is None or original_labels is None:
         return None
     required_labels, forbidden_labels = route_state
+    current_labels = snapshot.labels - SAFETY_LABELS
     if (
         snapshot.decision.safe
         and "safe evidence" in snapshot.labels
@@ -96,6 +105,7 @@ def refresh_snapshot_revision(
         and same_evidence_revision(current_revision, expected_revision)
         and required_labels <= snapshot.labels
         and snapshot.labels.isdisjoint(forbidden_labels)
+        and current_labels - ROUTE_LABELS == original_labels - ROUTE_LABELS
     ):
         return current_revision
     return None

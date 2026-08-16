@@ -25,6 +25,7 @@ jobs:
           python -m pytest
           tests/test_support_intake.py
           tests/test_support_workflows.py
+          tests/test_validate_support_fix.py
           -q
       - name: Test browser sanitiser
         run: node --test tests/support_bundle_sanitizer.test.mjs
