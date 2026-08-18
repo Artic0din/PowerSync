@@ -19,24 +19,21 @@ from types import SimpleNamespace
 
 import pytest
 
+from _ha_stub import (
+    HA_STUB_MODULE_NAMES,
+    install_ha_stubs,
+    install_power_sync_coordinator_stub,
+)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 _SENTINEL = object()
 
-_STUB_MODULE_NAMES = (
-    "homeassistant",
-    "homeassistant.core",
-    "homeassistant.exceptions",
-    "homeassistant.helpers",
-    "homeassistant.helpers.dispatcher",
-    "homeassistant.helpers.event",
-    "homeassistant.helpers.storage",
-    "homeassistant.helpers.update_coordinator",
-    "homeassistant.util",
-    "homeassistant.util.dt",
+_STUB_MODULE_NAMES = HA_STUB_MODULE_NAMES + (
     "power_sync",
+    "power_sync.coordinator",
     "power_sync.const",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
@@ -49,67 +46,15 @@ _STUB_MODULE_NAMES = (
 
 
 def _install_ha_stubs() -> None:
-    ha_root = types.ModuleType("homeassistant")
-    ha_core = types.ModuleType("homeassistant.core")
-    ha_exceptions = types.ModuleType("homeassistant.exceptions")
-    ha_helpers = types.ModuleType("homeassistant.helpers")
-    ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
-    ha_event = types.ModuleType("homeassistant.helpers.event")
-    ha_storage = types.ModuleType("homeassistant.helpers.storage")
-    ha_update = types.ModuleType("homeassistant.helpers.update_coordinator")
-    ha_util = types.ModuleType("homeassistant.util")
-    ha_dt = types.ModuleType("homeassistant.util.dt")
-
-    class _Store:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-    class _DataUpdateCoordinator:
-        def __class_getitem__(cls, item):
-            return cls
-
-        def __init__(self, hass, logger, name=None, update_interval=None) -> None:
-            self.hass = hass
-            self.logger = logger
-            self.name = name
-            self.update_interval = update_interval
-            self.data = None
-
-    ha_core.HomeAssistant = type("HomeAssistant", (), {})
-    ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
-    ha_storage.Store = _Store
-    ha_update.DataUpdateCoordinator = _DataUpdateCoordinator
-    ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
-    ha_event.async_track_point_in_utc_time = (
-        lambda hass, callback, when: getattr(hass, "scheduled", []).append((callback, when)) or (lambda: None)
-    )
-    ha_dt.now = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
-    ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
-    ha_dt.UTC = timezone.utc
-    ha_helpers.storage = ha_storage
-    ha_helpers.dispatcher = ha_dispatcher
-    ha_helpers.event = ha_event
-    ha_helpers.update_coordinator = ha_update
-    ha_util.dt = ha_dt
-    ha_root.helpers = ha_helpers
-    ha_root.util = ha_util
-
-    sys.modules["homeassistant"] = ha_root
-    sys.modules["homeassistant.core"] = ha_core
-    sys.modules["homeassistant.exceptions"] = ha_exceptions
-    sys.modules["homeassistant.helpers"] = ha_helpers
-    sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
-    sys.modules["homeassistant.helpers.event"] = ha_event
-    sys.modules["homeassistant.helpers.storage"] = ha_storage
-    sys.modules["homeassistant.helpers.update_coordinator"] = ha_update
-    sys.modules["homeassistant.util"] = ha_util
-    sys.modules["homeassistant.util.dt"] = ha_dt
+    install_ha_stubs()
 
 
 def _install_power_sync_stubs() -> None:
     ps_module = types.ModuleType("power_sync")
     ps_module.__path__ = [str(COMPONENT_ROOT)]
     sys.modules["power_sync"] = ps_module
+
+    install_power_sync_coordinator_stub()
 
     optimization_module = types.ModuleType("power_sync.optimization")
     optimization_module.__path__ = [str(COMPONENT_ROOT / "optimization")]
