@@ -2782,15 +2782,15 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     from ..const import DOMAIN
     import aiohttp
 
-    _LOGGER.info(f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'")
+    _LOGGER.debug(f"📱 Attempting to send notification - Title: '{title}'")
 
     # Get registered push tokens
     push_tokens = hass.data.get(DOMAIN, {}).get("push_tokens", {})
     if not push_tokens:
-        _LOGGER.warning("📱 PUSH DEBUG: No push tokens registered in hass.data[DOMAIN]['push_tokens'], skipping notification")
+        _LOGGER.warning("📱 No push tokens registered in hass.data[DOMAIN]['push_tokens'], skipping notification")
         return
 
-    _LOGGER.info(f"📱 PUSH DEBUG: Found {len(push_tokens)} registered push token(s)")
+    _LOGGER.debug(f"📱 Found {len(push_tokens)} registered push token(s)")
 
     # Prepare messages for Expo Push API
     messages = []
@@ -2800,8 +2800,8 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
         platform = token_data.get("platform", "unknown")
         device = token_data.get("device_name", "unknown")
         registered_at = token_data.get("registered_at", "unknown")
-        _LOGGER.info(
-            "📱 PUSH DEBUG: Token entry - platform=%s, device=%s, registered_at=%s",
+        _LOGGER.debug(
+            "📱 Token entry - platform=%s, device=%s, registered_at=%s",
             platform,
             device,
             registered_at,
@@ -2816,20 +2816,20 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                 "priority": "high",
                 "channelId": "default",  # Android channel ID
             })
-            _LOGGER.info(f"📱 PUSH DEBUG: Including token for {device} ({platform})")
+            _LOGGER.debug(f"📱 Including token for {device} ({platform})")
         else:
             skipped_tokens += 1
             _LOGGER.warning(
-                "📱 PUSH DEBUG: Skipping invalid push token for %s (%s)",
+                "📱 Skipping invalid push token for %s (%s)",
                 device,
                 platform,
             )
 
     if not messages:
-        _LOGGER.warning(f"📱 PUSH DEBUG: No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
+        _LOGGER.warning(f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
         return
 
-    _LOGGER.info(f"📱 PUSH DEBUG: Sending {len(messages)} message(s) to Expo Push API")
+    _LOGGER.debug(f"📱 Sending {len(messages)} message(s) to Expo Push API")
 
     # Send to Expo Push API
     try:
@@ -2844,8 +2844,8 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                 },
             ) as response:
                 response_text = await response.text()
-                _LOGGER.info(f"📱 PUSH DEBUG: Expo API response status: {response.status}")
-                _LOGGER.info(f"📱 PUSH DEBUG: Expo API response body: {response_text}")
+                _LOGGER.debug(f"📱 Expo API response status: {response.status}")
+                _LOGGER.debug(f"📱 Expo API response body: {response_text}")
 
                 if response.status == 200:
                     try:
@@ -2856,13 +2856,13 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                             status = ticket.get("status")
                             ticket_id = ticket.get("id", "no-id")
                             if status == "ok":
-                                _LOGGER.info(f"📱 PUSH DEBUG: Ticket {i+1}/{len(data)} - SUCCESS (id={ticket_id})")
+                                _LOGGER.debug(f"📱 Ticket {i+1}/{len(data)} - SUCCESS (id={ticket_id})")
                             else:
                                 # Error in ticket
                                 error_msg = ticket.get("message", "unknown error")
                                 error_details = ticket.get("details", {})
-                                _LOGGER.error(f"📱 PUSH DEBUG: Ticket {i+1}/{len(data)} - FAILED: {error_msg}")
-                                _LOGGER.error(f"📱 PUSH DEBUG: Error details: {error_details}")
+                                _LOGGER.error(f"📱 Ticket {i+1}/{len(data)} - FAILED: {error_msg}")
+                                _LOGGER.error(f"📱 Error details: {error_details}")
                                 # Common errors:
                                 # - DeviceNotRegistered: FCM token is invalid/expired
                                 # - MessageTooBig: Payload too large
@@ -2870,17 +2870,17 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                                 # - MismatchSenderId: FCM sender ID mismatch
                                 # - InvalidCredentials: FCM credentials not configured in Expo
                                 if "InvalidCredentials" in str(error_details) or "InvalidCredentials" in error_msg:
-                                    _LOGGER.error("📱 PUSH DEBUG: ⚠️ FCM credentials may not be configured in Expo! "
+                                    _LOGGER.error("📱 ⚠️ FCM credentials may not be configured in Expo! "
                                                 "Upload google-services.json to Expo for Android push notifications.")
                                 if "DeviceNotRegistered" in str(error_details) or "DeviceNotRegistered" in error_msg:
-                                    _LOGGER.error("📱 PUSH DEBUG: ⚠️ Device token is no longer valid. "
+                                    _LOGGER.error("📱 ⚠️ Device token is no longer valid. "
                                                 "App may need to re-register for push notifications.")
                     except Exception as parse_err:
-                        _LOGGER.error(f"📱 PUSH DEBUG: Failed to parse Expo response: {parse_err}")
+                        _LOGGER.error(f"📱 Failed to parse Expo response: {parse_err}")
                 else:
-                    _LOGGER.error(f"📱 PUSH DEBUG: Expo Push API HTTP error: {response.status} - {response_text}")
+                    _LOGGER.error(f"📱 Expo Push API HTTP error: {response.status} - {response_text}")
     except Exception as e:
-        _LOGGER.error(f"📱 PUSH DEBUG: Exception sending Expo push notification: {e}", exc_info=True)
+        _LOGGER.error(f"📱 Exception sending Expo push notification: {e}", exc_info=True)
 
 
 async def _action_set_grid_export(

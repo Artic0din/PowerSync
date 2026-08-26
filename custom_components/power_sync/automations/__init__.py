@@ -1028,7 +1028,7 @@ class AutomationEngine:
             _LOGGER.warning("📱 No push tokens registered, skipping push notification")
             return
 
-        _LOGGER.info(f"📱 Found {len(push_tokens)} registered push token(s)")
+        _LOGGER.debug(f"📱 Found {len(push_tokens)} registered push token(s)")
 
         # Prepare messages for Expo Push API
         messages = []
@@ -1048,7 +1048,7 @@ class AutomationEngine:
                 _LOGGER.debug(f"📱 Including token for {device} ({platform})")
             else:
                 skipped_tokens += 1
-                _LOGGER.warning(f"📱 Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
+                _LOGGER.warning(f"📱 Skipping non-Expo token for {device} ({platform})")
 
         if not messages:
             _LOGGER.warning(f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
