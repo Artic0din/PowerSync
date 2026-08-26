@@ -1088,7 +1088,21 @@ class AutomationEngine:
         # Check Zaptec standalone FIRST — if configured with cached state, use it
         # immediately. This prevents Tesla sensor regex from matching a Zaptec HA
         # integration entity and short-circuiting into the Tesla code path.
-        from ..const import DOMAIN, CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME
+        from ..const import (
+            CONF_EV_PROVIDER,
+            CONF_ZAPTEC_STANDALONE_ENABLED,
+            CONF_ZAPTEC_USERNAME,
+            DOMAIN,
+            EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+        )
+        config_entry = getattr(self, "_config_entry", None)
+        config = {
+            **getattr(config_entry, "data", {}),
+            **getattr(config_entry, "options", {}),
+        }
+        cloud_only_telemetry = (
+            config.get(CONF_EV_PROVIDER) == EV_PROVIDER_CLOUD_TELEMETRY_BLE
+        )
         for entry in self._hass.config_entries.async_entries(DOMAIN):
             opts = {**entry.data, **entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
@@ -1124,6 +1138,27 @@ class AutomationEngine:
             match = re.match(r"sensor\.(\w+)_charging(?:_state)?$", entity_id)
             if match:
                 candidate_prefix = match.group(1)
+                is_local_candidate = (
+                    "ble" in candidate_prefix.lower()
+                    or self._hass.states.get(
+                        f"binary_sensor.{candidate_prefix}_ble_status"
+                    )
+                    is not None
+                    or self._hass.states.get(
+                        f"switch.{candidate_prefix}_charger"
+                    )
+                    is not None
+                    or (
+                        len(candidate_prefix) == 17
+                        and candidate_prefix.isalnum()
+                        and self._hass.states.get(
+                            f"switch.{candidate_prefix}_charge"
+                        )
+                        is not None
+                    )
+                )
+                if cloud_only_telemetry and is_local_candidate:
+                    continue
                 state_value = state.state
                 normalized_state = str(state_value or "").lower()
                 activity_rank = (

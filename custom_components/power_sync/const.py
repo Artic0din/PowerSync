@@ -75,13 +75,38 @@ EV_PROVIDER_FLEET_API = "fleet_api"  # Tesla Fleet API / Teslemetry
 EV_PROVIDER_TESLA_BLE = "tesla_ble"  # ESPHome Tesla BLE
 EV_PROVIDER_TESLEMETRY_BT = "teslemetry_bt"  # Teslemetry Bluetooth (native HA)
 EV_PROVIDER_BOTH = "both"  # Use both providers (any local BLE/BT + Fleet API fallback)
+EV_PROVIDER_CLOUD_TELEMETRY_BLE = "cloud_telemetry_ble"
 
 EV_PROVIDERS = {
     EV_PROVIDER_FLEET_API: "Tesla Fleet API / Teslemetry",
     EV_PROVIDER_TESLA_BLE: "Tesla BLE (ESPHome)",
     EV_PROVIDER_TESLEMETRY_BT: "Teslemetry Bluetooth",
     EV_PROVIDER_BOTH: "Both (Fleet API + local BLE/BT)",
+    EV_PROVIDER_CLOUD_TELEMETRY_BLE: "Cloud telemetry + ESPHome BLE control",
 }
+
+EV_PROVIDERS_WITH_CLOUD_TELEMETRY = frozenset({
+    EV_PROVIDER_FLEET_API,
+    EV_PROVIDER_BOTH,
+    EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+})
+EV_PROVIDERS_WITH_ESPHOME_BLE_CONTROL = frozenset({
+    EV_PROVIDER_TESLA_BLE,
+    EV_PROVIDER_BOTH,
+    EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+})
+EV_PROVIDERS_WITH_CLOUD_CONTROL = frozenset({
+    EV_PROVIDER_FLEET_API,
+    EV_PROVIDER_BOTH,
+})
+EV_PROVIDERS_WITH_LOCAL_ONLY_CONTROL = frozenset({
+    EV_PROVIDER_TESLA_BLE,
+    EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+})
+EV_PROVIDERS_WITH_VIN_BLE_PAIRING = frozenset({
+    EV_PROVIDER_BOTH,
+    EV_PROVIDER_CLOUD_TELEMETRY_BLE,
+})
 
 # Tesla EV API Provider selection (v2.10.1+).
 # Selects which Tesla cloud API is used for vehicle commands when the energy
