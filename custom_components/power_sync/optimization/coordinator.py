@@ -2307,19 +2307,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc = soc / 100.0
         return max(0.0, min(1.0, soc))
 
-    @staticmethod
-    def _kw_to_w(value: Any) -> int | None:
-        """Normalize a kW-like value to watts."""
-        if value is None:
-            return None
-        try:
-            kw = float(value)
-        except (TypeError, ValueError):
-            return None
-        if kw < 0:
-            return None
-        return int(round(kw * 1000))
-
     def _get_custom_entity_id(self, key: str) -> str:
         """Return one configured custom telemetry entity ID."""
         if not self._entry:
@@ -7513,6 +7500,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _kw_to_w(value: Any) -> float | None:
+        """Convert a kW-like value to watts.
+
+        Returns ``None`` for ``None``/non-numeric input; otherwise returns a
+        float (not rounded to ``int``). Negative values pass through
+        unclamped since callers use this for signed power readings (e.g.
+        grid/battery power, where negative means export/discharge) as well
+        as unsigned config limits.
+        """
         try:
             parsed = float(value)
         except (TypeError, ValueError):
