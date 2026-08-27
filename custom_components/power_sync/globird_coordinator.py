@@ -32,6 +32,11 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Cap on how many update intervals an endpoint that keeps failing waits
+# before the next attempt (i.e. failures back off 2x, 4x, 8x... up to 16x
+# the normal update interval, not indefinitely).
+_OPTIONAL_FETCH_MAX_BACKOFF_MULTIPLIER = 16
+
 
 class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for fetching GloBird portal data."""
@@ -62,6 +67,11 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._cache: dict[str, Any] | None = None
         self._initialized = False
+        # Per-endpoint-key backoff/logging state for _fetch_optional(), keyed
+        # by the same key passed to that method (callers that share a key
+        # across multiple services, e.g. per-service "usage", must make the
+        # key unique per service so backoff/logging isn't conflated).
+        self._optional_fetch_state: dict[str, dict[str, Any]] = {}
 
     async def async_shutdown(self) -> None:
         """Close resources."""
@@ -91,16 +101,60 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cache: dict[str, Any],
         *,
         _errors: dict[str, str] | None = None,
+        state_key: str | None = None,
     ) -> dict[str, Any] | None:
-        """Fetch optional data, falling back to cache on endpoint failure."""
+        """Fetch optional data, falling back to cache on endpoint failure.
+
+        An endpoint that keeps failing backs off with a growing interval
+        (instead of being retried every refresh) and only logs a warning on
+        the failure/recovery transition, not on every refresh it stays down.
+
+        `key` is used for the cache lookup (`cache` is already scoped to the
+        right account/service by the caller) and for log messages. Callers
+        that reuse the same `key` across multiple independent things sharing
+        one `self` — e.g. per-service "usage"/"cost"/"weather" fetches, one
+        per service — must pass a `state_key` unique to that thing, since
+        `self._optional_fetch_state` is keyed by `state_key` and shared
+        across all calls on this coordinator.
+        """
+        cached_value = cache.get(key)
+        cached_value = cached_value if isinstance(cached_value, dict) else None
+
+        state = self._optional_fetch_state.setdefault(
+            state_key or key, {"consecutive_failures": 0, "next_attempt": 0.0}
+        )
+        now = time.monotonic()
+        if state["consecutive_failures"] and now < state["next_attempt"]:
+            if _errors is not None:
+                _errors[key] = "skipped (backing off after repeated failures)"
+            return cached_value
+
         try:
-            return await callback()
+            result = await callback()
         except Exception as err:  # noqa: BLE001 - optional portal endpoint.
-            _LOGGER.warning("GloBird optional fetch failed for %s: %s", key, err)
+            if state["consecutive_failures"] == 0:
+                _LOGGER.warning("GloBird optional fetch failed for %s: %s", key, err)
+            state["consecutive_failures"] += 1
+            backoff_multiplier = min(
+                2 ** (state["consecutive_failures"] - 1),
+                _OPTIONAL_FETCH_MAX_BACKOFF_MULTIPLIER,
+            )
+            state["next_attempt"] = now + (
+                self.update_interval.total_seconds() * backoff_multiplier
+            )
             if _errors is not None:
                 _errors[key] = str(err)
-            cached_value = cache.get(key)
-            return cached_value if isinstance(cached_value, dict) else None
+            return cached_value
+
+        if state["consecutive_failures"]:
+            _LOGGER.info(
+                "GloBird optional fetch for %s recovered after %d failed attempt(s)",
+                key,
+                state["consecutive_failures"],
+            )
+        state["consecutive_failures"] = 0
+        state["next_attempt"] = 0.0
+        return result
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch GloBird data."""
@@ -245,6 +299,7 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     days=GLOBIRD_DEFAULT_USAGE_DAYS,
                 ),
                 cache,
+                state_key=f"usage:{sid}",
             )
 
         cost = None
@@ -258,6 +313,7 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     days=GLOBIRD_DEFAULT_USAGE_DAYS,
                 ),
                 cache,
+                state_key=f"cost:{sid}",
             )
 
         weather = None
@@ -271,6 +327,7 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     days=GLOBIRD_DEFAULT_USAGE_DAYS,
                 ),
                 cache,
+                state_key=f"weather:{sid}",
             )
 
         usage_summary = build_usage_summary(usage)

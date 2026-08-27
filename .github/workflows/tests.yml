@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio aiohttp cffi cryptography protobuf
+
+      - name: Run tests
+        # The suite has pre-existing, order-dependent test-isolation failures
+        # tracked in #60 (cross-file sys.modules stub contamination that
+        # varies by run order/environment) which are not yet fixed. Until
+        # #60 lands, keep this step non-blocking so it surfaces results
+        # without turning every PR red for a pre-existing issue — check
+        # whether a failing test name is already known via #60 before
+        # treating a red run here as a regression.
+        continue-on-error: true
+        run: python -m pytest tests/ -q --tb=short
