@@ -3985,6 +3985,23 @@ def _vehicle_config_matches(vehicle_id: str | None, config_vehicle_id: str | Non
     return vehicle_ids_match(vehicle_id, config_vehicle_id)
 
 
+def _ev_start_failure_is_ownership_conflict(
+    last_command: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether a recorded EV start attempt failed due to ownership arbitration.
+
+    ``can_claim_ev_ownership`` and the legacy-state takeover check in
+    ``_action_start_ev_charging_dynamic_locked`` both build their block reason as
+    ``f"{existing_mode} already owns this loadpoint"`` (see automations/ev_ownership.py
+    and automations/actions.py) -- that suffix is the stable signature of an
+    ownership rejection as opposed to a genuine charger/API failure.
+    """
+    if not isinstance(last_command, Mapping) or last_command.get("success"):
+        return False
+    reason = last_command.get("reason") or ""
+    return str(reason).endswith("already owns this loadpoint")
+
+
 def _vehicle_config_value(
     config: Mapping[str, Any],
     key: str,
@@ -6559,6 +6576,11 @@ class AutoScheduleExecutor:
             _action_start_ev_charging_dynamic,
             _resolve_max_grid_import_kw,
         )
+        from .ev_ownership import (
+            DEFAULT_VEHICLE_ID,
+            get_ev_last_commands,
+            normalize_vehicle_id,
+        )
 
         failure = getattr(self, "_start_failure_state", {}).get(vehicle_id)
         if failure:
@@ -6691,6 +6713,28 @@ class AutoScheduleExecutor:
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
+                # A False return only means "no session was started" -- it does not
+                # distinguish an expected ownership rejection (another mode already
+                # owns this loadpoint) from a genuine charger/API failure. Read back
+                # the block reason that _action_start_ev_charging_dynamic already
+                # persisted via record_ev_command() instead of widening its return
+                # type, and classify on that.
+                resolved_vehicle_id = (
+                    params.get("vehicle_vin")
+                    or params.get("vehicle_id")
+                    or DEFAULT_VEHICLE_ID
+                )
+                last_command = get_ev_last_commands(self.hass, self.config_entry).get(
+                    normalize_vehicle_id(resolved_vehicle_id)
+                )
+                if _ev_start_failure_is_ownership_conflict(last_command):
+                    _LOGGER.info(
+                        "Auto-schedule: Start skipped for %s - %s",
+                        vehicle_id,
+                        last_command.get("reason"),
+                    )
+                    return False
+
                 count, delay = self._record_start_failure(vehicle_id)
                 _LOGGER.warning(
                     "Auto-schedule: Failed to start charging for %s "

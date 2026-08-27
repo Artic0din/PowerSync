@@ -354,3 +354,45 @@ def reconcile_pack_remaining_with_aggregate(
         pack["remainingReconciledFromAggregate"] = True
 
     return packs
+
+
+def ghost_pack_topology_log_decision(
+    ghost_count: int,
+    kept_full_wh: float,
+    current_wh: float,
+    *,
+    previous_signature: tuple[int, int] | None,
+) -> tuple[tuple[int, int], str | None]:
+    """Decide whether a ghost-expansion-pack classification needs a new log line.
+
+    The 5-minute BMS health poll re-runs this classification every cycle, but
+    the topology it describes (how many phantom packs are being dropped, and
+    the rated capacity of the real packs kept) is normally stable for long
+    stretches. Build a signature from ``ghost_count`` and the *rated* capacity
+    of the kept packs -- not ``current_wh``, which fluctuates with charge/
+    discharge and would defeat the point -- and only return a log message when
+    that signature actually differs from the caller's last-logged value.
+
+    Returns ``(new_signature, message)``. The caller should always persist
+    ``new_signature`` (even when ``message`` is ``None``) and log ``message``
+    at ``info`` when it is not ``None``.
+    """
+    new_signature = (ghost_count, round(kept_full_wh))
+    if new_signature == previous_signature:
+        return new_signature, None
+
+    ratio = kept_full_wh / current_wh if current_wh else 0.0
+    if previous_signature is None:
+        message = (
+            "fleet_api_bms: dropping %d placeholder expansion pack(s) (no serial + near-empty) — "
+            "system %.0f Wh matches real-pack sum %.0f Wh (ratio %.3f); "
+            "expansion slots registered but not physically installed"
+        ) % (ghost_count, current_wh, kept_full_wh, ratio)
+    else:
+        message = (
+            "fleet_api_bms: expansion pack topology changed — "
+            "was %d placeholder(s)/%.0f Wh real-pack sum, now %d placeholder(s)/%.0f Wh "
+            "(system %.0f Wh, ratio %.3f)"
+        ) % (previous_signature[0], previous_signature[1], ghost_count, kept_full_wh, current_wh, ratio)
+
+    return new_signature, message
