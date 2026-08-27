@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PowerSync support bundle</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">PowerSync support</p>
+      <h1>Create a sanitised support bundle</h1>
+      <p>
+        This tool runs only in your browser. It removes credentials and replaces personal
+        identifiers consistently before you attach logs to a public GitHub issue.
+      </p>
+
+      <section aria-labelledby="create-heading">
+        <h2 id="create-heading">Create bundle</h2>
+        <label for="log-file">PowerSync text log</label>
+        <input id="log-file" type="file" accept=".txt,.log,.json,.jsonc,.yaml,.yml,.md,.debug" />
+        <button id="create-bundle" type="button" disabled>Create sanitised bundle</button>
+        <p id="status" role="status" aria-live="polite">Choose one text log up to 512 KB.</p>
+      </section>
+
+      <section aria-labelledby="removed-heading">
+        <h2 id="removed-heading">What changes</h2>
+        <p>
+          Credentials, authorization headers, cookies, and webhook URLs are removed.
+          IP and MAC addresses, VINs, email addresses, usernames, serial numbers, and home paths
+          receive stable placeholders. Timestamps, versions, errors, stack traces, and ordering remain.
+        </p>
+        <p>
+          Always review the downloaded file before uploading it. If a credential was already posted,
+          revoke or rotate it; deleting a link is not a confidentiality guarantee.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="sanitizer.mjs"></script>
+  </body>
+</html>

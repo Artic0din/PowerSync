@@ -1,0 +1,38 @@
+name: Support question
+description: Ask how to configure or use PowerSync
+title: "[Question]: "
+labels:
+  - question
+  - needs triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and documentation before asking a question.
+        Do not upload raw logs, screenshots, archives, credentials, or personal information.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Describe what you are trying to do and where you are blocked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Relevant context
+      description: Provide your PowerSync and Home Assistant versions plus non-sensitive configuration details that affect the question.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and documentation for an answer.
+          required: true
+        - label: I removed credentials and personal information from this question.
+          required: true
