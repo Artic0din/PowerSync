@@ -484,7 +484,7 @@ def _new_stream_tesla_coordinator() -> TeslaEnergyCoordinator:
     coordinator._lifetime_fetch_failed = False
     coordinator._site_info_cache = {}
     coordinator._site_info_last_fetch = time.monotonic()
-    coordinator._site_info_fetch_failed = False
+    coordinator._site_info_next_retry = 0
     coordinator._firmware = None
     coordinator._last_valid_battery_level_pct = None
     coordinator._last_grid_status = "Active"

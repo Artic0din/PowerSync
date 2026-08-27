@@ -747,11 +747,13 @@ from .const import (
     DEFAULT_GOODWE_PORT_UDP,
     DEFAULT_GOODWE_PORT_TCP,
     # Octopus Energy UK configuration
+    CONF_OCTOPUS_PRODUCT,
     CONF_OCTOPUS_PRODUCT_CODE,
     CONF_OCTOPUS_TARIFF_CODE,
     CONF_OCTOPUS_REGION,
     CONF_OCTOPUS_EXPORT_PRODUCT_CODE,
     CONF_OCTOPUS_EXPORT_TARIFF_CODE,
+    OCTOPUS_EXPORT_PRODUCT_CODES,
     # Octopus Saving Sessions
     CONF_OCTOPUS_SAVING_SESSIONS_ENABLED,
     CONF_OCTOPUS_SAVING_SESSIONS_SOURCE,
@@ -13650,7 +13652,7 @@ class EVVehiclesView(HomeAssistantView):
 
                 from .sigenergy_charger import sigenergy_charger_state_to_vehicle
 
-                state = await _read_sigenergy_charger_state_for_entry(entry, hass)
+                state = await _read_sigenergy_charger_state_for_entry(entry, self._hass)
                 vehicles.append(
                     sigenergy_charger_state_to_vehicle(
                         state or configured_state,
@@ -13658,7 +13660,7 @@ class EVVehiclesView(HomeAssistantView):
                         online=state is not None,
                         capabilities=_configured_sigenergy_charger_capabilities(
                             entry,
-                            hass,
+                            self._hass,
                         ),
                     )
                 )
