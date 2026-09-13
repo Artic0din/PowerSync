@@ -130,6 +130,38 @@ def test_optimizer_retail_price_uses_timestamp_aligned_local_slot(monkeypatch):
     assert ev_pricing.get_current_retail_price(hass, "entry-1") == 24.32
 
 
+def test_optimizer_retail_price_accepts_a_real_price_prefix(monkeypatch):
+    """A short display-price tail must not hide the current real EPEX slot."""
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc),
+    )
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": SimpleNamespace(
+                        data={
+                            "schedule": {
+                                "timestamps": [
+                                    "2026-08-05T11:30:00+00:00",
+                                    "2026-08-05T12:00:00+00:00",
+                                    "2026-08-05T12:30:00+00:00",
+                                    "2026-08-05T13:00:00+00:00",
+                                ],
+                                "import_price": [0.1111, 0.2432],
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert ev_pricing.get_current_retail_price(hass, "entry-1") == 24.32
+
+
 def test_optimizer_export_price_uses_timestamp_aligned_local_slot(monkeypatch):
     monkeypatch.setattr(
         ev_pricing.dt_util,

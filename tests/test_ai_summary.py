@@ -372,13 +372,38 @@ def test_forecast_evidence_requires_exact_schedule_snapshot_and_complete_slots()
     assert module.build_compact_context(snapshot)["forecast_evidence"] == {
         "status": "unavailable", "reason": "plan_mismatch", "windows": [],
     }
-
     snapshot["forecast_evidence"]["plan_snapshot_id"] = "plan-a"
     snapshot["forecast_evidence"]["load_forecast_values_kw"].pop()
     assert module.build_compact_context(snapshot)["forecast_evidence"] == {
         "status": "unavailable", "reason": "incomplete_or_misaligned", "windows": [],
     }
 
+
+def test_forecast_evidence_aggregates_long_windows_without_losing_bounds():
+    module = _load_module()
+    snapshot = _snapshot()
+    timestamps = [f"2026-08-01T{hour:02d}:00:00+10:00" for hour in range(26)]
+    snapshot["schedule"]["timestamps"] = timestamps
+    snapshot["schedule"]["import_price"] = [0.1] * len(timestamps)
+    snapshot["schedule"]["export_price"] = [0.05] * len(timestamps)
+    snapshot["schedule"]["soc"] = [0.25] * len(timestamps)
+    snapshot["schedule"]["plan_snapshot_id"] = "long-plan"
+    snapshot["next_actions"] = [{
+        "timestamp": timestamps[0], "end_time": timestamps[-1], "action": "charge", "power_w": 5000,
+    }]
+    snapshot["forecast_evidence"] = {
+        "plan_snapshot_id": "long-plan", "timestamps": timestamps,
+        "solar_forecast_values_kw": list(range(26)),
+        "load_forecast_values_kw": [1.0] * 26,
+    }
+
+    evidence = module.build_compact_context(snapshot)["forecast_evidence"]["windows"][0]
+    assert "values" not in evidence
+    assert evidence["summary"] == {
+        "slot_count": 25,
+        "solar_kw": {"min": 0.0, "average": 12.0, "max": 24.0},
+        "load_kw": {"min": 1.0, "average": 1.0, "max": 1.0},
+    }
 
 def test_forecast_evidence_marks_changed_values_without_model_provenance():
     module = _load_module()
@@ -867,6 +892,27 @@ def test_malformed_refresh_keeps_last_valid_summary_as_fallback():
         "code": "invalid_provider_response",
         "message": "The AI provider returned an invalid structured response.",
     }
+
+
+def test_local_provider_reports_length_stop_without_parsing_partial_content(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(module.socket, "getaddrinfo", lambda *args, **kwargs: [
+        (None, None, None, None, ("127.0.0.1", 0))
+    ])
+    session = _FakeSession(_FakeResponse(200, {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"content": '{"headline":"partial",'},
+        }],
+    }))
+    with pytest.raises(module.AISummaryError) as caught:
+        asyncio.run(module.LocalOpenAICompatibleAISummaryProvider().generate(
+            session=session, api_key="", model="local-model",
+            context=module.build_compact_context(_snapshot()),
+            endpoint="http://127.0.0.1:3000/v1",
+        ))
+    assert caught.value.code == "provider_response_truncated"
+    assert session.calls[0][1]["json"]["max_tokens"] == module.LOCAL_OPENAI_MAX_TOKENS
 
 
 def test_auto_refresh_is_material_debounced_coalesced_and_cancelled():

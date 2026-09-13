@@ -61,14 +61,15 @@ def _get_current_optimizer_schedule_price(
     if (
         not isinstance(timestamps, (list, tuple))
         or not isinstance(prices, (list, tuple))
-        or len(timestamps) != len(prices)
         or len(timestamps) < 2
+        or len(prices) < 2
+        or len(prices) > len(timestamps)
     ):
         return None
 
-    # Treat any malformed/non-finite value in the aligned retail array as an
-    # invalid snapshot.  A valid-looking current slot must not mask a broken
-    # provider refresh elsewhere in the same schedule.
+    # A display schedule may intentionally omit synthetic future prices while
+    # retaining optimizer timestamps for the full planning horizon.  Validate
+    # every real price, then only select a current slot that has one.
     for raw_price in prices:
         if isinstance(raw_price, bool):
             return None
@@ -117,6 +118,8 @@ def _get_current_optimizer_schedule_price(
             break
 
     if active_index is None:
+        return None
+    if active_index >= len(prices):
         return None
 
     try:

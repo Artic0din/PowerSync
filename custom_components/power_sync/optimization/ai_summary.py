@@ -41,6 +41,8 @@ PROMPT_VERSION = "2"
 SCHEMA_VERSION = "2"
 MAX_CONTEXT_WINDOWS = 24
 MAX_ACTION_EXPLANATIONS = 6
+MAX_FORECAST_EVIDENCE_SLOTS = 24
+LOCAL_OPENAI_MAX_TOKENS = 2048
 MAX_LOCAL_ENDPOINT_LENGTH = 512
 MAX_LOCAL_MODEL_LENGTH = 128
 AUTO_REFRESH_DEBOUNCE_SECONDS = 15
@@ -509,6 +511,23 @@ def _window_forecast_slots(
     return slots or None
 
 
+def _forecast_slot_summary(slots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Preserve bounded, aggregate forecast evidence for long action windows."""
+    return {
+        "slot_count": len(slots),
+        "solar_kw": {
+            "min": round(min(slot["solar_kw"] for slot in slots), 4),
+            "average": round(sum(slot["solar_kw"] for slot in slots) / len(slots), 4),
+            "max": round(max(slot["solar_kw"] for slot in slots), 4),
+        },
+        "load_kw": {
+            "min": round(min(slot["load_kw"] for slot in slots), 4),
+            "average": round(sum(slot["load_kw"] for slot in slots) / len(slots), 4),
+            "max": round(max(slot["load_kw"] for slot in slots), 4),
+        },
+    }
+
+
 def build_forecast_evidence(
     snapshot: Mapping[str, Any],
     windows: list[Mapping[str, Any]],
@@ -554,15 +573,17 @@ def build_forecast_evidence(
         slots = _window_forecast_slots(timestamps, solar_values, load_values, start, end)
         if slots is None:
             return {"status": "unavailable", "reason": "incomplete_or_misaligned", "windows": []}
-        evidence_windows.append(
-            {
-                "window_id": window_id,
-                "start": start,
-                "end": end,
-                "action": window.get("action"),
-                "values": slots,
-            }
-        )
+        evidence_window = {
+            "window_id": window_id,
+            "start": start,
+            "end": end,
+            "action": window.get("action"),
+        }
+        if len(slots) <= MAX_FORECAST_EVIDENCE_SLOTS:
+            evidence_window["values"] = slots
+        else:
+            evidence_window["summary"] = _forecast_slot_summary(slots)
+        evidence_windows.append(evidence_window)
     return {
         "status": "available",
         "plan_snapshot_id": plan_snapshot_id,
@@ -1373,7 +1394,14 @@ def _openai_message_text(body: Mapping[str, Any]) -> Mapping[str, Any]:
     choices = body.get("choices")
     text: Any = None
     if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-        message = choices[0].get("message")
+        choice = choices[0]
+        if choice.get("finish_reason") == "length":
+            raise AISummaryError(
+                "provider_response_truncated",
+                "The AI provider stopped before it completed a safe explanation.",
+                http_status=502,
+            )
+        message = choice.get("message")
         if isinstance(message, Mapping):
             text = message.get("content")
     return _parse_json_text(text)
@@ -1408,7 +1436,7 @@ class LocalOpenAICompatibleAISummaryProvider:
                 {"role": "user", "content": f"PLAN_CONTEXT_JSON:\n{canonical_context_json(context)}"},
             ],
             "temperature": 0.2,
-            "max_tokens": 1200,
+            "max_tokens": LOCAL_OPENAI_MAX_TOKENS,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
