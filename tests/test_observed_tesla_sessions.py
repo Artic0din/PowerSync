@@ -250,6 +250,7 @@ def test_delayed_charge_readback_after_powersync_stop_does_not_stick_external():
     _lease_id, lease = get_ev_ownership(hass, _Entry(), VIN)
     assert lease["owner"] == "external"
     assert lease["stop_settling"] is True
+    assert manager.started == []
 
     vehicles[0].update({
         "ev_power_kw": 0.0,

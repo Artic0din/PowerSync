@@ -2250,6 +2250,36 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ble_power_observed_at
         )
         power_kw = _kw_from_power_state(power_state)
+        # A BLE bridge may emit a fresh state update while continuing to
+        # re-report an unchanged, older power value.  `last_reported` is
+        # useful for normal freshness checks, but it is not the time at which
+        # that watt value was measured.  A newer explicit non-charging state
+        # therefore wins over a positive value whose last value update
+        # predates it.  Keep the power unavailable rather than claiming a
+        # measured zero: command acknowledgement is still not hardware proof.
+        power_value_updated_at = _ev_observed_at(
+            getattr(power_state, "last_updated", None)
+        )
+        explicit_non_charging = str(
+            getattr(charge_state, "state", "")
+        ).strip().lower() in {
+            "stopped",
+            "complete",
+            "completed",
+            "disconnected",
+        }
+        stale_power_contradicted_by_state = (
+            power_kw > 0
+            and explicit_non_charging
+            and ble_state_observed_at is not None
+            and (
+                power_value_updated_at is None
+                or ble_state_observed_at > power_value_updated_at
+            )
+        )
+        if stale_power_contradicted_by_state:
+            power_kw = 0.0
+            power_available = False
         if power_kw > 0:
             ev_power_kw = power_kw
             is_connected = True

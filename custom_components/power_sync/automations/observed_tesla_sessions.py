@@ -242,6 +242,21 @@ class ObservedTeslaSessionTracker:
             if self._has_other_active_session(self._session_manager, vehicle_id):
                 continue
 
+            # Establish ownership before creating history.  A just-accepted
+            # PowerSync stop creates a provisional stop-settling lease for
+            # delayed positive telemetry; that telemetry must not first create
+            # a new observed session and then be rejected only for ownership.
+            self._reconcile_vehicle_ownership(vehicle, vehicle_id)
+            from .ev_ownership import get_ev_ownership
+
+            _lease_id, lease = get_ev_ownership(
+                self._hass,
+                self._entry,
+                vehicle_id,
+            )
+            if lease and lease.get("stop_settling"):
+                continue
+
             if not self._active_observed_session(self._session_manager, vehicle_id):
                 await self._session_manager.start_session(
                     vehicle_id=vehicle_id,

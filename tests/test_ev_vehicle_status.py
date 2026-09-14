@@ -113,6 +113,7 @@ def _install_import_stubs() -> None:
     currency.currency_for_entry = lambda *args, **kwargs: "AUD"
     currency.currency_metadata = lambda *args, **kwargs: {}
     currency.normalize_currency = lambda value=None, *args, **kwargs: value or "AUD"
+    currency.presentation_currency_metadata_for_entry = lambda *args, **kwargs: {}
     sys.modules["power_sync.currency"] = currency
 
     inverters = types.ModuleType("power_sync.inverters")
@@ -860,6 +861,41 @@ def test_ble_disconnected_state_overrides_open_charge_flap():
     assert vehicle["is_connected"] is False
     assert vehicle["is_charging"] is False
     assert vehicle["ev_power_kw"] == 0.0
+
+
+def test_ble_newer_stopped_state_suppresses_re_reported_stale_power():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    prefix = "garage_ble"
+    hass = _Hass([
+        _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+        _State(
+            f"sensor.{prefix}_charging_state",
+            "Stopped",
+            last_updated=now,
+        ),
+        _State(
+            f"sensor.{prefix}_charge_power",
+            "3.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(minutes=1),
+            # A state event can be re-reported now without being a new watt
+            # measurement; this is the Ticket #409 shape.
+            last_reported=now,
+        ),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": prefix},
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["is_connected"] is True
+    assert vehicle["is_charging"] is False
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["power_available"] is False
 
 
 def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
