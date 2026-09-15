@@ -23816,7 +23816,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             last_update = getattr(coordinator, "last_update_success_time", None)
             update_interval = getattr(coordinator, "update_interval", None)
             if last_update is None:
-                return False
+                # DataUpdateCoordinator does not expose a success timestamp in
+                # every supported Home Assistant runtime.  A successful,
+                # telemetry-ready snapshot is still safe to use here; the
+                # matching normalized live-status guard follows this contract.
+                return True
 
             try:
                 stale_after = max(
