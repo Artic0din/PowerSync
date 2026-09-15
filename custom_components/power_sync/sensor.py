@@ -79,6 +79,8 @@ from .const import (
     SENSOR_TYPE_SOLCAST_CURRENT,
     CONF_SOLCAST_ENABLED,
     CONF_ELECTRICITY_PROVIDER,
+    CONF_AMBER_API_TOKEN,
+    CONF_FLOW_POWER_PRICE_SOURCE,
     SENSOR_TYPE_TARIFF_SCHEDULE,
     SENSOR_TYPE_SOLAR_CURTAILMENT,
     SENSOR_TYPE_SAVING_SESSION_ACTIVE,
@@ -2329,10 +2331,27 @@ async def async_setup_entry(
         # Store callback for deferred LP forecast + optimizer action sensor creation
         domain_data["sensor_async_add_entities"] = async_add_entities
 
-    # Add Amber usage sensors if usage coordinator exists
+    # Keep the Amber metered-cost entity identities stable across a transient
+    # site-discovery or coordinator-startup failure.  AmberUsageSensor already
+    # reports no value until a coordinator has fresh data; withholding the
+    # entities here instead makes a reload look like a removal.
     amber_usage_coordinator = domain_data.get("amber_usage_coordinator")
-    if amber_usage_coordinator:
-        _LOGGER.info("Amber usage tracking active - adding metered cost sensors")
+    flow_power_price_source = entry.options.get(
+        CONF_FLOW_POWER_PRICE_SOURCE,
+        entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber"),
+    )
+    amber_usage_configured = bool(entry.data.get(CONF_AMBER_API_TOKEN)) and (
+        electricity_provider == "amber"
+        or (
+            electricity_provider == "flow_power"
+            and flow_power_price_source == "amber"
+        )
+    )
+    if amber_usage_configured:
+        _LOGGER.info(
+            "Amber usage metered cost sensors added%s",
+            " (awaiting usage coordinator)" if not amber_usage_coordinator else "",
+        )
         sensor_names = {
             SENSOR_TYPE_AMBER_USAGE_TODAY_COST: "Today Metered Cost",
             SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST: "Yesterday Billed Cost",
