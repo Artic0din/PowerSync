@@ -136,6 +136,7 @@ async def async_read_storage_result(
             return StorageReadbackResult(None, "identity_mismatch")
         inverter = matches[0]
         previous_decoded = getattr(inverter, "decoded_storage_control", None)
+        previous_storage_kind = _storage_readback_kind(inverter)
 
         previous_success_time = getattr(coordinator, "last_update_success_time", None)
         if previous_success_time is None:
@@ -165,6 +166,7 @@ async def async_read_storage_result(
                 inverter,
                 previous_success_time,
                 previous_decoded,
+                previous_storage_kind,
             ):
                 if notification_count:
                     return _stale_result(hub)
@@ -175,6 +177,7 @@ async def async_read_storage_result(
                     inverter,
                     previous_success_time,
                     previous_decoded,
+                    previous_storage_kind,
                 ):
                     break
                 if notification_count:
@@ -196,6 +199,7 @@ async def async_read_storage_result(
                     inverter,
                     previous_success_time,
                     previous_decoded,
+                    previous_storage_kind,
                 ):
                     return _stale_result(hub)
         finally:
@@ -248,7 +252,7 @@ async def async_read_storage_result(
         if getattr(hub, "option_storage_control", None) is not True:
             return StorageReadbackResult(None, "readback_unavailable")
 
-        decoded = getattr(inverter, "decoded_storage_control", None)
+        decoded = _storage_values(inverter)
         if getattr(hub, "has_write", None) is not None:
             return StorageReadbackResult(None, "upstream_write_busy")
         if not isinstance(decoded, Mapping):
@@ -397,6 +401,7 @@ def _fresh_storage_read(
     inverter: Any,
     previous_success_time: Any,
     previous_decoded: Any,
+    previous_storage_kind: str | None,
 ) -> bool:
     current_success_time = getattr(coordinator, "last_update_success_time", None)
     return (
@@ -404,8 +409,48 @@ def _fresh_storage_read(
         and getattr(coordinator, "last_update_success", None) is True
         and current_success_time is not None
         and current_success_time > previous_success_time
-        and getattr(inverter, "decoded_storage_control", None) is not previous_decoded
+        and _storage_readback_kind(inverter) is not None
+        and (
+            (
+                previous_storage_kind == "v4"
+                and _storage_readback_kind(inverter) == "v4"
+            )
+            or (
+                previous_storage_kind == "v3"
+                and getattr(inverter, "decoded_storage_control", None)
+                is not previous_decoded
+            )
+        )
     )
+
+
+def _storage_readback_kind(inverter: Any) -> str | None:
+    """Return the supported upstream storage snapshot shape.
+
+    SolarEdge Modbus Multi v3 replaces its decoded dictionary on a successful
+    storage poll. v4 instead retains a StorageControl component and updates its
+    fields in place; its per-inverter availability flag proves the component was
+    included in the completed coordinator poll.
+    """
+    if isinstance(getattr(inverter, "decoded_storage_control", None), Mapping):
+        return "v3"
+    if (
+        getattr(inverter, "has_storage_control", None) is True
+        and getattr(inverter, "storage_control_data", None) is not None
+    ):
+        return "v4"
+    return None
+
+
+def _storage_values(inverter: Any) -> Mapping[str, Any] | None:
+    """Copy raw v3/v4 storage values for the common validation path."""
+    decoded = getattr(inverter, "decoded_storage_control", None)
+    if isinstance(decoded, Mapping):
+        return decoded
+    if _storage_readback_kind(inverter) != "v4":
+        return None
+    component = inverter.storage_control_data
+    return {field: getattr(component, field, None) for field in _RAW_FIELDS}
 
 
 def _remaining(loop: asyncio.AbstractEventLoop, deadline: float) -> float:

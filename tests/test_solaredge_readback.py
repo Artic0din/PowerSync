@@ -79,9 +79,9 @@ class _Coordinator(TimestampDataUpdateCoordinator):
             self.last_update_success_time += 1
             if self.replaces_storage:
                 for inverter in self._hub.inverters:
-                    inverter.decoded_storage_control = dict(
-                        inverter.decoded_storage_control
-                    )
+                    decoded = getattr(inverter, "decoded_storage_control", None)
+                    if isinstance(decoded, dict):
+                        inverter.decoded_storage_control = dict(decoded)
         for listener in tuple(self.listeners):
             listener()
 
@@ -108,6 +108,25 @@ class _Inverter:
             "charge_limit": 4200.0,
             "discharge_limit": 3800.0,
         }
+
+
+class _V4Inverter:
+    """SolarEdge Modbus Multi v4 keeps a persistent storage component."""
+
+    def __init__(self, uid):
+        self.uid_base = uid
+        self.has_storage_control = True
+        self.storage_control_data = types.SimpleNamespace(
+            control_mode=4,
+            ac_charge_policy=1,
+            ac_charge_limit=12.5,
+            backup_reserve=20.0,
+            default_mode=7,
+            command_timeout=3600,
+            command_mode=7,
+            charge_limit=4200.0,
+            discharge_limit=3800.0,
+        )
 
 
 class _Hub:
@@ -202,6 +221,31 @@ def test_readback_rejects_poll_that_did_not_read_storage_registers(monkeypatch):
     coordinator = _Coordinator(replaces_storage=False)
     assert _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")]) is None
     assert coordinator.refreshes == 1
+
+
+def test_readback_accepts_fresh_v4_persistent_storage_component(monkeypatch):
+    """A completed v4 storage poll does not replace its component object."""
+    result = _read(monkeypatch, _Coordinator(), [_V4Inverter("SE5000_SERIAL-A")])
+    assert result is not None
+    assert result["control_mode"] == "Remote Control"
+    assert result["command_mode"] == "Maximize Self Consumption"
+
+
+def test_readback_rejects_stale_v4_persistent_storage_component(monkeypatch):
+    assert (
+        _read(
+            monkeypatch,
+            _Coordinator(advances=False),
+            [_V4Inverter("SE5000_SERIAL-A")],
+        )
+        is None
+    )
+
+
+def test_readback_rejects_v4_without_confirmed_storage_control(monkeypatch):
+    inverter = _V4Inverter("SE5000_SERIAL-A")
+    inverter.has_storage_control = False
+    assert _read(monkeypatch, _Coordinator(), [inverter]) is None
 
 
 def test_readback_waits_for_debounced_poll_completion(monkeypatch):
