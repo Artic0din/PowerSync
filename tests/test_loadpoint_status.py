@@ -18,6 +18,7 @@ _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
 
 from power_sync.automations.loadpoint_status import (  # noqa: E402
+    _merge_observation_status,
     build_generic_charger_observation,
     build_loadpoint_status,
     charging_state_plugged_status,
@@ -54,6 +55,25 @@ def test_charging_state_plugged_status_matches_idle_connected_tesla_states():
     assert charging_state_plugged_status("No Power") is True
     assert charging_state_plugged_status("Disconnected") is False
     assert charging_state_plugged_status("unknown") is None
+
+
+def test_newer_available_ble_power_replaces_older_unavailable_power_quality():
+    older = datetime(2026, 9, 15, 4, 50)
+    newer = older + timedelta(seconds=30)
+    target = {
+        "ev_power_kw": 0.0,
+        "current_power_kw": 0.0,
+        "power_available": False,
+        "_observed_at": older,
+    }
+    _merge_observation_status(target, {
+        "ev_power_kw": 1.0,
+        "current_power_kw": 1.0,
+        "power_available": True,
+        "_observed_at": newer,
+    })
+    assert target["ev_power_kw"] == 1.0
+    assert target["power_available"] is True
 
 
 def test_generic_charger_soc_resolver_prefers_primary_sensor():

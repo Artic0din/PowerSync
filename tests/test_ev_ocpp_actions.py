@@ -9797,6 +9797,23 @@ def test_solar_surplus_rejects_stale_ev_power_that_home_load_would_reject():
     ) == (2.0, True)
 
 
+def test_solar_surplus_reads_fresh_power_for_a_synthetic_ble_loadpoint():
+    hass = _Hass([
+        _State(
+            "sensor.tesla_ble_charge_power",
+            "1000",
+            {"unit_of_measurement": "W"},
+            last_updated=datetime.now(timezone.utc),
+        ),
+    ])
+
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            hass, "ble_tesla_ble", {"charger_type": "tesla"}
+        )
+    ) == (1.0, True)
+
+
 def test_solar_surplus_stopped_tesla_keeps_commanded_fallback_without_power_source(
     monkeypatch,
 ):

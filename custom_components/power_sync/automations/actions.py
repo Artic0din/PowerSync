@@ -1565,6 +1565,24 @@ async def _get_observed_ev_power_reading_kw(
 
     charger_type = params.get("charger_type", "tesla")
 
+    # The BLE-only Solar Surplus fallback deliberately uses a synthetic
+    # ``ble_<prefix>`` loadpoint ID.  It has no Fleet VIN to resolve, but it
+    # still has a prefix-scoped, fresh BLE meter.  Do not silently turn that
+    # observed draw into zero: an already-charging session needs it to retain
+    # its existing draw when calculating the next rate.
+    if charger_type == "tesla" and vehicle_id.startswith("ble_"):
+        from ..tesla_ble import get_tesla_ble_charge_power_state
+
+        state = get_tesla_ble_charge_power_state(hass, vehicle_id[4:])
+        power_kw, available = _power_state_kw_reading(state)
+        available = available and is_current_ev_power_observation(
+            getattr(state, "last_reported", None)
+            or getattr(state, "last_updated", None)
+            or getattr(state, "last_changed", None)
+        )
+        if available:
+            return power_kw, True
+
     # Sigenergy exposes no power *meter* entity — only charge/discharge power
     # *limit* entities — so the loop above can never resolve a reading for it.
     # Without one, surplus accounting falls back to commanded amps, which are

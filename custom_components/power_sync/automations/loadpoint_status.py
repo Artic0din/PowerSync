@@ -258,6 +258,9 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
     if source_power_is_newer:
         target["ev_power_kw"] = source_power
         target["current_power_kw"] = source_power
+        # Availability belongs to the selected measurement, not to the row
+        # that happened to provide the older identity/status fields.
+        target["power_available"] = source.get("power_available", True)
         target.pop("auxiliary_power_kw", None)
         if source.get("auxiliary_power_kw") is not None:
             target["auxiliary_power_kw"] = source.get("auxiliary_power_kw")
@@ -268,6 +271,7 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
         if source_power > target_power:
             target["ev_power_kw"] = source_power
             target["current_power_kw"] = source_power
+            target["power_available"] = source.get("power_available", True)
             target.pop("auxiliary_power_kw", None)
             if source.get("auxiliary_power_kw") is not None:
                 target["auxiliary_power_kw"] = source.get("auxiliary_power_kw")
