@@ -311,6 +311,42 @@ def test_optimizer_force_discharge_preserves_active_pv_before_battery_target(
     ]
 
 
+def test_optimizer_force_discharge_keeps_active_pv_below_pcc_ceiling(
+    sigenergy_module,
+):
+    """Ticket #410: a PCC ceiling must not select PV-suppressing ESS-first."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(attributes={"pv_power_kw": 2.88})
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert asyncio.run(
+        controller.force_discharge(
+            power_kw=5.0,
+            battery_discharge_kw=1.327,
+        )
+    )
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(1327)),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_PV]),
+    ]
+
+
 def test_optimizer_force_discharge_refuses_without_fresh_pv_status(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     _stub_force_discharge_reads(controller)

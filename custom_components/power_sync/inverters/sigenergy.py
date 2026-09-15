@@ -1485,7 +1485,13 @@ class SigenergyController(InverterController):
                         "status is unavailable"
                     )
                     return False
-                if solar_kw < effective_kw:
+                # ``effective_kw`` is a PCC export ceiling, not a measure of
+                # available PV.  Comparing active PV with that ceiling picks
+                # ESS-first at ordinary solar output and can suppress PV,
+                # inverting an optimizer export into grid import.  Optimizer
+                # commands with any fresh PV preserve it; ESS-first remains
+                # for the confirmed no-PV battery-origin case below.
+                if solar_kw <= 0:
                     mode = self.REMOTE_EMS_MODE_DISCHARGE_ESS
                     mode_name = "DISCHARGE_ESS"
                 _LOGGER.info(

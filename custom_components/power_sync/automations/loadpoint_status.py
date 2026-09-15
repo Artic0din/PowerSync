@@ -249,11 +249,20 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
             source_at is None or target_at > source_at
         )
 
-    source_power_is_newer = source_is_newer(
-        source_observed_at, target_observed_at
+    # A newer status row is not necessarily a newer *measurement*.  In
+    # particular, BLE can refresh connection/charging state without a usable
+    # power value while Fleet still has a fresh measured reading for the same
+    # physical vehicle.  Keep that usable measurement rather than turning the
+    # aggregated EV load and normalized Home Load into unavailable telemetry.
+    source_power_available = source.get("power_available", True) is not False
+    target_power_available = target.get("power_available", True) is not False
+    source_power_is_newer = source_power_available and (
+        not target_power_available
+        or source_is_newer(source_observed_at, target_observed_at)
     )
-    target_power_is_newer = target_is_newer(
-        source_observed_at, target_observed_at
+    target_power_is_newer = target_power_available and (
+        not source_power_available
+        or target_is_newer(source_observed_at, target_observed_at)
     )
     if source_power_is_newer:
         target["ev_power_kw"] = source_power

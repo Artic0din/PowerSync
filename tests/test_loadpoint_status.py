@@ -76,6 +76,31 @@ def test_newer_available_ble_power_replaces_older_unavailable_power_quality():
     assert target["power_available"] is True
 
 
+def test_newer_unavailable_ble_status_keeps_fresh_fleet_power_measurement():
+    """Ticket #56: status freshness cannot discard usable merged EV power."""
+    older = datetime(2026, 9, 15, 5, 35)
+    newer = older + timedelta(seconds=10)
+    target = {
+        "ev_power_kw": 2.3,
+        "current_power_kw": 2.3,
+        "power_available": True,
+        "_observed_at": older,
+        "is_charging": True,
+    }
+    _merge_observation_status(target, {
+        "ev_power_kw": 0.0,
+        "current_power_kw": 0.0,
+        "power_available": False,
+        "_observed_at": newer,
+        "is_charging": True,
+    })
+
+    assert target["ev_power_kw"] == 2.3
+    assert target["current_power_kw"] == 2.3
+    assert target["power_available"] is True
+    assert target["is_charging"] is True
+
+
 def test_generic_charger_soc_resolver_prefers_primary_sensor():
     hass = _Hass({
         "sensor.car_a_soc": _State("61"),
