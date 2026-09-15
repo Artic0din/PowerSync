@@ -8709,6 +8709,22 @@ def get_solar_surplus_vehicle_configs(
     opts = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
     charger_type = _configured_charger_type(opts)
     if charger_type == "tesla":
+        from ..const import CONF_EV_PROVIDER, EV_PROVIDER_TESLA_BLE
+
+        # Tesla BLE installations created before the per-vehicle editor can
+        # have Solar Surplus enabled without a stored vehicle profile.  A
+        # single configured BLE prefix is an unambiguous physical loadpoint;
+        # start selection still applies location and plugged-in checks below.
+        ble_prefixes = _configured_ble_prefixes(config_entry, None, hass=hass)
+        if (
+            opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_TESLA_BLE
+            and len(ble_prefixes) == 1
+        ):
+            return [{
+                "vehicle_id": f"ble_{ble_prefixes[0]}",
+                "display_name": "Tesla BLE charger",
+                "charger_type": "tesla",
+            }]
         return []
 
     params = _with_configured_charger_entities(

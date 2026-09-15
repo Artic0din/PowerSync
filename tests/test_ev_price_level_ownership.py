@@ -7449,6 +7449,44 @@ def test_ble_only_multi_bridge_solar_configs_drop_stale_vin_profiles():
     assert [config["vehicle_id"] for config in configs] == ["ble_tesla_flinn"]
 
 
+def test_solar_surplus_config_falls_back_to_unique_tesla_ble_loadpoint():
+    class BleOnlyEntry(_FakeConfigEntry):
+        options = {
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88",
+        }
+
+    configs = ev_planner.get_solar_surplus_vehicle_configs(
+        _FakeHass(),
+        BleOnlyEntry(),
+        {"solar_surplus_config": {"enabled": True}},
+    )
+
+    assert configs == [
+        {
+            "vehicle_id": "ble_tesla_yf88",
+            "display_name": "Tesla BLE charger",
+            "charger_type": "tesla",
+        }
+    ]
+
+
+def test_solar_surplus_config_does_not_guess_between_tesla_ble_loadpoints():
+    class BleOnlyEntry(_FakeConfigEntry):
+        options = {
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        }
+
+    configs = ev_planner.get_solar_surplus_vehicle_configs(
+        _FakeHass(),
+        BleOnlyEntry(),
+        {"solar_surplus_config": {"enabled": True}},
+    )
+
+    assert configs == []
+
+
 def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
     monkeypatch,
 ):
