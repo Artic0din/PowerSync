@@ -31362,6 +31362,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     result["accepted_sites"].append(site_id)
                 if site_id not in result["field_absent_sites"]:
                     result["field_absent_sites"].append(site_id)
+                _LOGGER.info(
+                    "Tesla %s grid charging %s accepted for site %s; "
+                    "direct readback omitted the grid-charging field",
+                    reason,
+                    "enable" if enabled else "disable",
+                    site_id,
+                )
+                return False
             if (
                 outcome.status
                 is TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED

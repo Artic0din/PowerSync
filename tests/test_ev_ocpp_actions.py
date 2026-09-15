@@ -2641,6 +2641,30 @@ def test_tesla_charging_lookup_prefers_active_duplicate_vin_provider():
     assert charging_state == "sensor.n3bula_charging"
 
 
+def test_fleet_friendly_complete_state_is_resolved_for_exact_vin():
+    """A Fleet device name must not make a completed vehicle startable."""
+    vin = "LRW3F7FS1NC484342"
+    vehicle = SimpleNamespace(
+        id="fleet-device",
+        identifiers={("tesla_fleet", vin)},
+    )
+    hass = _Hass(
+        [_State("sensor.primary_ev_charging_state", "Complete")],
+        registry_entities={
+            "fleet-state": SimpleNamespace(
+                entity_id="sensor.primary_ev_charging_state",
+                device_id=vehicle.id,
+            ),
+        },
+        registry_devices={vehicle.id: vehicle},
+    )
+
+    assert asyncio.run(actions._is_vehicle_charge_complete(hass, vin))
+    assert not asyncio.run(
+        actions._is_vehicle_charge_complete(hass, "5YJ3E1EA7JF000001")
+    )
+
+
 def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeypatch):
     async def not_unplugged(*args, **kwargs):
         return False

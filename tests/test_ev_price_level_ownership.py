@@ -2308,6 +2308,7 @@ def fake_actions(monkeypatch):
         return round(amps * voltage * phases / 1000.0, 3)
 
     actions._resolve_max_grid_import_kw = resolve_max_grid_import_kw
+    actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
     monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
     monkeypatch.setattr(
         sys.modules["power_sync.automations"],
@@ -2708,6 +2709,24 @@ def test_price_level_start_uses_vehicle_charger_config(fake_actions):
     assert params["max_charge_amps"] == 24
     assert params["phases"] == 3
     assert params["allow_ownership_takeover"] is True
+
+
+def test_price_level_does_not_start_a_fleet_vehicle_reporting_complete(fake_actions):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._is_vehicle_charge_complete = AsyncMock(return_value=True)
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), _FakeConfigEntry())
+
+    assert asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "Price is eligible",
+            vehicle_vin=VIN,
+        )
+    ) is False
+    state = executor._get_or_create_vehicle_state(VIN)
+    assert state.last_decision == "waiting"
+    assert state.last_decision_reason == "vehicle reports charge complete"
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
 
 
 def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(

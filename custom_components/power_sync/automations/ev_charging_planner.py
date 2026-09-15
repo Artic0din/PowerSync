@@ -10139,6 +10139,7 @@ class PriceLevelChargingExecutor:
             reason: Reason for starting charging
             vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
         """
+        from .actions import _is_vehicle_charge_complete
         from .ev_ownership import manual_stop_hold_reason
 
         state = (
@@ -10146,6 +10147,18 @@ class PriceLevelChargingExecutor:
             if vehicle_vin
             else self._state
         )
+
+        if vehicle_vin and await _is_vehicle_charge_complete(self.hass, vehicle_vin):
+            state.is_charging = False
+            state.charging_mode = ""
+            state.last_decision = "waiting"
+            state.last_decision_reason = "vehicle reports charge complete"
+            await self.apply_preserve_home_battery(False, state.last_decision_reason)
+            _LOGGER.info(
+                "Price-level charging: start suppressed for %s - vehicle reports charge complete",
+                vehicle_vin,
+            )
+            return False
 
         hold_reason = manual_stop_hold_reason(
             self.hass,

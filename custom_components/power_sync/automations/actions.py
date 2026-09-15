@@ -1469,9 +1469,27 @@ def _effective_ev_power_kw(
     return commanded_kw
 
 
-def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
-    """Return whether Tesla telemetry says this vehicle reached its target."""
-    return _get_tesla_charging_state(hass, vehicle_vin) == "complete"
+async def _is_vehicle_charge_complete(
+    hass: HomeAssistant,
+    vehicle_vin: str,
+    charging_state_entity: Optional[str] = None,
+) -> bool:
+    """Return whether exact-VIN Tesla telemetry says it reached its target.
+
+    Tesla Fleet entity IDs are based on the device name, not necessarily the
+    VIN.  Prefer a previously resolved state entity, then bind through the
+    VIN's device registry entry before retaining the legacy VIN-prefix probe.
+    """
+    state = _get_tesla_charging_state(hass, vehicle_vin, charging_state_entity)
+    if state is None:
+        charging_state_entity = await _get_tesla_ev_entity(
+            hass,
+            r"sensor\..*(charging_state|charging)(?:_\d+)?$",
+            vehicle_vin,
+            warn_on_missing=False,
+        )
+        state = _get_tesla_charging_state(hass, vehicle_vin, charging_state_entity)
+    return state == "complete"
 
 
 def _dynamic_ev_soc_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional[str]:
@@ -6832,7 +6850,7 @@ async def _solar_surplus_switch_to_next_vehicle(
             continue
 
         # Check if charge is already complete
-        if _is_vehicle_charge_complete(hass, vin):
+        if await _is_vehicle_charge_complete(hass, vin):
             _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping")
             continue
 
@@ -9514,7 +9532,11 @@ async def _dynamic_ev_update_surplus(
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
 
                 # Check if this vehicle's charge is already complete before trying
-                if _is_vehicle_charge_complete(hass, vehicle_id):
+                if await _is_vehicle_charge_complete(
+                    hass,
+                    vehicle_id,
+                    params.get("tesla_charging_state_entity"),
+                ):
                     _LOGGER.info(
                         f"⚡ Solar surplus EV: {vehicle_id[:8]}... is charge complete — "
                         f"looking for next vehicle"
@@ -9538,7 +9560,11 @@ async def _dynamic_ev_update_surplus(
                     return
                 if not start_success:
                     # Check if failure was due to charge complete
-                    if _is_vehicle_charge_complete(hass, vehicle_id):
+                    if await _is_vehicle_charge_complete(
+                        hass,
+                        vehicle_id,
+                        params.get("tesla_charging_state_entity"),
+                    ):
                         _LOGGER.info(
                             f"⚡ Solar surplus EV: {vehicle_id[:8]}... charge complete — "
                             f"looking for next vehicle"

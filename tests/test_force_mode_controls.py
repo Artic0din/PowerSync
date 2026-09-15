@@ -3504,6 +3504,7 @@ def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():
     assert "not expected.intersection(failed)" in function_source
     assert "expected.issubset(confirmed.union(field_absent))" in function_source
 
+
     namespace: dict[str, object] = {}
     exec(textwrap.dedent(function_source), namespace)
     compatibility_safe = namespace[
@@ -3548,6 +3549,21 @@ def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():
     apply_source = ast.get_source_segment(source, apply_function)
     assert apply_source is not None
     assert '"field_absent_sites": []' in apply_source
+
+
+def test_tesla_grid_field_absence_is_not_logged_as_a_failed_force_charge():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    apply_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_apply_grid_charging"),
+    )
+
+    assert apply_source is not None
+    field_absent = apply_source.index("TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT")
+    generic_failure = apply_source.index("grid charging %s did not verify")
+    assert "direct readback omitted the grid-charging field" in apply_source
+    assert "return False" in apply_source[field_absent:generic_failure]
 
 
 def test_tesla_charge_kicks_opt_in_without_relaxing_force_discharge():
