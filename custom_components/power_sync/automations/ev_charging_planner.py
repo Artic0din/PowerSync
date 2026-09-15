@@ -10148,6 +10148,7 @@ class PriceLevelChargingExecutor:
             )
             return False
 
+        retry_already_pending = state.start_cooldown_until > time.time()
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,
@@ -10174,7 +10175,13 @@ class PriceLevelChargingExecutor:
             else:
                 state.last_decision_reason = f"{reason}; start failed"
             await self.apply_preserve_home_battery(False, reason)
-            _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
+            if retry_already_pending:
+                _LOGGER.info(
+                    "Price-level charging: waiting for physical-start retry - %s",
+                    state.last_decision_reason,
+                )
+            else:
+                _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
             return False
 
         if vehicle_vin:

@@ -1478,7 +1478,20 @@ def _apply_wall_connector_observation(
     ]
 
     if (wc_charging or wc_power_kw > 0.05) and len(charging_vehicles) == 1:
-        update_vehicle(charging_vehicles[0])
+        charging_vehicle = charging_vehicles[0]
+        # A VIN-less Wall Connector record is only site telemetry.  It cannot
+        # establish that it belongs to this BLE-discovered vehicle, and the
+        # coordinator-wide refresh timestamp is not a source timestamp for
+        # the connector's power.  Keep a live BLE measurement authoritative
+        # rather than replacing it with a lower, ambiguously attributed value.
+        # Returning matched preserves the existing single-loadpoint accounting
+        # contract and avoids treating the same connector as an extra EV load.
+        if (
+            str(charging_vehicle.get("vehicle_id") or "").startswith("ble_")
+            and float(charging_vehicle.get("ev_power_kw") or 0.0) > 0.05
+        ):
+            return True
+        update_vehicle(charging_vehicle)
         return True
     if not charging_vehicles and wc_connected and len(connected_vehicles) == 1:
         update_vehicle(connected_vehicles[0])

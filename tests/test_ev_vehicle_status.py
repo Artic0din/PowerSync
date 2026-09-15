@@ -474,6 +474,46 @@ def test_ble_steady_power_uses_its_own_last_reported_timestamp():
     assert round(normalized["load_power"], 2) == 2.77
 
 
+def test_ble_power_is_not_replaced_by_vinless_wall_connector():
+    """Ticket #409: a connector-wide refresh cannot identify a BLE vehicle."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("binary_sensor.yf88_status", "on", last_updated=now),
+        _State("sensor.yf88_charging_state", "Charging", last_updated=now),
+        _State("binary_sensor.yf88_charge_flap", "on", last_updated=now),
+        _State(
+            "sensor.yf88_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "wall_connectors_raw": [{
+                "wall_connector_state": 2,
+                "wall_connector_power": 3000,
+            }],
+            "last_update": now + timedelta(seconds=1),
+        }
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": "yf88"},
+    )
+
+    vehicle = next(
+        item
+        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        if item["vehicle_id"] == "ble_yf88"
+    )
+
+    assert vehicle["ev_power_kw"] == 7.0
+    assert vehicle["is_charging"] is True
+
+
 def test_ble_metadata_does_not_refresh_stale_power_measurement():
     """Stale BLE watts are withheld consistently from every status surface."""
     power_sync = _power_sync_module()

@@ -2713,6 +2713,7 @@ def test_price_level_start_uses_vehicle_charger_config(fake_actions):
 def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(
     monkeypatch,
     fake_actions,
+    caplog,
 ):
     """A Tesla command acknowledgement is not a physical Price Level start."""
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=False)
@@ -2738,6 +2739,7 @@ def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(
     assert state.start_cooldown_until == clock[0] + 30
     assert "physical start was not confirmed" in state.last_decision_reason.lower()
 
+    caplog.clear()
     assert asyncio.run(
         executor._start_charging(
             "price_level_opportunity",
@@ -2746,6 +2748,8 @@ def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(
         )
     ) is False
     assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+    assert "retrying in 30s" in state.last_decision_reason
+    assert not any("Failed to start" in record.message for record in caplog.records)
 
     clock[0] += 31
     assert asyncio.run(
