@@ -1924,7 +1924,11 @@ def _resolve_ble_prefix_for_vehicle(
             resolved_prefixes,
         )
         return ""
-    explicitly_mapped_prefix = vehicle_ble_prefix(config, vehicle_vin)
+    explicitly_mapped_prefix = vehicle_ble_prefix(
+        config,
+        vehicle_vin,
+        resolved_prefixes=resolved_prefixes,
+    )
     if explicitly_mapped_prefix:
         return explicitly_mapped_prefix
 

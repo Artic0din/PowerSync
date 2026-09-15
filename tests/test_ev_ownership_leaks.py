@@ -532,6 +532,25 @@ def test_ble_only_multi_bridge_stale_vin_command_fails_closed():
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == ""
 
 
+def test_ble_only_vin_uses_single_discovered_prefix_over_display_config_value():
+    """A persisted display label must not replace the one safe BLE entity prefix."""
+    hass = _Hass(
+        [
+            _State("sensor.tesla_ble_charging_state", "Stopped"),
+            _State("switch.tesla_ble_charger", "off"),
+        ]
+    )
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "Tesla BLE",
+        },
+    )
+
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == "tesla_ble"
+
+
 def test_single_vehicle_command_uses_unambiguous_autodetected_ble_bridge(monkeypatch):
     monkeypatch.setattr(actions, "TESLA_EV_INTEGRATIONS", {"tesla_fleet"})
     monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)
