@@ -850,6 +850,47 @@ def test_tesla_ble_bridge_merges_with_associated_vehicle_not_fleet_only_sibling(
     )
 
 
+def test_active_ble_session_uses_canonical_fleet_loadpoint_after_bridge_merge():
+    """Ticket #56: an active BLE alias must not create a second EV row."""
+    vin = "5YJTEST0000000001"
+    loadpoints = build_loadpoint_status(
+        {
+            "ble_teslable": {
+                "active": True,
+                "vehicle_name": "Tesla BLE (teslable)",
+                "current_amps": 8,
+                "target_amps": 8,
+                "params": {"dynamic_mode": "solar_surplus"},
+            }
+        },
+        [
+            {
+                "vehicle_id": vin,
+                "vehicle_name": "PRIMARY EV",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "ble_teslable",
+                "bridge_vehicle_id": vin,
+                "vehicle_name": "Tesla BLE (teslable)",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "ev_soc": 78,
+                "is_connected": True,
+                "is_charging": False,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["PRIMARY EV"]
+    assert loadpoints[0]["loadpoint_id"] == vin
+    assert loadpoints[0]["soc"] == 78
+    assert loadpoints[0]["owner_mode"] == "solar_surplus"
+
+
 def test_explicit_bridge_does_not_hide_a_real_standalone_second_ble_vehicle():
     primary_vin = "5YJTEST0000000001"
     secondary_vin = "5YJTEST0000000002"

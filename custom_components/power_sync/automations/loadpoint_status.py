@@ -544,6 +544,20 @@ def _explicit_bridge_vehicle_id(observation: Mapping[str, Any]) -> str:
     return ""
 
 
+def _observation_aliases(observation: Mapping[str, Any]) -> set[str]:
+    """Return identifiers that may refer to the same normalized observation."""
+    aliases = {
+        _normal_key(observation.get(field))
+        for field in ("vehicle_id", "charger_id", "vin")
+    }
+    aliases.update(
+        _normal_key(value)
+        for value in (observation.get("_source_vehicle_ids") or ())
+    )
+    aliases.discard("")
+    return aliases
+
+
 def _observation_matches_vehicle_id(
     observation: Mapping[str, Any],
     vehicle_id: str,
@@ -591,6 +605,21 @@ def _merge_explicit_ble_bridges(
         target_index = candidates[0]
         target = dict(merged[target_index])
         _merge_observation_status(target, observation)
+        # The physical Fleet identity remains the public loadpoint ID, but an
+        # active BLE session is still keyed by its configured prefix. Preserve
+        # that source alias so status can attach the live session to the one
+        # canonical vehicle instead of rendering a second BLE-only row.
+        source_ids = set(target.get("_source_vehicle_ids") or ())
+        source_ids.update(
+            value
+            for value in (
+                observation.get("vehicle_id"),
+                observation.get("charger_id"),
+            )
+            if value
+        )
+        if source_ids:
+            target["_source_vehicle_ids"] = tuple(sorted(source_ids))
         merged[target_index] = target
         matched_ble_indexes.add(ble_index)
 
@@ -900,10 +929,7 @@ def _find_observation(
     for index, observation in enumerate(observations):
         if index in used_indexes:
             continue
-        observed_keys = {
-            _normal_key(observation.get("vehicle_id")),
-            _normal_key(observation.get("charger_id")),
-            _normal_key(observation.get("vin")),
+        observed_keys = _observation_aliases(observation) | {
             _normal_key(observation.get("vehicle_name")),
             _normal_key(observation.get("name")),
         }
@@ -987,7 +1013,11 @@ def _dynamic_loadpoint(
     )
     loadpoint_id = vehicle_id
     observation_vehicle_id = None
-    if observation is not None and _is_default_loadpoint(vehicle_id, vehicle_name):
+    use_observation_identity = observation is not None and (
+        _is_default_loadpoint(vehicle_id, vehicle_name)
+        or _normal_key(vehicle_id) in _observation_aliases(observation)
+    )
+    if use_observation_identity:
         observation_vehicle_id = (
             observation.get("vehicle_id")
             or observation.get("charger_id")
