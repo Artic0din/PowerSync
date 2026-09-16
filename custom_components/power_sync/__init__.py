@@ -1633,12 +1633,12 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
 
     fleet_vehicle_ids = list(dict.fromkeys(fleet_vehicle_ids))
     fleet_site_presence = {
-        vehicle_key: _latest_ev_site_presence(observations)[0]
+        vehicle_key: _latest_ev_site_presence(observations)
         for vehicle_key, observations in fleet_site_presence_observations.items()
     }
     away_fleet_vehicle_ids = {
         vehicle_key
-        for vehicle_key, site_presence in fleet_site_presence.items()
+        for vehicle_key, (site_presence, _) in fleet_site_presence.items()
         if site_presence == "away"
     }
 
@@ -1653,11 +1653,6 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         if ev_provider == EV_PROVIDER_BOTH
         else {}
     )
-    away_ble_prefixes = {
-        prefix
-        for prefix, vehicle_id in paired_ble_prefixes.items()
-        if _vehicle_identity_key(vehicle_id) in away_fleet_vehicle_ids
-    }
 
     generic_observation = _generic_charger_observation_from_config(hass, config)
     if generic_observation:
@@ -1683,15 +1678,31 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         # Only trust power sensor if vehicle is actually charging
         # Reject stale "Charging" state when SoC is 100% (BLE doesn't always update promptly)
         ble_charging_state = get_tesla_ble_charging_state(hass, prefix)
+        ble_state = get_tesla_ble_charge_power_state(hass, prefix)
+        ble_presence_observed_at = _latest_ev_observed_at(
+            getattr(ble_charging_state, "last_updated", None),
+            _ev_power_observed_at(ble_state),
+        )
+        fleet_presence, fleet_presence_observed_at = fleet_site_presence.get(
+            _vehicle_identity_key(paired_ble_prefixes.get(prefix)),
+            (None, None),
+        )
+        fleet_away_is_newer = (
+            fleet_presence == "away"
+            and (
+                ble_presence_observed_at is None
+                or fleet_presence_observed_at is None
+                or fleet_presence_observed_at >= ble_presence_observed_at
+            )
+        )
         is_ble_charging = (
             ble_charging_state
             and ble_charging_state.state not in ("unknown", "unavailable")
             and ble_charging_state.state.lower() == "charging"
             and (ble_soc_value is None or ble_soc_value < 100)
-            and prefix not in away_ble_prefixes
+            and not fleet_away_is_newer
         )
 
-        ble_state = get_tesla_ble_charge_power_state(hass, prefix)
         if is_ble_charging and ble_state and ble_state.state not in ("unknown", "unavailable"):
             val = _kw_from_power_state(ble_state)
             if val > 0:
@@ -2189,6 +2200,18 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         for vehicle in vehicles
         if vehicle.get("site_presence") == "away"
     }
+    fleet_presence_by_vehicle_id = {}
+    for vehicle in vehicles:
+        vehicle_key = _vehicle_identity_key(vehicle.get("vehicle_id"))
+        if not vehicle_key:
+            continue
+        fleet_presence_by_vehicle_id[vehicle_key] = _latest_ev_site_presence((
+            fleet_presence_by_vehicle_id.get(vehicle_key, (None, None)),
+            (
+                vehicle.get("site_presence"),
+                vehicle.get("_site_presence_observed_at"),
+            ),
+        ))
     for prefix in ble_prefixes:
         ble_vehicle_id = f"ble_{prefix}"
         # Synthetic BLE IDs are complete identities, not embedded VIN payloads.
@@ -2314,17 +2337,35 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             except (ValueError, TypeError):
                 pass
 
+        # A plugged or charging BLE observation is local-site evidence.  Keep
+        # its timestamp so a stale Fleet-away location cannot pre-zero this
+        # physical load before the two providers are reconciled below.
+        ble_site_presence = None
+        ble_presence_observed_at = None
+        if is_connected and ble_connected_observed_at is not None:
+            ble_site_presence = "home"
+            ble_presence_observed_at = ble_connected_observed_at
+
         bridge_vehicle_id = paired_prefixes.get(prefix)
         if (
             bridge_vehicle_id
             and _vehicle_identity_key(bridge_vehicle_id)
             in away_fleet_vehicle_ids
         ):
-            # The BLE bridge may still report charge power from a remote
-            # charger.  Preserve its identity/SOC merge but exclude that
-            # physical draw from the home site.
-            ev_power_kw = 0.0
-            is_connected = False
+            _, fleet_presence_observed_at = fleet_presence_by_vehicle_id.get(
+                _vehicle_identity_key(bridge_vehicle_id),
+                ("away", None),
+            )
+            if (
+                ble_presence_observed_at is None
+                or fleet_presence_observed_at is None
+                or fleet_presence_observed_at >= ble_presence_observed_at
+            ):
+                # The BLE bridge may still report charge power from a remote
+                # charger. Preserve its identity/SOC merge but exclude that
+                # physical draw when Fleet-away evidence is at least as new.
+                ev_power_kw = 0.0
+                is_connected = False
 
         soc_state = get_tesla_ble_battery_state(hass, prefix)
         if soc_state and soc_state.state not in ("unknown", "unavailable"):
@@ -2372,9 +2413,17 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         }
         if current_amps is not None:
             ble_observation["current_amps"] = current_amps
+        if ble_site_presence is not None:
+            ble_observation["site_presence"] = ble_site_presence
+            ble_observation["_site_presence_observed_at"] = (
+                ble_presence_observed_at
+            )
         if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id:
             ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
-            if _vehicle_identity_key(bridge_vehicle_id) in away_fleet_vehicle_ids:
+            if (
+                _vehicle_identity_key(bridge_vehicle_id) in away_fleet_vehicle_ids
+                and ble_site_presence != "home"
+            ):
                 ble_observation["site_presence"] = "away"
         vehicles.append(ble_observation)
 

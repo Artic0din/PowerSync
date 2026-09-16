@@ -378,6 +378,98 @@ def test_named_zone_also_excludes_paired_ble_bridge_power():
     }
 
 
+def test_newer_paired_ble_home_presence_overrides_stale_fleet_away():
+    """Ticket #56: stale Fleet location cannot erase current BLE site power."""
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=5)
+    states = [
+        _State("sensor.primary_ev_charger_power", "0.0", last_updated=stale),
+        _State("sensor.primary_ev_charging_state", "disconnected", last_updated=stale),
+        _State("binary_sensor.primary_ev_charge_cable", "off", last_updated=stale),
+        _State("device_tracker.primary_ev_location", "away", last_updated=stale),
+        _State("sensor.primary_ev_battery_level", "86", last_updated=stale),
+        _State("binary_sensor.home_ble_status", "on", last_updated=now),
+        _State("sensor.home_ble_charging_state", "Charging", last_updated=now),
+        _State("binary_sensor.home_ble_charge_flap", "on", last_updated=now),
+        _State(
+            "sensor.home_ble_charge_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+        _State("sensor.home_ble_charge_level", "86", last_updated=now),
+    ]
+    hass = _tesla_hass(states)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": "home_ble",
+            "tesla_ble_vehicle_mapping": f"{vin}=home_ble",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["vehicle_id"] == vin
+    assert vehicles[0]["ev_power_kw"] == 2.0
+    assert vehicles[0]["is_connected"] is True
+    assert vehicles[0]["is_charging"] is True
+    assert vehicles[0]["site_presence"] == "home"
+    assert power_sync._get_ev_vehicle_status(hass, entry) == {
+        "ev_power_kw": 2.0,
+        "ev_soc": 86,
+    }
+
+
+def test_newer_fleet_away_presence_still_excludes_paired_ble_power():
+    """Ticket #56: current remote-location evidence remains fail-closed."""
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=5)
+    states = [
+        _State("sensor.primary_ev_charger_power", "0.0", last_updated=now),
+        _State("sensor.primary_ev_charging_state", "disconnected", last_updated=now),
+        _State("binary_sensor.primary_ev_charge_cable", "off", last_updated=now),
+        _State("device_tracker.primary_ev_location", "away", last_updated=now),
+        _State("sensor.primary_ev_battery_level", "86", last_updated=now),
+        _State("binary_sensor.remote_ble_status", "on", last_updated=stale),
+        _State("sensor.remote_ble_charging_state", "Charging", last_updated=stale),
+        _State("binary_sensor.remote_ble_charge_flap", "on", last_updated=stale),
+        _State(
+            "sensor.remote_ble_charge_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale,
+        ),
+        _State("sensor.remote_ble_charge_level", "86", last_updated=stale),
+    ]
+    hass = _tesla_hass(states)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": "remote_ble",
+            "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["ev_power_kw"] == 0.0
+    assert vehicles[0]["is_connected"] is False
+    assert vehicles[0]["is_charging"] is False
+    assert vehicles[0]["site_presence"] == "away"
+    assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 0.0
+
+
 def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
     """A stale Fleet tracker cannot claim an unrelated BLE-only vehicle."""
     power_sync = _power_sync_module()
