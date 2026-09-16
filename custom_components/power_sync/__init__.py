@@ -1915,8 +1915,16 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     vehicles = []
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
+    config = {**entry.data, **entry.options}
+    ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
     for device in iter_device_entries(device_registry):
+        # A BLE-only configuration deliberately selects the local bridge as
+        # its single source of truth.  Retained Tesla Fleet registry devices
+        # must not become a second status/aggregation source merely because
+        # their entities still exist in Home Assistant.
+        if ev_provider == EV_PROVIDER_TESLA_BLE:
+            continue
         is_tesla_vehicle = False
         vehicle_id = None
         for identifier in device.identifiers:
@@ -2139,7 +2147,6 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     # Supplement BLE-only vehicles. The BLE switch entity exists even when a
     # vehicle is away/asleep, so derive connection from charge_flap, charging
     # state, or measured charge power instead of switch existence.
-    config = {**entry.data, **entry.options}
     generic_observation = _generic_charger_observation_from_config(hass, config)
     generic_device_ids: set[str] = set()
     if generic_observation:
@@ -2184,7 +2191,6 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             generic_vehicle["_source_device_ids"] = generic_device_ids
         vehicles.append(generic_vehicle)
 
-    ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     ble_prefixes = _resolve_ble_prefixes(hass, config)
     paired_prefixes = (
         ble_prefix_vehicle_pairs(

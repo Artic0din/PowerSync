@@ -566,6 +566,64 @@ def test_ble_steady_power_uses_its_own_last_reported_timestamp():
     assert round(normalized["load_power"], 2) == 2.77
 
 
+def test_ble_only_provider_excludes_residual_fleet_registry_observation():
+    """Ticket #56: BLE-only status must not absorb charging into Home Load."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    vin = "5YJTEST0000000001"
+    states = [
+        _State("sensor.primary_ev_charger_power", "0", {"unit_of_measurement": "kW"}, now),
+        _State("sensor.primary_ev_charging_state", "disconnected", last_updated=now),
+        _State("device_tracker.primary_ev_location", "away", last_updated=now),
+        _State("binary_sensor.ble_status", "on", last_updated=now),
+        _State("sensor.ble_charging_state", "Charging", last_updated=now),
+        _State("binary_sensor.ble_charge_flap", "on", last_updated=now),
+        _State("sensor.ble_charge_power", "3.84", {"unit_of_measurement": "kW"}, now),
+        _State("sensor.ble_charge_level", "72", last_updated=now),
+    ]
+    hass = _tesla_hass(states)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+            "tesla_ble_entity_prefix": "ble",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert len(vehicles) == 1
+    vehicle = vehicles[0]
+    assert vehicle["vehicle_id"] == "ble_ble"
+    assert vehicle["vehicle_name"] == "Tesla BLE (ble)"
+    assert vehicle["ev_power_kw"] == 3.84
+    assert vehicle["ev_soc"] == 72
+    assert vehicle["is_connected"] is True
+    assert vehicle["is_charging"] is True
+    assert vehicle["power_available"] is True
+
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                physical_load_key="vehicle:ble_ble",
+                source_key="ble_ble",
+                power_kw=vehicle["ev_power_kw"],
+                observed_at=vehicle["_observed_at"],
+                active=vehicle["is_charging"],
+            )
+        ],
+        at=now,
+    )
+    normalized = ev_load.normalize_energy_data(
+        {"load_power": 5.30}, battery_system="sungrow", ev_load=snapshot, at=now
+    )
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert snapshot.power_kw == 3.84
+    assert round(normalized["load_power"], 2) == 1.46
+
+
 def test_ble_power_is_not_replaced_by_vinless_wall_connector():
     """Ticket #409: a connector-wide refresh cannot identify a BLE vehicle."""
     power_sync = _power_sync_module()
