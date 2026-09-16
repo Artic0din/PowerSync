@@ -11300,6 +11300,88 @@ def test_ble_number_commands_do_not_send_after_failed_wake(monkeypatch, kind):
     assert hass.services.calls == []
 
 
+def test_ble_rate_update_uses_fresh_charging_telemetry_without_wake(monkeypatch):
+    """Ticket #56: an already-charging BLE vehicle must reach the amps write."""
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "11", {"min": 1, "max": 32}),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State(
+            "sensor.car_charge_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+    ])
+
+    async def must_not_wake(*args, **kwargs):
+        raise AssertionError("fresh charging telemetry should bypass the wake gate")
+
+    async def write(domain, service, data, **kwargs):
+        assert (domain, service, data) == (
+            "number",
+            "set_value",
+            {"entity_id": "number.car_charging_amps", "value": 13},
+        )
+        hass.states._states["number.car_charging_amps"] = _State(
+            "number.car_charging_amps", "13", last_updated=datetime.now(timezone.utc)
+        )
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_wake)
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    hass.services.async_call = write
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is True
+
+
+def test_ble_rate_update_does_not_use_stale_charging_telemetry(monkeypatch):
+    """The rate-only exception retains fresh, vehicle-originated safeguards."""
+    stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+    hass = _Hass([
+        _State("number.car_charging_amps", "11", {"min": 1, "max": 32}),
+        _State("sensor.car_charging_state", "Charging", last_updated=stale),
+        _State(
+            "sensor.car_charge_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale,
+        ),
+    ])
+    wake_calls = []
+
+    async def failed_wake(*args, **kwargs):
+        wake_calls.append(args[1])
+        return False
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", failed_wake)
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is False
+    assert wake_calls == ["car"]
+    assert hass.services.calls == []
+
+
+def test_ble_rate_update_does_not_use_unpowered_charging_telemetry(monkeypatch):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "11", {"min": 1, "max": 32}),
+        _State("sensor.car_charging_state", "Charging", last_updated=now),
+        _State(
+            "sensor.car_charge_power",
+            "0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+    ])
+
+    async def failed_wake(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", failed_wake)
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is False
+    assert hass.services.calls == []
+
+
 @pytest.mark.parametrize("kind", ["amps", "limit"])
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_ble_number_command_requires_matching_readback(monkeypatch, kind, confirmed):

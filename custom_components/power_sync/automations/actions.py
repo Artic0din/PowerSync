@@ -2208,6 +2208,58 @@ async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: in
         return False
 
 
+def _ble_rate_update_has_fresh_charging_evidence(
+    hass: HomeAssistant, ble_prefix: str
+) -> bool:
+    """Whether vehicle-originated telemetry proves a BLE rate update is safe.
+
+    This deliberately applies only to an already-charging rate adjustment.  A
+    start, stop, or charge-limit request still needs the normal explicit wake
+    acknowledgement.  The current/power corroboration prevents a writable
+    entity, bridge status, or stale ``Charging`` state from standing in for the
+    vehicle itself.
+    """
+    freshness_cutoff = datetime.now(dt_timezone.utc) - timedelta(
+        seconds=_TESLA_BLE_WAKE_FRESHNESS_SECONDS
+    )
+    charging_states = (
+        TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+        TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+    )
+    if not any(
+        (state := hass.states.get(entity_id))
+        and str(state.state).strip().lower() == "charging"
+        and _ble_state_observed_after(state, freshness_cutoff)
+        for entity_id in charging_states
+    ):
+        return False
+
+    from ..tesla_ble import (
+        get_tesla_ble_charge_current_state,
+        get_tesla_ble_charge_power_state,
+    )
+
+    current = get_tesla_ble_charge_current_state(hass, ble_prefix)
+    power = get_tesla_ble_charge_power_state(hass, ble_prefix)
+    for measured, minimum in ((current, 0.1), (power, 50.0)):
+        if measured is None or not _ble_state_observed_after(
+            measured, freshness_cutoff
+        ):
+            continue
+        try:
+            value = float(measured.state)
+            if (
+                measured is power
+                and measured.attributes.get("unit_of_measurement") == "kW"
+            ):
+                value *= 1000
+            if math.isfinite(value) and value >= minimum:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Optional[bool]:
     """Return True if confirmed, False before dispatch, None if unconfirmed."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -2347,7 +2399,9 @@ async def _set_ev_charging_amps_ble(
 
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(hass, ble_prefix):
+        if not _ble_rate_update_has_fresh_charging_evidence(
+            hass, ble_prefix
+        ) and not await _wake_tesla_ble(hass, ble_prefix):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
