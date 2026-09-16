@@ -2063,6 +2063,19 @@ class PriceForecaster:
             if amber_forecast:
                 return amber_forecast
 
+        # EPEX is a dynamic retail-price provider. A generic Australian TOU
+        # estimate is not a safe substitute: it can authorise a grid window
+        # precisely when the site's real EPEX price is at its peak.
+        elif electricity_provider == "epex":
+            epex_forecast = self._get_optimizer_price_forecast(hours)
+            if epex_forecast:
+                return epex_forecast
+            _LOGGER.warning(
+                "EV price forecast: EPEX optimizer price coverage is unavailable; "
+                "Smart Schedule will not create a grid-price plan"
+            )
+            return []
+
         # Globird/AEMO VPP: use the user's tariff schedule for normal prices.
         # AEMO VPP adds spike detection on top; it is not an AEMO spot-price feed.
         elif electricity_provider in ("agl", "globird", "aemo_vpp"):
@@ -2095,6 +2108,81 @@ class PriceForecaster:
             electricity_provider,
         )
         return await self._estimate_tou_prices(hours)
+
+    def _get_optimizer_price_forecast(
+        self, hours: int
+    ) -> Optional[List[PriceForecast]]:
+        """Return real, timestamp-aligned optimizer import prices.
+
+        The optimizer owns the normalized retail EPEX schedule in dollars per
+        kWh. Do not pad a short prefix or invent a replacement curve: an absent
+        real interval must remain unavailable to Smart Schedule.
+        """
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id, {}
+        )
+        coordinator = entry_data.get("optimization_coordinator")
+        if getattr(coordinator, "last_update_success", None) is False:
+            return None
+        data = getattr(coordinator, "data", None)
+        if not isinstance(data, dict) or data.get("optimization_status") == "stale":
+            return None
+        schedule = data.get("schedule")
+        if not isinstance(schedule, dict):
+            return None
+        timestamps = schedule.get("timestamps")
+        import_prices = schedule.get("import_price")
+        export_prices = schedule.get("export_price")
+        if (
+            not isinstance(timestamps, (list, tuple))
+            or not isinstance(import_prices, (list, tuple))
+            or not timestamps
+            or not import_prices
+            or len(import_prices) > len(timestamps)
+        ):
+            return None
+
+        forecasts: List[PriceForecast] = []
+        previous: Optional[datetime] = None
+        now = _ha_local_now_naive()
+        horizon_end = now + timedelta(hours=hours)
+        for index, raw_timestamp in enumerate(timestamps[: len(import_prices)]):
+            try:
+                timestamp = _as_ha_local_naive(
+                    datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+                )
+                import_cents = float(import_prices[index]) * 100.0
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not math.isfinite(import_cents)
+                or previous is not None and timestamp <= previous
+            ):
+                return None
+            previous = timestamp
+            # Keep the active interval even when it began before ``now``: the
+            # planner bounds it to the remaining fraction of the slot. Older
+            # elapsed intervals are subsequently discarded by that same
+            # bounded-window check.
+            if timestamp >= horizon_end:
+                continue
+            export_cents = 0.0
+            if isinstance(export_prices, (list, tuple)) and index < len(export_prices):
+                try:
+                    export_cents = float(export_prices[index]) * 100.0
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not math.isfinite(export_cents):
+                    return None
+            forecasts.append(
+                PriceForecast(
+                    hour=timestamp.isoformat(),
+                    import_cents=import_cents,
+                    export_cents=export_cents,
+                    period="epex",
+                )
+            )
+        return forecasts or None
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
         """Get forecast from Amber coordinator data."""
@@ -3883,7 +3971,7 @@ class ChargingPlanner:
         vehicle_id: str,
         plan: ChargingPlan,
         current_surplus_kw: float,
-        current_price_cents: float,
+        current_price_cents: Optional[float],
         battery_soc: float,
         current_export_price_cents: Optional[float] = None,
         min_battery_soc: int = DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
@@ -4044,6 +4132,9 @@ class ChargingPlanner:
         # Keep free planned windows in the comparison.  Dropping zero prices
         # makes an all-free plan look like a default 30c plan, which can start
         # opportunistic paid charging before the planned free period.
+        if current_price_cents is None:
+            return False, "Current retail price unavailable", "waiting"
+
         if plan.windows:
             planned_prices = [w.price_cents_kwh for w in plan.windows]
             min_planned_price = min(planned_prices)
@@ -6859,14 +6950,13 @@ class AutoScheduleExecutor:
 
         self._sync_inactive_smart_schedule_preserve_intent()
 
-    async def _get_current_price(self) -> float:
+    async def _get_current_price(self) -> Optional[float]:
         """Get current import price from available sources (provider-aware).
 
         Uses real-time TOU calculation for custom/Tesla tariffs to ensure prices
         update when TOU periods change throughout the day.
         """
         from ..const import DOMAIN, CONF_ELECTRICITY_PROVIDER
-        from ..__init__ import get_current_price_from_tariff_schedule
 
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
@@ -6887,10 +6977,20 @@ class AutoScheduleExecutor:
                             # perKwh is in cents for Amber
                             return price.get("perKwh", 30.0)
 
+            elif electricity_provider == "epex":
+                from .ev_pricing import get_current_retail_price
+
+                return get_current_retail_price(
+                    self.hass,
+                    self.config_entry.entry_id,
+                )
+
             elif electricity_provider in ("agl", "globird", "aemo_vpp"):
                 # Static providers: use real-time calculation from tariff schedule.
                 tariff_schedule = entry_data.get("tariff_schedule", {})
                 if tariff_schedule:
+                    from ..__init__ import get_current_price_from_tariff_schedule
+
                     # Use real-time TOU calculation if TOU periods are defined
                     if tariff_schedule.get("tou_periods"):
                         buy_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
@@ -6904,6 +7004,8 @@ class AutoScheduleExecutor:
             # Fallback: Try tariff schedule with TOU calculation for any provider
             tariff_schedule = entry_data.get("tariff_schedule", {})
             if tariff_schedule:
+                from ..__init__ import get_current_price_from_tariff_schedule
+
                 # Real-time TOU calculation
                 if tariff_schedule.get("tou_periods"):
                     buy_cents, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
@@ -6941,6 +7043,8 @@ class AutoScheduleExecutor:
 
         except Exception as e:
             _LOGGER.debug(f"Failed to get current price: {e}")
+            if locals().get("electricity_provider") == "epex":
+                return None
             return 25.0  # Default shoulder rate
 
     def _is_sigenergy_system(self) -> bool:

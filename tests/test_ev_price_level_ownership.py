@@ -7624,3 +7624,64 @@ def test_price_forecast_uses_the_configured_tariff_for_custom_tou(monkeypatch):
     # off-peak window is cheaper than now, so the car belongs in it.
     assert min(by_hour.values()) == 8.5
     assert by_hour[9] < by_hour[6]
+
+
+def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypatch):
+    """A high current EPEX price must not become a synthetic 15c off-peak."""
+    now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        data={
+            "schedule": {
+                "timestamps": [
+                    "2026-09-16T21:00:00+00:00",
+                    "2026-09-16T21:30:00+00:00",
+                    "2026-09-16T22:00:00+00:00",
+                ],
+                "import_price": [1.9728, 0.15, 0.12],
+                "export_price": [0.0, 0.0, 0.0],
+            }
+        }
+    )
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+
+    forecast = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+
+    assert [item.import_cents for item in forecast] == [197.28, 15.0, 12.0]
+    assert all(item.period == "epex" for item in forecast)
+
+
+def test_epex_without_real_optimizer_coverage_does_not_use_generic_tou():
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+
+    forecast = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+
+    assert forecast == []
+
+
+def test_epex_current_price_uses_the_active_optimizer_slot(monkeypatch):
+    now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        data={
+            "schedule": {
+                "timestamps": [
+                    "2026-09-16T21:00:00+00:00",
+                    "2026-09-16T21:30:00+00:00",
+                ],
+                "import_price": [1.9728, 0.15],
+            }
+        }
+    )
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "epex"}
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+
+    assert asyncio.run(executor._get_current_price()) == 197.28
