@@ -105,6 +105,7 @@ def _reset_ev_action_module_state():
     mutable_state = (
         actions._dynamic_ev_state,
         actions._dynamic_ev_update_locks,
+        actions._dynamic_ev_solar_update_locks,
         actions._phase_load_management_locks,
         actions._phase_load_management_targets,
         actions._ev_wake_lock,
@@ -11481,6 +11482,47 @@ def test_failed_ble_wake_cooldown_is_bridge_scoped():
         ("button", "press", {"entity_id": "button.car_wake_up"}),
         ("button", "press", {"entity_id": "button.other_wake_up"}),
     ]
+
+
+def test_solar_surplus_update_serializes_same_vehicle_callbacks(monkeypatch):
+    hass = _Hass([])
+    actions._dynamic_ev_state["entry-1"] = {
+        "ble_car": {"active": True, "params": {"dynamic_mode": "solar_surplus"}}
+    }
+    first_entered = asyncio.Event()
+    allow_first_to_finish = asyncio.Event()
+    active = 0
+    maximum_active = 0
+    calls = 0
+
+    async def slow_surplus(*_args):
+        nonlocal active, maximum_active, calls
+        calls += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if calls == 1:
+            first_entered.set()
+            await allow_first_to_finish.wait()
+        active -= 1
+
+    monkeypatch.setattr(actions, "_dynamic_ev_update_surplus", slow_surplus)
+
+    async def check():
+        first = asyncio.create_task(
+            actions._dynamic_ev_update(hass, _Entry(), "entry-1", "ble_car")
+        )
+        await first_entered.wait()
+        second = asyncio.create_task(
+            actions._dynamic_ev_update(hass, _Entry(), "entry-1", "ble_car")
+        )
+        await asyncio.sleep(0)
+        assert calls == 1
+        allow_first_to_finish.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(check())
+    assert calls == 2
+    assert maximum_active == 1
 
 
 def test_tesla_entity_lookup_ignores_disabled_provider_entities():

@@ -5682,6 +5682,7 @@ _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
 _dynamic_ev_update_locks: Dict[str, asyncio.Lock] = {}
+_dynamic_ev_solar_update_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -5735,6 +5736,9 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
     _dynamic_ev_state.pop(entry_id, None)
     _smart_schedule_effective_authorizations.pop(entry_id, None)
     _dynamic_ev_update_locks.pop(entry_id, None)
+    for lock_key in tuple(_dynamic_ev_solar_update_locks):
+        if lock_key.startswith(f"{entry_id}:"):
+            _dynamic_ev_solar_update_locks.pop(lock_key, None)
     _phase_load_management_locks.pop(entry_id, None)
     _phase_load_management_targets.pop(entry_id, None)
 
@@ -11058,7 +11062,16 @@ async def _dynamic_ev_update(
     # Check which mode we're in
     mode = params.get("dynamic_mode", "battery_target")
     if mode == "solar_surplus":
-        await _dynamic_ev_update_surplus(hass, config_entry, entry_id, vehicle_id)
+        # BLE Solar Surplus ticks run every 10 seconds, but a wake/readback can
+        # take longer.  Keep one physical vehicle's decision-to-command path
+        # single-flight so a later tick cannot duplicate a wake or current
+        # attempt while the previous one is still awaiting confirmation.
+        lock_key = f"{entry_id}:{vehicle_id}"
+        update_lock = _dynamic_ev_solar_update_locks.setdefault(lock_key, asyncio.Lock())
+        async with update_lock:
+            if not _session_is_current():
+                return
+            await _dynamic_ev_update_surplus(hass, config_entry, entry_id, vehicle_id)
         return
 
     if await _release_dynamic_tesla_if_away(
