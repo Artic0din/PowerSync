@@ -59,7 +59,11 @@ def display_snapshot_to_sensor_data(snapshot: dict[str, Any]) -> dict[str, Any]:
     site = snapshot.get("site") or {}
     active = active_display_loadpoint(snapshot)
     data: dict[str, Any] = {
-        "ev_power_kw": _optional_float_value(site.get("ev_power_kw")),
+        # This sensor also carries one selected vehicle's name and SOC for the
+        # Energy Flow card. Keep its power on that same loadpoint scope rather
+        # than labelling a site-wide total as one vehicle when several rows are
+        # active. The canonical snapshot retains the explicit site aggregate.
+        "ev_power_kw": None,
         "vehicle_count": len(loadpoints),
         "loadpoint_count": len(loadpoints),
         "observation_quality": site.get("observation_quality"),
@@ -69,6 +73,7 @@ def display_snapshot_to_sensor_data(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     data.update(
         {
+            "ev_power_kw": _optional_float_value(active.get("current_power_kw")),
             "vehicle_id": active.get("vehicle_id") or active.get("loadpoint_id"),
             "vehicle_name": active.get("vehicle_name") or "EV",
             "ev_soc": active.get("soc"),

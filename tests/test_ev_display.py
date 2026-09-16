@@ -91,6 +91,30 @@ def test_sensor_and_widgets_project_the_same_active_vehicle() -> None:
     assert sensor["observation_quality"] == "complete"
 
 
+def test_sensor_keeps_power_name_and_soc_on_one_active_loadpoint() -> None:
+    snapshot = _two_vehicle_snapshot()
+    snapshot["site"]["ev_power_kw"] = 2.7
+    snapshot["loadpoints"][1]["current_power_kw"] = 1.68
+    snapshot["loadpoints"].append(
+        {
+            "loadpoint_id": "second-active-id",
+            "vehicle_id": "second-active-vin",
+            "vehicle_name": "Second EV",
+            "connected": True,
+            "actual_charging": True,
+            "status": "charging",
+            "current_power_kw": 1.02,
+            "soc": 64,
+        }
+    )
+
+    sensor = display_snapshot_to_sensor_data(snapshot)
+
+    assert sensor["vehicle_name"] == "W3RT1E"
+    assert sensor["ev_power_kw"] == 1.68
+    assert sensor["ev_soc"] == 78
+
+
 def test_auxiliary_power_does_not_override_canonical_idle_state() -> None:
     snapshot = {
         "site": {

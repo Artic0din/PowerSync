@@ -2287,6 +2287,7 @@ def fake_actions(monkeypatch):
     actions = types.ModuleType("power_sync.automations.actions")
     actions.DEFAULT_VEHICLE_ID = "_default"
     actions._dynamic_ev_state = {}
+    actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
 
     async def resolve_max_grid_import_kw(hass, config_entry, params=None):
         explicit = (params or {}).get("max_grid_import_kw")
@@ -7340,6 +7341,36 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     )
 
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
+
+
+def test_solar_surplus_skips_complete_tesla_before_opening_a_session(
+    monkeypatch, fake_actions
+):
+    complete_vin = "LRWYHCEKXTC687964"
+    eligible_vin = "XP7YGCEL7NB001704"
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        return vehicle_vin in {complete_vin, eligible_vin}
+
+    fake_actions._is_vehicle_charge_complete = AsyncMock(
+        side_effect=lambda _hass, vin: vin == complete_vin
+    )
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+
+    selected = asyncio.run(
+        ev_planner.get_solar_surplus_start_configs(
+            _FakeHass(),
+            _FakeConfigEntry(),
+            [
+                {"vehicle_id": complete_vin, "display_name": "Complete", "priority": 1},
+                {"vehicle_id": eligible_vin, "display_name": "Ready", "priority": 2},
+            ],
+            set(),
+            allow_parallel=False,
+        )
+    )
+
+    assert [config["vehicle_id"] for config in selected] == [eligible_vin]
 
 
 def test_solar_surplus_skips_away_vehicle_even_when_remote_charge_looks_plugged(

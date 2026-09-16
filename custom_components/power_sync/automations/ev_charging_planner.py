@@ -8808,6 +8808,18 @@ async def get_solar_surplus_start_configs(
             vehicle_vin=vehicle_id,
         ):
             continue
+        if vehicle_id and config.get("charger_type", "tesla") == "tesla":
+            # Reject a complete vehicle before a zero-amp dynamic session,
+            # ownership lease, history record, or notification can be opened.
+            # The later timer guard remains necessary for completion races.
+            from .actions import _is_vehicle_charge_complete
+
+            if await _is_vehicle_charge_complete(hass, vehicle_id):
+                _LOGGER.debug(
+                    "Solar surplus skipping %s because charging is complete",
+                    config.get("display_name") or vehicle_id,
+                )
+                continue
         configs_to_start.append(config)
         if not allow_parallel:
             break
