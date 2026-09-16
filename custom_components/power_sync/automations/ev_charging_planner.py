@@ -6341,6 +6341,27 @@ class AutoScheduleExecutor:
         # as stop and 1A as their lowest positive command, while missing or
         # invalid bounds retain the conservative 5A fallback.
         if should_charge and source == "solar_surplus":
+            def _use_deadline_grid_fallback() -> bool:
+                """Keep a permitted deadline from becoming solar-only at runtime."""
+                nonlocal source, reason
+                if (
+                    not is_time_critical
+                    or effective_limit_grid
+                    or self.planner._is_grid_charging_blocked_at(dt_util.now())
+                ):
+                    return False
+                source = "grid_deadline_fallback"
+                reason = (
+                    "Deadline solar forecast unavailable; using permitted grid "
+                    "fallback"
+                )
+                _LOGGER.info(
+                    "Auto-schedule: deadline solar window for %s lost live surplus; "
+                    "using permitted grid fallback",
+                    vehicle_id,
+                )
+                return True
+
             # Smart Schedule owns the home-battery start floor here. Solar
             # surplus settings still provide parallel-charge reserve behavior.
             solar_config = await self._get_solar_surplus_config()
@@ -6370,24 +6391,26 @@ class AutoScheduleExecutor:
                             f"battery reserve {max_battery_charge_kw:.1f}kW"
                         )
                     else:
-                        should_charge = False
-                        reason = (
-                            f"Strict solar surplus {ev_surplus_kw:.1f}kW < min {min_surplus:.1f}kW "
-                            f"(total {current_surplus_kw:.1f}kW - battery reserve {max_battery_charge_kw:.1f}kW)"
-                        )
+                        if not _use_deadline_grid_fallback():
+                            should_charge = False
+                            reason = (
+                                f"Strict solar surplus {ev_surplus_kw:.1f}kW < min {min_surplus:.1f}kW "
+                                f"(total {current_surplus_kw:.1f}kW - battery reserve {max_battery_charge_kw:.1f}kW)"
+                            )
                 else:
-                    should_charge = False
-                    if allow_parallel:
-                        reason = (
-                            f"Battery {battery_soc:.0f}% < {min_battery_for_ev}%, "
-                            f"surplus {current_surplus_kw:.1f}kW <= battery reserve {max_battery_charge_kw:.1f}kW"
+                    if not _use_deadline_grid_fallback():
+                        should_charge = False
+                        if allow_parallel:
+                            reason = (
+                                f"Battery {battery_soc:.0f}% < {min_battery_for_ev}%, "
+                                f"surplus {current_surplus_kw:.1f}kW <= battery reserve {max_battery_charge_kw:.1f}kW"
+                            )
+                        else:
+                            reason = f"Battery {battery_soc:.0f}% < {min_battery_for_ev}% (charging battery first)"
+                        _LOGGER.info(
+                            f"Auto-schedule: Solar surplus blocked - battery at {battery_soc:.0f}% "
+                            f"needs to reach {min_battery_for_ev}% before EV charging"
                         )
-                    else:
-                        reason = f"Battery {battery_soc:.0f}% < {min_battery_for_ev}% (charging battery first)"
-                    _LOGGER.info(
-                        f"Auto-schedule: Solar surplus blocked - battery at {battery_soc:.0f}% "
-                        f"needs to reach {min_battery_for_ev}% before EV charging"
-                    )
             else:
                 # Battery is above threshold, check surplus requirement
                 min_surplus = settings.get_min_surplus_kw()
@@ -6408,14 +6431,15 @@ class AutoScheduleExecutor:
                     min_surplus,
                     active_owner_mode,
                 ):
-                    should_charge = False
-                    reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
-                    _LOGGER.info(
-                        f"Auto-schedule: In solar window but no surplus - "
-                        f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
-                        f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed "
-                        f"(phases={settings.phases})"
-                    )
+                    if not _use_deadline_grid_fallback():
+                        should_charge = False
+                        reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
+                        _LOGGER.info(
+                            f"Auto-schedule: In solar window but no surplus - "
+                            f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
+                            f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed "
+                            f"(phases={settings.phases})"
+                        )
                 elif current_surplus_kw < min_surplus:
                     reason = (
                         f"Active Solar Surplus session controls low-surplus stop "

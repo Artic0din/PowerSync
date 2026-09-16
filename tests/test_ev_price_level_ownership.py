@@ -5339,6 +5339,106 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
 
 
 @pytest.mark.parametrize(
+    ("limit_grid_import", "demand_blocked", "expected_start"),
+    ((False, False, True), (True, False, False), (False, True, False)),
+)
+def test_time_critical_solar_window_falls_back_to_grid_only_when_permitted(
+    monkeypatch,
+    limit_grid_import,
+    demand_blocked,
+    expected_start,
+):
+    """A forecast-solar deadline must not become solar-only after the forecast fails."""
+    start_calls: list[tuple[str, bool]] = []
+
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def vehicle_soc(self, vehicle_id):
+        return 40
+
+    async def start_charging(
+        self, vehicle_id, settings, state, source, force_max_rate=False
+    ):
+        start_calls.append((source, force_max_rate))
+        state.is_charging = True
+        return True
+
+    class DeadlineSolarPlanner:
+        async def should_charge_now(self, **kwargs):
+            return True, "In planned solar_surplus window (0c)", "solar_surplus"
+
+        def _is_grid_charging_blocked_at(self, when):
+            return demand_blocked
+
+    now = datetime(2026, 9, 16, 14, 30, tzinfo=timezone.utc)
+    local_now = now.replace(tzinfo=None)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_start_charging", start_charging)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {}
+    executor = ev_planner.AutoScheduleExecutor(
+        hass, _FakeConfigEntry(), planner=DeadlineSolarPlanner()
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        target_soc=80,
+        priority=ev_planner.ChargingPriority.TIME_CRITICAL,
+        limit_grid_import=limit_grid_import,
+    )
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=40,
+        target_soc=80,
+        target_time=(local_now + timedelta(minutes=30)).isoformat(),
+        energy_needed_kwh=5.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=(local_now - timedelta(minutes=13)).isoformat(),
+                end_time=(local_now + timedelta(minutes=30)).isoformat(),
+                source="solar_surplus",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=5.0,
+                price_cents_kwh=0.0,
+                reason="target_deadline",
+            )
+        ],
+    )
+    state.last_plan_update = local_now
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            VIN,
+            settings,
+            {
+                "battery_soc": 90,
+                "solar_power": 0,
+                "load_power": 1000,
+                "grid_power": 1000,
+            },
+            current_price_cents=31,
+        )
+    )
+
+    if expected_start:
+        assert start_calls == [("grid_deadline_fallback", True)]
+        assert state.last_decision == "started"
+        assert "permitted grid fallback" in state.last_decision_reason
+    else:
+        assert start_calls == []
+        assert state.last_decision == "waiting"
+
+
+@pytest.mark.parametrize(
     ("priority", "demand_blocked", "expected_start"),
     (
         (ev_planner.ChargingPriority.TIME_CRITICAL, False, True),
