@@ -2226,13 +2226,11 @@ def _ble_rate_update_has_fresh_charging_evidence(
         TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
         TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
     )
-    if not any(
-        (state := hass.states.get(entity_id))
-        and str(state.state).strip().lower() == "charging"
-        and _ble_state_observed_after(state, freshness_cutoff)
+    charging_statuses = [
+        state
         for entity_id in charging_states
-    ):
-        return False
+        if (state := hass.states.get(entity_id)) is not None
+    ]
 
     from ..tesla_ble import (
         get_tesla_ble_charge_current_state,
@@ -2253,6 +2251,20 @@ def _ble_rate_update_has_fresh_charging_evidence(
                 and measured.attributes.get("unit_of_measurement") == "kW"
             ):
                 value *= 1000
+            if not math.isfinite(value) or value < minimum:
+                continue
+
+            measured_at = measured.last_updated or measured.last_changed
+            # A positive, fresh vehicle measurement is enough for a rate-only
+            # adjustment when BLE leaves its unchanged Charging state stale.
+            # Do not override a newer explicit state that says charging has
+            # stopped, completed, or disconnected.
+            if any(
+                str(status.state).strip().lower() in _TESLA_NON_CHARGING_STATES
+                and (status.last_updated or status.last_changed) > measured_at
+                for status in charging_statuses
+            ):
+                return False
             if math.isfinite(value) and value >= minimum:
                 return True
         except (TypeError, ValueError):

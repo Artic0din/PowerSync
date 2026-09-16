@@ -11335,6 +11335,61 @@ def test_ble_rate_update_uses_fresh_charging_telemetry_without_wake(monkeypatch)
     assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 13)) is True
 
 
+def test_ble_rate_update_uses_fresh_power_when_charging_state_is_unchanged(monkeypatch):
+    """Ticket #56: unchanged BLE Charging state must not force a wake."""
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "5", {"min": 1, "max": 32}),
+        _State(
+            "sensor.car_charging_state", "Charging",
+            last_updated=now - timedelta(seconds=121),
+        ),
+        _State(
+            "sensor.car_charge_power", "1.0",
+            {"unit_of_measurement": "kW"}, last_updated=now,
+        ),
+    ])
+
+    async def must_not_wake(*args, **kwargs):
+        raise AssertionError("fresh positive power should bypass the wake gate")
+
+    async def write(domain, service, data, **kwargs):
+        assert (domain, service, data) == (
+            "number", "set_value",
+            {"entity_id": "number.car_charging_amps", "value": 8},
+        )
+        hass.states._states["number.car_charging_amps"] = _State(
+            "number.car_charging_amps", "8", last_updated=datetime.now(timezone.utc)
+        )
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_wake)
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    hass.services.async_call = write
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8)) is True
+
+
+def test_ble_rate_update_rejects_newer_explicit_non_charging_state(monkeypatch):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("number.car_charging_amps", "5", {"min": 1, "max": 32}),
+        _State("sensor.car_charging_state", "Stopped", last_updated=now),
+        _State(
+            "sensor.car_charge_power", "1.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(seconds=10),
+        ),
+    ])
+
+    async def must_not_wake(*args, **kwargs):
+        raise AssertionError("newer explicit stopped state must block the write")
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", must_not_wake)
+
+    assert asyncio.run(actions._set_ev_charging_amps_ble(hass, "car", 8)) is False
+    assert hass.services.calls == []
+
+
 def test_ble_rate_update_does_not_use_stale_charging_telemetry(monkeypatch):
     """The rate-only exception retains fresh, vehicle-originated safeguards."""
     stale = datetime.now(timezone.utc) - timedelta(minutes=5)
