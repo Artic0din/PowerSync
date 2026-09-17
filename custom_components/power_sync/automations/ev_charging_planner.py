@@ -4067,7 +4067,8 @@ class ChargingPlanner:
                 target_time_local is not None and now < target_time_local
             )
         if (
-            current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
+            current_price_cents is not None
+            and current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
             and free_grid_deadline_pending
         ):
             return (
@@ -6583,13 +6584,17 @@ class AutoScheduleExecutor:
             self._clear_start_failure(vehicle_id)
             if state.is_charging:
                 # Restore backup reserve when stopping - we'll set it again when next window starts
-                await self._stop_charging(
+                stopped = await self._stop_charging(
                     vehicle_id,
                     settings,
                     state,
                     reason=reason,
                 )
-                state.last_decision = "stopped"
+                if stopped:
+                    state.last_decision = "stopped"
+                else:
+                    state.last_decision = "charging"
+                    reason = f"{reason}; stop unconfirmed, retry scheduled"
             elif await self._stop_external_charging_if_needed(
                 vehicle_id,
                 settings,

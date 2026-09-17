@@ -122,6 +122,89 @@ ev_capacity = importlib.import_module("power_sync.automations.ev_vehicle_capacit
 VIN = "5YJTEST0000000001"
 
 
+@pytest.mark.parametrize(
+    "price,priority,window_source,expected",
+    [
+        (None, "cost_optimized", None, (False, "waiting")),
+        (None, "solar_preferred", None, (True, "solar_surplus")),
+        (None, "solar_only", None, (True, "solar_surplus")),
+        (None, "cost_optimized", "grid_offpeak", (True, "grid_offpeak")),
+        (None, "cost_optimized", "solar_surplus", (True, "solar_surplus")),
+        (-5, "cost_optimized", None, (True, "grid_free")),
+        (0, "cost_optimized", None, (True, "grid_free")),
+    ],
+)
+def test_missing_import_price_preserves_independent_eligibility(
+    monkeypatch, price, priority, window_source, expected,
+):
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    planner._get_solar_surplus_config = AsyncMock(return_value={})
+    windows = []
+    if window_source:
+        windows.append(SimpleNamespace(
+            start_time="2026-09-17T11:00:00", end_time="2026-09-17T13:00:00",
+            source=window_source, price_cents_kwh=10,
+        ))
+    result = asyncio.run(planner.should_charge_now(
+        vehicle_id=VIN, plan=SimpleNamespace(windows=windows, target_time=None),
+        current_surplus_kw=5, current_price_cents=price,
+        current_export_price_cents=0, battery_soc=100, priority=priority,
+    ))
+    assert (result[0], result[2]) == expected
+    if not expected[0]:
+        assert result[1] == "Current retail price unavailable"
+
+
+@pytest.mark.parametrize("stop_succeeds", [False, True])
+def test_missing_import_price_owned_stop_status_and_retry(
+    monkeypatch, stop_succeeds,
+):
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner._get_solar_surplus_config = AsyncMock(return_value={})
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=54)
+    executor._get_current_price = AsyncMock(return_value=None)
+    executor._start_charging = AsyncMock()
+    executor._restore_curtailment = AsyncMock()
+    guarded_stop = AsyncMock(return_value=stop_succeeds)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", guarded_stop)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN, target_soc=80)
+    state = executor.get_state(VIN)
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
+    state.last_plan_update = now.replace(tzinfo=None)
+    state.is_charging = True
+    state.started_at = now
+    state.curtailment_override_active = True
+    live = {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 1000}
+
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, None))
+
+    executor._start_charging.assert_not_awaited()
+    guarded_stop.assert_awaited_once()
+    assert guarded_stop.await_args.kwargs["vehicle_vin"] == VIN
+    assert guarded_stop.await_args.kwargs["expected_owner_mode"] == "smart_schedule"
+    assert guarded_stop.await_args.kwargs["stop_untracked"] is False
+    assert state.is_charging is not stop_succeeds
+    assert state.last_decision == ("stopped" if stop_succeeds else "charging")
+    assert "Current retail price unavailable" in state.last_decision_reason
+    if stop_succeeds:
+        assert state.started_at is None
+        executor._restore_curtailment.assert_awaited_once_with(state)
+    else:
+        assert "stop unconfirmed" in state.last_decision_reason
+        assert state.started_at == now
+        executor._restore_curtailment.assert_not_awaited()
+        asyncio.run(executor._evaluate_vehicle(VIN, settings, live, None))
+        assert guarded_stop.await_count == 2
+
+
 def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(None) == "unknown"
     assert ev_planner._format_price_log_value(12) == "12.0c"
