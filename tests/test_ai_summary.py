@@ -40,6 +40,7 @@ def _load_module():
         const.CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH = "optimization_ai_summary_auto_refresh"
         const.CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT = "optimization_ai_summary_local_endpoint"
         const.CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL = "optimization_ai_summary_local_model"
+        const.CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL = "optimization_ai_summary_openrouter_model"
         const.CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER = "optimization_ai_summary_provider"
         const.DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER = "gemini"
         sys.modules[const.__name__] = const
@@ -549,6 +550,40 @@ def test_write_only_settings_replace_preserve_clear_and_isolate_provider_key():
     assert changed == {provider_name: "grok", key_name: "grok-secret"}
 
 
+def test_openrouter_settings_require_model_preserve_it_and_isolate_key():
+    module = _load_module()
+    options, changes = module.apply_ai_summary_settings(
+        {},
+        {
+            "ai_summary_provider": "openrouter",
+            "ai_summary_openrouter_model": "openai/gpt-4.1-mini",
+            "ai_summary_api_key": "openrouter-secret",
+        },
+    )
+    assert changes == [
+        "updated AI summary provider",
+        "updated AI summary API key",
+        "updated OpenRouter AI model",
+    ]
+    assert options[module.CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL] == "openai/gpt-4.1-mini"
+    public = module.ai_summary_settings(SimpleNamespace(data={}, options=options))
+    assert public["ai_summary_provider"] == "openrouter"
+    assert public["ai_summary_key_configured"] is True
+    assert public["ai_summary_model"] == "openai/gpt-4.1-mini"
+    assert "openrouter-secret" not in json.dumps(public)
+
+    switched, changes = module.apply_ai_summary_settings(
+        options, {"ai_summary_provider": "gemini"}
+    )
+    assert module.CONF_OPTIMIZATION_AI_SUMMARY_API_KEY not in switched
+    assert switched[module.CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL] == "openai/gpt-4.1-mini"
+    assert changes == ["updated AI summary provider", "cleared AI summary API key"]
+
+    with pytest.raises(module.AISummaryError) as caught:
+        module.apply_ai_summary_settings({}, {"ai_summary_provider": "openrouter"})
+    assert caught.value.code == "invalid_openrouter_model"
+
+
 class _FakeResponse:
     def __init__(self, status: int, body):
         self.status = status
@@ -645,6 +680,29 @@ def test_provider_adapters_use_structured_requests_without_key_in_body():
     assert grok_request["headers"]["Authorization"] == "Bearer grok-secret"
     assert grok_request["json"]["response_format"]["json_schema"]["strict"] is True
     assert "grok-secret" not in json.dumps(grok_request["json"])
+
+    openrouter_session = _FakeSession(
+        _FakeResponse(
+            200,
+            {"choices": [{"message": {"content": json.dumps(_model_output())}}]},
+        )
+    )
+    result = asyncio.run(
+        module.OpenRouterAISummaryProvider().generate(
+            session=openrouter_session,
+            api_key="openrouter-secret",
+            model="openai/gpt-4.1-mini",
+            context=context,
+        )
+    )
+    assert result == _model_output()
+    openrouter_url, openrouter_request = openrouter_session.calls[0]
+    assert openrouter_url == "https://openrouter.ai/api/v1/chat/completions"
+    assert openrouter_request["headers"]["Authorization"] == "Bearer openrouter-secret"
+    assert openrouter_request["json"]["model"] == "openai/gpt-4.1-mini"
+    assert openrouter_request["json"]["response_format"]["json_schema"]["strict"] is True
+    assert openrouter_request["json"]["provider"] == {"require_parameters": True}
+    assert "openrouter-secret" not in json.dumps(openrouter_request["json"])
 
 
 def test_local_openai_endpoint_rules_optional_auth_and_schema_fallback(monkeypatch):

@@ -3249,6 +3249,7 @@ def test_smart_optimization_sections_have_local_labels_and_descriptions():
             "optimization_ai_summary_clear_api_key",
             "optimization_ai_summary_local_endpoint",
             "optimization_ai_summary_local_model",
+            "optimization_ai_summary_openrouter_model",
             "optimization_ai_summary_auto_refresh",
         }
         assert "write-only" in ai_section["data_description"][
@@ -3266,6 +3267,8 @@ def test_smart_optimization_ai_key_uses_shared_write_only_settings_helper():
     assert "apply_ai_summary_settings(" in method_source
     assert "CONF_OPTIMIZATION_AI_SUMMARY_API_KEY" in method_source
     assert "TextSelectorType.PASSWORD" in method_source
+    assert 'SelectOptionDict(value="openrouter", label="OpenRouter")' in method_source
+    assert "CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL" in method_source
     assert "default=current_ai_key" not in method_source
     assert 'errors={"base": "invalid_ai_summary_settings"}' in method_source
 
