@@ -143,6 +143,14 @@ Or manually:
 | **Services** | Force charge/discharge, hold SOC, TOU sync, backup reserve, inverter curtailment, **off-grid/reconnect** | [Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference) |
 | **Troubleshooting** | Connection issues, debug logging, common fixes | [Guide](https://github.com/bolagnaise/PowerSync/wiki/Troubleshooting) |
 
+### Custom tariff daily supply charge
+
+For a static custom tariff uploaded to Tesla, `daily_supply_charge` is an
+optional decimal amount in the tariff currency **per day**. Set it when your
+contracted supply charge differs from the selected tariff template. If it is
+omitted, PowerSync uses that template's daily supply charge when available;
+tariffs without either value keep their existing no-amount daily-charge row.
+
 ---
 
 ## Mobile App

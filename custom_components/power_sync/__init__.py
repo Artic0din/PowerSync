@@ -13673,6 +13673,32 @@ class CustomTariffView(HomeAssistantView):
                     status=400,
                 )
 
+            if "daily_supply_charge" in data:
+                raw_daily_supply_charge = data["daily_supply_charge"]
+                try:
+                    daily_supply_charge = float(raw_daily_supply_charge)
+                except (TypeError, ValueError):
+                    daily_supply_charge = -1.0
+                if (
+                    isinstance(raw_daily_supply_charge, bool)
+                    or not math.isfinite(daily_supply_charge)
+                    or daily_supply_charge < 0
+                ):
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": (
+                                "Daily supply charge must be a finite, "
+                                "non-negative number"
+                            ),
+                        },
+                        status=400,
+                    )
+                # Store the explicit per-day tariff amount in major currency
+                # units. Existing saved tariffs are only read by the
+                # converter and are deliberately not normalized here.
+                data["daily_supply_charge"] = daily_supply_charge
+
             raw_import_quota = data.get("import_quota")
             if (
                 isinstance(raw_import_quota, dict)

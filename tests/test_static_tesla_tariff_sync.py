@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import ast
+import asyncio
 import importlib
 import math
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -219,6 +221,158 @@ def test_static_payload_uses_fixed_safe_envelope(tariff_converter_module):
     assert payload["name"] == "Custom Tariff"
     assert payload["utility"] == "Custom"
     assert payload["currency"] == "AUD"
+
+
+def test_static_payload_uses_explicit_daily_supply_charge_without_mutation(
+    tariff_converter_module,
+):
+    raw_tariff = _agl_tariff()
+    raw_tariff["template_id"] = "ergon_solar_sharer_12f_2026"
+    raw_tariff["daily_supply_charge"] = 1.2345
+    before = copy.deepcopy(raw_tariff)
+
+    payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(raw_tariff)
+
+    assert payload["daily_charges"] == [{"name": "Charge", "amount": 1.2345}]
+    assert payload["sell_tariff"]["daily_charges"] == [{"name": "Charge"}]
+    assert payload["energy_charges"]["All Year"]["rates"] == {
+        "OFF_PEAK": 0.31,
+        "OFF_PEAK_AGL_REWARD": 0.31,
+    }
+    assert raw_tariff == before
+
+
+def test_static_payload_falls_back_to_selected_template_daily_supply_charge(
+    tariff_converter_module,
+):
+    raw_tariff = _agl_tariff()
+    raw_tariff["template_id"] = "ergon_solar_sharer_12f_2026"
+    before = copy.deepcopy(raw_tariff)
+
+    payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(raw_tariff)
+
+    assert payload["daily_charges"] == [
+        {"name": "Charge", "amount": pytest.approx(1.77853)}
+    ]
+    assert raw_tariff == before
+
+
+@pytest.mark.parametrize("legacy_value", [math.nan, -1, "not-a-number", True])
+def test_static_payload_handles_invalid_or_legacy_daily_supply_charge_safely(
+    tariff_converter_module,
+    legacy_value,
+):
+    template_tariff = _agl_tariff()
+    template_tariff["template_id"] = "ergon_solar_sharer_12f_2026"
+    template_tariff["daily_supply_charge"] = legacy_value
+    template_before = copy.deepcopy(template_tariff)
+
+    template_payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(
+        template_tariff
+    )
+
+    assert template_payload["daily_charges"] == [
+        {"name": "Charge", "amount": pytest.approx(1.77853)}
+    ]
+    assert template_tariff == template_before
+
+    legacy_tariff = _agl_tariff()
+    legacy_tariff["daily_supply_charge"] = legacy_value
+    legacy_before = copy.deepcopy(legacy_tariff)
+    legacy_payload = tariff_converter_module.convert_custom_tariff_to_tesla_tariff(
+        legacy_tariff
+    )
+
+    assert legacy_payload["daily_charges"] == [{"name": "Charge"}]
+    assert legacy_tariff == legacy_before
+
+
+def _load_custom_tariff_post():
+    """Extract the API boundary without importing Home Assistant."""
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tree = ast.parse(source)
+    post_method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "CustomTariffView"
+        for item in node.body
+        if isinstance(item, ast.AsyncFunctionDef) and item.name == "post"
+    )
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            post_method,
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = {
+        "DOMAIN": "power_sync",
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            error=lambda *_args, **_kwargs: None,
+        ),
+        "currency_for_entry": lambda _entry, _hass: "AUD",
+        "math": math,
+        "normalize_currency": lambda value, _default: value or "AUD",
+        "web": SimpleNamespace(
+            json_response=lambda payload, status=200: SimpleNamespace(
+                payload=payload, status=status
+            )
+        ),
+        "__package__": "power_sync",
+    }
+    saved_modules = {
+        name: sys.modules.get(name, _MISSING)
+        for name in ("power_sync", "power_sync.tariff_time")
+    }
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    sys.modules["power_sync"] = package
+    tariff_time = types.ModuleType("power_sync.tariff_time")
+    tariff_time.tariff_season_validation_error = lambda _seasons: None
+    sys.modules["power_sync.tariff_time"] = tariff_time
+    exec(compile(module, str(COMPONENT_ROOT / "__init__.py"), "exec"), namespace)
+    return namespace["post"], saved_modules
+
+
+def _restore_modules(saved_modules):
+    for name, previous in saved_modules.items():
+        if previous is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+
+
+@pytest.mark.parametrize("daily_supply_charge", [math.nan, -1, "not-a-number", True])
+def test_custom_tariff_api_rejects_invalid_new_daily_supply_charge(
+    daily_supply_charge,
+):
+    post, saved_modules = _load_custom_tariff_post()
+
+    class Request:
+        async def json(self):
+            return {
+                "name": "Test tariff",
+                "energy_charges": {"All Year": {"OFF_PEAK": 0.31}},
+                "daily_supply_charge": daily_supply_charge,
+            }
+
+    view = SimpleNamespace(_get_store=lambda: object())
+    try:
+        response = asyncio.run(post(view, Request()))
+    finally:
+        _restore_modules(saved_modules)
+
+    assert response.status == 400
+    assert response.payload["error"] == (
+        "Daily supply charge must be a finite, non-negative number"
+    )
 
 
 def test_static_payload_keeps_all_seasons_and_strips_power_sync_metadata(
