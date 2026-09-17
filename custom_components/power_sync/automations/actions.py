@@ -2090,7 +2090,7 @@ def _ble_state_observed_after(state: Any, since: datetime) -> bool:
 async def _wait_for_ble_command_readback(
     hass: HomeAssistant,
     entity_id: str | tuple[str, ...],
-    expected: str | float,
+    expected: str | float | tuple[str, ...],
     command_started_at: datetime,
     *,
     charging_prefix: str | None = None,
@@ -2108,6 +2108,8 @@ async def _wait_for_ble_command_readback(
             value = str(state.state).strip().lower()
             if isinstance(expected, str):
                 matches = value == expected.lower()
+            elif isinstance(expected, tuple):
+                matches = value in {candidate.lower() for candidate in expected}
             else:
                 try:
                     matches = math.isfinite(float(value)) and abs(float(value) - expected) < 0.1
@@ -2312,27 +2314,49 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Option
         return None if command_dispatched else False
 
 
-async def _stop_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
-    """Stop EV charging via Tesla BLE."""
+async def _stop_ev_charging_ble(
+    hass: HomeAssistant, ble_prefix: str
+) -> Optional[bool]:
+    """Stop Tesla BLE charging; do not treat service acceptance as readback."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
     if hass.states.get(charger_entity) is None:
         _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
         return False
 
+    command_dispatched = False
     try:
-        await _wake_tesla_ble(hass, ble_prefix)
+        if not await _wake_tesla_ble(hass, ble_prefix):
+            return False
+        command_started_at = datetime.now(dt_timezone.utc)
+        command_dispatched = True
         await hass.services.async_call(
             "switch",
             "turn_off",
             {"entity_id": charger_entity},
             blocking=True,
         )
-        _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
-        return True
+        confirmed = await _wait_for_ble_command_readback(
+            hass,
+            (
+                TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix),
+                TESLA_BLE_SENSOR_CHARGING.format(prefix=ble_prefix),
+            ),
+            ("stopped", "complete", "disconnected", "not charging"),
+            command_started_at,
+        )
+        if confirmed:
+            _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
+            return True
+        _LOGGER.warning(
+            "Tesla BLE stop accepted but not confirmed by fresh vehicle readback"
+        )
+        return None
     except Exception as e:
         _LOGGER.error(f"Failed to stop EV charging via BLE: {e}")
-        return False
+        if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
+            return False
+        return None if command_dispatched else False
 
 
 async def _set_ev_charge_limit_ble(
@@ -13190,6 +13214,9 @@ async def _action_stop_ev_charging_dynamic(
                     if stop_charging and vid not in passive_vehicle_ids
                     else "release"
                 ),
+                # The physical stop is attempted below.  Preserve that this
+                # pre-command teardown is not a vehicle confirmation.
+                success=not (stop_charging and vid not in passive_vehicle_ids),
             )
             released_vehicle_ids.add(vid)
             del vehicles[vid]
@@ -13246,6 +13273,15 @@ async def _action_stop_ev_charging_dynamic(
                 ).add(vid_to_stop)
             if not stop_success:
                 physical_stop_failed = True
+            from .ev_ownership import record_ev_command
+            record_ev_command(
+                hass,
+                config_entry,
+                vid_to_stop,
+                command="stop",
+                success=bool(stop_success),
+                reason=params.get("stop_reason", "stopped"),
+            )
             if params.get("stop_untracked") and vid_to_stop not in released_vehicle_ids:
                 from .ev_ownership import release_ev_ownership
                 release_ev_ownership(

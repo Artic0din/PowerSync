@@ -34027,7 +34027,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if sig_coord and getattr(sig_coord, "_controller", None):
                 controller = sig_coord._controller
                 power_kw = power_w / 1000 if power_w > 0 else 10.0
-                await controller.force_charge(power_kw=power_kw)
+                sigenergy_result = await controller.force_charge(power_kw=power_kw)
+                if not sigenergy_result:
+                    raise HomeAssistantError(
+                        "Sigenergy force charge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"Sigenergy force charge hardware extended ({duration}min)")
                 return
             if entry.data.get(CONF_SIGENERGY_STATION_ID):
@@ -34058,7 +34062,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     try:
                         power_kw = power_w / 1000 if power_w > 0 else 10.0
-                        await controller.force_charge(power_kw=power_kw)
+                        sigenergy_result = await controller.force_charge(power_kw=power_kw)
+                        if not sigenergy_result:
+                            raise HomeAssistantError(
+                                "Sigenergy force charge hardware refresh was not confirmed"
+                            )
                         _LOGGER.debug(
                             "Sigenergy force charge hardware extended without coordinator (%dmin)",
                             duration,

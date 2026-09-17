@@ -7963,6 +7963,29 @@ def test_tesla_ble_set_amps_honors_entity_positive_floor(monkeypatch):
     ]
 
 
+def test_tesla_ble_stop_service_acceptance_requires_fresh_stopped_readback(monkeypatch):
+    async def fake_wake(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", fake_wake)
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    hass = _Hass([
+        _State("switch.car_charger", "on"),
+        _State(
+            "sensor.car_charging_state",
+            "Charging",
+            last_updated=datetime.now(timezone.utc) - timedelta(minutes=5),
+        ),
+    ])
+
+    result = asyncio.run(actions._stop_ev_charging_ble(hass, "car"))
+
+    assert result is None
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.car_charger"})
+    ]
+
+
 def test_tesla_ble_set_amps_uses_safe_floor_without_proven_bounds(monkeypatch):
     async def fake_wake(*args, **kwargs):
         return True

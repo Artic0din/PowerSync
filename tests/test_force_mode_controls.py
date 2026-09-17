@@ -3024,6 +3024,28 @@ def test_sigenergy_optimizer_discharge_rejects_unconfirmed_hardware_write():
     assert '"Sigenergy Modbus host"' in missing_host_branch
 
 
+def test_sigenergy_optimizer_charge_rejects_unconfirmed_hardware_write():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+
+    assert function_source is not None
+    hardware_branch = function_source.split(
+        "# Hardware-only path: fires for BOTH",
+        1,
+    )[1].split("sungrow_coord =", 1)[0]
+    assert hardware_branch.count(
+        "sigenergy_result = await controller.force_charge(power_kw=power_kw)"
+    ) == 2
+    assert hardware_branch.count("if not sigenergy_result:") == 2
+    assert hardware_branch.count(
+        '"Sigenergy force charge hardware refresh was not confirmed"'
+    ) == 2
+
+
 def test_sungrow_optimizer_discharge_rejects_unconfirmed_hardware_write():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

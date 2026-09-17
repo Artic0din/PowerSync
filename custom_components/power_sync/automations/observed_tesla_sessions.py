@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from ..const import DOMAIN
+from ..ev_load import is_current_ev_power_observation
 from .ev_pricing import get_current_ev_prices
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +33,20 @@ def _optional_int(value: Any) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _current_observation(value: Any) -> bool:
+    """Accept persisted ISO observations while rejecting stale telemetry."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return False
+    if isinstance(value, datetime):
+        observed_at = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if 0 <= (observed_at - datetime.now(timezone.utc)).total_seconds() <= 60:
+            return True
+    return is_current_ev_power_observation(value)
 
 
 def _normal_key(value: Any) -> str:
@@ -224,6 +240,22 @@ class ObservedTeslaSessionTracker:
                 or power_kw > ACTIVE_POWER_THRESHOLD_KW
             )
             soc = _optional_int(vehicle.get("ev_soc", vehicle.get("current_soc")))
+
+            # A coordinator-wide Tesla snapshot can be fresh while this
+            # vehicle's retained Charging/power pair is not.  Such a pair is
+            # insufficient to create a new observed session after a reload or
+            # a failed-to-confirm stop.  Keep legacy producers without a
+            # timestamp compatible; timestamped projections must be current.
+            charging_observed_at = (
+                vehicle.get("_charging_observed_at")
+                or vehicle.get("_observed_at")
+            )
+            if (
+                is_charging
+                and charging_observed_at is not None
+                and not _current_observation(charging_observed_at)
+            ):
+                continue
 
             if not is_charging:
                 self._reconcile_vehicle_ownership(vehicle, vehicle_id)

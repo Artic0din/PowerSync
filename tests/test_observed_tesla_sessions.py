@@ -272,6 +272,22 @@ def test_delayed_charge_readback_after_powersync_stop_does_not_stick_external():
     assert reason is None
 
 
+def test_stale_timestamped_charging_does_not_start_observed_session():
+    manager = _SessionManager()
+    vehicles = [{
+        "vehicle_id": VIN,
+        "ev_power_kw": 11.0,
+        "is_charging": True,
+        "is_connected": True,
+        "_charging_observed_at": datetime.now() - timedelta(minutes=5),
+    }]
+
+    asyncio.run(_tracker(manager, vehicles).poll())
+
+    assert manager.started == []
+    assert manager.updated == []
+
+
 def test_external_tesla_ownership_is_vin_scoped():
     manager = _SessionManager()
     hass = _Hass()
