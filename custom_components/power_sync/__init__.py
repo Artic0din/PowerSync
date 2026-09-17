@@ -817,6 +817,7 @@ from .const import (
     CONF_EPEX_SURCHARGE,
     CONF_EPEX_TAX_PERCENT,
     CONF_EPEX_EXPORT_RATE,
+    CONF_EPEX_EXPORT_SOURCE,
     # OpenWeatherMap for automations weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
     # EV BLE configuration
@@ -23377,6 +23378,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         epex_surcharge = _entry_value(CONF_EPEX_SURCHARGE, 0.0)
         epex_tax_percent = _entry_value(CONF_EPEX_TAX_PERCENT, 0.0)
         epex_export_rate = _entry_value(CONF_EPEX_EXPORT_RATE, 0.0)
+        epex_export_source = _entry_value(CONF_EPEX_EXPORT_SOURCE, None)
 
         epex_coordinator = EPEXPriceCoordinator(
             hass,
@@ -23385,6 +23387,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             surcharge=epex_surcharge,
             tax_percent=epex_tax_percent,
             export_rate=epex_export_rate,
+            export_source=epex_export_source,
         )
         try:
             await epex_coordinator.async_config_entry_first_refresh()

@@ -5337,6 +5337,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
         surcharge: float = 0.0,
         tax_percent: float = 0.0,
         export_rate: float = 0.0,
+        export_source: str | None = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -5347,6 +5348,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             surcharge: Fixed surcharge in ct/kWh (network fees, levies)
             tax_percent: Tax percentage (e.g. 21 for Belgian VAT)
             export_rate: Fixed feed-in rate in ct/kWh (0 = unconfigured)
+            export_source: Explicit export valuation source, if selected
         """
         from .epex_api import EPEXAPIClient
 
@@ -5354,6 +5356,7 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
         self._surcharge = surcharge
         self._tax_percent = tax_percent
         self._export_rate = export_rate
+        self._export_source = export_source
         self._client = EPEXAPIClient(session)
         # Tracks whether we've already logged the "no export rate configured"
         # warning so it fires once per coordinator lifetime, not every poll.
@@ -5381,6 +5384,15 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
 
             if not prices:
                 raise UpdateFailed(f"No prices returned from EPEX API for {self.region}")
+
+            raw_prices: list[dict[str, Any]] = []
+            export_source = getattr(self, "_export_source", None)
+            if export_source == "raw_wholesale":
+                raw_prices = await self._client.get_prices(
+                    region=self.region,
+                    surcharge=0.0,
+                    tax_percent=0.0,
+                )
 
             now = dt_util.utcnow()
             current_prices = []
@@ -5414,6 +5426,17 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                 parsed_prices.append((entry, starts_at, explicit_end))
 
             parsed_prices.sort(key=lambda item: item[1])
+            raw_by_start: dict[datetime, float] = {}
+            for raw_entry in raw_prices:
+                try:
+                    raw_start = datetime.fromisoformat(raw_entry.get("startsAt", ""))
+                    if raw_start.tzinfo is None:
+                        raw_start = raw_start.replace(tzinfo=dt_util.UTC)
+                    raw_total = float(raw_entry.get("total"))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(raw_total):
+                    raw_by_start[raw_start] = raw_total
             default_duration = 15 if self.region.upper() == "BE" else 60
 
             for index, (entry, starts_at, explicit_end) in enumerate(parsed_prices):
@@ -5463,7 +5486,18 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                 # to export midday energy it should have held for the
                 # evening peak. Default to 0 instead of guessing a price we
                 # don't actually have.
-                if self._export_rate > 0:
+                if export_source == "raw_wholesale":
+                    # The second Predictor request is deliberately raw: it is
+                    # EUR ct/kWh wholesale valuation, with no import surcharge,
+                    # network charge, levy, or tax. Missing intervals fail
+                    # closed rather than borrowing an import retail price.
+                    raw_total = raw_by_start.get(starts_at)
+                    export_ct = -raw_total if raw_total is not None else 0.0
+                elif export_source == "custom_entity":
+                    # The optimizer reads the selected sensor. Keep this native
+                    # feed-in path at zero if the sensor is unavailable.
+                    export_ct = 0.0
+                elif self._export_rate > 0:
                     export_ct = -self._export_rate
                 else:
                     export_ct = 0.0

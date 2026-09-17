@@ -14837,9 +14837,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _epex_export_price_entity_id(self) -> str | None:
         """Return the configured EPEX export valuation sensor, if any."""
-        from ..const import CONF_EPEX_EXPORT_PRICE_ENTITY
+        from ..const import (
+            CONF_EPEX_EXPORT_PRICE_ENTITY,
+            EPEX_EXPORT_SOURCE_CUSTOM_ENTITY,
+        )
+
+        source = self._epex_export_source()
+        # Existing entries did not persist a source: retain their historical
+        # entity-first behaviour. Once an entry has been edited, a custom
+        # sensor is used only when it is explicitly selected.
+        if source is not None and source != EPEX_EXPORT_SOURCE_CUSTOM_ENTITY:
+            return None
 
         return self._epex_price_entity_id(CONF_EPEX_EXPORT_PRICE_ENTITY)
+
+    def _epex_export_source(self) -> str | None:
+        """Return an explicit EPEX export source, or None for legacy entries."""
+        if not self._entry:
+            return None
+        from ..const import CONF_EPEX_EXPORT_SOURCE
+
+        if CONF_EPEX_EXPORT_SOURCE in self._entry.options:
+            return self._entry.options[CONF_EPEX_EXPORT_SOURCE]
+        return self._entry.data.get(CONF_EPEX_EXPORT_SOURCE)
 
     @staticmethod
     def _epex_sensor_value_to_major(value: Any, unit: str | None) -> float | None:
@@ -15593,6 +15613,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 export_prices,
                                 display_export_steps,
                             ) = epex_override
+                        elif self._epex_export_source() == "custom_entity":
+                            # An explicitly selected custom source is never
+                            # silently replaced by fixed or retail valuation.
+                            display_export_raw = [0.0] * n_steps
+                            export_prices = [0.0] * n_steps
+                            display_export_steps = n_steps
 
                         # Apply Flow Power export schedule before display storage.
                         # For Flow Power, the synthetic Happy Hour schedule IS the
