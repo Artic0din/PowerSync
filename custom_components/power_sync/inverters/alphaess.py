@@ -47,7 +47,8 @@ class AlphaESSController(InverterController):
     # Grid meter
     REG_GRID_TOTAL_ACTIVE_POWER = 0x0021   # S32, 1 W/bit, + = import / − = export (to verify)
 
-    # PV meter (optional, CT-based; use PV total power at 0453H as primary)
+    # PV meter (optional, CT-based).  Some SMILE topologies report their live
+    # PV here while the inverter-total register remains zero.
     REG_PV_METER_TOTAL_ACTIVE_POWER = 0x00A1  # S32, 1 W/bit
 
     # Battery
@@ -362,10 +363,34 @@ class AlphaESSController(InverterController):
                 attrs["grid_power_w"] = grid_w
                 attrs["grid_power_kw"] = round(grid_w / 1000.0, 3)
 
-            # PV total power (U32, 1 W/bit)
+            # PV total power (U32, 1 W/bit).  This is the inverter DC total;
+            # it can legitimately be zero when PV is measured upstream by the
+            # optional CT meter, so retain both sources before choosing one.
+            inverter_pv_w: Optional[int] = None
             pv_regs = await self._read_holding_registers(self.REG_PV_TOTAL_POWER, 2)
             if pv_regs and len(pv_regs) >= 2:
-                pv_w = self._to_unsigned32(pv_regs[0], pv_regs[1])
+                inverter_pv_w = self._to_unsigned32(pv_regs[0], pv_regs[1])
+
+            pv_meter_w: Optional[int] = None
+            pv_meter_regs = await self._read_holding_registers(
+                self.REG_PV_METER_TOTAL_ACTIVE_POWER, 2
+            )
+            if pv_meter_regs and len(pv_meter_regs) >= 2:
+                pv_meter_w = self._to_signed32(pv_meter_regs[0], pv_meter_regs[1])
+                attrs["pv_meter_power_w"] = pv_meter_w
+
+            # Prefer a positive CT-meter reading only when the inverter-total
+            # source is absent or zero.  A non-zero inverter total remains the
+            # primary source, and a negative meter value is never presented as
+            # solar generation.
+            pv_w = inverter_pv_w
+            if (pv_w is None or pv_w == 0) and pv_meter_w is not None and pv_meter_w > 0:
+                pv_w = pv_meter_w
+                attrs["pv_power_source"] = "pv_meter"
+            elif pv_w is not None:
+                attrs["pv_power_source"] = "inverter_total"
+
+            if pv_w is not None:
                 attrs["pv_power_w"] = pv_w
                 attrs["pv_power_kw"] = round(pv_w / 1000.0, 3)
 

@@ -35359,13 +35359,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await _cleanup_failed_tesla_force_charge(
                     "grid charging enable did not verify"
                 )
-                hass.async_create_task(
-                    _notify_api_error(
-                        hass,
-                        "Force Charge Failed",
-                        "Could not verify Tesla grid charging was enabled",
+                if source == "optimizer":
+                    # The coordinator deliberately retains its action marker
+                    # and retries this fail-closed outcome.  Do not present a
+                    # retryable readback ambiguity as a terminal failure.
+                    hass.async_create_task(
+                        _notify_api_error(
+                            hass,
+                            "Force Charge Retrying",
+                            "Tesla grid charging could not be verified; PowerSync will retry",
+                        )
                     )
-                )
+                else:
+                    hass.async_create_task(
+                        _notify_api_error(
+                            hass,
+                            "Force Charge Failed",
+                            "Could not verify Tesla grid charging was enabled",
+                        )
+                    )
                 return {
                     "success": False,
                     "error": "grid charging enable did not verify",
