@@ -134,6 +134,11 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_DEMAND_CHARGE_DAYS = "demand_charge_days"
     const_module.CONF_EPEX_IMPORT_PRICE_ENTITY = "epex_import_price_entity"
     const_module.CONF_EPEX_EXPORT_PRICE_ENTITY = "epex_export_price_entity"
+    const_module.CONF_EPEX_EXPORT_SOURCE = "epex_export_source"
+    const_module.EPEX_EXPORT_SOURCE_CUSTOM_ENTITY = "custom_entity"
+    const_module.CONF_DISPLAY_CURRENCY = "display_currency"
+    const_module.DISPLAY_CURRENCY_AUTOMATIC = "automatic"
+    const_module.DISPLAY_CURRENCIES = ("automatic", "AUD", "EUR", "GBP", "NZD", "SEK")
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
@@ -668,6 +673,8 @@ def _coordinator_with_epex_provider(
     opt_coordinator,
     states: list[_State],
     provider: str = "epex",
+    export_source: str | None = None,
+    feed_in_price: float = -8.0,
 ):
     def price_entry(start: str, end: str, price: float, channel: str) -> dict:
         return {
@@ -685,14 +692,17 @@ def _coordinator_with_epex_provider(
         data={"power_sync": {"entry-1": {}}},
     )
     coordinator.entry_id = "entry-1"
+    options = {
+        "electricity_provider": provider,
+        "epex_import_price_entity": "sensor.actual_import_price",
+        "epex_export_price_entity": "sensor.actual_export_price",
+    }
+    if export_source is not None:
+        options["epex_export_source"] = export_source
     coordinator._entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
-        options={
-            "electricity_provider": provider,
-            "epex_import_price_entity": "sensor.actual_import_price",
-            "epex_export_price_entity": "sensor.actual_export_price",
-        },
+        options=options,
     )
     coordinator._config = opt_coordinator.OptimizationConfig(horizon_hours=1)
     coordinator.price_coordinator = SimpleNamespace(
@@ -707,7 +717,7 @@ def _coordinator_with_epex_provider(
                 price_entry(
                     "2026-05-03T08:30:00+00:00",
                     "2026-05-03T09:30:00+00:00",
-                    -8.0,
+                    feed_in_price,
                     "feedIn",
                 ),
             ],
@@ -1207,6 +1217,47 @@ def test_epex_export_price_sensor_non_numeric_falls_back_to_epex_export(opt_modu
 
     assert export_prices == [0.08] * 12
     assert coordinator._last_display_export_prices == [0.08] * 12
+
+
+def test_explicit_epex_fixed_source_ignores_legacy_custom_entity(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module,
+        [_State("sensor.actual_export_price", "1.3", unit="ct/kWh")],
+        export_source="fixed_rate",
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == [0.08] * 12
+
+
+def test_explicit_epex_custom_source_fails_closed_when_entity_is_unusable(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module,
+        [_State("sensor.actual_export_price", "unavailable", unit="ct/kWh")],
+        export_source="custom_entity",
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == [0.0] * 12
+    assert coordinator._last_display_export_prices == [0.0] * 12
+
+
+def test_epex_negative_wholesale_export_stays_visible_but_is_not_lp_revenue(opt_module):
+    # A raw wholesale value of -5 ct/kWh is emitted as +5 feedIn ct/kWh:
+    # the display shows -5 ct/kWh earnings while LP export revenue is zero.
+    coordinator = _coordinator_with_epex_provider(
+        opt_module,
+        [],
+        export_source="raw_wholesale",
+        feed_in_price=5.0,
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == [0.0] * 12
+    assert coordinator._last_display_export_prices == [-0.05] * 12
 
 
 def test_epex_export_price_sensor_is_ignored_for_other_providers(opt_module):

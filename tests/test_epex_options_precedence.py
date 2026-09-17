@@ -14,6 +14,7 @@ CONF_EPEX_REGION = "epex_region"
 CONF_EPEX_SURCHARGE = "epex_surcharge"
 CONF_EPEX_TAX_PERCENT = "epex_tax_percent"
 CONF_EPEX_EXPORT_RATE = "epex_export_rate"
+CONF_EPEX_EXPORT_SOURCE = "epex_export_source"
 
 
 def _epex_setup_assignments() -> list[ast.Assign]:
@@ -30,6 +31,7 @@ def _epex_setup_assignments() -> list[ast.Assign]:
         "epex_surcharge",
         "epex_tax_percent",
         "epex_export_rate",
+        "epex_export_source",
     }
     found: dict[str, ast.Assign] = {}
     for node in ast.walk(setup):
@@ -58,6 +60,7 @@ def _evaluate_epex_setup(entry: SimpleNamespace) -> dict[str, object]:
         "CONF_EPEX_SURCHARGE": CONF_EPEX_SURCHARGE,
         "CONF_EPEX_TAX_PERCENT": CONF_EPEX_TAX_PERCENT,
         "CONF_EPEX_EXPORT_RATE": CONF_EPEX_EXPORT_RATE,
+        "CONF_EPEX_EXPORT_SOURCE": CONF_EPEX_EXPORT_SOURCE,
     }
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
     return namespace
@@ -78,6 +81,7 @@ def test_epex_setup_prefers_options_over_legacy_entry_data():
                 CONF_EPEX_SURCHARGE: 5.66,
                 CONF_EPEX_TAX_PERCENT: 25.0,
                 CONF_EPEX_EXPORT_RATE: 8.5,
+                CONF_EPEX_EXPORT_SOURCE: "raw_wholesale",
             },
         )
     )
@@ -87,6 +91,7 @@ def test_epex_setup_prefers_options_over_legacy_entry_data():
     assert values["epex_surcharge"] == 5.66
     assert values["epex_tax_percent"] == 25.0
     assert values["epex_export_rate"] == 8.5
+    assert values["epex_export_source"] == "raw_wholesale"
 
 
 def test_epex_setup_accepts_epex_region_saved_only_in_options():

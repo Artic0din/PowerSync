@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,25 +69,33 @@ class UpdateFailed(Exception):
 
 
 class _FakeEPEXClient:
-    def __init__(self, prices: list[dict]) -> None:
+    def __init__(self, prices: list[dict], raw_prices: list[dict] | None = None) -> None:
         self._prices = prices
+        self._raw_prices = raw_prices if raw_prices is not None else prices
         self.calls: list[tuple] = []
 
     async def get_prices(self, region: str, surcharge: float, tax_percent: float) -> list[dict]:
         self.calls.append((region, surcharge, tax_percent))
-        return self._prices
+        return self._raw_prices if surcharge == 0 and tax_percent == 0 else self._prices
 
 
 FIXED_NOW = datetime(2026, 7, 8, 10, 30, tzinfo=timezone.utc)
 
 
-def _make_self(export_rate: float, prices: list[dict], warnings: list) -> SimpleNamespace:
+def _make_self(
+    export_rate: float,
+    prices: list[dict],
+    warnings: list,
+    export_source: str | None = None,
+    raw_prices: list[dict] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         region="DE",
         _surcharge=8.0,
         _tax_percent=19.0,
         _export_rate=export_rate,
-        _client=_FakeEPEXClient(prices),
+        _client=_FakeEPEXClient(prices, raw_prices),
+        _export_source=export_source,
         _warned_export_rate_unset=False,
     )
 
@@ -96,6 +105,7 @@ def _run_update_data(self_obj: SimpleNamespace, warnings: list) -> dict:
         "Any": Any,
         "datetime": datetime,
         "timedelta": timedelta,
+        "math": math,
         "UpdateFailed": UpdateFailed,
         "dt_util": SimpleNamespace(utcnow=lambda: FIXED_NOW, UTC=timezone.utc),
         "_LOGGER": SimpleNamespace(
@@ -164,6 +174,7 @@ async def _run_update_data_async(self_obj: SimpleNamespace, warnings: list) -> d
         "Any": Any,
         "datetime": datetime,
         "timedelta": timedelta,
+        "math": math,
         "UpdateFailed": UpdateFailed,
         "dt_util": SimpleNamespace(utcnow=lambda: FIXED_NOW, UTC=timezone.utc),
         "_LOGGER": SimpleNamespace(
@@ -191,22 +202,64 @@ def test_epex_configured_export_rate_branch_is_unchanged():
     assert len(warnings) == 0
 
 
-def test_epex_export_rate_copy_matches_safe_unconfigured_default():
+def test_epex_raw_export_uses_zero_adjustment_request_and_matching_intervals():
+    warnings: list = []
+    raw_prices = [
+        {"startsAt": "2026-07-08T10:00:00+00:00", "total": 7.5},
+        {"startsAt": "2026-07-08T11:00:00+00:00", "total": -2.0},
+    ]
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[
+            CURRENT_INTERVAL_ENTRY,
+            {"startsAt": "2026-07-08T11:00:00+00:00", "total": 31.0},
+        ],
+        warnings=warnings,
+        export_source="raw_wholesale",
+        raw_prices=raw_prices,
+    )
+
+    data = _run_update_data(self_obj, warnings)
+
+    assert self_obj._client.calls == [("DE", 8.0, 19.0), ("DE", 0.0, 0.0)]
+    exports = [
+        entry for entry in data["current"] + data["forecast"]
+        if entry["channelType"] == "feedIn"
+    ]
+    assert [entry["perKwh"] for entry in exports] == [-7.5, 2.0]
+
+
+def test_epex_raw_export_missing_or_invalid_interval_fails_closed_to_zero():
+    warnings: list = []
+    self_obj = _make_self(
+        export_rate=8.5,
+        prices=[CURRENT_INTERVAL_ENTRY],
+        warnings=warnings,
+        export_source="raw_wholesale",
+        raw_prices=[{"startsAt": "2026-07-08T10:00:00+00:00", "total": "nan"}],
+    )
+
+    data = _run_update_data(self_obj, warnings)
+
+    export = next(entry for entry in data["current"] if entry["channelType"] == "feedIn")
+    assert export["perKwh"] == 0.0
+
+
+def test_epex_export_source_copy_explains_raw_wholesale_semantics():
     for path in STRINGS_PATHS:
         descriptions = [
             value
             for value in _values_for_key(
                 json.loads(path.read_text()),
-                "epex_export_rate",
+                "epex_export_source",
             )
-            if "ct/kWh" in value
+            if "Raw EPEX wholesale" in value
         ]
         assert descriptions
         for description in descriptions:
-            assert "unconfigured" in description
-            assert "0 ct/kWh" in description
-            assert "export price entity" in description
-            assert "use the wholesale price" not in description
+            assert "EUR ct/kWh" in description
+            assert "tax are excluded" in description
+            assert "modelled" in description
 
 
 def test_epex_region_copy_lists_only_supported_zone_examples():

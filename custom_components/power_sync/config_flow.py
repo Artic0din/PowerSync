@@ -519,6 +519,9 @@ from .const import (
     CONF_EPEX_EXPORT_RATE,
     CONF_EPEX_IMPORT_PRICE_ENTITY,
     CONF_EPEX_EXPORT_PRICE_ENTITY,
+    CONF_EPEX_EXPORT_SOURCE,
+    EPEX_EXPORT_SOURCE_FIXED_RATE,
+    EPEX_EXPORT_SOURCES,
     EPEX_REGIONS,
     # Smart Optimization configuration
     CONF_BATTERY_MANAGEMENT_MODE,
@@ -3215,6 +3218,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             surcharge = user_input.get(CONF_EPEX_SURCHARGE, 0.0)
             tax_percent = user_input.get(CONF_EPEX_TAX_PERCENT, 0.0)
             export_rate = user_input.get(CONF_EPEX_EXPORT_RATE, 0.0)
+            export_source = user_input.get(
+                CONF_EPEX_EXPORT_SOURCE, EPEX_EXPORT_SOURCE_FIXED_RATE
+            )
             import_price_entity = _normalize_optional_entity(
                 user_input.get(CONF_EPEX_IMPORT_PRICE_ENTITY)
             )
@@ -3242,6 +3248,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_EPEX_SURCHARGE: surcharge,
                     CONF_EPEX_TAX_PERCENT: tax_percent,
                     CONF_EPEX_EXPORT_RATE: export_rate,
+                    CONF_EPEX_EXPORT_SOURCE: export_source,
                 }
                 if import_price_entity:
                     self._epex_data[CONF_EPEX_IMPORT_PRICE_ENTITY] = (
@@ -3287,6 +3294,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_EPEX_EXPORT_RATE, default=0.0): NumberSelector(
                     NumberSelectorConfig(
                         min=0, max=50, step=0.1, unit_of_measurement="ct/kWh",
+                    )
+                ),
+                vol.Required(
+                    CONF_EPEX_EXPORT_SOURCE,
+                    default=EPEX_EXPORT_SOURCE_FIXED_RATE,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=key, label=label)
+                            for key, label in EPEX_EXPORT_SOURCES.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
                 vol.Optional(CONF_EPEX_IMPORT_PRICE_ENTITY): EntitySelector(
@@ -16732,6 +16751,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             surcharge = user_input.get(CONF_EPEX_SURCHARGE, 0.0)
             tax_percent = user_input.get(CONF_EPEX_TAX_PERCENT, 0.0)
             export_rate = user_input.get(CONF_EPEX_EXPORT_RATE, 0.0)
+            export_source = user_input.get(
+                CONF_EPEX_EXPORT_SOURCE, EPEX_EXPORT_SOURCE_FIXED_RATE
+            )
             import_price_entity = _normalize_optional_entity(
                 user_input.get(CONF_EPEX_IMPORT_PRICE_ENTITY)
             )
@@ -16759,6 +16781,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_EPEX_SURCHARGE: surcharge,
                     CONF_EPEX_TAX_PERCENT: tax_percent,
                     CONF_EPEX_EXPORT_RATE: export_rate,
+                    CONF_EPEX_EXPORT_SOURCE: export_source,
                     CONF_AUTO_SYNC_ENABLED: user_input.get(
                         CONF_AUTO_SYNC_ENABLED, True
                     ),
@@ -16782,6 +16805,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_surcharge = self._get_option(CONF_EPEX_SURCHARGE, 0.0)
         current_tax = self._get_option(CONF_EPEX_TAX_PERCENT, 0.0)
         current_export = self._get_option(CONF_EPEX_EXPORT_RATE, 0.0)
+        current_export_source = self._get_option(
+            CONF_EPEX_EXPORT_SOURCE, EPEX_EXPORT_SOURCE_FIXED_RATE
+        )
         current_import_price_entity = _normalize_optional_entity(
             self._get_option(CONF_EPEX_IMPORT_PRICE_ENTITY, None)
         )
@@ -16820,6 +16846,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         min=0.0, max=100.0, step=0.01, unit_of_measurement="ct/kWh",
                         mode=NumberSelectorMode.BOX,
                     )),
+                    vol.Required(
+                        CONF_EPEX_EXPORT_SOURCE,
+                        default=current_export_source,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=key, label=label)
+                                for key, label in EPEX_EXPORT_SOURCES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Optional(
                         CONF_EPEX_IMPORT_PRICE_ENTITY,
                         description=(

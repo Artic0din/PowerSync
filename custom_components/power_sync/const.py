@@ -841,6 +841,15 @@ CONF_EPEX_TAX_PERCENT = "epex_tax_percent"  # Tax percentage (e.g. 21% VAT in Be
 CONF_EPEX_EXPORT_RATE = "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = unconfigured)
 CONF_EPEX_IMPORT_PRICE_ENTITY = "epex_import_price_entity"  # Optional HA sensor for import valuation
 CONF_EPEX_EXPORT_PRICE_ENTITY = "epex_export_price_entity"  # Optional HA sensor for export valuation
+CONF_EPEX_EXPORT_SOURCE = "epex_export_source"
+EPEX_EXPORT_SOURCE_FIXED_RATE = "fixed_rate"
+EPEX_EXPORT_SOURCE_RAW_WHOLESALE = "raw_wholesale"
+EPEX_EXPORT_SOURCE_CUSTOM_ENTITY = "custom_entity"
+EPEX_EXPORT_SOURCES = {
+    EPEX_EXPORT_SOURCE_FIXED_RATE: "Fixed export rate",
+    EPEX_EXPORT_SOURCE_RAW_WHOLESALE: "Raw EPEX wholesale forecast",
+    EPEX_EXPORT_SOURCE_CUSTOM_ENTITY: "Custom export price sensor",
+}
 EPEX_API_BASE_URL = "https://epexpredictor.batzill.com"
 EPEX_REGIONS = {
     "DE": "Germany",
