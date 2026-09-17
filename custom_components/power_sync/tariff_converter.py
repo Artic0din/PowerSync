@@ -67,6 +67,50 @@ def _finite_tariff_rate(value: Any) -> int | float | None:
     return None
 
 
+def _nonnegative_finite_tariff_amount(value: Any) -> float | None:
+    """Return a Tesla-safe daily amount in major tariff-currency units."""
+    if isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
+def resolve_static_tariff_daily_supply_charge(
+    custom_tariff: dict[str, Any] | None,
+) -> float | None:
+    """Resolve a saved static tariff's optional daily supply charge.
+
+    A saved ``daily_supply_charge`` is an explicit override in major
+    tariff-currency units per day.  When it is absent or unusable, retain
+    compatibility with template-backed tariffs by using the selected
+    template's default.  Legacy tariffs without a valid value or template
+    intentionally return ``None`` so their existing amount-less Tesla row is
+    preserved.
+    """
+    if not isinstance(custom_tariff, dict):
+        return None
+
+    explicit_amount = _nonnegative_finite_tariff_amount(
+        custom_tariff.get("daily_supply_charge")
+    )
+    if explicit_amount is not None:
+        return explicit_amount
+
+    template_id = custom_tariff.get("template_id")
+    if not isinstance(template_id, str) or not template_id.strip():
+        return None
+
+    from .tariff_templates import get_template
+
+    template = get_template(template_id)
+    if not isinstance(template, dict):
+        return None
+    return _nonnegative_finite_tariff_amount(template.get("daily_supply_charge"))
+
+
 def _raw_rate_map(section: Any) -> dict[str, Any] | None:
     """Return a raw direct/nested rate map without dropping bad values."""
     if not isinstance(section, dict):
@@ -328,6 +372,11 @@ def convert_custom_tariff_to_tesla_tariff(
     )
     sell_utility = _safe_tariff_string(sell_source.get("utility"), utility)
 
+    daily_charge = {"name": "Charge"}
+    daily_supply_charge = resolve_static_tariff_daily_supply_charge(custom_tariff)
+    if daily_supply_charge is not None:
+        daily_charge["amount"] = daily_supply_charge
+
     payload = {
         "version": 1,
         # Stable marker used to apply strict multi-season readback only to
@@ -336,7 +385,7 @@ def convert_custom_tariff_to_tesla_tariff(
         "name": name,
         "utility": utility,
         "currency": currency,
-        "daily_charges": [{"name": "Charge"}],
+        "daily_charges": [daily_charge],
         "demand_charges": _default_tariff_demand_charges(seasons),
         "energy_charges": energy_charges,
         "seasons": seasons,
