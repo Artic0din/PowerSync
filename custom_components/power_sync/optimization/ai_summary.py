@@ -26,14 +26,16 @@ from ..const import (
     CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH,
     CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT,
     CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL,
+    CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL,
     CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
     DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
 )
 
-AI_SUMMARY_PROVIDERS = ("gemini", "grok", "local_openai_compatible")
+AI_SUMMARY_PROVIDERS = ("gemini", "grok", "openrouter", "local_openai_compatible")
 AI_SUMMARY_MODELS = {
     "gemini": "gemini-3.5-flash-lite",
     "grok": "grok-4.5",
+    "openrouter": "",
     "local_openai_compatible": "",
 }
 EXPLAINER_CONTRACT_VERSION = "powersync.optimizer-explainer.v2"
@@ -45,6 +47,7 @@ MAX_FORECAST_EVIDENCE_SLOTS = 24
 LOCAL_OPENAI_MAX_TOKENS = 2048
 MAX_LOCAL_ENDPOINT_LENGTH = 512
 MAX_LOCAL_MODEL_LENGTH = 128
+MAX_OPENROUTER_MODEL_LENGTH = 128
 AUTO_REFRESH_DEBOUNCE_SECONDS = 15
 AUTO_REFRESH_COOLDOWN_SECONDS = 300
 
@@ -238,18 +241,31 @@ def pin_local_endpoint(endpoint: str, addresses: tuple[str, ...]) -> tuple[str, 
     return urlunsplit((parsed.scheme, authority, parsed.path, "", "")), host_header, host
 
 
-def provider_model(provider: str, local_model: str = "") -> str:
+def provider_model(
+    provider: str,
+    local_model: str = "",
+    openrouter_model: str = "",
+) -> str:
     """Return the backend-owned model for a supported provider."""
     if provider not in AI_SUMMARY_MODELS:
         raise AISummaryError(
             "invalid_ai_provider",
-            "Choose Gemini, Grok, or a local OpenAI-compatible provider for AI plan explanations.",
+            "Choose Gemini, Grok, OpenRouter, or a local OpenAI-compatible provider for AI plan explanations.",
             http_status=400,
         )
     if provider == "local_openai_compatible":
         model = " ".join(str(local_model or "").split())
         if not model or len(model) > MAX_LOCAL_MODEL_LENGTH:
             raise AISummaryError("invalid_local_ai_model", "Enter a local OpenAI-compatible model identifier.", http_status=400)
+        return model
+    if provider == "openrouter":
+        model = " ".join(str(openrouter_model or "").split())
+        if not model or len(model) > MAX_OPENROUTER_MODEL_LENGTH:
+            raise AISummaryError(
+                "invalid_openrouter_model",
+                "Enter an OpenRouter model identifier.",
+                http_status=400,
+            )
         return model
     return AI_SUMMARY_MODELS[provider]
 
@@ -274,12 +290,24 @@ def ai_summary_settings(entry: Any | None) -> dict[str, Any]:
         data.get(CONF_OPTIMIZATION_AI_SUMMARY_API_KEY),
     )
     endpoint = options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT, data.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT, ""))
-    model = options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, ""))
-    local_configured = provider != "local_openai_compatible" or bool(str(endpoint).strip() and str(model).strip())
+    local_model = options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, ""))
+    openrouter_model = options.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, ""))
+    local_configured = provider != "local_openai_compatible" or bool(str(endpoint).strip() and str(local_model).strip())
+    openrouter_configured = provider != "openrouter" or bool(str(api_key or "").strip() and str(openrouter_model).strip())
     return {
         "ai_summary_provider": provider,
-        "ai_summary_key_configured": bool(str(api_key or "").strip()) if provider != "local_openai_compatible" else local_configured,
-        "ai_summary_model": provider_model(provider, str(model or "")) if local_configured else "",
+        "ai_summary_key_configured": (
+            local_configured
+            if provider == "local_openai_compatible"
+            else openrouter_configured
+            if provider == "openrouter"
+            else bool(str(api_key or "").strip())
+        ),
+        "ai_summary_model": (
+            provider_model(provider, str(local_model or ""), str(openrouter_model or ""))
+            if local_configured and openrouter_configured
+            else ""
+        ),
         "ai_summary_auto_refresh": bool(options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, data.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False))),
     }
 
@@ -316,6 +344,15 @@ def configured_local_model(entry: Any | None) -> str:
     return str(options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, "")) or "").strip()
 
 
+def configured_openrouter_model(entry: Any | None) -> str:
+    """Read the selected OpenRouter model only for the server-side adapter."""
+    if entry is None:
+        return ""
+    data = getattr(entry, "data", {}) or {}
+    options = getattr(entry, "options", {}) or {}
+    return str(options.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, data.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, "")) or "").strip()
+
+
 def apply_ai_summary_settings(
     current_options: Mapping[str, Any],
     payload: Mapping[str, Any],
@@ -335,7 +372,7 @@ def apply_ai_summary_settings(
     if not isinstance(requested_provider, str):
         raise AISummaryError(
             "invalid_ai_provider",
-            "Choose Gemini, Grok, or a local OpenAI-compatible provider for AI plan explanations.",
+            "Choose Gemini, Grok, OpenRouter, or a local OpenAI-compatible provider for AI plan explanations.",
             http_status=400,
         )
     requested_provider = requested_provider.strip().lower()
@@ -365,14 +402,24 @@ def apply_ai_summary_settings(
         )
     raw_endpoint = payload.get("ai_summary_local_endpoint")
     raw_model = payload.get("ai_summary_local_model")
+    raw_openrouter_model = payload.get("ai_summary_openrouter_model")
+    if raw_openrouter_model is not None and not isinstance(raw_openrouter_model, str):
+        raise AISummaryError(
+            "invalid_openrouter_model",
+            "The OpenRouter model identifier must be text.",
+            http_status=400,
+        )
     auto_refresh = payload.get("ai_summary_auto_refresh", options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False))
     if not isinstance(auto_refresh, bool):
         raise AISummaryError("invalid_ai_settings", "Automatic AI explanation refresh must be true or false.", http_status=400)
     endpoint = normalize_local_endpoint(raw_endpoint) if isinstance(raw_endpoint, str) and raw_endpoint.strip() else str(options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT, "") or "")
     model = " ".join(str(raw_model).split()) if isinstance(raw_model, str) and raw_model.strip() else str(options.get(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, "") or "")
+    openrouter_model = " ".join(str(raw_openrouter_model).split()) if isinstance(raw_openrouter_model, str) and raw_openrouter_model.strip() else str(options.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL, "") or "")
     if requested_provider == "local_openai_compatible":
         provider_model(requested_provider, model)
         endpoint = normalize_local_endpoint(endpoint)
+    elif requested_provider == "openrouter":
+        provider_model(requested_provider, openrouter_model=openrouter_model)
     changes: list[str] = []
     if requested_provider != current_provider:
         options[CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER] = requested_provider
@@ -402,6 +449,9 @@ def apply_ai_summary_settings(
     elif requested_provider != current_provider:
         options.pop(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_ENDPOINT, None)
         options.pop(CONF_OPTIMIZATION_AI_SUMMARY_LOCAL_MODEL, None)
+    if requested_provider == "openrouter" and options.get(CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL) != openrouter_model:
+        options[CONF_OPTIMIZATION_AI_SUMMARY_OPENROUTER_MODEL] = openrouter_model
+        changes.append("updated OpenRouter AI model")
     if options.get(CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH, False) != auto_refresh:
         options[CONF_OPTIMIZATION_AI_SUMMARY_AUTO_REFRESH] = auto_refresh
         changes.append("enabled automatic AI explanation refresh" if auto_refresh else "disabled automatic AI explanation refresh")
@@ -1389,6 +1439,49 @@ class GrokAISummaryProvider:
         return _parse_json_text(text)
 
 
+class OpenRouterAISummaryProvider:
+    """OpenRouter OpenAI-compatible Chat Completions adapter."""
+
+    async def generate(
+        self,
+        *,
+        session: Any,
+        api_key: str,
+        model: str,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        body = await _post_json(
+            session,
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            payload={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"PLAN_CONTEXT_JSON:\n{canonical_context_json(context)}",
+                    },
+                ],
+                "temperature": 0.2,
+                "max_tokens": 1200,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "powersync_ai_plan_summary",
+                        "schema": MODEL_OUTPUT_SCHEMA,
+                        "strict": True,
+                    },
+                },
+                "provider": {"require_parameters": True},
+            },
+        )
+        return _openai_message_text(body)
+
+
 def _openai_message_text(body: Mapping[str, Any]) -> Mapping[str, Any]:
     """Extract only the simple, bounded OpenAI Chat Completions content form."""
     choices = body.get("choices")
@@ -1465,6 +1558,7 @@ class LocalOpenAICompatibleAISummaryProvider:
 PROVIDER_ADAPTERS: dict[str, AISummaryProvider] = {
     "gemini": GeminiAISummaryProvider(),
     "grok": GrokAISummaryProvider(),
+    "openrouter": OpenRouterAISummaryProvider(),
     "local_openai_compatible": LocalOpenAICompatibleAISummaryProvider(),
 }
 
@@ -1487,7 +1581,7 @@ class AISummaryService:
         self._last_explained_context: dict[str, Any] | None = None
         self._request_lock = asyncio.Lock()
         self._auto_task: asyncio.Task[None] | None = None
-        self._auto_pending: tuple[str, str, str, str, str] | None = None
+        self._auto_pending: tuple[str, str, str, str, str, str] | None = None
         self._auto_last_material_fingerprint: str | None = None
         self._auto_last_request_at = 0.0
         self._generation = 0
@@ -1518,6 +1612,7 @@ class AISummaryService:
         api_key: str,
         endpoint: str = "",
         local_model: str = "",
+        openrouter_model: str = "",
     ) -> None:
         """Coalesce detached refreshes after a committed optimizer plan.
 
@@ -1526,7 +1621,7 @@ class AISummaryService:
         debounce and cooldown bound local compute use.
         """
         try:
-            model = provider_model(provider, local_model)
+            model = provider_model(provider, local_model, openrouter_model)
             context = build_compact_context(self._snapshot_getter())
         except AISummaryError:
             return
@@ -1534,7 +1629,7 @@ class AISummaryService:
         if material == self._auto_last_material_fingerprint:
             return
         self._auto_last_material_fingerprint = material
-        self._auto_pending = (material, provider, api_key, endpoint, local_model)
+        self._auto_pending = (material, provider, api_key, endpoint, local_model, openrouter_model)
         if self._auto_task is None or self._auto_task.done():
             generation = self._generation
             self._auto_task = asyncio.create_task(self._run_auto_refresh(generation))
@@ -1542,7 +1637,7 @@ class AISummaryService:
     async def _run_auto_refresh(self, generation: int) -> None:
         try:
             while self._auto_pending is not None and generation == self._generation:
-                _material, provider, api_key, endpoint, local_model = self._auto_pending
+                _material, provider, api_key, endpoint, local_model, openrouter_model = self._auto_pending
                 self._auto_pending = None
                 await asyncio.sleep(AUTO_REFRESH_DEBOUNCE_SECONDS)
                 remaining = AUTO_REFRESH_COOLDOWN_SECONDS - (asyncio.get_running_loop().time() - self._auto_last_request_at)
@@ -1553,7 +1648,7 @@ class AISummaryService:
                     continue
                 self._auto_last_request_at = asyncio.get_running_loop().time()
                 try:
-                    await self.generate(provider=provider, api_key=api_key, refresh=False, endpoint=endpoint, local_model=local_model)
+                    await self.generate(provider=provider, api_key=api_key, refresh=False, endpoint=endpoint, local_model=local_model, openrouter_model=openrouter_model)
                 except (AISummaryError, asyncio.CancelledError):
                     if generation != self._generation:
                         return
@@ -1568,6 +1663,7 @@ class AISummaryService:
         api_key: str,
         endpoint: str = "",
         local_model: str = "",
+        openrouter_model: str = "",
     ) -> dict[str, Any]:
         """Return status/cache metadata without contacting a provider."""
         if provider != "local_openai_compatible" and not api_key:
@@ -1578,7 +1674,7 @@ class AISummaryService:
                 "last_error": None,
             }
         try:
-            model = provider_model(provider, local_model)
+            model = provider_model(provider, local_model, openrouter_model)
             context = build_compact_context(snapshot)
         except AISummaryError as err:
             state = "plan_stale" if err.code == "plan_stale" else "optimizer_unavailable"
@@ -1618,6 +1714,7 @@ class AISummaryService:
         refresh: bool,
         endpoint: str = "",
         local_model: str = "",
+        openrouter_model: str = "",
     ) -> dict[str, Any]:
         """Generate or return a cached explanation after an explicit request."""
         if provider != "local_openai_compatible" and not api_key:
@@ -1626,7 +1723,7 @@ class AISummaryService:
                 "Add a provider key before generating an explanation.",
                 http_status=400,
             )
-        model = provider_model(provider, local_model)
+        model = provider_model(provider, local_model, openrouter_model)
         if provider == "local_openai_compatible":
             endpoint = normalize_local_endpoint(endpoint)
         snapshot = self._snapshot_getter()

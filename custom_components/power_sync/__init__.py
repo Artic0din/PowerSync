@@ -43780,6 +43780,7 @@ def _optimization_ai_service(
                 configured_api_key,
                 configured_local_endpoint,
                 configured_local_model,
+                configured_openrouter_model,
             )
             entry = hass.config_entries.async_get_entry(entry_id)
             settings = ai_summary_settings(entry)
@@ -43790,6 +43791,7 @@ def _optimization_ai_service(
                 api_key=configured_api_key(entry),
                 endpoint=configured_local_endpoint(entry),
                 local_model=configured_local_model(entry),
+                openrouter_model=configured_openrouter_model(entry),
             )
         entry_data["_optimization_ai_summary_auto_unsub"] = (
             opt_coordinator.async_add_listener(_queue_auto_ai_summary)
@@ -43834,6 +43836,7 @@ class OptimizationView(HomeAssistantView):
             configured_api_key,
             configured_local_endpoint,
             configured_local_model,
+            configured_openrouter_model,
         )
         ai_settings = ai_summary_settings(config_entry)
 
@@ -43871,6 +43874,7 @@ class OptimizationView(HomeAssistantView):
                 api_key=configured_api_key(config_entry),
                 endpoint=configured_local_endpoint(config_entry),
                 local_model=configured_local_model(config_entry),
+                openrouter_model=configured_openrouter_model(config_entry),
             )
         _LOGGER.debug(f"Optimization GET response: enabled={api_data.get('enabled')}, "
                       f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
@@ -44514,6 +44518,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "clear_ai_summary_api_key",
                 "ai_summary_local_endpoint",
                 "ai_summary_local_model",
+                "ai_summary_openrouter_model",
                 "ai_summary_auto_refresh",
             }
             if ai_setting_keys.intersection(settings):
@@ -45197,6 +45202,7 @@ class OptimizationAISummaryView(HomeAssistantView):
             configured_api_key,
             configured_local_endpoint,
             configured_local_model,
+            configured_openrouter_model,
         )
 
         try:
@@ -45268,6 +45274,7 @@ class OptimizationAISummaryView(HomeAssistantView):
                 refresh=refresh,
                 endpoint=configured_local_endpoint(config_entry),
                 local_model=configured_local_model(config_entry),
+                openrouter_model=configured_openrouter_model(config_entry),
             )
         except AISummaryError as err:
             _LOGGER.warning("AI plan explanation failed: %s", err.code)
