@@ -9,6 +9,7 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -9186,7 +9187,7 @@ def test_solar_surplus_below_floor_can_start_with_strict_surplus(monkeypatch):
         },
     )
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
-    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", lambda *args, **kwargs: False)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
 
     asyncio.run(
         actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
@@ -9730,7 +9731,7 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
         return True
 
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_ev)
-    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", lambda *args: False)
+    monkeypatch.setattr(actions, "_is_vehicle_charge_complete", AsyncMock(return_value=False))
     set_amps_calls = _install_solar_surplus_runtime_stubs(
         monkeypatch,
         {
@@ -9773,7 +9774,128 @@ def test_tesla_stopped_state_is_not_charge_complete_at_partial_soc():
         _State("sensor.VIN123_battery_level", "69"),
     ])
 
-    assert actions._is_vehicle_charge_complete(hass, "VIN123") is False
+    assert asyncio.run(actions._is_vehicle_charge_complete(hass, "VIN123")) is False
+
+
+@pytest.mark.parametrize("current_suffix", ["charge_current", "charger_current"])
+@pytest.mark.parametrize("charging_suffix", ["charging_state", "charging"])
+def test_ble_solar_restart_uses_zero_current_without_power_sensor(monkeypatch, current_suffix, charging_suffix):
+    """A BLE car reporting Stopped and 0 A must receive start, not only amps."""
+    vehicle_id = "ble_snowflake"
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(f"sensor.snowflake_{charging_suffix}", "Stopped", last_updated=now),
+        _State(f"sensor.snowflake_{current_suffix}", "0", {"unit_of_measurement": "A"}, last_updated=now),
+        _State("binary_sensor.snowflake_charger", "on"),
+        _State("sensor.other_charging_state", "Charging", last_updated=now),
+        _State("sensor.other_charge_current", "16", last_updated=now),
+    ])
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=16)
+    state["params"].update(vehicle_vin=vehicle_id, owner_mode="smart_schedule_solar_surplus", household_buffer_kw=0)
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_calls = _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 52, "grid_power": 0, "battery_power": -3840,
+        "solar_power": 4500, "load_power": 660,
+    })
+    starts = []
+
+    async def start(_hass, _entry, params, context=None):
+        starts.append(params)
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", start)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id))
+    assert len(starts) == 1
+    assert starts[0]["vehicle_vin"] == vehicle_id
+    assert starts[0]["amps"] == 16
+    assert set_calls == [16]
+    assert state["high_surplus_start"] is None
+
+
+@pytest.mark.parametrize("case", [
+    "stale_current", "stale_state", "positive_current", "unknown_current",
+    "wrong_unit", "other_vehicle", "writable_limit", "missing_timestamp",
+])
+def test_ble_zero_draw_fallback_requires_fresh_same_vehicle_measurements(case):
+    now = datetime.now(timezone.utc)
+    current_id = "sensor.snowflake_charge_current"
+    current_value = "0"
+    current_unit = "A"
+    current_time = state_time = now
+    if case == "stale_current":
+        current_time = now - timedelta(minutes=5)
+    elif case == "stale_state":
+        state_time = now - timedelta(minutes=5)
+    elif case == "positive_current":
+        current_value = "16"
+    elif case == "unknown_current":
+        current_value = "unavailable"
+    elif case == "wrong_unit":
+        current_unit = "W"
+    elif case == "other_vehicle":
+        current_id = "sensor.other_charge_current"
+    elif case == "writable_limit":
+        current_id = "number.snowflake_charging_amps"
+    elif case == "missing_timestamp":
+        current_time = None
+    hass = _Hass([
+        _State("sensor.snowflake_charging_state", "Stopped", last_updated=state_time),
+        _State(current_id, current_value, {"unit_of_measurement": current_unit}, last_updated=current_time),
+    ])
+    assert asyncio.run(actions._get_observed_ev_power_reading_kw(
+        hass, "ble_snowflake", {"charger_type": "tesla"},
+    )) == (0.0, False)
+
+
+@pytest.mark.parametrize("current_suffix", ["charge_current", "charger_current"])
+def test_ble_grid_schedule_reconciles_stopped_current_without_power(monkeypatch, current_suffix):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    hass = _Hass([
+        _State("sensor.snowflake_charging", "Stopped", last_updated=now),
+        _State(f"sensor.snowflake_{current_suffix}", "0", {"unit_of_measurement": "A"}, last_updated=now),
+        _State("sensor.other_charge_current", "16", {"unit_of_measurement": "A"}, last_updated=now),
+    ])
+    state = _solar_surplus_state(current_amps=16)
+    state["params"].update(owner_mode="smart_schedule", dynamic_mode="battery_target")
+    assert asyncio.run(actions._reconcile_stopped_smart_schedule_tesla(
+        hass, _Entry(), "ble_snowflake", state,
+    )) is True
+    assert state["current_amps"] == state["target_amps"] == 0
+    assert state["charging_started"] is False
+    assert state["physical_restart_required"] is True
+
+
+@pytest.mark.parametrize("block", ["lp_zero", "no_surplus", "start_grace"])
+def test_ble_stopped_recovery_preserves_solar_start_gates(monkeypatch, block):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("sensor.snowflake_charging_state", "Stopped", last_updated=now),
+        _State("sensor.snowflake_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=now),
+        _State("binary_sensor.snowflake_charger", "on"),
+    ])
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=16)
+    state["params"].update(vehicle_vin="ble_snowflake", owner_mode="smart_schedule_solar_surplus")
+    state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
+    if block == "start_grace":
+        state["last_start_command_at"] = datetime.now()
+    actions._dynamic_ev_state["entry-1"] = {"ble_snowflake": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 52, "grid_power": 0,
+        "battery_power": 0 if block == "no_surplus" else -3840,
+        "solar_power": 4500, "load_power": 660,
+    })
+    if block == "lp_zero":
+        monkeypatch.setattr(actions, "_optimizer_planned_ev_charge_kw", lambda *args: 0.0)
+
+    async def unexpected_start(*args, **kwargs):
+        raise AssertionError("Stopped telemetry cannot bypass the solar start gates")
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", unexpected_start)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "ble_snowflake"))
 
 
 def test_stopped_tesla_requires_available_numeric_zero_power_for_stale_load_override():
@@ -10179,6 +10301,20 @@ def test_automation_stop_context_routes_to_charging_ble_tesla():
             "tesla_ble_entity_prefix": "tesla_yf88",
         },
     )
+
+    original_call = hass.services.async_call
+
+    async def stop_with_readback(domain, service, data, **kwargs):
+        await original_call(domain, service, data, **kwargs)
+        if (domain, service, data.get("entity_id")) == (
+            "switch", "turn_off", "switch.tesla_yf88_charger"
+        ):
+            hass.states._states["sensor.tesla_yf88_charging_state"] = _State(
+                "sensor.tesla_yf88_charging_state", "Stopped",
+                last_updated=datetime.now(timezone.utc),
+            )
+
+    hass.services.async_call = stop_with_readback
 
     result = asyncio.run(
         actions._execute_single_action(

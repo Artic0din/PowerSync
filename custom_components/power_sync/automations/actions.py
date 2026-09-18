@@ -1011,6 +1011,13 @@ def _get_tesla_charging_state(
     if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
         return None
 
+    if vehicle_vin.startswith("ble_"):
+        from ..tesla_ble import get_tesla_ble_charging_state
+
+        state = get_tesla_ble_charging_state(hass, vehicle_vin[4:])
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        return value if value not in {"", "unknown", "unavailable", "none"} else None
+
     for state in hass.states.async_all():
         match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
         if not match or match.group(1).upper() != str(vehicle_vin).upper():
@@ -1043,6 +1050,13 @@ def _get_tesla_charging_state_changed_at(
 
     if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
         return None
+
+    if vehicle_vin.startswith("ble_"):
+        from ..tesla_ble import get_tesla_ble_charging_state
+
+        state = get_tesla_ble_charging_state(hass, vehicle_vin[4:])
+        changed_at = getattr(state, "last_changed", None)
+        return changed_at if isinstance(changed_at, datetime) else None
 
     for state in hass.states.async_all():
         match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
@@ -1656,6 +1670,35 @@ async def _get_observed_ev_power_reading_kw(
 
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID and wall_power_available:
         return wall_power_kw, True
+
+    # Some BLE bridges expose measured current but no power sensor. Fresh
+    # Stopped + exactly 0 A is still proof of zero draw: retaining a previous
+    # commanded rate here prevents the surplus controller from issuing a new
+    # start. Never use a writable current limit, another car, or stale samples.
+    # Positive current is deliberately not converted to estimated power.
+    if charger_type == "tesla" and vehicle_id.startswith("ble_"):
+        from ..tesla_ble import (
+            get_tesla_ble_charge_current_state,
+            get_tesla_ble_charging_state,
+        )
+
+        current = get_tesla_ble_charge_current_state(hass, vehicle_id[4:])
+        charging = get_tesla_ble_charging_state(hass, vehicle_id[4:])
+        if (
+            current is not None
+            and charging is not None
+            and str(charging.state).strip().lower() == "stopped"
+            and str(current.attributes.get("unit_of_measurement", "")).lower() == "a"
+            and all(
+                is_current_ev_power_observation(
+                    getattr(sample, "last_reported", None)
+                    or getattr(sample, "last_updated", None)
+                )
+                for sample in (current, charging)
+            )
+            and float(current.state) == 0.0
+        ):
+            return 0.0, True
     return 0.0, False
 
 
@@ -2308,7 +2351,7 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Option
         if "complete" in err_str:
             _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
         else:
-            _LOGGER.error(f"Failed to start EV charging via BLE: {e}")
+            _LOGGER.error("Failed to start EV charging via BLE (%s): %s", type(e).__name__, e)
         if type(e).__name__ in {"ServiceNotFound", "ServiceValidationError"}:
             return False
         return None if command_dispatched else False
@@ -9926,6 +9969,15 @@ async def _observed_owned_charge_amps(
         if not entity_id:
             continue
         amps, error, _age = _phase_current_state_amps(hass.states.get(entity_id))
+        if error is None:
+            return amps
+
+    if params.get("charger_type", "tesla") == "tesla" and vehicle_id.startswith("ble_"):
+        from ..tesla_ble import get_tesla_ble_charge_current_state
+
+        amps, error, _age = _phase_current_state_amps(
+            get_tesla_ble_charge_current_state(hass, vehicle_id[4:])
+        )
         if error is None:
             return amps
 
