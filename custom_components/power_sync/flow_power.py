@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from typing import Any, Mapping, Sequence
 
 from .const import (
@@ -20,6 +21,55 @@ from .quota import QuotaLedger, QuotaRule, tariff_datetime
 LEGACY_PLAN_ID = "legacy_unclassified"
 ACCOUNT_SPECIFIC_PLAN_ID = "account_specific"
 OFFICIAL_PLAN_IDS = {"happy_hour_2026", "four_free_2026", "flow_home_2026"}
+CUSTOM_EXPORT_CAPABILITY = "custom_export_tiers_v1"
+CUSTOM_EXPORT_RULE_ID = "flow_custom_export"
+CUSTOM_EXPORT_RATE_FIELDS = (
+    "premium_rate_c_per_kwh", "post_quota_rate_c_per_kwh",
+    "outside_window_rate_c_per_kwh",
+)
+
+
+def custom_export_defaults(region: str | None) -> dict[str, Any]:
+    """Editor defaults, applied only when the user enables custom tiers."""
+    return {
+        "tiered_export_enabled": True,
+        "premium_rate_c_per_kwh": 30.0 if region == "VIC" else 35.0,
+        "export_cap_kwh": 15.0,
+        "post_quota_rate_c_per_kwh": 10.0,
+        "outside_window_rate_c_per_kwh": 0.0,
+        "export_window_start": "17:30",
+        "export_window_end": "21:30",
+    }
+
+
+def has_custom_export_tiers(selection: FlowPowerPlanSelection) -> bool:
+    return (selection.plan_id == ACCOUNT_SPECIFIC_PLAN_ID
+            and selection.overrides.get("tiered_export_enabled") is True)
+
+
+def _validate_custom_export(overrides: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"tiered_export_enabled": True}
+    for key in (*CUSTOM_EXPORT_RATE_FIELDS, "export_cap_kwh"):
+        raw = overrides.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        try:
+            value = float(raw)
+        except OverflowError as err:
+            raise ValueError(f"{key} must be finite") from err
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{key} must be finite and nonnegative")
+        result[key] = max(0.0, value)
+    if result["export_cap_kwh"] <= 0:
+        raise ValueError("Export allowance must be positive")
+    if result["premium_rate_c_per_kwh"] < result["post_quota_rate_c_per_kwh"]:
+        raise ValueError("Premium rate must be at least the post-quota rate")
+    times = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+    start, end = overrides.get("export_window_start"), overrides.get("export_window_end")
+    if start not in times or end not in [*times, "24:00"] or start >= end:
+        raise ValueError("Export window must increase within one day in 30-minute steps")
+    result.update(export_window_start=start, export_window_end=end)
+    return result
 
 _PLAN_REGIONS = {
     "happy_hour_2026": ("NSW", "QLD", "SA", "VIC"),
@@ -92,7 +142,7 @@ def flow_power_plan_catalog() -> list[dict[str, Any]]:
     """Return the HA-owned catalog consumed by config surfaces and mobile."""
     summaries = {
         LEGACY_PLAN_ID: "Uses the saved Happy Hour rate and end time exactly as configured.",
-        ACCOUNT_SPECIFIC_PLAN_ID: "Uses your account-specific Happy Hour rate and end time.",
+        ACCOUNT_SPECIFIC_PLAN_ID: "Saved flat export rate, or a custom daily two-tier export window.",
         "happy_hour_2026": (
             "17:30-21:30 export: first 15 kWh/day at 35c NSW/QLD/SA or "
             "30c VIC, then 10c; 0c outside."
@@ -116,6 +166,8 @@ def flow_power_plan_catalog() -> list[dict[str, Any]]:
                 FLOW_POWER_PLAN_EFFECTIVE_FROM if plan_id in OFFICIAL_PLAN_IDS else None
             ),
             "summary": summaries[plan_id],
+            "capabilities": ([CUSTOM_EXPORT_CAPABILITY]
+                             if plan_id == ACCOUNT_SPECIFIC_PLAN_ID else []),
         }
         for plan_id, label in FLOW_POWER_PLAN_IDS.items()
     ]
@@ -147,6 +199,17 @@ def validate_flow_power_plan_selection(raw: object | None) -> FlowPowerPlanSelec
     overrides = raw.get("overrides") or {}
     if not isinstance(overrides, Mapping):
         raise ValueError("Flow Power plan overrides must be an object")
+    enabled = overrides.get("tiered_export_enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("tiered_export_enabled must be a boolean")
+    if enabled:
+        if plan_id != ACCOUNT_SPECIFIC_PLAN_ID:
+            raise ValueError("Custom export tiers require an account-specific plan")
+        if not raw.get("effective_from"):
+            raise ValueError("Custom export tiers require an effective date")
+        if date.fromisoformat(effective_from).isoformat() != effective_from:
+            raise ValueError("Custom export effective date must use YYYY-MM-DD")
+        overrides = _validate_custom_export(overrides)
     return FlowPowerPlanSelection(
         schema_version=schema_version,
         plan_id=plan_id,
@@ -196,7 +259,7 @@ def flow_power_plan_hash(
     # Official plans own their tariff terms. Retaining compatibility fields in
     # their state identity discards a valid quota ledger when an unrelated
     # legacy UI setting changes.
-    if selection.plan_id not in OFFICIAL_PLAN_IDS:
+    if selection.plan_id not in OFFICIAL_PLAN_IDS and not has_custom_export_tiers(selection):
         payload.update(
             {
                 "legacy_export_rate_dollars": round(
@@ -214,6 +277,14 @@ def flow_power_quota_rules(snapshot: FlowPowerPlanSnapshot) -> tuple[QuotaRule, 
     plan_id = snapshot.plan_id
     region = snapshot.selection.region
     timezone_token = snapshot.timezone_token
+    if has_custom_export_tiers(snapshot.selection):
+        terms = snapshot.selection.overrides
+        return (_rule(
+            CUSTOM_EXPORT_RULE_ID, "export", timezone_token,
+            ((terms["export_window_start"], terms["export_window_end"]),),
+            terms["export_cap_kwh"], terms["post_quota_rate_c_per_kwh"],
+            terms["premium_rate_c_per_kwh"] - terms["post_quota_rate_c_per_kwh"],
+        ),)
     if plan_id == "happy_hour_2026":
         bonus = 20.0 if region == "VIC" else 25.0
         return (_rule("flow_happy_hour_export", "export", timezone_token,
@@ -354,10 +425,42 @@ def flow_power_provider_contract(
         },
         "quotas": quotas,
         "telemetry": {
+            "tariff_timezone": snapshot.timezone_token,
             "settlement_source": "pcc_energy_or_integrated_grid_power",
             "last_observed_at": _last_observed_at(ledger),
         },
     }
+
+
+def flow_power_export_earnings(
+    snapshot: FlowPowerPlanSnapshot, *, end: datetime, duration_hours: float,
+    export_kwh: float, settled_bonus_kwh: float,
+) -> float:
+    """Price measured export across tariff boundaries, including an exhausted tier.
+
+    Energy is apportioned uniformly, as in quota settlement. The earned bonus
+    comes from measured quota deltas, not the remaining marginal allowance.
+    """
+    end = end.astimezone(timezone.utc)
+    start = end - timedelta(hours=duration_hours)
+    cursor = start
+    weighted_base = 0.0
+    while cursor < end:
+        next_boundary = cursor.replace(minute=(cursor.minute // 30) * 30,
+                                       second=0, microsecond=0) + timedelta(minutes=30)
+        stop = min(end, next_boundary)
+        series = flow_power_price_series(snapshot, [cursor], [0.0])
+        weighted_base += series.settlement_export[0] * (stop - cursor).total_seconds()
+        cursor = stop
+    seconds = (end - start).total_seconds()
+    base = weighted_base / seconds if seconds > 0 else 0.0
+    bonus = max((rule.bonus_price_c_per_kwh / 100.0
+                 for rule in flow_power_quota_rules(snapshot)
+                 if rule.direction == "export"), default=0.0)
+    if _active_plan_id(snapshot, tariff_datetime(end - timedelta(microseconds=1),
+                                                snapshot.timezone_token)) == LEGACY_PLAN_ID:
+        bonus = 0.0
+    return max(0.0, export_kwh) * base + max(0.0, settled_bonus_kwh) * bonus
 
 
 def _rule(rule_id: str, direction: str, timezone_token: str,
@@ -369,7 +472,7 @@ def _rule(rule_id: str, direction: str, timezone_token: str,
 
 
 def _active_plan_id(snapshot: FlowPowerPlanSnapshot, local: datetime) -> str:
-    if snapshot.plan_id not in OFFICIAL_PLAN_IDS:
+    if snapshot.plan_id not in OFFICIAL_PLAN_IDS and not has_custom_export_tiers(snapshot.selection):
         return snapshot.plan_id
     if local.date() < date.fromisoformat(snapshot.selection.effective_from):
         return LEGACY_PLAN_ID
@@ -379,6 +482,11 @@ def _active_plan_id(snapshot: FlowPowerPlanSnapshot, local: datetime) -> str:
 def _export_terms(snapshot: FlowPowerPlanSnapshot, plan_id: str, local: datetime,
                   rules: Mapping[str, QuotaRule]) -> tuple[float, float, str | None]:
     minute = local.hour * 60 + local.minute
+    if plan_id == ACCOUNT_SPECIFIC_PLAN_ID and has_custom_export_tiers(snapshot.selection):
+        rule = rules[CUSTOM_EXPORT_RULE_ID]
+        if rule.contains(local):
+            return rule.base_price_c_per_kwh, rule.bonus_price_c_per_kwh, rule.rule_id
+        return snapshot.selection.overrides["outside_window_rate_c_per_kwh"], 0.0, None
     if plan_id in {LEGACY_PLAN_ID, ACCOUNT_SPECIFIC_PLAN_ID}:
         if _inside(minute, FLOW_POWER_HAPPY_HOUR_START, snapshot.legacy_happy_hour_end):
             return snapshot.legacy_export_rate_dollars * 100.0, 0.0, None

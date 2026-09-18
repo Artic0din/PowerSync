@@ -228,3 +228,41 @@ def test_daily_export_bonus_groups_do_not_share_caps(optimizer_module, use_highs
     assert day_2_kwh <= 0.4 + 1e-6
     assert day_1_kwh > 0
     assert day_2_kwh > 0
+
+
+@pytest.mark.parametrize("use_highs", [False, True])
+def test_custom_flow_plan_limits_optimizer_to_measured_remaining_bonus(optimizer_module, use_highs):
+    from test_flow_power_plan import _custom_snapshot, flow_power, quota
+
+    if use_highs and not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
+    snapshot = _custom_snapshot(premium_rate_c_per_kwh=60, post_quota_rate_c_per_kwh=5)
+    ledger = quota.QuotaLedger(flow_power.flow_power_quota_rules(snapshot), quota.QuotaLedgerState(
+        tariff_day="2026-09-06", confidence="authoritative",
+        settled_kwh={"flow_custom_export": 14.5},
+    ))
+    start = datetime.fromisoformat("2026-09-06T17:30:00+10:00")
+    timestamps = [start + timedelta(minutes=5 * i) for i in range(12)]
+    series = flow_power.flow_power_price_series(snapshot, timestamps, [0.35] * 12, ledger=ledger)
+    optimizer = _optimizer(optimizer_module)
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=None, import_caps_by_group=None,
+        export_group_ids=list(series.export_group_ids),
+        export_caps_by_group=dict(series.export_group_caps_kwh),
+    )
+    kwargs = _kwargs()
+    kwargs.update(
+        export_prices=list(series.settlement_export),
+        export_bonus_prices=list(series.export_bonus),
+        export_bonus_cap_kwh=sum(series.export_group_caps_kwh.values()),
+        schedule_timestamps=timestamps,
+    )
+    old = optimizer_module.HIGHS_AVAILABLE
+    optimizer_module.HIGHS_AVAILABLE = use_highs
+    try:
+        result = optimizer.optimize(**kwargs)
+    finally:
+        optimizer_module.HIGHS_AVAILABLE = old
+    exported = sum(result.grid_export_w) / 1000 * optimizer.interval_minutes / 60
+    assert 0 < exported <= 0.5 + 1e-6
+    assert ledger.state.settled_kwh == {"flow_custom_export": 14.5}

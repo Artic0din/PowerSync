@@ -1816,6 +1816,30 @@ def apply_flow_power_export(
         _LOGGER.warning("No tariff provided for Flow Power export adjustment")
         return tariff
 
+    # Resolve custom contracts through the same adapter as the optimizer.
+    if (plan_selection or {}).get("plan_id") == "account_specific":
+        from .flow_power import has_custom_export_tiers, resolve_flow_power_plan
+
+        snapshot = resolve_flow_power_plan(
+            plan_selection, timezone_token=str(dt_util.now().tzinfo),
+            legacy_export_rate_dollars=(export_rate if export_rate is not None
+                                        else FLOW_POWER_EXPORT_RATES.get(state, 0.0)),
+            legacy_happy_hour_end=happy_hour_end,
+        )
+        if (has_custom_export_tiers(snapshot.selection)
+                and dt_util.now().date() >= date.fromisoformat(snapshot.selection.effective_from)):
+            terms = snapshot.selection.overrides
+            for season in tariff.get("sell_tariff", {}).get("energy_charges", {}).values():
+                rates = season.get("rates", {})
+                for period in rates:
+                    if period.startswith("PERIOD_"):
+                        clock = period.removeprefix("PERIOD_").replace("_", ":")
+                        inside = terms["export_window_start"] <= clock < terms["export_window_end"]
+                        rates[period] = terms[
+                            "post_quota_rate_c_per_kwh" if inside else "outside_window_rate_c_per_kwh"
+                        ] / 100.0
+            return tariff
+
     plan_id = str((plan_selection or {}).get("plan_id") or "legacy_unclassified")
     region = str((plan_selection or {}).get("region") or "").upper()
     effective_from = str((plan_selection or {}).get("effective_from") or "2026-09-01")

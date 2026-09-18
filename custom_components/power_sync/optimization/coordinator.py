@@ -3438,6 +3438,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cached_hash = getattr(self, "_flow_power_plan_hash", None)
         if cached_hash is not None and cached_hash != snapshot.plan_hash:
             self._flow_power_ledger = None
+            self._pending_flow_power_settlement = {"import": 0.0, "export": 0.0}
         self._flow_power_plan_hash = snapshot.plan_hash
         return snapshot
 
@@ -13263,11 +13264,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return [False] * n
 
         runtime = self._ensure_flow_power_ledger(now=dt_util.now())
-        if runtime is not None and runtime[0].plan_id in {
+        custom_tiers = False
+        if runtime is not None:
+            from ..flow_power import has_custom_export_tiers
+
+            custom_tiers = (runtime[0].plan_id == "account_specific"
+                            and has_custom_export_tiers(runtime[0].selection))
+
+        if runtime is not None and (runtime[0].plan_id in {
             "happy_hour_2026",
             "four_free_2026",
             "flow_home_2026",
-        }:
+        } or custom_tiers):
             snapshot, ledger = runtime
             if snapshot.plan_id == "flow_home_2026":
                 return [False] * n
@@ -17517,9 +17525,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     grid_import_kwh * series.settlement_import[0]
                     - max(0.0, quota_delta["import"]) * series.import_bonus[0]
                 )
-                actual_export_earnings = (
-                    grid_export_kwh * series.settlement_export[0]
-                    + max(0.0, quota_delta["export"]) * series.export_bonus[0]
+                from ..flow_power import flow_power_export_earnings
+
+                actual_export_earnings = flow_power_export_earnings(
+                    snapshot, end=now, duration_hours=dt_hours,
+                    export_kwh=grid_export_kwh,
+                    settled_bonus_kwh=(quota_delta["export"]
+                                       if ledger is not None
+                                       and ledger.state.confidence != "unknown" else 0.0),
                 )
                 if grid_import_kwh > 1e-9:
                     import_price = actual_import_cost / grid_import_kwh

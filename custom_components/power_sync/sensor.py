@@ -6488,6 +6488,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
                 {
                     "flow_power_plan_id": plan.get("plan_id"),
                     "flow_power_plan_region": plan.get("region"),
+                    "flow_power_plan": plan,
                     "settlement_rate": settlement,
                     "marginal_rate": marginal,
                     "quota_status": contract.get("quotas", []),
@@ -6605,6 +6606,20 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             )
             attributes["is_happy_hour"] = self._is_happy_hour()
             attributes["happy_hour_rate"] = self._get_export_rate()
+            if contract is not None:
+                plan = contract.get("plan") or {}
+                terms = plan.get("overrides") or {}
+                now = dt_util.now()
+                if (plan.get("plan_id") == "account_specific"
+                        and terms.get("tiered_export_enabled") is True
+                        and str(plan.get("effective_from", "")) <= now.date().isoformat()):
+                    start, end = terms["export_window_start"], terms["export_window_end"]
+                    attributes.update(
+                        happy_hour_start=start,
+                        happy_hour_end=end,
+                        is_happy_hour=start <= now.strftime("%H:%M") < end,
+                        happy_hour_rate=terms["premium_rate_c_per_kwh"] / 100.0,
+                    )
 
         return _entity_currency_attrs(self, attributes)
 

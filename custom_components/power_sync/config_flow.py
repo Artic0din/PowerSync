@@ -16,8 +16,10 @@ from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult, section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    DateSelector,
     EntitySelector,
     EntitySelectorConfig,
     NumberSelector,
@@ -55,7 +57,11 @@ from .settings_metadata import (
     submitted_live_settings,
 )
 from .zerohero import zerohero_plan_from_entry
-from .flow_power import validate_flow_power_plan_selection
+from .flow_power import (
+    custom_export_defaults,
+    has_custom_export_tiers,
+    validate_flow_power_plan_selection,
+)
 from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings
 from .const import (
     DOMAIN,
@@ -666,6 +672,61 @@ CONF_NETWORK_TARIFF_COMBINED = "network_tariff_combined"
 CUSTOM_TOU_PROVIDER_OPTIONS = ("agl", "globird", "aemo_vpp", "other", "tou_only")
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _flow_power_form_selection(
+    user_input: dict[str, Any], stored: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Preserve the complete stored contract when editing unrelated settings."""
+    raw = dict(stored or {})
+    plan_id = user_input.pop("flow_power_plan_id")
+    if raw.get("plan_id") != plan_id:
+        raw = {}
+    raw.update(plan_id=plan_id, region=user_input.pop("flow_power_plan_region"))
+    edit_tiers = user_input.pop("flow_power_tiered_export", None)
+    if edit_tiers is False and plan_id == "account_specific":
+        raw["overrides"] = {**raw.get("overrides", {}), "tiered_export_enabled": False}
+    if edit_tiers and plan_id != "account_specific":
+        raise ValueError("Custom tiers require Account-specific")
+    return validate_flow_power_plan_selection(raw).to_dict(), edit_tiers is True
+
+
+def _flow_power_custom_export_schema(
+    raw: dict[str, Any], submitted: dict[str, Any] | None = None,
+) -> vol.Schema:
+    selection = validate_flow_power_plan_selection(raw)
+    values = {
+        **custom_export_defaults(selection.region),
+        **selection.overrides,
+        "effective_from": (selection.effective_from if "export_cap_kwh" in selection.overrides
+                           else dt_util.now().date().isoformat()),
+        **(submitted or {}),
+    }
+    fields = {vol.Required("effective_from", default=values["effective_from"]): DateSelector()}
+    for key in ("premium_rate_c_per_kwh", "export_cap_kwh",
+                "post_quota_rate_c_per_kwh", "outside_window_rate_c_per_kwh"):
+        fields[vol.Required(key, default=values[key])] = NumberSelector(NumberSelectorConfig(
+            min=0, step=0.001, mode=NumberSelectorMode.BOX,
+            unit_of_measurement="kWh" if key == "export_cap_kwh" else "c/kWh",
+        ))
+    times = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+    for key in ("export_window_start", "export_window_end"):
+        fields[vol.Required(key, default=values[key])] = SelectSelector(SelectSelectorConfig(
+            options=times if key.endswith("start") else [*times, "24:00"],
+            mode=SelectSelectorMode.DROPDOWN,
+        ))
+    return vol.Schema(fields)
+
+
+def _flow_power_custom_export_selection(
+    raw: dict[str, Any], submitted: dict[str, Any],
+) -> dict[str, Any]:
+    terms = dict(submitted)
+    effective_from = terms.pop("effective_from")
+    return validate_flow_power_plan_selection({
+        **raw, "effective_from": effective_from,
+        "overrides": {**terms, "tiered_export_enabled": True},
+    }).to_dict()
 
 SUNGROW_LEGACY_DUAL_KEYS = (
     CONF_SUNGROW_HOST_2,
@@ -2453,16 +2514,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle Flow Power setup - region and base rate only."""
         errors: dict[str, str] = {}
 
-        if user_input is not None:
+        if user_input is not None and CONF_FLOW_POWER_PLAN not in user_input:
+            user_input = dict(user_input)
             try:
-                user_input[CONF_FLOW_POWER_PLAN] = (
-                    validate_flow_power_plan_selection(
-                        {
-                            "plan_id": user_input.pop("flow_power_plan_id"),
-                            "region": user_input.pop("flow_power_plan_region"),
-                        }
-                    ).to_dict()
-                )
+                selection, edit_tiers = _flow_power_form_selection(user_input)
+                user_input[CONF_FLOW_POWER_PLAN] = selection
+                if edit_tiers:
+                    self._flow_power_pending_setup = user_input
+                    return await self.async_step_flow_power_custom_export()
             except (KeyError, TypeError, ValueError):
                 errors["base"] = "invalid_flow_power_plan"
             user_input[CONF_FLOW_POWER_HAPPY_HOUR_END] = (
@@ -2539,6 +2598,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                    vol.Optional("flow_power_tiered_export", default=False): BooleanSelector(),
                     vol.Required(CONF_FLOW_POWER_STATE, default="NSW1"): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -2577,6 +2637,25 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_flow_power_custom_export(self, user_input=None) -> FlowResult:
+        pending = self._flow_power_pending_setup
+        errors = {}
+        if user_input is not None:
+            try:
+                selection = _flow_power_custom_export_selection(
+                    pending[CONF_FLOW_POWER_PLAN], user_input,
+                )
+            except (KeyError, TypeError, ValueError):
+                errors["base"] = "invalid_flow_power_plan"
+            else:
+                return await self.async_step_flow_power_setup({
+                    **pending, CONF_FLOW_POWER_PLAN: selection,
+                })
+        return self.async_show_form(
+            step_id="flow_power_custom_export", errors=errors,
+            data_schema=_flow_power_custom_export_schema(pending[CONF_FLOW_POWER_PLAN], user_input),
         )
 
     async def async_step_flow_power_site(
@@ -15971,22 +16050,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step 2b: Flow Power main settings (region, base rate, PEA, sync)."""
-        if user_input is not None:
+        if user_input is not None and CONF_FLOW_POWER_PLAN not in user_input:
+            user_input = dict(user_input)
             try:
-                user_input[CONF_FLOW_POWER_PLAN] = (
-                    validate_flow_power_plan_selection(
-                        {
-                            "plan_id": user_input.pop("flow_power_plan_id"),
-                            "region": user_input.pop("flow_power_plan_region"),
-                        }
-                    ).to_dict()
+                selection, edit_tiers = _flow_power_form_selection(
+                    user_input, self._get_option(CONF_FLOW_POWER_PLAN, None),
                 )
+                user_input[CONF_FLOW_POWER_PLAN] = selection
+                if edit_tiers:
+                    self._flow_power_pending_options = user_input
+                    return await self.async_step_flow_power_custom_export()
             except (KeyError, TypeError, ValueError):
                 return self.async_show_form(
                     step_id="flow_power_options",
                     data_schema=self._flow_power_options_schema(),
                     errors={"base": "invalid_flow_power_plan"},
                 )
+        if user_input is not None:
             update_api_key = bool(
                 user_input.pop("update_flow_power_api_key", False)
             )
@@ -16029,6 +16109,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         except (TypeError, ValueError):
             selection = validate_flow_power_plan_selection(None)
         schema = {
+            vol.Optional(
+                "flow_power_tiered_export", default=has_custom_export_tiers(selection),
+            ): BooleanSelector(),
             vol.Required(
                 "flow_power_plan_id",
                 default=selection.plan_id,
@@ -16121,6 +16204,25 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         }
 
         return vol.Schema(schema)
+
+    async def async_step_flow_power_custom_export(self, user_input=None) -> FlowResult:
+        pending = self._flow_power_pending_options
+        errors = {}
+        if user_input is not None:
+            try:
+                selection = _flow_power_custom_export_selection(
+                    pending[CONF_FLOW_POWER_PLAN], user_input,
+                )
+            except (KeyError, TypeError, ValueError):
+                errors["base"] = "invalid_flow_power_plan"
+            else:
+                return await self.async_step_flow_power_options({
+                    **pending, CONF_FLOW_POWER_PLAN: selection,
+                })
+        return self.async_show_form(
+            step_id="flow_power_custom_export", errors=errors,
+            data_schema=_flow_power_custom_export_schema(pending[CONF_FLOW_POWER_PLAN], user_input),
+        )
 
 
     async def async_step_flow_power_amber_token(

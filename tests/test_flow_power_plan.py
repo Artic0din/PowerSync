@@ -202,3 +202,119 @@ def test_active_official_plan_hash_ignores_inactive_legacy_fields():
 
     assert first.plan_hash == changed_legacy.plan_hash
     assert legacy_first.plan_hash != legacy_changed.plan_hash
+
+
+def _custom_snapshot(**changes):
+    terms = {**flow_power.custom_export_defaults("VIC"), **changes}
+    return resolve_flow_power_plan(
+        {"plan_id": "account_specific", "region": "VIC",
+         "effective_from": "2026-08-01", "overrides": terms},
+        timezone_token="Australia/Melbourne", legacy_export_rate_dollars=0.35,
+        legacy_happy_hour_end="19:30",
+    )
+
+
+def test_custom_tier_settles_sixteen_kwh_at_four_dollars_sixty():
+    snapshot = _custom_snapshot()
+    ledger = QuotaLedger(flow_power_quota_rules(snapshot))
+    ledger.observe_cumulative("export", 100, datetime.fromisoformat("2026-09-06T17:30:00+10:00"))
+    end = datetime.fromisoformat("2026-09-06T19:30:00+10:00")
+    earned = ledger.observe_cumulative("export", 116, end)
+    assert earned == 15
+    assert flow_power.flow_power_export_earnings(
+        snapshot, end=end, duration_hours=2, export_kwh=16, settled_bonus_kwh=earned,
+    ) == pytest.approx(4.60)
+    assert flow_power_price_series(snapshot, [end], [0.3], ledger=ledger).marginal_export == (0.1,)
+    restored = QuotaLedger(ledger.rules, QuotaLedgerState.from_dict(ledger.state.to_dict()))
+    assert restored.remaining_kwh("flow_custom_export") == 0
+    assert restored.state.confidence == "authoritative"
+
+
+@pytest.mark.parametrize("settled,expected,cap", [(0, 0.3, 15), (14.5, 0.3, 0.5), (15, 0.1, 0)])
+def test_custom_remaining_allowance_drives_marginal_price(settled, expected, cap):
+    snapshot = _custom_snapshot()
+    ledger = QuotaLedger(flow_power_quota_rules(snapshot), QuotaLedgerState(
+        tariff_day="2026-09-06", confidence="authoritative",
+        settled_kwh={"flow_custom_export": settled},
+    ))
+    at = datetime.fromisoformat("2026-09-06T18:00:00+10:00")
+    before = ledger.state.to_dict()
+    result = flow_power_price_series(snapshot, [at], [0.3], ledger=ledger)
+    assert result.marginal_export == pytest.approx((expected,))
+    assert list(result.export_group_caps_kwh.values()) == [cap]
+    assert ledger.state.to_dict() == before
+
+
+@pytest.mark.parametrize("stamp,expected", [
+    ("2026-07-31T18:00:00+10:00", 0.35),
+    ("2026-08-01T17:29:59+10:00", 0.02),
+    ("2026-08-01T17:30:00+10:00", 0.1),
+    ("2026-08-01T21:29:59+10:00", 0.1),
+    ("2026-08-01T21:30:00+10:00", 0.02),
+    ("2026-10-04T17:30:00+11:00", 0.1),
+])
+def test_custom_date_and_window_boundaries(stamp, expected):
+    snapshot = _custom_snapshot(outside_window_rate_c_per_kwh=2)
+    result = flow_power_price_series(snapshot, [datetime.fromisoformat(stamp)], [0.3])
+    assert result.settlement_export == pytest.approx((expected,))
+    assert result.export_bonus == (0.0,)
+
+
+def test_custom_window_end_accounting_and_midnight_rollover():
+    snapshot = _custom_snapshot(outside_window_rate_c_per_kwh=2)
+    ledger = QuotaLedger(flow_power_quota_rules(snapshot))
+    ledger.observe_daily_total("export", 8, datetime.fromisoformat("2026-09-06T17:30:00+10:00"))
+    end = datetime.fromisoformat("2026-09-06T21:30:00+10:00")
+    earned = ledger.observe_daily_total("export", 24, end)
+    assert earned == 15  # Daytime exports did not consume the allowance.
+    assert flow_power.flow_power_export_earnings(
+        snapshot, end=end, duration_hours=4, export_kwh=16, settled_bonus_kwh=earned,
+    ) == pytest.approx(4.6)
+    ledger.advance_to(datetime.fromisoformat("2026-09-07T00:00:00+10:00"))
+    assert ledger.remaining_kwh("flow_custom_export") == 15
+    assert ledger.state.confidence == "unknown"
+    ledger.observe_daily_total("export", 0, datetime.fromisoformat("2026-09-07T00:01:00+10:00"))
+    assert ledger.state.confidence == "authoritative"
+
+
+def test_custom_midnight_end_and_zero_rates():
+    snapshot = _custom_snapshot(export_window_start="23:00", export_window_end="24:00",
+                                premium_rate_c_per_kwh=0, post_quota_rate_c_per_kwh=0)
+    assert flow_power_quota_rules(snapshot)[0].contains(datetime.fromisoformat("2026-09-06T23:30:00+10:00"))
+    assert not flow_power_quota_rules(snapshot)[0].contains(datetime.fromisoformat("2026-09-07T00:00:00+10:00"))
+
+
+@pytest.mark.parametrize("changes", [
+    {"export_cap_kwh": 0}, {"export_cap_kwh": -1}, {"export_cap_kwh": True},
+    {"premium_rate_c_per_kwh": float("nan")}, {"premium_rate_c_per_kwh": float("inf")},
+    {"premium_rate_c_per_kwh": 9}, {"outside_window_rate_c_per_kwh": -1},
+    {"post_quota_rate_c_per_kwh": "10"}, {"export_window_start": "24:00"},
+    {"export_window_start": "17:15"}, {"export_window_end": "17:30"},
+    {"export_window_end": "01:00"}, {"tiered_export_enabled": "true"},
+])
+def test_custom_rejects_invalid_terms(changes):
+    with pytest.raises(ValueError):
+        _custom_snapshot(**changes)
+
+
+def test_custom_missing_fields_are_not_silently_defaulted():
+    for key in flow_power.custom_export_defaults("VIC"):
+        if key == "tiered_export_enabled":
+            continue
+        raw = _custom_snapshot().selection.to_dict()
+        del raw["overrides"][key]
+        with pytest.raises(ValueError):
+            validate_flow_power_plan_selection(raw)
+
+
+def test_custom_normalized_hash_and_flat_account_compatibility():
+    first = _custom_snapshot()
+    equivalent = _custom_snapshot(premium_rate_c_per_kwh=30.0)
+    assert first.plan_hash == equivalent.plan_hash
+    assert first.plan_hash != _custom_snapshot(export_cap_kwh=12).plan_hash
+    flat = _snapshot("account_specific", region="VIC", legacy_rate=0.42)
+    assert flow_power_quota_rules(flat) == ()
+    assert flow_power_price_series(flat, [_at(2, 8)], [0.3]).settlement_export == (0.42,)
+    assert "custom_export_tiers_v1" in next(
+        item for item in flow_power_plan_catalog() if item["plan_id"] == "account_specific"
+    )["capabilities"]

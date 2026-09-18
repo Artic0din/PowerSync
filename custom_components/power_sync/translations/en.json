@@ -92,6 +92,7 @@
         "data": {
           "flow_power_plan_id": "Residential plan",
           "flow_power_plan_region": "Plan region",
+          "flow_power_tiered_export": "Configure custom export tiers (Account-specific only)",
           "flow_power_state": "NEM region",
           "flow_power_base_rate": "Base rate",
           "flow_power_happy_hour_end": "Happy Hour plan end time",
@@ -104,6 +105,20 @@
           "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments.",
           "flow_power_happy_hour_end": "Select the Happy Hour end time stated on your Flow Power plan or fact sheet. This changes the Happy Hour window only; the separate Happy Hour export-rate setting remains unchanged.",
           "flowpower_api_key": "Optional for AEMO Direct; required for Flow Power API prices and account metrics. Get it from the Flow Power app under More > Web Data Access."
+        },
+        "submit": "Next"
+      },
+      "flow_power_custom_export": {
+        "title": "Custom export tiers",
+        "description": "Enter the export terms and effective date from your account. The allowance resets at local midnight.",
+        "data": {
+          "effective_from": "Effective from",
+          "premium_rate_c_per_kwh": "Premium export rate",
+          "export_cap_kwh": "Daily premium allowance",
+          "post_quota_rate_c_per_kwh": "Export rate after allowance",
+          "outside_window_rate_c_per_kwh": "Export rate outside window",
+          "export_window_start": "Export window start",
+          "export_window_end": "Export window end"
         },
         "submit": "Next"
       },
@@ -2093,6 +2108,7 @@
         "data": {
           "flow_power_plan_id": "Residential plan",
           "flow_power_plan_region": "Plan region",
+          "flow_power_tiered_export": "Configure custom export tiers (Account-specific only)",
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
           "flow_power_base_rate": "Base rate",
@@ -2111,6 +2127,20 @@
           "pea_enabled": "PEA reflects how Flow Power actually bills you: final rate moves with wholesale prices. Disable for flat network tariff rates.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
           "update_flow_power_api_key": "Opens a secure API-key entry page. Leave disabled to keep the currently stored key unchanged."
+        },
+        "submit": "Next"
+      },
+      "flow_power_custom_export": {
+        "title": "Custom export tiers",
+        "description": "Enter the export terms and effective date from your account. The allowance resets at local midnight.",
+        "data": {
+          "effective_from": "Effective from",
+          "premium_rate_c_per_kwh": "Premium export rate",
+          "export_cap_kwh": "Daily premium allowance",
+          "post_quota_rate_c_per_kwh": "Export rate after allowance",
+          "outside_window_rate_c_per_kwh": "Export rate outside window",
+          "export_window_start": "Export window start",
+          "export_window_end": "Export window end"
         },
         "submit": "Next"
       },

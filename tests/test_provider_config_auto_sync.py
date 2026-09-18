@@ -7,7 +7,7 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import textwrap
 
 
@@ -20,40 +20,34 @@ INIT_PATH = (
 
 
 def _handler_globals() -> dict:
-    """Real module globals the extracted handler resolves at call time.
-
-    ``const``, ``currency`` and ``zerohero`` are stdlib-only, so they load
-    standalone without the Home Assistant import chain.  Loading them beats
-    hand-listing names: the handler grows references over time, and anything
-    missing from this namespace surfaces as a NameError swallowed by the
-    view's own except clause -- an opaque HTTP 500 rather than a clear failure.
-
-    Deliberately not registered in ``sys.modules``: these are for this
-    namespace only and must not become the tree another test file imports.
-    """
+    """Load real handler globals in an isolated package for relative imports."""
+    package_name = "_ps_provider_config_helpers"
+    package = ModuleType(package_name)
+    package.__path__ = [str(INIT_PATH.parent)]
+    previous = {
+        name: value for name, value in sys.modules.items()
+        if name == package_name or name.startswith(package_name + ".")
+    }
+    sys.modules[package_name] = package
     globals_: dict = {}
-    for module_name in ("const", "currency", "zerohero"):
-        path = INIT_PATH.parent / f"{module_name}.py"
-        spec = importlib.util.spec_from_file_location(
-            f"_ps_standalone_{module_name}", path
-        )
-        module = importlib.util.module_from_spec(spec)
-        # dataclasses resolves sys.modules[cls.__module__] while building a
-        # frozen class, so the module has to be registered for the exec.  Drop
-        # it straight after: this tree is for this namespace only and must not
-        # become something another test file can import.
-        sys.modules[spec.name] = module
-        try:
+    try:
+        for module_name in ("const", "currency", "zerohero"):
+            spec = importlib.util.spec_from_file_location(
+                f"{package_name}.{module_name}",
+                INIT_PATH.parent / f"{module_name}.py",
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
             spec.loader.exec_module(module)
-        finally:
-            sys.modules.pop(spec.name, None)
-        globals_.update(
-            {
-                name: value
-                for name, value in vars(module).items()
+            globals_.update({
+                name: value for name, value in vars(module).items()
                 if not name.startswith("__")
-            }
-        )
+            })
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(package_name + "."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous)
     return globals_
 
 
