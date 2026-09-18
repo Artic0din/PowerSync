@@ -9868,6 +9868,25 @@ def test_ble_grid_schedule_reconciles_stopped_current_without_power(monkeypatch,
     assert state["physical_restart_required"] is True
 
 
+@pytest.mark.parametrize("bad_sample", ["current", "state"])
+@pytest.mark.parametrize("offset_seconds", [-300, 300])
+def test_ble_grid_recovery_rejects_stale_or_future_samples(monkeypatch, bad_sample, offset_seconds):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    invalid_time = now + timedelta(seconds=offset_seconds)
+    hass = _Hass([
+        _State("sensor.snowflake_charging", "Stopped", last_updated=invalid_time if bad_sample == "state" else now),
+        _State("sensor.snowflake_charge_current", "0", {"unit_of_measurement": "A"}, last_updated=invalid_time if bad_sample == "current" else now),
+    ])
+    state = _solar_surplus_state(current_amps=16)
+    state["params"].update(owner_mode="smart_schedule", dynamic_mode="battery_target")
+    assert asyncio.run(actions._reconcile_stopped_smart_schedule_tesla(
+        hass, _Entry(), "ble_snowflake", state,
+    )) is False
+    assert state["current_amps"] == state["target_amps"] == 16
+    assert "physical_restart_required" not in state
+
+
 @pytest.mark.parametrize("block", ["lp_zero", "no_surplus", "start_grace"])
 def test_ble_stopped_recovery_preserves_solar_start_gates(monkeypatch, block):
     now = datetime.now(timezone.utc)

@@ -1125,6 +1125,16 @@ async def _reconcile_stopped_smart_schedule_tesla(
     ):
         return False
 
+    if vehicle_id.startswith("ble_"):
+        from ..tesla_ble import get_tesla_ble_charging_state
+
+        charging = get_tesla_ble_charging_state(hass, vehicle_id[4:])
+        if not is_current_ev_power_observation(
+            getattr(charging, "last_reported", None)
+            or getattr(charging, "last_updated", None)
+        ):
+            return False
+
     observed_amps = await _observed_owned_charge_amps(
         hass,
         config_entry,
@@ -9975,10 +9985,14 @@ async def _observed_owned_charge_amps(
     if params.get("charger_type", "tesla") == "tesla" and vehicle_id.startswith("ble_"):
         from ..tesla_ble import get_tesla_ble_charge_current_state
 
+        current = get_tesla_ble_charge_current_state(hass, vehicle_id[4:])
         amps, error, _age = _phase_current_state_amps(
-            get_tesla_ble_charge_current_state(hass, vehicle_id[4:])
+            current
         )
-        if error is None:
+        if error is None and is_current_ev_power_observation(
+            getattr(current, "last_reported", None)
+            or getattr(current, "last_updated", None)
+        ):
             return amps
 
     power_entities = (
