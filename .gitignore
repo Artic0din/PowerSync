@@ -58,3 +58,17 @@ VERSION
 
 # Local agent workflow artifacts
 pro-project-approach-review-guidance*.txt
+pro-project-kickoff-guidance*.txt
+/AGENTS.md
+/CLAUDE.md
+/.codex/
+/docs/agent-support-reference.md
+/docs/plans/
+/docs/planning/
+/docs/token-savings-*.md
+/docs/token-usage-*.md
+/docs/wiki/EV-Charging-Refactor.md
+/docs/wiki/V2H-Architecture.md
+
+# Unrelated personal assets
+/roof-colour-visualisations/
