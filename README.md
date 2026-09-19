@@ -148,6 +148,8 @@ Or manually:
 Smart Schedule passes the optimizer's configured grid-import limit to the live EV controller.
 The controller uses the lowest available positive limit from the EV session, optimizer, Tesla site and Home Power settings.
 Deadline charging remains dynamically adjustable; reaching a departure target does not override site capacity.
+The first Smart Schedule command checks live site headroom for every charger type and waits if telemetry is unavailable.
+Deadline sessions skip discretionary battery-charge reservation in both initial and periodic control, including shared Tesla sessions.
 An explicit EV session limit can reduce the site limit but cannot increase it.
 
 Whole-site power balancing uses site power telemetry.

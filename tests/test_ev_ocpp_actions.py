@@ -7247,6 +7247,7 @@ def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, forc
     async def start(hass, entry, params, context=None):
         limits.append(await actions._resolve_max_grid_import_kw(hass, entry, params))
         assert not params.get("fixed_charge_amps")
+        assert params.get("reserve_battery_charge", True) is not force_max_rate
         return True
 
     monkeypatch.setattr(actions, "_action_start_ev_charging_dynamic", start)
@@ -7282,6 +7283,50 @@ def test_grid_import_constraints_cannot_be_widened(
         {"max_grid_import_kw": explicit, "optimizer_max_grid_import_kw": optimizer},
     ))
     assert result == expected
+
+
+@pytest.mark.parametrize("charger_type", ["generic", "ocpp", "zaptec", "sigenergy", "ha_native"])
+@pytest.mark.parametrize("live_grid_w, expected_amps", [(11500, 8), (13500, None), (None, None)])
+def test_deadline_first_command_respects_site_headroom(monkeypatch, charger_type, live_grid_w, expected_amps):
+    commands = []
+    async def set_amps(hass, entry, vehicle_id, amps, params):
+        commands.append(amps)
+        return True
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_get_initial_smart_schedule_live_status", AsyncMock(return_value={
+        "grid_power": live_grid_w, "battery_power": 0, "solar_power": 0, "battery_soc": 50,
+    }))
+    monkeypatch.setattr(actions, "_optimizer_planned_battery_charge_kw", lambda *args: 7.0)
+    hass = _Hass([])
+    result = asyncio.run(actions._action_start_ev_charging_dynamic(hass, _Entry(), {
+        "vehicle_id": "deadline_ev", "charger_type": charger_type,
+        "dynamic_mode": "battery_target", "owner_mode": "smart_schedule",
+        "max_grid_import_kw": 13.5, "target_battery_charge_kw": 0,
+        "reserve_battery_charge": False, "min_charge_amps": 6,
+        "max_charge_amps": 32, "start_amps": 32, "voltage": 240, "phases": 1,
+    }, context=None))
+    assert commands == ([] if expected_amps is None else [expected_amps])
+    assert result is (expected_amps is not None)
+    if expected_amps is not None:
+        reservations = []
+        resolve = actions._resolve_battery_reservation_kw
+        def capture_reservation(**kwargs):
+            reservation = resolve(**kwargs)
+            reservations.append(reservation)
+            return reservation
+        monkeypatch.setattr(actions, "_resolve_battery_reservation_kw", capture_reservation)
+        monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value={
+            "grid_power": 11500, "battery_power": 0, "solar_power": 0,
+            "load_power": 11500, "ev_power": 1920, "battery_soc": 50,
+        }))
+        asyncio.run(actions._dynamic_ev_update(hass, _Entry(), "entry-1", "deadline_ev"))
+        assert reservations == [0.0]
+
+
+def test_deadline_battery_reservation_ignores_optimizer_target():
+    assert actions._resolve_battery_reservation_kw(
+        session_target_kw=0, planned_charge_kw=7, reserve_battery_charge=False,
+    ) == 0
 
 
 def test_scheduled_sigenergy_start_waits_without_minimum_headroom(monkeypatch):
@@ -7366,8 +7411,9 @@ def test_dynamic_update_holds_fixed_deadline_rate(monkeypatch):
     assert set_amps_calls == [32]
 
 
+@pytest.mark.parametrize("deadline", [False, True])
 def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
-    monkeypatch,
+    monkeypatch, deadline,
 ):
     """A 32 A command must not mask fresh stopped/0 A Tesla telemetry."""
     vehicle_id = "5YJTEST00000000R4"
@@ -7419,6 +7465,10 @@ def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
     monkeypatch.setattr(actions, "_observed_owned_charge_amps", observed_current)
     monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
     monkeypatch.setattr(
+        actions, "_optimizer_planned_battery_charge_kw",
+        lambda *args: 7.0 if deadline else 0.0,
+    )
+    monkeypatch.setattr(
         actions,
         "_optimizer_planned_ev_charge_kw",
         lambda *args, **kwargs: 7.36,
@@ -7449,6 +7499,7 @@ def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
                 "charger_type": "tesla",
                 "vehicle_vin": vehicle_id,
                 "tesla_charging_state_entity": "sensor.tessy_charging",
+                "reserve_battery_charge": not deadline,
                 "min_charge_amps": 1,
                 "max_charge_amps": 32,
                 "target_battery_charge_kw": 0,
@@ -7476,7 +7527,8 @@ def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
     assert state["charging_started"] is True
 
 
-def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch):
+@pytest.mark.parametrize("deadline", [False, True])
+def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch, deadline):
     """Two Wall Connector sessions reconcile their own VIN telemetry."""
     vehicle_ids = ("5YJTEST00000000M1", "5YJTEST00000000M2")
     status_entities = {
@@ -7532,7 +7584,7 @@ def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch):
     monkeypatch.setattr(
         actions,
         "_optimizer_planned_battery_charge_kw",
-        lambda *args, **kwargs: 0.0,
+        lambda *args, **kwargs: 16.0 if deadline else 0.0,
     )
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
@@ -7575,6 +7627,7 @@ def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch):
                 "charger_type": "tesla",
                 "vehicle_vin": vehicle_id,
                 "tesla_charging_state_entity": status_entities[vehicle_id],
+                "reserve_battery_charge": not (deadline and index == 0),
                 "min_charge_amps": 1,
                 "max_charge_amps": 32,
                 "target_battery_charge_kw": 0,

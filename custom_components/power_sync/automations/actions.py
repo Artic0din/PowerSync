@@ -7927,6 +7927,7 @@ def _resolve_battery_reservation_kw(
     session_target_kw: Any,
     planned_charge_kw: Optional[float],
     max_battery_charge_rate_kw: Any = None,
+    reserve_battery_charge: bool = True,
 ) -> float:
     """Return the battery charge reserve to protect from EV load.
 
@@ -7937,6 +7938,8 @@ def _resolve_battery_reservation_kw(
     as spare surplus. The result feeds ``_effective_battery_charge_reserve_kw``,
     so live BMS taper still releases headroom the battery cannot accept.
     """
+    if not reserve_battery_charge:
+        return 0.0
     reservation = planned_charge_kw
     if reservation is None:
         try:
@@ -8512,6 +8515,10 @@ async def _update_smart_schedule_battery_target_group(
     params_list = [(state.get("params") or {}) for _vehicle_id, state in sessions]
     # Same reservation rule as the single-vehicle path.
     target_battery_charge_kw = _resolve_battery_reservation_kw(
+        # A deadline takes priority over a shared discretionary battery reserve.
+        reserve_battery_charge=all(
+            params.get("reserve_battery_charge", True) for params in params_list
+        ),
         session_target_kw=max(
             float(params.get("target_battery_charge_kw", 0) or 0)
             for params in params_list
@@ -11297,6 +11304,7 @@ async def _dynamic_ev_update(
     # battery's hardware maximum and is 0 outside a grid-window start.
     target_battery_charge_kw = _resolve_battery_reservation_kw(
         session_target_kw=params.get("target_battery_charge_kw", 5.0),
+        reserve_battery_charge=params.get("reserve_battery_charge", True),
         planned_charge_kw=_optimizer_planned_battery_charge_kw(hass, config_entry),
         max_battery_charge_rate_kw=params.get("max_battery_charge_rate_kw"),
     )
@@ -12387,7 +12395,6 @@ async def _action_start_ev_charging_dynamic_locked(
     adaptive_smart_schedule_start = (
         dynamic_mode == "battery_target"
         and params.get("owner_mode") == "smart_schedule"
-        and params.get("charger_type", "tesla") == "tesla"
         and not params.get("no_grid_import", False)
         and not _coerce_positive_int(params.get("fixed_charge_amps"))
     )
@@ -12407,6 +12414,7 @@ async def _action_start_ev_charging_dynamic_locked(
     )
     defer_battery_target_start = (
         adaptive_smart_schedule_start
+        and charger_type == "tesla"
         and any(
             candidate_id != vehicle_id
             and candidate_state.get("active")
@@ -12461,6 +12469,7 @@ async def _action_start_ev_charging_dynamic_locked(
         no_grid_import = params.get("no_grid_import", False)
         mode_params = {
             "target_battery_charge_kw": target_battery_charge_kw,
+            "reserve_battery_charge": params.get("reserve_battery_charge", True),
             "max_grid_import_kw": (
                 await _resolve_max_grid_import_kw(hass, config_entry, params)
                 or 12.5
@@ -12584,6 +12593,7 @@ async def _action_start_ev_charging_dynamic_locked(
             max_grid_import_kw=mode_params["max_grid_import_kw"],
             target_battery_charge_kw=_resolve_battery_reservation_kw(
                 session_target_kw=target_battery_charge_kw,
+                reserve_battery_charge=params.get("reserve_battery_charge", True),
                 planned_charge_kw=_optimizer_planned_battery_charge_kw(
                     hass,
                     config_entry,

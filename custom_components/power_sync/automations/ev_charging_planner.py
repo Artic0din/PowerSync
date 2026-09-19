@@ -7789,6 +7789,7 @@ class AutoScheduleExecutor:
                 # A deadline requests the fastest safe rate; it cannot bypass
                 # initial site headroom or subsequent shared-load adjustment.
                 "target_battery_charge_kw": 0,
+                "reserve_battery_charge": False,
             })
 
         try:
