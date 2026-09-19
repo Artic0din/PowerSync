@@ -11847,3 +11847,93 @@ def test_cancelled_ble_start_confirmation_compensates_exact_vehicle(monkeypatch)
     assert len(stops) == 1
     assert stops[0]["vehicle_vin"] == vin
     assert stops[0]["_force_tesla_stop_request"] is True
+
+
+def _app_surplus_params(profile, entry, phases=1):
+    """Execute the actual app startup resolution block without importing HA."""
+    import ast
+    import textwrap
+
+    source = (ROOT / "__init__.py").read_text()
+    start = source.index('                            vc_charger_type = vc.get("charger_type")')
+    end = source.index('                            if vc.get("vehicle_id"):', start)
+    block = ast.parse(textwrap.dedent(source[start:end]))
+    namespace = {
+        "__package__": "power_sync",
+        "vc": dict(profile), "entry": entry, "vc_phases": phases,
+        "surplus_config": {}, "min_battery_soc": 20, "allow_parallel": False,
+    }
+    exec(compile(block, str(ROOT / "__init__.py"), "exec"), namespace)
+    return namespace["params"]
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_app_surplus_explicit_generic_inherits_enabled_defaults(missing):
+    fields = ("switch", "amps", "status", "power")
+    defaults = {f"generic_charger_{field}_entity": f"sensor.global_{field}" for field in fields}
+    entry = SimpleNamespace(data={**defaults, "generic_charger_enabled": False},
+                            options={"generic_charger_enabled": True,
+                                     "generic_charger_power_entity": "sensor.current_power"})
+    profile = {"charger_type": "generic", **{f"charger_{field}_entity": missing for field in fields}}
+    params = _app_surplus_params(profile, entry)
+    for field in fields:
+        assert params[f"charger_{field}_entity"] == (
+            "sensor.current_power" if field == "power" else f"sensor.global_{field}")
+    assert profile["charger_power_entity"] == missing
+    second_profile = {"charger_type": "generic", **{f"charger_{field}_entity": f"sensor.other_{field}" for field in fields}}
+    other = _app_surplus_params(second_profile, entry)
+    for field in fields:
+        assert other[f"charger_{field}_entity"] == f"sensor.other_{field}"
+
+
+@pytest.mark.parametrize("charger_type,enabled", [("generic", False), ("tesla", True), ("ocpp", True)])
+def test_app_surplus_does_not_inherit_disabled_or_other_charger(charger_type, enabled):
+    entry = SimpleNamespace(data={"generic_charger_enabled": True,
+                                  "generic_charger_power_entity": "sensor.old_power"},
+                            options={"generic_charger_enabled": enabled})
+    params = _app_surplus_params({"charger_type": charger_type}, entry)
+    assert params["charger_type"] == charger_type
+    assert params["charger_power_entity"] is None
+
+
+@pytest.mark.parametrize("phases", [1, 3])
+@pytest.mark.parametrize("stale", [False, True])
+def test_app_surplus_inherited_meter_controls_external_generic_charge(monkeypatch, phases, stale):
+    now = datetime.now(timezone.utc)
+    power = 16 * 240 * phases
+    hass = _Hass([
+        _State("sensor.charger_power", str(power), {"unit_of_measurement": "W"},
+               last_updated=now - timedelta(seconds=600 if stale else 0)),
+        _State("number.charger_amps", "16", {"min": 6, "max": 32}),
+        _State("switch.charger", "on"),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": True,
+        "generic_charger_power_entity": "sensor.charger_power",
+        "generic_charger_amps_entity": "number.charger_amps",
+        "generic_charger_switch_entity": "switch.charger",
+    })
+    set_amps = actions._set_vehicle_amps
+    observed_power = actions._get_observed_ev_power_kw
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 80, "grid_power": 0, "battery_power": power,
+        "solar_power": 500, "load_power": power + 500,
+    })
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_get_observed_ev_power_kw", observed_power)
+    state = _solar_surplus_state(current_amps=0)
+    state["params"] = _app_surplus_params({"charger_type": "generic", "min_amps": 6}, entry, phases)
+    state["charging_started"] = False
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    if stale:
+        assert hass.services.calls == []
+        assert state["current_amps"] == 0
+        return
+    assert hass.services.calls == [("number", "set_value", {"entity_id": "number.charger_amps", "value": 6})]
+    assert state["current_amps"] == 6
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=6)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    assert hass.services.calls[-1] == ("switch", "turn_off", {"entity_id": "switch.charger"})
+    assert state["current_amps"] == 0
