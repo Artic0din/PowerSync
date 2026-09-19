@@ -858,6 +858,8 @@ def _timer_snapshot(
 
 
 def _solar_surplus_delay_timer(state: Mapping[str, Any]) -> dict[str, Any] | None:
+    if state.get("stop_outcome"):
+        return None
     params = state.get("params") or {}
     mode = str(params.get("dynamic_mode") or state.get("mode") or "").lower()
     owner_mode = str(params.get("owner_mode") or "").lower()
@@ -1044,9 +1046,12 @@ def _dynamic_loadpoint(
     target_amps = _int_value(state.get("target_amps"), commanded_amps)
     if target_amps <= 0 and observed_current is not None:
         target_amps = observed_amps
+    stop_outcome = state.get("stop_outcome")
+    if stop_outcome:
+        target_amps = 0
     voltage = _float_value(params.get("voltage"), 240.0)
     phases = _float_value(params.get("phases"), 1.0)
-    commanded_power_kw = target_amps * voltage * phases / 1000
+    commanded_power_kw = (commanded_amps if stop_outcome else target_amps) * voltage * phases / 1000
 
     observed_power_available = (
         observation is None or observation.get("power_available") is not False
@@ -1085,6 +1090,8 @@ def _dynamic_loadpoint(
     )
     if status == "commanded_no_power" and not blocking_reason:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
+    if stop_outcome:
+        blocking_reason = stop_outcome.get("reason") or blocking_reason
 
     allocated_surplus_kw = _float_value(state.get("allocated_surplus_kw"), 0.0)
     soc = _optional_int(
@@ -1149,6 +1156,11 @@ def _dynamic_loadpoint(
         "target_soc": _optional_int(params.get("target_soc")),
         "allocated_surplus_kw": round(allocated_surplus_kw, 2),
         "delay_timer": _solar_surplus_delay_timer(state),
+        **({"stop_outcome": {
+            **stop_outcome,
+            "requested_at": _coerce_datetime(stop_outcome.get("requested_at")).isoformat()
+            if _coerce_datetime(stop_outcome.get("requested_at")) else None,
+        }} if stop_outcome else {}),
         "blocking_reason": blocking_reason,
         "session_id": session_id,
         "last_command": (ownership or {}).get("last_command"),

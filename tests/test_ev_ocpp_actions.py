@@ -11937,3 +11937,99 @@ def test_app_surplus_inherited_meter_controls_external_generic_charge(monkeypatc
     asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
     assert hass.services.calls[-1] == ("switch", "turn_off", {"entity_id": "switch.charger"})
     assert state["current_amps"] == 0
+
+
+@pytest.mark.parametrize("outcome, expected", [(False, "failed"), (None, "unconfirmed"), (True, None)])
+def test_surplus_stop_outcome_replaces_expired_delay(monkeypatch, outcome, expected):
+    """A stop request is not a completed stop or another grace period."""
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
+
+    hass = _Hass([])
+    state = _solar_surplus_state(current_amps=5)
+    state["params"]["min_charge_amps"] = 5
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=6)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"ble_car": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": 2000, "battery_power": 0,
+        "solar_power": 0, "load_power": 0,
+    })
+
+    async def stop(*args):
+        assert args[3] == 0
+        # The UI must also be truthful while the actuator is awaiting readback.
+        row = build_loadpoint_status({"ble_car": state})[0]
+        assert row["stop_outcome"]["status"] == "pending"
+        assert row["delay_timer"] is None
+        return outcome
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", stop)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "ble_car"))
+    row = build_loadpoint_status({"ble_car": state})[0]
+    assert row["delay_timer"] is None
+    if expected:
+        assert state["current_amps"] == 5
+        assert state["charging_started"] is True
+        assert row["stop_outcome"]["status"] == expected
+        assert row["target_amps"] == 0
+        assert row["commanded_power_kw"] == 1.2
+        assert "retry" in row["blocking_reason"].lower()
+    else:
+        assert state["current_amps"] == 0
+        assert state["charging_started"] is False
+        assert row.get("stop_outcome") is None
+
+
+@pytest.mark.parametrize("recovery", ["surplus", "fresh_stop", "stale_stop", "other_vehicle"])
+def test_surplus_stop_outcome_lifecycle(monkeypatch, recovery):
+    """Only a new own-vehicle stop observation or renewed demand retires the outcome."""
+    now = datetime.now(timezone.utc)
+    charging = _State("sensor.car_charging_state", "stopped")
+    charging.last_changed = now if recovery == "fresh_stop" else now - timedelta(hours=1)
+    power = _State("sensor.car_power", "0", {"unit_of_measurement": "W"}, last_updated=now)
+    if recovery == "other_vehicle":
+        charging.entity_id = "sensor.other_charging_state"
+    hass = _Hass([charging, power])
+    state = _solar_surplus_state(current_amps=5)
+    state["params"].update({"min_charge_amps": 5, "vehicle_vin": "ble_car", "charger_power_entity": "sensor.car_power"})
+    state["stop_outcome"] = {"status": "failed", "requested_at": now - timedelta(minutes=1), "reason": "Stop unsuccessful; retry pending"}
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=6)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"ble_car": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 100, "grid_power": -4000 if recovery == "surplus" else 0,
+        "battery_power": 0, "solar_power": 0, "load_power": 0,
+    })
+    monkeypatch.setattr(actions, "_set_vehicle_amps", AsyncMock(return_value=False))
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "ble_car"))
+    if recovery in ("surplus", "fresh_stop"):
+        assert state.get("stop_outcome") is None
+        assert state.get("low_surplus_start") is None
+    else:
+        assert state["stop_outcome"]["status"] == "failed"
+    # Status reconciliation must not manufacture a command/ownership settlement.
+    assert state["current_amps"] == 5
+
+
+@pytest.mark.parametrize("confirmation", ["fresh_own", "stale_own", "fresh_other"])
+def test_ble_stop_confirmation_stays_prefix_and_timestamp_scoped(monkeypatch, confirmation):
+    monkeypatch.setattr(actions, "_wake_tesla_ble", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0)
+    old = datetime.now(timezone.utc) - timedelta(minutes=10)
+    hass = _Hass([
+        _State("switch.car_charger", "on"),
+        _State("sensor.car_charging_state", "stopped", last_updated=old),
+        _State("sensor.other_charging_state", "stopped", last_updated=old),
+    ])
+    original = hass.services.async_call
+
+    async def update(domain, service, data, **kwargs):
+        await original(domain, service, data, **kwargs)
+        if confirmation != "stale_own":
+            prefix = "car" if confirmation == "fresh_own" else "other"
+            hass.states.get(f"sensor.{prefix}_charging_state").last_updated = datetime.now(timezone.utc)
+
+    hass.services.async_call = update
+    result = asyncio.run(actions._stop_ev_charging_ble(hass, "car"))
+    assert result is (True if confirmation == "fresh_own" else None)
+    assert hass.services.calls == [("switch", "turn_off", {"entity_id": "switch.car_charger"})]

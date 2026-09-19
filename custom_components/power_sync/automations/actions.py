@@ -9567,6 +9567,15 @@ async def _dynamic_ev_update_surplus(
     if stopped_without_restart_lag:
         current_ev_kw = 0.0
         effective_current_amps = 0
+        stop_outcome = state.get("stop_outcome") or {}
+        if stop_outcome and _datetime_is_after(
+            current_vehicle_charging_state_changed_at,
+            stop_outcome.get("requested_at"),
+        ):
+            # A later independent stopped observation retires the warning,
+            # without attributing that stop to our unsuccessful command.
+            state.pop("stop_outcome", None)
+            state["low_surplus_start"] = None
     elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
 
@@ -9667,6 +9676,7 @@ async def _dynamic_ev_update_surplus(
     else:
         # Sufficient surplus - reset low surplus timer
         state["low_surplus_start"] = None
+        state.pop("stop_outcome", None)
 
         if effective_current_amps == 0:
             # Track how long we've had surplus before starting
@@ -9794,10 +9804,28 @@ async def _dynamic_ev_update_surplus(
             f"⚡ Solar surplus EV: {effective_current_amps}A -> {new_amps}A "
             f"(surplus={my_surplus_kw:.1f}kW, battery={battery_soc:.0f}%)"
         )
+        if new_amps == 0:
+            state["stop_outcome"] = {
+                "status": "pending",
+                "requested_at": datetime.now(dt_timezone.utc),
+                "reason": "Stop requested; awaiting result",
+            }
         success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
         if _session_was_replaced("amp adjustment"):
             return
+        if new_amps == 0 and not success:
+            # False can mean a pre-command block OR a backend error after
+            # dispatch. None is explicitly unconfirmed. Neither proves a
+            # physical stop, nor warrants clearing commanded amps/ownership.
+            state["stop_outcome"].update(
+                status="unconfirmed" if success is None else "failed",
+                reason=(
+                    "Stop unconfirmed; retry pending"
+                    if success is None else "Stop unsuccessful; retry pending"
+                ),
+            )
         if success:
+            state.pop("stop_outcome", None)
             applied_amps = _phase_applied_amps(params, new_amps)
             max_after_set = _coerce_positive_int(params.get("max_charge_amps"))
             if max_after_set is not None and applied_amps > 0:

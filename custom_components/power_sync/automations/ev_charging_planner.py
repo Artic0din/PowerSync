@@ -10978,6 +10978,9 @@ class ScheduledChargingExecutor:
         self._domain = DOMAIN
         self._state = ScheduledChargingState()
         self._preserve_home_battery_active = False
+        self._vehicle_results: dict[str, dict] = {}
+        self._pending_stops: dict[str, dict] = {}
+        self._fleet_vins: list[str] = []
 
     def _get_settings(self) -> dict:
         """Get scheduled charging settings from store."""
@@ -11096,148 +11099,275 @@ class ScheduledChargingExecutor:
             _LOGGER.error(f"Error parsing time window: {e}")
             return False
 
-    async def _start_charging(self, reason: str) -> bool:
-        """Start EV charging."""
-        await self.apply_preserve_home_battery(True, reason)
-        if _configured_charger_type({**self.config_entry.data, **self.config_entry.options}) == "tesla":
-            tesla_started = await self._start_scheduled_tesla_vehicles(reason)
-            if tesla_started is not None:
-                return tesla_started
+    def _tesla_session_modes(self) -> dict[str, str]:
+        """Exact runtime/lease ids only; never spread a default owner to all cars."""
+        from .actions import _dynamic_ev_state
+        from .ev_ownership import get_ev_ownerships
 
-        success = await _start_coordinated_charging(
-            self.hass,
-            self._domain,
-            self.config_entry,
-            owner_mode="scheduled",
-            reason=reason,
-            no_grid_import=self._get_settings().get("no_grid_import", False),
-            allow_ownership_takeover=True,
-            log_prefix="Scheduled charging",
+        modes = {
+            vid: str((state.get("params") or {}).get("owner_mode")
+                     or (state.get("params") or {}).get("dynamic_mode") or "dynamic")
+            for vid, state in _dynamic_ev_state.get(self.config_entry.entry_id, {}).items()
+            if state.get("active")
+        }
+        # A live lease is authoritative over a superseded controller snapshot.
+        modes.update({
+            vid: str(lease.get("owner_mode") or lease.get("owner") or "")
+            for vid, lease in get_ev_ownerships(self.hass, self.config_entry).items()
+            if lease.get("owner")
+        })
+        return modes
+
+    def _physical_tesla_id(self, vehicle_id: str) -> str:
+        from .actions import _canonical_dynamic_tesla_vehicle_id
+
+        # Use the actuator's registry-backed identity even before discovery has
+        # run (restored sessions can need cleanup immediately after reload).
+        command_id = _canonical_dynamic_tesla_vehicle_id(self.hass, self.config_entry, vehicle_id)
+        if command_id and command_id != vehicle_id:
+            return command_id
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        return canonical_tesla_vehicle_id(
+            opts, vehicle_id, getattr(self, "_fleet_vins", []),
+            _configured_ble_prefixes(self.config_entry, None, hass=self.hass),
         )
-        if not success:
-            _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
-            return False
 
-        self._state.is_charging = True
-        self._state.last_decision = "started"
-        self._state.last_decision_reason = reason
-        _LOGGER.info(f"Scheduled charging: Started - {reason}")
-        return True
+    def _tesla_owner_groups(self) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = {}
+        for vid, mode in self._tesla_session_modes().items():
+            groups.setdefault(self._physical_tesla_id(vid), []).append(mode)
+        return groups
+
+    def _has_scheduled_tesla_sessions(self) -> bool:
+        from .ev_ownership import owner_family
+        return any(owner_family(mode) == "scheduled" for mode in self._tesla_session_modes().values())
+
+    async def _pending_stop_observed(self, vin: str, pending: dict) -> bool:
+        """Observe a later stop without issuing commands or attributing its cause."""
+        from .actions import (
+            _get_tesla_charging_state, _get_tesla_charging_state_changed_at,
+            _get_observed_ev_power_reading_kw, _datetime_is_after,
+            _TESLA_NON_CHARGING_STATES, _ACTIVE_EV_POWER_EPSILON_KW,
+        )
+        params = pending["params"]
+        entity = params.get("tesla_charging_state_entity")
+        if _get_tesla_charging_state(self.hass, vin, entity) not in _TESLA_NON_CHARGING_STATES:
+            return False
+        if not _datetime_is_after(
+            _get_tesla_charging_state_changed_at(self.hass, vin, entity), pending["at"],
+        ):
+            return False
+        power, available = await _get_observed_ev_power_reading_kw(
+            self.hass, vin, params, allow_wall_connector_fallback=False,
+        )
+        return available and power <= _ACTIVE_EV_POWER_EPSILON_KW
+
+    async def _start_charging(self, reason: str) -> bool:
+        """Acquire Scheduled control, then publish only the accepted outcome."""
+        await self.apply_preserve_home_battery(True, reason)
+        success = await self._start_scheduled_tesla_vehicles(reason)
+        if success is None:
+            success = await _start_coordinated_charging(
+                self.hass, self._domain, self.config_entry,
+                owner_mode="scheduled", reason=reason,
+                no_grid_import=self._get_settings().get("no_grid_import", False),
+                allow_ownership_takeover=True, log_prefix="Scheduled charging",
+            )
+            self._state.is_charging = bool(success)
+            self._state.last_decision = "started" if success else "start_failed"
+            self._state.last_decision_reason = reason if success else f"{reason}; start unsuccessful"
+        await self.apply_preserve_home_battery(
+            bool(success) or bool(self._pending_stops), self._state.last_decision_reason,
+        )
+        return bool(success)
 
     async def _start_scheduled_tesla_vehicles(self, reason: str) -> Optional[bool]:
-        """Start every eligible Tesla in the scheduled window.
-
-        The legacy scheduled path used the default Tesla loadpoint. In multi-car
-        homes that can start the first matching Tesla and then mark the shared
-        scheduled mode as active, leaving another home/plugged car idle.
-        """
-        if (
-            _configured_charger_type({**self.config_entry.data, **self.config_entry.options})
-            != "tesla"
-        ):
+        """Reconcile each physical Tesla's ownership, not just charging telemetry."""
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        if _configured_charger_type(opts) != "tesla":
             return None
+        from .ev_ownership import can_take_over_ev_ownership, owner_family
 
+        discovery_failed = False
         try:
             vehicles = await discover_all_tesla_vehicles(self.hass, self.config_entry)
         except Exception as err:
             _LOGGER.debug("Scheduled charging Tesla discovery unavailable: %s", err)
-            return None
+            vehicles = []
+            discovery_failed = True
+        if vehicles:
+            self._fleet_vins = [
+                str(v.get("vin") or v.get("vehicle_id") or "") for v in vehicles
+                if not str(v.get("vin") or v.get("vehicle_id") or "").startswith("ble_")
+            ]
+        elif not discovery_failed and not self._has_scheduled_tesla_sessions() and not self._pending_stops:
+            self._vehicle_results = {}
+            return None  # The fallback still requires unambiguous resolution.
 
-        if not vehicles:
-            return None
-
-        eligible_vins: list[str] = []
-        missing_vins: list[str] = []
+        physical_id = self._physical_tesla_id
+        results: dict[str, dict] = {}
         for vehicle in vehicles:
-            vin = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
-            if not vin:
+            vin = physical_id(str(vehicle.get("vin") or vehicle.get("vehicle_id") or ""))
+            if not vin or vin in results:
                 continue
+            results[vin] = {"active": False, "reason": "Vehicle is not eligible"}
             try:
-                location = await get_ev_location(self.hass, self.config_entry, vehicle_vin=vin)
-                if location not in ("home", "unknown"):
+                if await get_ev_location(self.hass, self.config_entry, vehicle_vin=vin) not in ("home", "unknown"):
                     continue
                 if not await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin=vin):
                     continue
-                eligible_vins.append(vin)
-                if not await is_ev_actively_charging(
-                    self.hass,
-                    self.config_entry,
-                    vehicle_vin=vin,
-                ):
-                    missing_vins.append(vin)
-            except Exception as err:
-                _LOGGER.debug(
-                    "Scheduled charging Tesla eligibility check failed for %s: %s",
-                    vin[:8],
-                    err,
+                session_modes = self._tesla_session_modes()
+                if "_default" in session_modes and vin != "_default":
+                    results[vin]["reason"] = "Unresolved default loadpoint ownership"
+                    continue
+                modes = [mode for vid, mode in session_modes.items()
+                         if physical_id(vid) == vin]
+                blocked = next((mode for mode in modes if not can_take_over_ev_ownership(
+                    mode, "scheduled", allow_takeover=True,
+                )), None)
+                if blocked:
+                    results[vin]["reason"] = f"{blocked} owns this loadpoint"
+                    continue
+                if modes and all(owner_family(mode) == "scheduled" for mode in modes):
+                    # Its dynamic controller owns restart/readback/retry policy.
+                    # Re-running start here would reset that controller.
+                    results[vin] = {"active": True, "reason": "Scheduled control active"}
+                    continue
+                if vin in self._pending_stops:
+                    results[vin]["reason"] = "Previous stop unconfirmed; awaiting vehicle observation"
+                    if not await self._pending_stop_observed(vin, self._pending_stops[vin]):
+                        continue
+                    self._pending_stops.pop(vin, None)
+                success = await _start_coordinated_charging(
+                    self.hass, self._domain, self.config_entry,
+                    owner_mode="scheduled", reason=reason, vehicle_vin=vin,
+                    no_grid_import=self._get_settings().get("no_grid_import", False),
+                    allow_ownership_takeover=True, log_prefix="Scheduled charging",
                 )
+                results[vin] = {
+                    "active": bool(success),
+                    "reason": "Scheduled start accepted" if success else "Scheduled start unsuccessful; will retry",
+                }
+            except Exception as err:
+                results[vin]["reason"] = "Scheduled reconciliation unsuccessful; will retry"
+                _LOGGER.warning("Scheduled charging reconciliation failed for %s: %s", vin[:8], err)
 
-        if not eligible_vins:
-            return None
-
-        if not missing_vins:
-            self._state.is_charging = True
-            self._state.last_decision = "charging"
-            self._state.last_decision_reason = reason
-            _LOGGER.debug("Scheduled charging: all eligible Tesla vehicles already charging")
-            return True
-
-        started_any = False
-        failed_vins: list[str] = []
-        for vin in missing_vins:
-            success = await _start_coordinated_charging(
-                self.hass,
-                self._domain,
-                self.config_entry,
-                owner_mode="scheduled",
-                reason=reason,
-                vehicle_vin=vin,
-                no_grid_import=self._get_settings().get("no_grid_import", False),
-                allow_ownership_takeover=True,
-                log_prefix="Scheduled charging",
-            )
-            if success:
-                started_any = True
-            else:
-                failed_vins.append(vin)
-
-        if failed_vins:
-            _LOGGER.warning(
-                "Scheduled charging: Failed to start Tesla vehicle(s): %s",
-                ", ".join(vin[:8] for vin in failed_vins),
-            )
-
-        if not started_any:
-            _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
-            return False
-
-        self._state.is_charging = True
-        self._state.last_decision = "started"
-        self._state.last_decision_reason = reason
-        _LOGGER.info(
-            "Scheduled charging: Started %d Tesla vehicle(s) - %s",
-            len(missing_vins) - len(failed_vins),
-            reason,
-        )
-        return True
+        # Re-read after every awaited eligibility/start operation. A manual
+        # takeover during those awaits must replace even an earlier success.
+        for vin, modes in self._tesla_owner_groups().items():
+            if modes and all(owner_family(mode) == "scheduled" for mode in modes):
+                if not results.get(vin, {}).get("active"):
+                    results[vin] = {
+                        "active": True,
+                        "reason": "Scheduled ownership retained; eligibility unavailable",
+                    }
+            elif vin in results:
+                results[vin] = {"active": False, "reason": "Another mode owns this loadpoint"}
+        self._vehicle_results = results
+        active = sum(result["active"] for result in results.values())
+        self._state.is_charging = active > 0
+        self._state.last_decision = "partial" if 0 < active < len(results) else "charging" if active else "start_failed"
+        self._state.last_decision_reason = f"{reason}; Scheduled control active for {active}/{len(results)} vehicle(s)"
+        return active > 0
 
     async def _stop_charging(self, reason: str) -> bool:
-        """Stop EV charging."""
-        success = await _stop_coordinated_charging(
-            self.hass,
-            self._domain,
-            self.config_entry,
-            expected_owner_mode="scheduled",
-            reason=reason,
-            log_prefix="Scheduled charging",
-        )
-        if not success:
-            return False
+        """Stop only canonically Scheduled-owned loadpoints; retain uncertain stops."""
+        from .ev_ownership import owner_family
 
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        if _configured_charger_type(opts) == "tesla":
+            groups = self._tesla_owner_groups()
+            targets = {vin for vin, modes in groups.items()
+                       if modes and all(owner_family(mode) == "scheduled" for mode in modes)}
+            success = True
+            transferred = any(
+                any(owner_family(mode) == "scheduled" for mode in modes)
+                and any(owner_family(mode) != "scheduled" for mode in modes)
+                for modes in groups.values()
+            )
+            for vin in sorted(targets | set(self._pending_stops)):
+                groups = self._tesla_owner_groups()
+                modes = groups.get(vin, [])
+                if any(owner_family(mode) != "scheduled" for mode in modes):
+                    # A foreign alias owns this physical car. End our tracking,
+                    # not its charge, even if another alias has a stale lease.
+                    self._pending_stops.pop(vin, None)
+                    transferred = True
+                    continue
+                if vin in self._pending_stops:
+                    if await self._pending_stop_observed(vin, self._pending_stops[vin]):
+                        self._pending_stops.pop(vin, None)
+                        if vin not in targets:
+                            continue
+                    elif vin not in targets:
+                        success = False
+                        continue  # Teardown released ownership: no unowned retry.
+                # Prior stops and observation checks await. Recheck physical
+                # aliases at the last synchronous point before stop dispatch.
+                groups = self._tesla_owner_groups()
+                modes = groups.get(vin, [])
+                if any(owner_family(mode) != "scheduled" for mode in modes):
+                    self._pending_stops.pop(vin, None)
+                    transferred = True
+                    continue
+                if not modes:
+                    success = not bool(self._pending_stops.get(vin)) and success
+                    continue
+                if "_default" in groups and len(groups) > 1:
+                    success = False
+                    continue  # Legacy ambiguous ownership must fail closed.
+                params = _build_dynamic_stop_params(
+                    self.hass, self._domain, self.config_entry, opts, vehicle_vin=vin,
+                )
+                from .actions import _dynamic_ev_state
+                # Preserve exact entity mappings before teardown deletes them.
+                runtime = _dynamic_ev_state.get(self.config_entry.entry_id, {}).get(vin, {})
+                params = {**params, **(runtime.get("params") or {})}
+                attempted_at = datetime.now(timezone.utc)
+                stopped = await _stop_coordinated_charging(
+                    self.hass, self._domain, self.config_entry,
+                    expected_owner_mode="scheduled", reason=reason,
+                    vehicle_vin=vin, log_prefix="Scheduled charging",
+                )
+                if stopped:
+                    self._pending_stops.pop(vin, None)
+                else:
+                    self._pending_stops.setdefault(vin, {"at": attempted_at, "params": params})
+                    success = False
+            live_groups = self._tesla_owner_groups()
+            self._vehicle_results = {
+                vin: {
+                    "active": bool(live_groups.get(vin)) and all(
+                        owner_family(mode) == "scheduled" for mode in live_groups[vin]
+                    ),
+                    "reason": (
+                        "Stop unconfirmed" if vin in self._pending_stops
+                        else "Scheduled control retained" if live_groups.get(vin) and all(
+                            owner_family(mode) == "scheduled" for mode in live_groups[vin]
+                        ) else "Scheduled control inactive"
+                    ),
+                }
+                for vin in targets | set(self._pending_stops)
+            }
+            self._state.is_charging = (
+                any(result["active"] for result in self._vehicle_results.values())
+                if not success else False
+            )
+        else:
+            transferred = False
+            success = await _stop_coordinated_charging(
+                self.hass, self._domain, self.config_entry,
+                expected_owner_mode="scheduled", reason=reason,
+                log_prefix="Scheduled charging",
+            )
+        if not success:
+            self._state.last_decision = "stop_failed"
+            self._state.last_decision_reason = f"{reason}; stop unconfirmed"
+            return False
         self._state.is_charging = False
-        self._state.last_decision = "stopped"
-        self._state.last_decision_reason = reason
-        _LOGGER.info(f"Scheduled charging: Stopped - {reason}")
+        self._state.last_decision = "released" if transferred else "stopped"
+        self._state.last_decision_reason = f"{reason}; control transferred" if transferred else reason
+        self._vehicle_results = {}
         self._clear_preserve_home_battery_intent(reason)
         return True
 
@@ -11322,9 +11452,11 @@ class ScheduledChargingExecutor:
         should_charge, reason, mode = await self.get_charging_decision(current_price_cents)
 
         # Take action
-        if should_charge and not self._state.is_charging:
+        if should_charge and (not self._state.is_charging or _configured_charger_type(
+            {**self.config_entry.data, **self.config_entry.options}
+        ) == "tesla"):
             await self._start_charging(reason)
-        elif not should_charge and self._state.is_charging:
+        elif not should_charge and (self._state.is_charging or self._pending_stops or self._has_scheduled_tesla_sessions()):
             await self._stop_charging(reason)
         else:
             await self.apply_preserve_home_battery(should_charge, reason)
@@ -11348,6 +11480,8 @@ class ScheduledChargingExecutor:
             "last_decision_reason": self._state.last_decision_reason,
             "preserve_home_battery_active": self._preserve_home_battery_active,
             "settings": settings,
+            "vehicle_results": dict(getattr(self, "_vehicle_results", {})),
+            "pending_stop_vehicle_ids": sorted(getattr(self, "_pending_stops", {})),
         }
 
 
@@ -11669,87 +11803,28 @@ class EVChargingModeCoordinator:
             any_price_level_charging = False
             vehicle_results = {}
 
-        # Scheduled charging (legacy single-vehicle behavior)
-        decisions: List[ChargingModeDecision] = []
+        scheduled_active = False
+        scheduled_reason = ""
         if scheduled_exec:
-            wants_charge, reason, source = await scheduled_exec.get_charging_decision(current_price_cents)
-            await scheduled_exec.apply_preserve_home_battery(wants_charge, reason)
-            decisions.append(ChargingModeDecision(
-                mode_name="Scheduled",
-                wants_charge=wants_charge,
-                reason=reason,
-                source=source,
-            ))
-
-        # Note: Smart Schedule (AutoScheduleExecutor) is handled separately
-        # because it has per-vehicle settings and manages backup reserve
-
-        # Log scheduled charging decision
-        for d in decisions:
-            _LOGGER.debug(
-                f"EV Coordinator decision: {d.mode_name} wants_charge={d.wants_charge}, "
-                f"reason={d.reason}"
+            wants_charge, reason, _source = await scheduled_exec.get_charging_decision(current_price_cents)
+            had_scheduled_control = (
+                scheduled_exec._state.is_charging or "Scheduled" in self._active_modes
+                or scheduled_exec._pending_stops or scheduled_exec._has_scheduled_tesla_sessions()
             )
-
-        # Combine decisions using OR logic
-        # Price-level is handled per-vehicle above, so only check scheduled here
-        modes_wanting_charge = [d for d in decisions if d.wants_charge]
-
-        # Also include price-level in active modes if any vehicle is charging
-        if any_price_level_charging:
-            if not any(d.mode_name == "Price-Level" for d in modes_wanting_charge):
-                # Add a synthetic decision for tracking
-                modes_wanting_charge.append(ChargingModeDecision(
-                    mode_name="Price-Level",
-                    wants_charge=True,
-                    reason="Per-vehicle charging active",
-                    source="price_level_multi_vehicle",
-                ))
-
-        if modes_wanting_charge:
-            # At least one mode wants to charge
-            active_modes = [d.mode_name for d in modes_wanting_charge]
-            combined_reason = " | ".join([d.reason for d in modes_wanting_charge])
-
-            # For scheduled charging (single vehicle), start if not already charging
-            scheduled_wanting = [d for d in decisions if d.wants_charge]
-            if scheduled_wanting and not self._is_charging:
-                await self._start_charging(active_modes, combined_reason)
-            elif scheduled_wanting and scheduled_exec:
-                await scheduled_exec._start_scheduled_tesla_vehicles(combined_reason)
-
-            # Update executor states
-            for d in decisions:
-                if d.mode_name == "Scheduled" and scheduled_exec:
-                    scheduled_exec.update_charging_state(True, combined_reason)
-
-            self._active_modes = active_modes
-            self._last_reason = combined_reason
-            self._is_charging = True  # Track overall state
-
-        else:
-            # No mode wants to charge
-            stopped_external_scheduled = False
-            # Price-Level has already handled its per-vehicle stop above. Only
-            # ask the coordinator to stop when it owns a non-Price-Level mode
-            # (for example Scheduled, or a mixed Scheduled/Price-Level cycle).
-            coordinator_owned_modes = [
-                mode for mode in self._active_modes if mode != "Price-Level"
-            ]
-            if (
-                self._is_charging
-                and not any_price_level_charging
-                and coordinator_owned_modes
-            ):
-                reasons = [d.reason for d in decisions if d.reason]
-                combined_reason = " | ".join(reasons) if reasons else "No mode wants to charge"
-                await self._stop_charging(combined_reason)
-            elif (
-                scheduled_exec
-                and decisions
-                and not any_price_level_charging
-                and decisions[0].reason != "Scheduled charging is disabled"
-            ):
+            if wants_charge:
+                is_tesla = _configured_charger_type(
+                    {**self.config_entry.data, **self.config_entry.options}
+                ) == "tesla"
+                if is_tesla or not scheduled_exec._state.is_charging:
+                    scheduled_active = await scheduled_exec._start_charging(reason)
+                else:
+                    scheduled_active = True
+                    await scheduled_exec.apply_preserve_home_battery(True, reason)
+            elif had_scheduled_control:
+                # End Scheduled independently of Price-Level on another car.
+                stopped = await scheduled_exec._stop_charging(reason)
+                scheduled_active = scheduled_exec._state.is_charging
+            elif not any_price_level_charging and reason != "Scheduled charging is disabled":
                 external_vehicle_vin, external_charge, external_guard_reason = (
                     await _find_external_scheduled_charging_vehicle(
                         self.hass,
@@ -11762,7 +11837,7 @@ class EVChargingModeCoordinator:
                         external_guard_reason,
                     )
                 if external_charge:
-                    scheduled_reason = decisions[0].reason or "Scheduled charging inactive"
+                    scheduled_reason = reason or "Scheduled charging inactive"
                     if self._external_scheduled_stop_recent(
                         external_vehicle_vin,
                         scheduled_reason,
@@ -11772,7 +11847,6 @@ class EVChargingModeCoordinator:
                             external_vehicle_vin or "configured charger",
                             scheduled_reason,
                         )
-                        stopped_external_scheduled = True
                     else:
                         _LOGGER.info(
                             "Scheduled charging stopping external session: %s",
@@ -11789,17 +11863,22 @@ class EVChargingModeCoordinator:
                             scheduled_exec.update_charging_state(False, scheduled_reason)
                             scheduled_exec._state.last_decision = "stopped"
                             scheduled_exec._state.last_decision_reason = scheduled_reason
-                            stopped_external_scheduled = True
                 else:
                     self._last_external_scheduled_stop = None
+            if not wants_charge and not scheduled_active and not scheduled_exec._pending_stops:
+                await scheduled_exec.apply_preserve_home_battery(False, reason)
+            scheduled_reason = scheduled_exec._state.last_decision_reason or reason
 
-            # Update executor states
-            if scheduled_exec and not stopped_external_scheduled:
-                scheduled_exec.update_charging_state(False)
-
-            if not any_price_level_charging:
-                self._is_charging = False
-                self._active_modes = []
+        self._active_modes = []
+        reasons = []
+        if scheduled_active:
+            self._active_modes.append("Scheduled")
+            reasons.append(scheduled_reason)
+        if any_price_level_charging:
+            self._active_modes.append("Price-Level")
+            reasons.append("Per-vehicle Price-Level charging active")
+        self._is_charging = bool(self._active_modes)
+        self._last_reason = " | ".join(reasons) or scheduled_reason
 
     def get_state(self) -> dict:
         """Get coordinator state for API."""

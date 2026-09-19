@@ -2369,6 +2369,7 @@ class _FakeTeslaSession:
 def fake_actions(monkeypatch):
     actions = types.ModuleType("power_sync.automations.actions")
     actions.DEFAULT_VEHICLE_ID = "_default"
+    actions._canonical_dynamic_tesla_vehicle_id = lambda h, e, vin: vin
     actions._dynamic_ev_state = {}
     actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
 
@@ -3381,6 +3382,8 @@ def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
     previous_price_executor = ev_planner.get_price_level_executor()
     scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
     coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
+    from power_sync.automations.ev_ownership import claim_ev_ownership
+    claim_ev_ownership(hass, _FakeConfigEntry(), first_vin, owner_mode="scheduled")
     coordinator._is_charging = True
 
     try:
@@ -4126,7 +4129,7 @@ def test_scheduled_does_not_stop_external_charging_when_vehicle_away(
 
     active_probe.assert_not_awaited()
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
-    assert scheduled.get_state()["last_decision"] == "waiting"
+    assert scheduled.get_state()["last_decision"] == "away"
 
 
 def test_scheduled_time_window_excludes_end_boundary(monkeypatch):
@@ -7868,3 +7871,289 @@ def test_epex_current_price_uses_the_active_optimizer_slot(monkeypatch):
     executor.config_entry = entry
 
     assert asyncio.run(executor._get_current_price()) == 197.28
+
+
+@pytest.fixture
+def scheduled_reconciliation(monkeypatch, fake_actions):
+    from power_sync.automations import ev_ownership as ownership
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    vins = ["XP7YHCEL7TB811704", "LRWYHCEKXTC687964"]
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["scheduled_charging"] = {
+        "enabled": True, "start_time": "12:00", "end_time": "14:00",
+        "max_price_cents": 80, "preserve_home_battery": True,
+    }
+    fake_actions._dynamic_ev_state = {"entry-1": {}}
+    for vin in vins:
+        ownership.claim_ev_ownership(hass, entry, vin, owner_mode="solar_surplus")
+        fake_actions._dynamic_ev_state["entry-1"][vin] = {
+            "active": True, "params": {"owner_mode": "solar_surplus", "dynamic_mode": "solar_surplus"},
+        }
+    failed = set()
+    async def start(_hass, _entry, params, context=None):
+        vin = params["vehicle_id"]
+        if vin in failed:
+            return False
+        ownership.claim_ev_ownership(hass, entry, vin, owner_mode=params["owner_mode"])
+        fake_actions._dynamic_ev_state["entry-1"][vin] = {
+            "active": True, "params": dict(params),
+        }
+        return True
+    async def stop(_hass, _entry, params):
+        vin = params["vehicle_id"]
+        assert ownership.get_active_ev_owner_mode(hass, entry, vin) == "scheduled"
+        ownership.release_ev_ownership(hass, entry, vin)
+        fake_actions._dynamic_ev_state["entry-1"].pop(vin, None)
+        return True
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(side_effect=start)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(side_effect=stop)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[{"vin": v} for v in vins]))
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 12, tzinfo=timezone.utc))
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    monkeypatch.setattr(ev_planner, "_scheduled_charging_executor", scheduled)
+    monkeypatch.setattr(ev_planner, "_price_level_executor", None)
+    return SimpleNamespace(hass=hass, entry=entry, vins=vins, failed=failed, scheduled=scheduled,
+                           coordinator=coordinator, actions=fake_actions, ownership=ownership)
+
+
+@pytest.mark.parametrize("already_charging", [True, False])
+def test_scheduled_reconciliation_acquires_each_surplus_vehicle(monkeypatch, scheduled_reconciliation, already_charging):
+    f = scheduled_reconciliation
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(side_effect=lambda *a, **kw: already_charging or kw.get("vehicle_vin") == f.vins[0]))
+    for _ in range(3):
+        asyncio.run(f.coordinator.evaluate({}, 0))
+    assert [f.ownership.get_active_ev_owner_mode(f.hass, f.entry, v) for v in f.vins] == ["scheduled", "scheduled"]
+    assert f.actions._action_start_ev_charging_dynamic.await_count == 2
+    assert f.coordinator.get_state()["active_modes"] == ["Scheduled"]
+
+
+def test_scheduled_reconciliation_partial_failure_retries_only_failed_vehicle(scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.failed.add(f.vins[1])
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.scheduled.get_state()["is_charging"] is True
+    assert f.scheduled.get_state()["last_decision"] == "partial"
+    assert f.scheduled.get_state()["vehicle_results"][f.vins[1]]["active"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+    f.failed.clear()
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.actions._action_start_ev_charging_dynamic.await_count == 3
+    assert all(v["active"] for v in f.scheduled.get_state()["vehicle_results"].values())
+
+
+def test_scheduled_reconciliation_rejected_start_is_not_active_and_can_recover(scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.failed.update(f.vins)
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.coordinator.get_state()["is_charging"] is False
+    assert f.coordinator.get_state()["active_modes"] == []
+    assert f.scheduled.get_state()["is_charging"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    f.failed.clear()
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.coordinator.get_state()["active_modes"] == ["Scheduled"]
+
+
+@pytest.mark.parametrize("foreign", ["manual", "external", "smart_schedule", "price_level"])
+def test_scheduled_reconciliation_preserves_foreign_owner_and_exact_cleanup(monkeypatch, scheduled_reconciliation, foreign):
+    f = scheduled_reconciliation
+    f.ownership.claim_ev_ownership(f.hass, f.entry, f.vins[1], owner_mode=foreign,
+                                  owner="external" if foreign == "external" else "powersync")
+    f.actions._dynamic_ev_state["entry-1"][f.vins[1]]["params"]["owner_mode"] = foreign
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.actions._action_start_ev_charging_dynamic.await_count == 1
+    assert f.ownership.get_ev_ownership(f.hass, f.entry, f.vins[1])[1]["owner_mode"] == foreign
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 14, tzinfo=timezone.utc))
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert [c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list] == [f.vins[0]]
+    assert f.ownership.get_ev_ownership(f.hass, f.entry, f.vins[1])[1]["owner_mode"] == foreign
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+
+
+def test_scheduled_reconciliation_mixed_price_level_does_not_mask_failed_start(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.failed.update(f.vins)
+    price = SimpleNamespace(
+        evaluate_all_vehicles=AsyncMock(return_value={"other": (True, "cheap", "opportunity")}),
+        _vehicle_states={"other": SimpleNamespace(is_charging=True)},
+    )
+    monkeypatch.setattr(ev_planner, "_price_level_executor", price)
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.coordinator.get_state()["active_modes"] == ["Price-Level"]
+    assert f.scheduled.get_state()["is_charging"] is False
+    f.failed.clear()
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert set(f.coordinator.get_state()["active_modes"]) == {"Price-Level", "Scheduled"}
+    # Price-Level on another vehicle must not leave Scheduled cars running after disable.
+    f.hass.data["power_sync"]["entry-1"]["automation_store"]._data["scheduled_charging"]["enabled"] = False
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert {c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list} == set(f.vins)
+    assert f.coordinator.get_state()["active_modes"] == ["Price-Level"]
+
+
+def test_scheduled_reconciliation_paired_alias_only_one_command(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.entry.options = {"ev_provider": "both", "tesla_ble_entity_prefix": "car", "tesla_ble_vehicle_mapping": f.vins[0] + "=car"}
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[{"vin": "ble_car"}, {"vin": f.vins[0]}]))
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert [c.args[2]["vehicle_id"] for c in f.actions._action_start_ev_charging_dynamic.await_args_list] == [f.vins[0]]
+
+
+@pytest.mark.parametrize("loss", ["unplugged", "discovery_error", "empty_discovery"])
+def test_scheduled_reconciliation_retains_cleanup_after_observation_loss(monkeypatch, scheduled_reconciliation, loss):
+    f = scheduled_reconciliation
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    if loss == "unplugged":
+        monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(side_effect=lambda *a, **kw: kw.get("vehicle_vin") is None))
+    else:
+        monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(
+            side_effect=RuntimeError("offline") if loss == "discovery_error" else None, return_value=[],
+        ))
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.scheduled.get_state()["is_charging"] is True
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 14, tzinfo=timezone.utc))
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert {c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list} == set(f.vins)
+    assert f.coordinator.get_state()["active_modes"] == []
+
+
+def test_scheduled_reconciliation_implicitly_paired_alias_only_one_command(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.entry.options = {"ev_provider": "both", "tesla_ble_entity_prefix": "car"}
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[{"vin": "ble_car"}, {"vin": f.vins[0]}]))
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert [c.args[2]["vehicle_id"] for c in f.actions._action_start_ev_charging_dynamic.await_args_list] == [f.vins[0]]
+
+
+def test_scheduled_reconciliation_cleanup_blocks_foreign_canonical_alias(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.entry.options = {"ev_provider": "both", "tesla_ble_entity_prefix": "car", "tesla_ble_vehicle_mapping": f.vins[0] + "=car"}
+    f.ownership.claim_ev_ownership(f.hass, f.entry, f.vins[0], owner_mode="manual")
+    f.ownership.claim_ev_ownership(f.hass, f.entry, "ble_car", owner_mode="scheduled")
+    f.actions._dynamic_ev_state["entry-1"]["ble_car"] = {"active": True, "params": {"owner_mode": "scheduled"}}
+    f.actions._dynamic_ev_state["entry-1"][f.vins[0]]["params"]["owner_mode"] = "manual"
+    f.scheduled._state.is_charging = True
+    assert asyncio.run(f.scheduled._stop_charging("window ended")) is True
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    assert f.scheduled.get_state()["last_decision"] == "released"
+    assert f.ownership.get_ev_ownership(f.hass, f.entry, f.vins[0])[1]["owner_mode"] == "manual"
+
+
+def test_scheduled_reconciliation_failed_teardown_remains_unconfirmed(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    original_stop = f.actions._action_stop_ev_charging_dynamic.side_effect
+    async def teardown_then_fail(*args):
+        await original_stop(*args)
+        return False
+    f.actions._action_stop_ev_charging_dynamic.side_effect = teardown_then_fail
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 14, tzinfo=timezone.utc))
+    # Probe at the observation boundary, not a fabricated successful command.
+    observed = AsyncMock(return_value=False)
+    monkeypatch.setattr(f.scheduled, "_pending_stop_observed", observed)
+    for _ in range(3):
+        asyncio.run(f.coordinator.evaluate({}, 0))
+        assert f.scheduled.get_state()["last_decision"] == "stop_failed"
+        assert set(f.scheduled.get_state()["pending_stop_vehicle_ids"]) == set(f.vins)
+        assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+        assert f.coordinator.get_state()["is_charging"] is False
+        assert not any(r["active"] for r in f.scheduled.get_state()["vehicle_results"].values())
+    assert f.actions._action_stop_ev_charging_dynamic.await_count == 2
+    observed.return_value = True
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.scheduled.get_state()["pending_stop_vehicle_ids"] == []
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.actions._action_stop_ev_charging_dynamic.await_count == 2
+
+
+def test_scheduled_reconciliation_default_owner_remains_ambiguous(scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.ownership.claim_ev_ownership(f.hass, f.entry, "_default", owner_mode="scheduled")
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    f.actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    assert asyncio.run(f.scheduled._stop_charging("window ended")) is False
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+
+
+def test_scheduled_reconciliation_pending_stop_foreign_takeover_is_not_stopped(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.scheduled._pending_stops[f.vins[0]] = {"at": datetime.now(timezone.utc), "params": {}}
+    f.ownership.claim_ev_ownership(f.hass, f.entry, f.vins[0], owner_mode="manual")
+    f.scheduled._preserve_home_battery_active = True
+    assert asyncio.run(f.scheduled._stop_charging("disabled")) is True
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    assert f.scheduled.get_state()["last_decision"] == "released"
+    assert f.scheduled.get_state()["pending_stop_vehicle_ids"] == []
+
+
+@pytest.mark.parametrize("state,fresh,power,available,expected", [
+    ("stopped", True, 0, True, True), ("stopped", False, 0, True, False),
+    ("charging", True, 0, True, False), ("stopped", True, 1.2, True, False),
+    ("stopped", True, 0, False, False),
+])
+def test_scheduled_pending_stop_observation_contract(monkeypatch, scheduled_reconciliation, state, fresh, power, available, expected):
+    f = scheduled_reconciliation
+    at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    f.actions._get_tesla_charging_state = lambda h, vin, entity: state if vin == f.vins[0] else "charging"
+    f.actions._get_tesla_charging_state_changed_at = lambda *a: at + timedelta(seconds=1 if fresh else -1)
+    f.actions._datetime_is_after = lambda a, b: a > b
+    f.actions._TESLA_NON_CHARGING_STATES = {"stopped", "complete"}
+    f.actions._ACTIVE_EV_POWER_EPSILON_KW = 0.05
+    f.actions._get_observed_ev_power_reading_kw = AsyncMock(return_value=(power, available))
+    assert asyncio.run(f.scheduled._pending_stop_observed(f.vins[0], {"at": at, "params": {}})) is expected
+    if state == "stopped" and fresh:
+        assert f.actions._get_observed_ev_power_reading_kw.await_args.args[1] == f.vins[0]
+        assert f.actions._get_observed_ev_power_reading_kw.await_args.kwargs["allow_wall_connector_fallback"] is False
+
+
+def test_scheduled_reconciliation_cleanup_uses_actuator_identity_before_discovery(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    f.entry.options = {"ev_provider": "both", "tesla_ble_entity_prefix": "car"}
+    # Downstream action resolves the single Fleet registry VIN despite no
+    # Scheduled discovery having run yet. Cleanup must use that same identity.
+    f.actions._canonical_dynamic_tesla_vehicle_id = lambda h, e, vin: f.vins[0] if vin == "ble_car" else vin
+    f.ownership.claim_ev_ownership(f.hass, f.entry, f.vins[0], owner_mode="manual")
+    f.ownership.claim_ev_ownership(f.hass, f.entry, "ble_car", owner_mode="scheduled")
+    f.actions._dynamic_ev_state["entry-1"]["ble_car"] = {"active": True, "params": {"owner_mode": "scheduled"}}
+    f.actions._dynamic_ev_state["entry-1"][f.vins[0]]["params"]["owner_mode"] = "manual"
+    assert f.scheduled._fleet_vins == []
+    assert asyncio.run(f.scheduled._stop_charging("disabled")) is True
+    f.actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    assert f.scheduled.get_state()["last_decision"] == "released"
+
+
+def test_scheduled_reconciliation_takeover_during_eligibility_is_not_active(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    async def takeover(*args, **kwargs):
+        for vin in f.vins:
+            f.ownership.claim_ev_ownership(f.hass, f.entry, vin, owner_mode="manual")
+            f.actions._dynamic_ev_state["entry-1"][vin]["params"]["owner_mode"] = "manual"
+        return "home"
+    monkeypatch.setattr(ev_planner, "get_ev_location", takeover)
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    assert f.coordinator.get_state()["active_modes"] == []
+    assert not any(r["active"] for r in f.scheduled.get_state()["vehicle_results"].values())
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.actions._action_start_ev_charging_dynamic.await_count == 2
+
+
+def test_scheduled_cleanup_rechecks_alias_owner_after_await(monkeypatch, scheduled_reconciliation):
+    f = scheduled_reconciliation
+    asyncio.run(f.coordinator.evaluate({}, 0))
+    first, second = sorted(f.vins)
+    f.entry.options = {"ev_provider": "both", "tesla_ble_entity_prefix": "car", "tesla_ble_vehicle_mapping": second + "=car"}
+    original = f.actions._action_stop_ev_charging_dynamic.side_effect
+    async def stop_then_takeover(*args):
+        result = await original(*args)
+        f.ownership.claim_ev_ownership(f.hass, f.entry, "ble_car", owner_mode="manual")
+        return result
+    f.actions._action_stop_ev_charging_dynamic.side_effect = stop_then_takeover
+    assert asyncio.run(f.scheduled._stop_charging("ended")) is True
+    assert [c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list] == [first]
+    assert f.scheduled.get_state()["last_decision"] == "released"
+    assert f.ownership.get_ev_ownership(f.hass, f.entry, "ble_car")[1]["owner_mode"] == "manual"
